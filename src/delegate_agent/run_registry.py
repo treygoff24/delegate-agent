@@ -713,11 +713,45 @@ class RunTargetLookupError:
     message: str
 
 
-def _bare_handle_resolution_details(
+def _newer_sibling_count(index: JsonObject, run_id: str) -> tuple[str | None, int]:
+    entries = list(index_run_entries(index))
+    target = next(
+        (
+            (position, entry)
+            for position, (candidate, entry) in enumerate(entries)
+            if candidate == run_id
+        ),
+        None,
+    )
+    if target is None:
+        return None, 0
+    target_position, target_entry = target
+    harness = target_entry.get("harness")
+    if not isinstance(harness, str) or not harness:
+        return None, 0
+
+    def registration_key(position: int, entry: JsonObject) -> tuple[int, int]:
+        ordinal = entry.get("registrationOrdinal")
+        if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+            ordinal = position
+        return alias_sequence_for_harness(entry.get("alias"), harness), ordinal
+
+    target_key = registration_key(target_position, target_entry)
+    newer = sum(
+        1
+        for position, (_candidate, entry) in enumerate(entries)
+        if entry.get("harness") == harness and registration_key(position, entry) > target_key
+    )
+    return harness, newer
+
+
+def _run_target_resolution_details(
     registry_root: Path,
     index: JsonObject,
     run_id: str,
     alias: str | None,
+    *,
+    warning_kind: str,
 ) -> tuple[JsonObject, str | None]:
     state = load_run_state_or_none(registry_root, run_id)
     manifest = load_run_manifest_or_none(registry_root, run_id)
@@ -734,6 +768,32 @@ def _bare_handle_resolution_details(
         ),
         None,
     )
+    started_at = next(
+        (
+            value
+            for value in (
+                manifest.get("startedAt") if isinstance(manifest, dict) else None,
+                state.get("startedAt") if isinstance(state, dict) else None,
+                entry.get("startedAt") if isinstance(entry, dict) else None,
+                timestamp_from_run_id(run_id),
+            )
+            if isinstance(value, str) and value
+        ),
+        "unknown",
+    )
+    group = next(
+        (
+            value
+            for value in (
+                entry.get("group") if isinstance(entry, dict) else None,
+                state.get("group") if isinstance(state, dict) else None,
+                manifest.get("group") if isinstance(manifest, dict) else None,
+            )
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
+    harness, newer_count = _newer_sibling_count(index, run_id)
     timestamp = activity_timestamp(state, manifest, run_id)
     parsed = parse_utc_timestamp(timestamp)
     age_seconds = (
@@ -744,26 +804,48 @@ def _bare_handle_resolution_details(
         "resolvedAlias": alias,
         "resolvedWorkspace": workspace,
         "resolvedAge": _format_age(timestamp),
+        "resolvedStartedAt": started_at,
+        "newerRunCount": newer_count,
     }
     if age_seconds is not None:
         details["resolvedAgeSeconds"] = age_seconds
+    if group is not None:
+        details["resolvedGroup"] = group
     warning = None
-    if age_seconds is not None and age_seconds > 24 * 60 * 60:
+    if warning_kind == "bare" and age_seconds is not None and age_seconds > 24 * 60 * 60:
         resolved = alias or run_id
         warning = (
             f"bare_handle_stale: resolved {resolved} in {workspace or 'an unknown workspace'} "
             f"({_format_age(timestamp)}). Use --cwd for the intended workspace or the explicit "
             f"handle {resolved}."
         )
+    elif warning_kind == "numbered_alias" and newer_count == 0:
+        return {}, None
+    elif warning_kind == "numbered_alias" or (
+        warning_kind == "latest" and age_seconds is not None and age_seconds > 24 * 60 * 60
+    ):
+        resolved = alias or run_id
+        run_word = "run" if newer_count == 1 else "runs"
+        harness_name = harness or "matching"
+        group_text = f" in group {group}" if group is not None else ""
+        runs_command = (
+            shlex.join(["delegate", "runs", "--group", group])
+            if group is not None
+            else shlex.join(["delegate", "runs", "--harness", harness_name])
+        )
+        warning = (
+            f"run_target_stale: resolved {resolved} ({run_id}), started at {started_at}, "
+            f"with {newer_count} newer {harness_name} {run_word}{group_text}. "
+            f"Review {runs_command}."
+        )
     return details, warning
 
 
 def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
-    if target.resolution_kind == "literal":
-        return
-    payload["requestedHandle"] = target.requested_handle
-    payload["resolvedHandle"] = target.resolved_handle or target.alias or target.run_id
-    payload["resolutionKind"] = target.resolution_kind
+    if target.resolution_kind != "literal":
+        payload["requestedHandle"] = target.requested_handle
+        payload["resolvedHandle"] = target.resolved_handle or target.alias or target.run_id
+        payload["resolutionKind"] = target.resolution_kind
     if target.resolution_details:
         payload.update(target.resolution_details)
     if target.resolution_warning:
@@ -861,7 +943,22 @@ def resolve_run_target(
                 f"No runs found for harness: {latest_harness}",
             )
         alias = alias_for_run(index, run_id)
-        return RunTarget(run_id, alias, latest_harness, alias or run_id, resolution_kind)
+        details, warning = _run_target_resolution_details(
+            registry_root,
+            index,
+            run_id,
+            alias,
+            warning_kind="latest",
+        )
+        return RunTarget(
+            run_id,
+            alias,
+            latest_harness,
+            alias or run_id,
+            resolution_kind,
+            details,
+            warning,
+        )
     if handle is None:
         return RunTargetLookupError(
             "missing_handle",
@@ -883,11 +980,20 @@ def resolve_run_target(
     details = None
     warning = None
     if handle in HARNESS_NAMES:
-        details, warning = _bare_handle_resolution_details(
+        details, warning = _run_target_resolution_details(
             registry_root,
             index,
             resolved.run_id,
             resolved.alias,
+            warning_kind="bare",
+        )
+    elif resolved.resolution_kind == "literal" and handle == resolved.alias:
+        details, warning = _run_target_resolution_details(
+            registry_root,
+            index,
+            resolved.run_id,
+            resolved.alias,
+            warning_kind="numbered_alias",
         )
     return RunTarget(
         resolved.run_id,

@@ -1133,7 +1133,13 @@ Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as
 `codex` resolves to that harness's latest run, and `harness:modelAlias` (for
 example `droid:glm`) resolves to the latest run for that harness/model alias.
-Generated follow-up commands always use the concrete numbered alias.
+Generated follow-up commands always use the concrete numbered alias. Resolving
+a numbered alias that has newer runs from the same harness adds a
+`run_target_stale` warning without changing the selected run. The warning names
+the selected run and start time, counts the newer runs, and includes the run's
+group when recorded. Review grouped runs with `delegate runs --group NAME`.
+Explicit `--latest` selectors expose the same resolution details and warn when
+the selected run's last activity is more than 24 hours old.
 
 v0.10.0 migration note: pre-v0.10 runs that were literally aliased with a bare
 harness name (for example `codex`) are shadowed by the new latest-selector
@@ -1197,7 +1203,7 @@ remembers temporary blocks by hashed credential namespace (`CODEX_HOME/auth.json
 also mirror compatible legacy alias keys so existing launchers share blocks;
 remapped aliases remain isolated.
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. Bare harness, stale numbered-alias, and explicit `--latest` resolutions report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, `resolvedAgeSeconds`, `resolvedStartedAt`, and `newerRunCount`; `resolvedGroup` is included when recorded. Bare-harness resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle. Stale numbered aliases and old explicit `--latest` results add `run_target_stale`; these warnings are advisory and never change which run resolves.
 
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and

@@ -221,6 +221,112 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(resolved.resolution_kind, "latest")
             self.assertEqual(resolved.resolved_handle, "cursor-2")
 
+    def test_stale_numbered_alias_warns_without_changing_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            runs = []
+            for minute in range(3):
+                run_id, alias = self.registry.register_run(
+                    root,
+                    harness="codex",
+                    metadata={"group": "wave4"},
+                )
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / self.registry.MANIFEST_FILE,
+                    {
+                        "startedAt": f"2026-05-20T12:0{minute}:00Z",
+                        "cwd": tmp,
+                        "group": "wave4",
+                    },
+                )
+                runs.append((run_id, alias))
+
+            target = self.registry.resolve_run_target(
+                root,
+                handle=runs[0][1],
+                latest_harness=None,
+            )
+
+            self.assertIsInstance(target, self.registry.RunTarget)
+            self.assertEqual(target.run_id, runs[0][0])
+            self.assertIn("started at 2026-05-20T12:00:00Z", target.resolution_warning)
+            self.assertIn("2 newer codex runs", target.resolution_warning)
+            self.assertIn("group wave4", target.resolution_warning)
+            self.assertIn("delegate runs --group wave4", target.resolution_warning)
+            payload = {}
+            self.registry.add_run_target_resolution(payload, target)
+            self.assertEqual(payload["resolvedRunId"], runs[0][0])
+            self.assertEqual(payload["resolvedStartedAt"], "2026-05-20T12:00:00Z")
+            self.assertEqual(payload["newerRunCount"], 2)
+            self.assertEqual(payload["resolvedGroup"], "wave4")
+            self.assertNotIn("resolutionKind", payload)
+
+    def test_stale_numbered_alias_warning_supports_legacy_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            runs = []
+            for run_id, started_at in (
+                ("del_20260520T120000Z_aaaaaa", "2026-05-20T12:00:00Z"),
+                ("del_20260520T120100Z_bbbbbb", "2026-05-20T12:01:00Z"),
+            ):
+                registered_id, alias = self.registry.register_run(
+                    root,
+                    harness="codex",
+                    run_id=run_id,
+                )
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / self.registry.MANIFEST_FILE,
+                    {"startedAt": started_at, "cwd": tmp},
+                )
+                runs.append((registered_id, alias))
+            index = self.registry.load_index(root)
+            for entry in index["runs"].values():
+                entry.pop("registrationOrdinal", None)
+            self.registry.save_index(root, index)
+
+            target = self.registry.resolve_run_target(
+                root,
+                handle=runs[0][1],
+                latest_harness=None,
+            )
+
+            self.assertIsInstance(target, self.registry.RunTarget)
+            self.assertEqual(target.run_id, runs[0][0])
+            self.assertIn("1 newer codex run", target.resolution_warning)
+            self.assertEqual(target.resolution_details["newerRunCount"], 1)
+
+    def test_latest_selector_warns_when_resolved_run_is_old(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            runs = []
+            for minute in range(2):
+                run_id, alias = self.registry.register_run(
+                    root,
+                    harness="codex",
+                    metadata={"group": "wave4"},
+                )
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / self.registry.MANIFEST_FILE,
+                    {
+                        "startedAt": f"2026-05-20T12:0{minute}:00Z",
+                        "cwd": tmp,
+                        "group": "wave4",
+                    },
+                )
+                runs.append((run_id, alias))
+
+            target = self.registry.resolve_run_target(
+                root,
+                handle=None,
+                latest_harness="codex",
+            )
+
+            self.assertIsInstance(target, self.registry.RunTarget)
+            self.assertEqual(target.run_id, runs[1][0])
+            self.assertIn("started at 2026-05-20T12:01:00Z", target.resolution_warning)
+            self.assertIn("0 newer codex runs", target.resolution_warning)
+            self.assertEqual(target.resolution_details["newerRunCount"], 0)
+
     def test_lookup_run_id_accepts_exact_run_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
