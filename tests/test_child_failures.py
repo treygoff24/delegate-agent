@@ -41,6 +41,25 @@ class ChildFailureClassifierTests(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.code, "auth_failed")
 
+    def test_estate_harness_binding_not_active_is_typed(self):
+        failure = child_failures.classify(
+            "estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active"
+        )
+
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "binding_not_active")
+        self.assertIn("Broker rejected this launch", failure.message)
+        self.assertIn("No vendor process ran", failure.message)
+        self.assertIn("not a Codex quota/token failure", failure.message)
+        self.assertIn("rebind the cell", failure.message)
+
+    def test_non_matching_403_is_not_binding_failure(self):
+        self.assertIsNone(
+            child_failures.classify(
+                "estate-harness: forbidden_principal: Broker returned HTTP 403: forbidden_principal"
+            )
+        )
+
     def test_state_database_thread_lookup_is_typed(self):
         for text in (
             "no thread with id: synthetic-thread",
