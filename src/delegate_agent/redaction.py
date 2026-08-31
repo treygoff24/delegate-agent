@@ -119,6 +119,8 @@ REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 PEM_BLOCK_PLACEHOLDER = "***PRIVATE KEY REDACTED***"
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_HEADER = re.compile(r"(?:Proc-Type|DEK-Info):\s*\S.*", re.IGNORECASE)
+_PEM_BODY = re.compile(r"[A-Za-z0-9+/=_-]{4,}")
 _URL_SPAN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`<>|;,)]+")
 # Absolute POSIX paths outside URL spans; avoid matching ratio-style "1/2".
 _ABSOLUTE_POSIX_PATH_RE = re.compile(
@@ -157,6 +159,54 @@ def _mask_progress_paths_outside_urls(value: str) -> str:
     return "".join(parts)
 
 
+def _pem_material_line(line: str, *, continuation: bool = False) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _PEM_BEGIN.fullmatch(stripped) or _PEM_END.fullmatch(stripped):
+        return True
+    if _PEM_HEADER.fullmatch(stripped):
+        return True
+    if _PEM_BODY.fullmatch(stripped) is None:
+        return False
+    if stripped.startswith(("MII", "LS0t", "b3Bl")):
+        return True
+    if len(stripped) < 8:
+        return continuation and stripped.isupper()
+    # Real PEM bodies are long, mixed-looking base64 lines.  Keep a little
+    # tolerance for synthetic fixtures and base64url-ish output, while avoiding
+    # ordinary single-word prose such as ``notready``.
+    return len(stripped) >= 16 or any(char.isdigit() or char in "+/=_-" for char in stripped)
+
+
+def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
+    """Return the end of contiguous PEM material after an unterminated marker."""
+    if value.startswith("\r\n", begin_end):
+        cursor = begin_end + 2
+    elif value.startswith("\n", begin_end):
+        cursor = begin_end + 1
+    else:
+        # A marker embedded in prose is not evidence that the rest is a key.
+        return None
+
+    material_end: int | None = None
+    while cursor < len(value):
+        line_end = value.find("\n", cursor)
+        if line_end < 0:
+            line_end = len(value)
+        line = value[cursor:line_end].removesuffix("\r")
+        if not _pem_material_line(line, continuation=material_end is not None):
+            break
+        if line_end == len(value):
+            material_end = len(value)
+            break
+        next_cursor = line_end + 1
+        content_end = line_end - (1 if value[line_end - 1 : line_end] == "\r" else 0)
+        material_end = len(value) if next_cursor == len(value) else content_end
+        cursor = next_cursor
+    return material_end
+
+
 def _redact_pem_blocks(value: str) -> str:
     match = _PEM_BEGIN.search(value)
     if match is None:
@@ -168,8 +218,15 @@ def _redact_pem_blocks(value: str) -> str:
         end = _PEM_END.search(value, match.end())
         parts.append(PEM_BLOCK_PLACEHOLDER)
         if end is None:
-            return "".join(parts)
-        pos = end.end()
+            material_end = _unterminated_pem_material_end(value, match.end())
+            if material_end is None:
+                pos = match.end()
+            elif material_end == len(value):
+                return "".join(parts)
+            else:
+                pos = material_end
+        else:
+            pos = end.end()
         match = _PEM_BEGIN.search(value, pos)
     parts.append(value[pos:])
     return "".join(parts)
