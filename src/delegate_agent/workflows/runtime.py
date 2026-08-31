@@ -1121,6 +1121,62 @@ class WorkflowState:
             self._write_status_locked(status=status, extra=extra)
             self._touch_heartbeat_locked()
 
+    def _record_watchdog_fire(self, reason: str) -> bool:
+        """Persist the watchdog marker and fire event before requesting cancel."""
+        with self.journal_lock:
+            status_present = self.status_path.exists()
+            status = registry.read_json(self.status_path)
+            if isinstance(status, dict) and status.get("status") in {
+                "succeeded",
+                "failed",
+                "killed",
+            }:
+                return False
+            last_seq = status.get("lastSeq") if isinstance(status, dict) else None
+            if isinstance(last_seq, int):
+                self.sequence = max(self.sequence, last_seq)
+            self.sequence += 1
+            fired_at = run_registry.utc_now_iso()
+            event: JsonObject = {
+                "seq": self.sequence,
+                "type": "workflow_watchdog_fired",
+                "at": fired_at,
+                "reason": reason,
+            }
+            with contextlib.suppress(OSError):
+                registry.append_jsonl(self.journal_path, event)
+            # A deliberately removed status file is itself the watchdog signal.
+            # Do not resurrect it while recording the state-missing fire.
+            if not status_present or not self.status_path.exists():
+                return True
+
+            status_value = status.get("status") if isinstance(status, dict) else None
+            status_name = status_value if isinstance(status_value, str) else "running"
+            extra: JsonObject = {
+                "watchdogFiredAt": fired_at,
+                "watchdogReason": reason,
+                "watchdogCancelRequested": True,
+            }
+            if status_name == "paused":
+                gate_key = status.get("gateKey") if isinstance(status, dict) else None
+                parked_items = status.get("parkedItems") if isinstance(status, dict) else None
+                if isinstance(gate_key, str):
+                    extra["gateKey"] = gate_key
+                    if isinstance(status, dict):
+                        extra["gateResult"] = status.get("gateResult")
+                elif isinstance(parked_items, list):
+                    extra["parkedItems"] = parked_items
+                    if isinstance(status, dict):
+                        extra["softPark"] = status.get("softPark")
+            try:
+                self._write_status_locked(status=status_name, last_event=event, extra=extra)
+            except OSError:
+                # A damaged status path still needs cooperative cancellation;
+                # the fire event remains the durable audit when projection is
+                # unavailable.
+                return True
+            return True
+
     def notify_event(self, event: str, *, detail: str = "") -> None:
         """Send one metadata line to the workflow's --notify target, if any.
 
@@ -4065,7 +4121,6 @@ class _SupervisorWatchdog:
             self._thread.join(timeout=max(self.interval_seconds * 4, 1.0))
 
     def _run(self) -> None:
-        bad_reason: str | None = None
         bad_samples = 0
         while not self._stop.wait(self.interval_seconds):
             reason = self._check()
@@ -4078,19 +4133,17 @@ class _SupervisorWatchdog:
             if reason == "terminal":
                 return
             if reason is None:
-                bad_reason = None
                 bad_samples = 0
                 continue
             if reason in {"state_missing", "heartbeat_invalid"}:
-                if reason == bad_reason:
-                    bad_samples += 1
-                else:
-                    bad_reason = reason
-                    bad_samples = 1
+                bad_samples += 1
                 if bad_samples < 2:
                     continue
             self.reason = reason
-            self.state.cancel_event.set()
+            record_fire = getattr(self.state, "_record_watchdog_fire", None)
+            recorded = record_fire(reason) if callable(record_fire) else True
+            if recorded:
+                self.state.cancel_event.set()
             return
 
     def _check(self) -> str | None:
@@ -4103,6 +4156,12 @@ class _SupervisorWatchdog:
             return "state_missing"
         if status.get("status") in {"succeeded", "failed", "killed"}:
             return "terminal"
+        if status.get("status") == "paused":
+            if isinstance(status.get("gateKey"), str):
+                return None
+            parked_items = status.get("parkedItems")
+            if isinstance(parked_items, list) and parked_items:
+                return None
         heartbeat = registry.read_json(root / WORKFLOW_HEARTBEAT_FILE)
         timestamp = heartbeat.get("heartbeatEpoch") if isinstance(heartbeat, dict) else None
         if (
