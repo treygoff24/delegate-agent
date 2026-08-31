@@ -862,6 +862,15 @@ def _unreadable_warnings(
     )
 
 
+def _make_temporary_tree_owner_writable(temp_base: str) -> None:
+    root = Path(temp_base)
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            continue
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    root.chmod(root.stat().st_mode | stat.S_IWUSR)
+
+
 def create_directory_safe_workspace(
     source_workspace: str,
     *,
@@ -895,7 +904,8 @@ def create_directory_safe_workspace(
             block_external_symlinks(copy_path, source_workspace),
         )
     except Exception:
-        shutil.rmtree(temp_base, ignore_errors=True)
+        _make_temporary_tree_owner_writable(temp_base)
+        shutil.rmtree(temp_base)
         raise
     if include_warnings:
         return copy_path, temp_base, warnings
@@ -934,7 +944,8 @@ def cleanup_safe_isolated_workspace(
         )
     if git_root is not None:
         remove_git_safe_workspace(git_root, isolated_workspace)
-    shutil.rmtree(temp_base, ignore_errors=True)
+    _make_temporary_tree_owner_writable(temp_base)
+    shutil.rmtree(temp_base)
 
 
 def _refuse_bwrap_initialized_submodules(git_root: str) -> None:
