@@ -1333,7 +1333,11 @@ class EngineArgvTests(CommandTestBase):
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
 
-    def test_codex_followup_argv_sandbox_precedes_exec(self):
+    def test_codex_followup_argv_sandbox_precedes_resume(self):
+        # Probe contract (codex-cli 0.151.0): --sandbox/--ask-for-approval/--color
+        # are rejected after the `resume` subcommand token. Sandbox is accepted
+        # both top-level and between `exec` and `resume`; this pins the contract,
+        # not a single placement. Pre-fix builders emitted sandbox after resume.
         policy = self.delegate.delegate_config.effective_policy(
             self.delegate.DEFAULT_CONFIG,
             engine="codex",
@@ -1350,9 +1354,9 @@ class EngineArgvTests(CommandTestBase):
             resume_session_id="th_0123456789abcdef",
             stream_capture=True,
         )
-        exec_idx = argv.index("exec")
-        self.assertIn("--sandbox", argv[:exec_idx])
-        self.assertIn("--ask-for-approval", argv[:exec_idx])
+        resume_idx = argv.index("resume")
+        self.assertIn("--sandbox", argv[:resume_idx])
+        self.assertIn("--ask-for-approval", argv[:resume_idx])
         self.assertNotIn("--color", argv)
         self.assertIn("--json", argv)
 
