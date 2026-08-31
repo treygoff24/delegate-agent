@@ -151,9 +151,10 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     Children routinely answer with a markdown report whose final fenced block
     is the structured result, and that prose can contain decoy brackets (a
     `[T1]` task tag, a `{run, exit, note}` contract line). Every top-level
-    decodable value is collected in text order; the last one that validates
-    against ``schema`` wins, then the last decodable value, so a trailing
-    report block beats any earlier fragment.
+    decodable value is collected in text order. A leading value that already
+    validates wins; otherwise the last value that validates against ``schema``
+    wins, then the last decodable value, so a trailing report block can recover
+    from an invalid leading fragment.
     """
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -168,11 +169,18 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     first_error: json.JSONDecodeError | None = None
     try:
         value, end = decoder.raw_decode(stripped)
-        candidates.append(
-            _decode_string_payload(value, schema) if isinstance(value, str) else value
-        )
+        leading_value = _decode_string_payload(value, schema) if isinstance(value, str) else value
+        candidates.append(leading_value)
         if not stripped[end:].strip():
-            return candidates[0]
+            return leading_value
+        if schema is None:
+            return leading_value
+        try:
+            validate_value(leading_value, schema)
+        except SchemaError:
+            pass
+        else:
+            return leading_value
         position = end
     except json.JSONDecodeError as exc:
         first_error = exc
