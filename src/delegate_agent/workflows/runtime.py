@@ -571,6 +571,7 @@ class WorkflowState:
     claimed_keys: set[str] = field(default_factory=set)
     sequence: int = 0
     journal_lock: threading.Lock = field(default_factory=threading.Lock)
+    heartbeat_lock: threading.Lock = field(default_factory=threading.Lock)
     scope_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_counter: list[int] = field(default_factory=lambda: [0])
@@ -836,16 +837,23 @@ class WorkflowState:
             return event
 
     def _touch_heartbeat_locked(self) -> None:
-        payload: JsonObject = {
-            "schema": WORKFLOW_HEARTBEAT_SCHEMA,
-            "wfId": self.wf_id,
-            "supervisorPid": os.getpid(),
-            "supervisorToken": self.supervisor_token,
-            "heartbeatAt": run_registry.utc_now_iso(),
-            "heartbeatEpoch": time.time(),
-        }
-        with contextlib.suppress(OSError):
-            registry.write_json(self.root / WORKFLOW_HEARTBEAT_FILE, payload)
+        """Serialize one lease write without taking the journal lock.
+
+        Event paths already hold ``journal_lock`` before entering this method;
+        the timer owns only ``heartbeat_lock`` so a blocked write cannot stall
+        journal or notification work.
+        """
+        with self.heartbeat_lock:
+            payload: JsonObject = {
+                "schema": WORKFLOW_HEARTBEAT_SCHEMA,
+                "wfId": self.wf_id,
+                "supervisorPid": os.getpid(),
+                "supervisorToken": self.supervisor_token,
+                "heartbeatAt": run_registry.utc_now_iso(),
+                "heartbeatEpoch": time.time(),
+            }
+            with contextlib.suppress(OSError):
+                registry.write_json(self.root / WORKFLOW_HEARTBEAT_FILE, payload)
 
     def touch_heartbeat(self) -> None:
         with self.journal_lock:
@@ -2014,6 +2022,7 @@ class WorkflowDsl:
             soft_park_scopes=self.state.soft_park_scopes,
         )
         child_state.journal_lock = self.state.journal_lock
+        child_state.heartbeat_lock = self.state.heartbeat_lock
         child_state.scope_lock = self.state.scope_lock
         child_state.lifetime_lock = self.state.lifetime_lock
         child_state.gate_condition = self.state.gate_condition
@@ -3993,6 +4002,35 @@ def _workflow_watchdog_stale_seconds(config: JsonObject) -> float:
     return value if math.isfinite(value) and value > 0 else WORKFLOW_WATCHDOG_STALE_SECONDS
 
 
+class _SupervisorHeartbeat:
+    def __init__(self, state: WorkflowState, *, interval_seconds: float) -> None:
+        self.state = state
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"delegate-workflow-heartbeat-{state.wf_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(self.interval_seconds * 4, 1.0))
+
+    def _run(self) -> None:
+        deadline = time.monotonic() + self.interval_seconds
+        while not self._stop.wait(max(deadline - time.monotonic(), 0.0)):
+            # The daemon deliberately takes no journal lock.  A failed write
+            # is only a missed lease sample; it must not kill the writer.
+            with contextlib.suppress(OSError):
+                self.state._touch_heartbeat_locked()
+            deadline += self.interval_seconds
+
+
 class _SupervisorWatchdog:
     def __init__(
         self,
@@ -4094,11 +4132,17 @@ def run_supervisor(
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
+        stale_seconds = _workflow_watchdog_stale_seconds(config)
+        heartbeat = _SupervisorHeartbeat(
+            state,
+            interval_seconds=min(1.0, stale_seconds / 3),
+        )
         watchdog = _SupervisorWatchdog(
             state,
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
-            stale_seconds=_workflow_watchdog_stale_seconds(config),
+            stale_seconds=stale_seconds,
         )
+        heartbeat.start()
         watchdog.start()
         try:
             result = execute_workflow(state)
@@ -4240,6 +4284,7 @@ def run_supervisor(
             return 0
         finally:
             watchdog.stop()
+            heartbeat.stop()
             for run_id in tuple(state.retry_worktree_runs):
                 with contextlib.suppress(Exception):
                     _release_structured_retry_worktree_for_state(state, run_id)
