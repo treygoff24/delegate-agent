@@ -248,20 +248,24 @@ delegate worktree reap --path ~/.delegate/worktrees/abc123def456/cursor-1 --olde
 delegate worktree reap --group wave4 --older-than 14 --yes --force
 ```
 
-`--path` is accepted only for an absolute, canonical pool entry exactly one
-fingerprint directory below the configured `worktrees.dataHome`; symlinked
-components and paths outside the pool are refused. A dry run never changes the
-pool. A mutating run also requires `--yes`, acquires the pool lock before the
-registry lock, and re-reads the selected entry immediately before removal.
+`--path` is accepted only for an absolute pool entry exactly one fingerprint
+directory below the configured `worktrees.dataHome`; symlinked fingerprint or
+worktree components and paths outside the pool are refused. A filesystem alias
+above the pool root is allowed when it resolves to that configured root. A dry
+run never changes the pool. A mutating run also requires `--yes`, acquires the
+pool lock before the registry lock without changing the pool root's mode, and
+re-reads the selected entry immediately before removal.
 
 The same owner-liveness check used by `worktree prune` and `worktree remove`
 blocks active runs, live process groups, and attached resumes. An effective
 `stale` run is eligible only when its child and recorded process group are
 provably gone; a stale record with missing PID information remains blocked.
 Source-gone paths cannot be checked for uncommitted contents, so they report
-unknown dirt. Reaping one requires the explicit `--yes` confirmation (with
-`--force` or `--discard-uncommitted` available when scripting that policy).
-Their branches are preserved and never touched.
+unknown dirt. Reaping one requires `--yes` plus either `--force` or
+`--discard-uncommitted`; confirmation alone never authorizes deleting unknown
+work. For recordless paths, `--older-than` uses the newest mtime across the root
+and all descendants without following symlinks; unreadable or over-limit walks
+are retained. Their branches are preserved and never touched.
 
 ## Repair registry state
 

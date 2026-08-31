@@ -1872,7 +1872,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Exactly one selector is required; --older-than is always required.",
             "Without --yes the command reports a confirmation requirement and leaves paths unchanged.",
-            "Source-gone paths have unknown dirt; --yes is required and --force/--discard-uncommitted make that policy explicit. Branches are never touched.",
+            "Source-gone paths have unknown dirt; removal requires --yes plus either --force or --discard-uncommitted. Branches are never touched.",
             "A --help token anywhere in the args prints help and reaps nothing.",
         ),
         see_also=(
