@@ -458,6 +458,18 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertTrue(payload["dryRun"])
         self.assertEqual(payload["result"], {"ok": False})
         self.assertEqual(payload["runTree"]["counts"], {"codex:safe": 1})
+        self.assertTrue(any("agent calls" in warning for warning in payload["warnings"]))
+        self.assertTrue(
+            any("filesystem writes are live" in warning for warning in payload["warnings"])
+        )
+
+    def test_dry_run_text_warns_that_script_writes_are_live(self) -> None:
+        script = self.write_workflow('meta = {"name": "dry-warning"}\nreturn None')
+        result = self.run_delegate(["workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning:", result.stdout)
+        self.assertIn("script filesystem writes are live", result.stdout)
+        self.assertIn("scriptPath:", result.stdout)
 
     def test_dry_run_exposes_dry_run_flag_to_the_script(self) -> None:
         script = self.write_workflow(
@@ -741,6 +753,67 @@ class WorkflowCommandTests(unittest.TestCase):
         events = self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"])
         event_types = {event["type"] for event in json.loads(events.stdout)["events"]}
         self.assertIn("agent_cache_hit", event_types)
+
+    def test_resume_reports_source_drift_and_runs_frozen_copy(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "source-provenance"}
+            return "frozen result"
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launch_payload = json.loads(launch.stdout)
+        wf_id = launch_payload["wfId"]
+        self.assertEqual(launch_payload["sourceScript"], str(script.resolve()))
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(status["sourceScript"], str(script.resolve()))
+        self.assertEqual(status["scriptSha256"], launch_payload["scriptSha256"])
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+
+        script.write_text(
+            'meta = {"name": "source-provenance"}\nreturn "edited source"\n', encoding="utf-8"
+        )
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        resumed_payload = json.loads(resumed.stdout)
+        self.assertEqual(resumed_payload["scriptPath"], str(root / workflow_registry.SCRIPT_FILE))
+        self.assertEqual(resumed_payload["scriptSha256"], launch_payload["scriptSha256"])
+        self.assertTrue(
+            any("source script differs" in warning for warning in resumed_payload["warnings"])
+        )
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "frozen result")
+
+    def test_resume_warns_when_recorded_source_is_unreadable(self) -> None:
+        script = self.write_workflow('meta = {"name": "source-missing"}\nreturn "frozen"')
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        script.unlink()
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertTrue(
+            any(
+                "unable to compare" in warning for warning in json.loads(resumed.stdout)["warnings"]
+            )
+        )
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
 
     def test_new_workflow_pins_supervisor_and_child_argv(self) -> None:
         script = self.write_workflow(
@@ -2455,14 +2528,16 @@ class WorkflowCommandTests(unittest.TestCase):
             observed.append(list(argv))
 
         with mock.patch.object(workflow_runtime, "detach_supervisor", side_effect=capture):
+            stdout = io.StringIO()
             result = workflow_commands.emit_run(
                 workflow_commands.WorkflowCommand("run", resume=wf_id, json_mode=True),
                 workspace=self.workspace,
                 config={},
-                stdout=io.StringIO(),
+                stdout=stdout,
                 stderr=io.StringIO(),
             )
         self.assertEqual(result, 0)
+        self.assertNotIn("warnings", json.loads(stdout.getvalue()))
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0][:2], workflow_commands._delegate_cli_argv())
         self.assertFalse(workflow_pinning.pin_path(wf_id, home=self.home).exists())
