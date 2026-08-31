@@ -17,11 +17,12 @@ Cross-cutting seams monkeypatched on the ``worktree_mgmt`` module
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import shutil
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -43,6 +44,8 @@ from delegate_agent.worktree_records import (
     live_attachments_for_path,
     load_persistent_records,
 )
+
+REAP_AGE_MAX_ENTRIES = 100_000
 
 
 def _older_than(record: PersistentWorktreeRecord, days: int) -> bool | None:
@@ -243,22 +246,23 @@ def _reap_pool_path(pool_data_home: Path, requested: str) -> tuple[Path | None, 
     if len(parts) != 2 or not isolation.is_pool_fingerprint_name(parts[0]):
         return None, "path_not_pool_worktree"
 
-    # Check the lexical path as well as the resolved path.  A symlink that
-    # happens to resolve back inside the pool must still be refused.
+    # Check only the two pool-entry components lexically.  The configured pool
+    # may itself be reached through an alias such as macOS /var -> /private/var,
+    # but neither the fingerprint nor worktree entry may be a symlink.
+    if ".." in raw.parts:
+        return None, "path_not_pool_worktree"
     try:
-        lexical = raw.relative_to(pool)
-    except ValueError:
-        lexical = None
-    if lexical is None or len(lexical.parts) != 2:
+        lexical_pool = raw.parent.parent.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None, "path_unverifiable"
+    if lexical_pool != pool:
         return None, "path_outside_pool"
-    cursor = pool
     try:
-        for part in lexical.parts:
-            cursor = cursor / part
+        for cursor in (raw.parent, raw):
             info = cursor.lstat()
             if stat.S_ISLNK(info.st_mode):
                 return None, "path_symlink"
-        if not cursor.is_dir():
+        if not raw.is_dir():
             return None, "path_not_directory"
     except FileNotFoundError:
         return None, "path_missing"
@@ -268,11 +272,75 @@ def _reap_pool_path(pool_data_home: Path, requested: str) -> tuple[Path | None, 
 
 
 def _reap_path_age(path: Path, days: int) -> bool | None:
+    """Return whether every non-followed entry in ``path`` is old enough.
+
+    A directory mtime does not change when an existing descendant is edited.
+    Walk the tree without following symlinks and fail closed when the walk is
+    unreadable, races a removal, or exceeds the bounded entry budget.
+    """
+
+    cutoff = time.time() - days * 24 * 60 * 60
+    pending = [path]
+    entries_seen = 0
+    while pending:
+        current = pending.pop()
+        try:
+            current_info = os.stat(current, follow_symlinks=False)
+        except OSError:
+            return None
+        entries_seen += 1
+        if entries_seen > REAP_AGE_MAX_ENTRIES:
+            return None
+        if current_info.st_mtime > cutoff:
+            return False
+        if not stat.S_ISDIR(current_info.st_mode):
+            continue
+        try:
+            with os.scandir(current) as children:
+                for child in children:
+                    try:
+                        child_info = child.stat(follow_symlinks=False)
+                    except OSError:
+                        return None
+                    if stat.S_ISDIR(child_info.st_mode):
+                        pending.append(Path(child.path))
+                        if entries_seen + len(pending) > REAP_AGE_MAX_ENTRIES:
+                            return None
+                        continue
+                    entries_seen += 1
+                    if entries_seen > REAP_AGE_MAX_ENTRIES:
+                        return None
+                    if child_info.st_mtime > cutoff:
+                        return False
+        except OSError:
+            return None
+    return True
+
+
+@contextlib.contextmanager
+def _reap_pool_lock(lock_path: Path) -> Iterator[None]:
+    """Lock an existing pool without changing the pool directory's mode."""
+
+    timeout_seconds = run_registry.resolve_registry_lock_timeout_seconds()
+    fd = run_registry.open_private_file(lock_path, os.O_CREAT | os.O_RDWR)
     try:
-        modified = path.stat().st_mtime
-    except OSError:
-        return None
-    return time.time() - modified >= days * 24 * 60 * 60
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for lock at {lock_path} after {timeout_seconds}s"
+                    ) from None
+                time.sleep(run_registry.REGISTRY_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _reap_entry(
@@ -397,7 +465,6 @@ def reap_worktrees(
                 wm._error_payload(
                     "invalid_reap_path",
                     f"Cannot reap path {selector_value}: {path_error}.",
-                    path=str(selector_value),
                 )
             )
         record = next(
@@ -417,20 +484,29 @@ def reap_worktrees(
                 or str(record.get("runId") or "") == selector_value
             ):
                 execution = record.get("executionCwd")
-                if isinstance(execution, str):
-                    canonical, path_error = _reap_pool_path(pool, execution)
-                    if canonical is not None and path_error is None:
-                        source_gone = str(canonical) in orphan_by_path or (
-                            isinstance(record.get("sourceGitRoot"), str)
-                            and not Path(str(record["sourceGitRoot"])).exists()
+                if not isinstance(execution, str):
+                    raise wm.WorktreeManagementError(
+                        wm._error_payload(
+                            "invalid_reap_path",
+                            f"Cannot reap worktree for {selector_value}: metadata_missing.",
+                            record=record,
                         )
-                        candidates.append((canonical, record, source_gone))
+                    )
+                canonical, path_error = _reap_pool_path(pool, execution)
+                if canonical is None or path_error is not None:
+                    raise wm.WorktreeManagementError(
+                        wm._error_payload(
+                            "invalid_reap_path",
+                            f"Cannot reap worktree for {selector_value}: {path_error}.",
+                            record=record,
+                        )
+                    )
+                source_gone = str(canonical) in orphan_by_path or (
+                    isinstance(record.get("sourceGitRoot"), str)
+                    and not Path(str(record["sourceGitRoot"])).exists()
+                )
+                candidates.append((canonical, record, source_gone))
                 break
-        if not candidates:
-            for orphan_path, _orphan in orphan_by_path.items():
-                if Path(orphan_path).name == selector_value:
-                    candidates.append((Path(orphan_path), None, True))
-                    break
     else:
         candidates = []
         for record in records:
@@ -452,7 +528,6 @@ def reap_worktrees(
             wm._error_payload(
                 "no_matching_worktrees",
                 f"No persistent worktrees found for {selector_name}: {selector_value}.",
-                selector={selector_name: selector_value},
             )
         )
 
@@ -518,7 +593,7 @@ def reap_worktrees(
                     entry["warnings"] = dirty_warnings
                 skipped.append(entry)
                 continue
-        elif source_gone and not (force or discard_uncommitted or yes):
+        elif source_gone and not (force or discard_uncommitted):
             entry["reason"] = "dirty_unknown"
             skipped.append(entry)
             continue
@@ -552,9 +627,9 @@ def reap_worktrees(
 
     # Destructive pass: the pool lock is outermost, then the registry lock.
     # Re-read the pool report while those locks are held before touching a path.
-    lock_path = pool / ".delegate-reap.lock"
+    lock_path = pool.resolve(strict=True) / ".delegate-reap.lock"
     try:
-        with run_registry.file_lock(lock_path):
+        with _reap_pool_lock(lock_path):
             registry_context = (
                 run_registry.registry_lock(registry_root)
                 if registry_root is not None
@@ -571,6 +646,20 @@ def reap_worktrees(
                     if entry.get("sourceGone") is True and str(target) not in fresh_orphans:
                         errors.append({**entry, "code": "toctou_changed"})
                         continue
+                    if entry.get("runId") is None:
+                        fresh_age = _reap_path_age(target, older_than_days)
+                        if fresh_age is not True:
+                            errors.append(
+                                {
+                                    **entry,
+                                    "code": (
+                                        "not_yet_old_enough"
+                                        if fresh_age is False
+                                        else "invalid_last_activity"
+                                    ),
+                                }
+                            )
+                            continue
                     fresh_record = None
                     run_id = entry.get("runId")
                     if registry_root is not None and isinstance(run_id, str):

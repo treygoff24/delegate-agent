@@ -1129,6 +1129,14 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def _scan(self, pool: Path, **kwargs) -> dict:
         return self.delegate.worktree_mgmt.scan_worktree_pool(pool, **kwargs)
 
+    def _configure_pool(self, home: str, pool: Path) -> None:
+        config_path = Path(home) / ".delegate" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            json.dumps({"worktrees": {"dataHome": str(pool)}}),
+            encoding="utf-8",
+        )
+
     def test_parse_worktree_backlink_reads_git_file_as_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
@@ -1258,7 +1266,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 "restore_source_root_or_inspect_path_before_manual_cleanup",
             )
 
-    def test_reap_source_gone_path_requires_confirmation_and_reaps_with_yes(self):
+    def test_reap_source_gone_path_requires_confirmation_and_destructive_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             gone = Path(tmp) / "deleted-repo"
@@ -1280,15 +1288,292 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(refused["errors"][0]["code"], "confirmation_required")
             self.assertTrue(worktree.exists())
 
-            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+            unknown_dirt = self.delegate.worktree_mgmt.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
                 older_than_days=0,
                 yes=True,
             )
+
+            self.assertEqual(unknown_dirt["skipped"][0]["reason"], "dirty_unknown")
+            self.assertTrue(worktree.exists())
+
+            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+                force=True,
+            )
             self.assertEqual(len(reaped["reaped"]), 1)
             self.assertFalse(worktree.exists())
+
+    def test_reap_cli_invalid_path_returns_json_error_envelope(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            pool.mkdir()
+            self._seed_persistent_run(repo_path)
+            self._configure_pool(fake_home, pool)
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    repo_path,
+                    "--json",
+                    "worktree",
+                    "reap",
+                    "--path",
+                    "/etc",
+                    "--older-than",
+                    "7",
+                    "--dry-run",
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "invalid_reap_path")
+            self.assertIn("path_outside_pool", payload["message"])
+
+    def test_reap_cli_no_match_returns_json_error_envelope(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            pool.mkdir()
+            self._seed_persistent_run(repo_path)
+            self._configure_pool(fake_home, pool)
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    repo_path,
+                    "--json",
+                    "worktree",
+                    "reap",
+                    "--handle",
+                    "missing-handle",
+                    "--older-than",
+                    "7",
+                    "--dry-run",
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(out)["code"], "no_matching_worktrees")
+
+    def test_reap_handle_does_not_fall_through_to_orphan_basename(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            gone = Path(fake_home) / "deleted-repo"
+            orphan = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-shadow",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-shadow"),
+            )
+            self._seed_persistent_run(
+                repo_path,
+                alias="cursor-shadow",
+                execution_cwd=str(Path(fake_home) / "outside-pool"),
+            )
+            self._configure_pool(fake_home, pool)
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    repo_path,
+                    "--json",
+                    "worktree",
+                    "reap",
+                    "--handle",
+                    "cursor-shadow",
+                    "--older-than",
+                    "0",
+                    "--yes",
+                    "--force",
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(out)["code"], "invalid_reap_path")
+            self.assertTrue(orphan.exists())
+
+    def test_reap_path_accepts_alias_above_pool_but_not_entry_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_home = root / "real" / "home"
+            real_pool = real_home / "pool"
+            worktree = self._pool_worktree(
+                real_pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir="/gone/.git/worktrees/cursor-1",
+            )
+            alias_home = root / "alias-home"
+            alias_home.symlink_to(real_home, target_is_directory=True)
+            alias_pool = alias_home / "pool"
+            alias_worktree = alias_pool / "abc123def456" / "cursor-1"
+
+            canonical, error = worktree_gc._reap_pool_path(alias_pool, str(alias_worktree))
+
+            self.assertIsNone(error)
+            self.assertEqual(canonical, worktree.resolve())
+
+            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=alias_pool,
+                path=str(alias_worktree),
+                older_than_days=0,
+                yes=True,
+                force=True,
+            )
+
+            self.assertEqual(len(reaped["reaped"]), 1)
+            self.assertFalse(worktree.exists())
+
+            other = self._pool_worktree(
+                real_pool,
+                "def456abc123",
+                "cursor-2",
+                gitdir="/gone/.git/worktrees/cursor-2",
+            )
+            linked = real_pool / "abc123def456" / "linked"
+            linked.symlink_to(other, target_is_directory=True)
+
+            canonical, error = worktree_gc._reap_pool_path(real_pool, str(linked))
+
+            self.assertIsNone(canonical)
+            self.assertEqual(error, "path_symlink")
+
+    def test_reap_path_refusal_matrix_preserves_all_sentinels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / "pool"
+            valid = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir="/gone/.git/worktrees/cursor-1",
+            )
+            neighbor = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "neighbor",
+                gitdir="/gone/.git/worktrees/neighbor",
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / "keep.txt"
+            outside_sentinel.write_text("keep\n", encoding="utf-8")
+            wrong_depth = valid / "nested"
+            wrong_depth.mkdir()
+            linked = pool / "abc123def456" / "linked"
+            linked.symlink_to(neighbor, target_is_directory=True)
+
+            cases = {
+                "outside": (outside, "path_outside_pool"),
+                "wrong-depth": (wrong_depth, "path_not_pool_worktree"),
+                "symlink": (linked, "path_symlink"),
+            }
+            for label, (candidate, expected) in cases.items():
+                with self.subTest(label=label):
+                    canonical, error = worktree_gc._reap_pool_path(pool, str(candidate))
+                    self.assertIsNone(canonical)
+                    self.assertEqual(error, expected)
+
+            self.assertTrue(valid.exists())
+            self.assertTrue(neighbor.exists())
+            self.assertEqual(outside_sentinel.read_text(encoding="utf-8"), "keep\n")
+
+    def test_reap_recordless_age_uses_freshest_nested_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            gone = Path(tmp) / "deleted-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
+            )
+            nested = worktree / "src"
+            nested.mkdir()
+            edited = nested / "edited.py"
+            edited.write_text("before\n", encoding="utf-8")
+            old = time.time() - 40 * 24 * 60 * 60
+            for candidate in (worktree / ".git", edited, nested, worktree, worktree.parent):
+                os.utime(candidate, (old, old), follow_symlinks=False)
+            edited.write_text("after\n", encoding="utf-8")
+
+            result = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=30,
+                yes=True,
+                force=True,
+            )
+
+            self.assertEqual(result["skipped"][0]["reason"], "not_yet_old_enough")
+            self.assertEqual(edited.read_text(encoding="utf-8"), "after\n")
+
+    def test_reap_recordless_age_fails_closed_at_walk_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp) / "worktree"
+            worktree.mkdir()
+            (worktree / "one").write_text("1\n", encoding="utf-8")
+            self._settle(worktree, worktree / "one")
+
+            with mock.patch.object(worktree_gc, "REAP_AGE_MAX_ENTRIES", 1):
+                old_enough = worktree_gc._reap_path_age(worktree, 0)
+
+            self.assertIsNone(old_enough)
+
+    def test_reap_preserves_pool_mode_and_external_symlink_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / "pool"
+            gone = root / "deleted-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
+            )
+            neighbor = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "neighbor",
+                gitdir=str(gone / ".git" / "worktrees" / "neighbor"),
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / "keep.txt"
+            outside_sentinel.write_text("keep\n", encoding="utf-8")
+            (worktree / "outside-link").symlink_to(outside, target_is_directory=True)
+            self._settle(worktree)
+            pool.chmod(0o755)
+
+            result = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+                force=True,
+            )
+
+            self.assertEqual(len(result["reaped"]), 1)
+            self.assertEqual(pool.stat().st_mode & 0o777, 0o755)
+            self.assertFalse(worktree.exists())
+            self.assertTrue(neighbor.exists())
+            self.assertEqual(outside_sentinel.read_text(encoding="utf-8"), "keep\n")
 
     def test_reap_path_refuses_live_backlink(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -141,6 +141,15 @@ class CommandPayloadShapeTests(unittest.TestCase):
         self.assertIn("--auth-profile", payload["unsupportedGlobalOptions"])
         self.assertNotIn("--auth-profile", {opt["flag"] for opt in payload["globalOptions"]})
 
+    def test_reap_help_requires_confirmation_and_destructive_override(self):
+        payload = command_help.command_help_payload(command_help.COMMAND_SPECS["worktree reap"])
+        notes = " ".join(payload["notes"])
+
+        self.assertIn(
+            "removal requires --yes plus either --force or --discard-uncommitted",
+            notes,
+        )
+
     def test_all_payloads_shape_and_serializable(self):
         for key, spec in command_help.COMMAND_SPECS.items():
             with self.subTest(command=key):

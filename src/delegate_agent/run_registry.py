@@ -821,6 +821,11 @@ def _run_target_resolution_details(
         )
     elif warning_kind == "numbered_alias" and newer_count == 0:
         return {}, None
+    elif (
+        warning_kind == "numbered_alias"
+        and run_status.effective_status(state) == run_status.STATUS_RUNNING
+    ):
+        return details, None
     elif warning_kind == "numbered_alias" or (
         warning_kind == "latest" and age_seconds is not None and age_seconds > 24 * 60 * 60
     ):
