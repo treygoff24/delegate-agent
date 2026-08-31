@@ -147,13 +147,25 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
         payload = ("a" * 10 + ".") * 1000
         self.assertEqual(self.redaction.redact_string(payload), payload)
 
-    def test_redact_string_collapses_unterminated_pem_near_misses(self):
-        # Unterminated private-key blocks are treated as secret from the first
-        # marker onward; this guards the behavior without a host-speed budget.
-        payload = "-----BEGIN PRIVATE KEY-----\n" * 20
+    def test_redact_string_preserves_unterminated_pem_near_misses(self):
+        payload = "Finding: pattern -----BEGIN PRIVATE KEY----- is absent.\nVerdict: not ready.\n"
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "Finding: pattern ***PRIVATE KEY REDACTED*** is absent.\nVerdict: not ready.\n",
+        )
+
+    def test_redact_string_masks_unterminated_pem_key_at_eof(self):
+        payload = "-----BEGIN PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n"
         self.assertEqual(
             self.redaction.redact_string(payload),
             "***PRIVATE KEY REDACTED***",
+        )
+
+    def test_redact_string_masks_unterminated_pem_key_before_prose(self):
+        payload = "-----BEGIN PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\nVerdict: not ready.\n"
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: not ready.\n",
         )
 
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
