@@ -1956,6 +1956,68 @@ class WorkflowCommandTests(unittest.TestCase):
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": False})
 
+    def test_resume_clears_watchdog_markers_from_prior_attempt(self) -> None:
+        """Fire markers must not survive a resume into a clean, successful run.
+
+        Without the clear, a workflow that fired its watchdog, was resumed, and
+        then succeeded reports status succeeded with watchdogCancelRequested
+        still true and fire diagnostics from the earlier attempt (WDB-R4). The
+        companion assertion pins the other half of the contract: a same-attempt
+        status rebuild that omits the marker keys still preserves them, which
+        is why the resume clear must write explicit None rather than pop.
+        """
+        child = self.write_saved_workflow(
+            "resume-watchdog-child",
+            """
+            meta = {"name": "watchdog-child"}
+            return {"ok": False}
+            """,
+        )
+        parent = self.write_workflow(
+            f"""
+            meta = {{"name": "watchdog-parent"}}
+            return workflow({child!r}, gate="on-failure")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(parent)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertEqual(json.loads(waited.stdout)["workflow"]["status"], "paused")
+
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        status.update(
+            {
+                "watchdogFiredAt": "2026-08-31T00:00:00Z",
+                "watchdogReason": "heartbeat_stale",
+                "watchdogCancelRequested": True,
+            }
+        )
+        workflow_registry.write_status(root, status)
+
+        # Same-attempt rebuilds omit the marker keys and must preserve them.
+        rebuilt = {
+            key: value
+            for key, value in status.items()
+            if key not in ("watchdogFiredAt", "watchdogReason", "watchdogCancelRequested")
+        }
+        workflow_registry.write_status(root, rebuilt)
+        preserved = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(preserved.get("watchdogReason"), "heartbeat_stale")
+        self.assertIs(preserved.get("watchdogCancelRequested"), True)
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertEqual(json.loads(waited.stdout)["workflow"]["status"], "succeeded")
+        final = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertIsNone(final.get("watchdogFiredAt"), final)
+        self.assertIsNone(final.get("watchdogReason"), final)
+        self.assertFalse(final.get("watchdogCancelRequested"), final)
+
     def test_run_rejects_conflicting_targets(self) -> None:
         script = self.write_workflow('meta = {"name": "target"}\nreturn None')
         result = self.run_delegate(
