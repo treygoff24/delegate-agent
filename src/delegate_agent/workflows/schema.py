@@ -164,44 +164,50 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     decoder = json.JSONDecoder()
+    candidates: list[JsonValue] = []
+    first_error: json.JSONDecodeError | None = None
     try:
-        value, _end = decoder.raw_decode(stripped)
-        return _decode_string_payload(value, schema) if isinstance(value, str) else value
-    except json.JSONDecodeError as first_error:
-        candidates: list[JsonValue] = []
+        value, end = decoder.raw_decode(stripped)
+        candidates.append(_decode_string_payload(value, schema) if isinstance(value, str) else value)
+        if not stripped[end:].strip():
+            return candidates[0]
+        position = end
+    except json.JSONDecodeError as exc:
+        first_error = exc
         position = 0
-        while True:
-            starts = [
-                idx
-                for idx in (
-                    stripped.find("{", position),
-                    stripped.find("[", position),
-                    stripped.find('"', position),
-                )
-                if idx >= 0
-            ]
-            if not starts:
-                break
-            start = min(starts)
-            try:
-                value, end = decoder.raw_decode(stripped[start:])
-            except json.JSONDecodeError:
-                position = start + 1
-                continue
-            candidates.append(
-                _decode_string_payload(value, schema) if isinstance(value, str) else value
+    while True:
+        starts = [
+            idx
+            for idx in (
+                stripped.find("{", position),
+                stripped.find("[", position),
+                stripped.find('"', position),
             )
-            position = start + end
-        if not candidates:
-            raise first_error
-        if schema is not None:
-            for value in reversed(candidates):
-                try:
-                    validate_value(value, schema)
-                except SchemaError:
-                    continue
-                return value
-        return candidates[-1]
+            if idx >= 0
+        ]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            value, end = decoder.raw_decode(stripped[start:])
+        except json.JSONDecodeError:
+            position = start + 1
+            continue
+        candidates.append(
+            _decode_string_payload(value, schema) if isinstance(value, str) else value
+        )
+        position = start + end
+    if not candidates:
+        assert first_error is not None
+        raise first_error
+    if schema is not None:
+        for value in reversed(candidates):
+            try:
+                validate_value(value, schema)
+            except SchemaError:
+                continue
+            return value
+    return candidates[-1]
 
 
 def placeholder(schema: JsonObject) -> JsonValue:
