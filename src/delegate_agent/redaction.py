@@ -238,9 +238,15 @@ def _redact_pem_blocks(value: str) -> str:
         return value
     parts: list[str] = []
     pos = 0
+    no_end_from: int | None = None
     while match is not None:
         parts.append(value[pos : match.start()])
-        end = _PEM_END.search(value, match.end())
+        if no_end_from is not None and match.end() >= no_end_from:
+            end = None
+        else:
+            end = _PEM_END.search(value, match.end())
+            if end is None:
+                no_end_from = match.end()
         parts.append(PEM_BLOCK_PLACEHOLDER)
         if end is None:
             material_end = _unterminated_pem_material_end(value, match.end())
