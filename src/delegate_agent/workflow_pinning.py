@@ -94,7 +94,8 @@ class WorkflowPin:
         current = os.environ.get("PYTHONPATH")
         pythonpath = str(self.import_root)
         if current:
-            pythonpath = pythonpath + os.pathsep + current
+            current_entries = [entry for entry in current.split(os.pathsep) if entry != pythonpath]
+            pythonpath = os.pathsep.join((pythonpath, *current_entries))
         return {
             "DELEGATE_CONFIG": str(self.config_path),
             "DELEGATE_WORKFLOW_PIN": str(self.path),

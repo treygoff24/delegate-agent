@@ -15,6 +15,7 @@ from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS
 from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.harness_events import StreamAccumulator
 from delegate_agent.json_types import JsonObject
+from delegate_agent.workflow_pinning import PIN_ROOT_DIRNAME
 
 STDERR_TAIL_LIMIT = 8_000
 DIRECTORY_BASELINE_MAX_ENTRIES = 10_000
@@ -254,7 +255,38 @@ def child_environment(
                 env[key] = _expanded_env_value(value, expand_env=env)
         else:
             env.update(overrides)
+    _strip_workflow_pin_environment(env)
     return env
+
+
+def _strip_workflow_pin_environment(env: dict[str, str]) -> None:
+    pin_path = env.pop("DELEGATE_WORKFLOW_PIN", None)
+    env.pop("DELEGATE_WORKFLOW_LOCK_FD", None)
+
+    pin_roots: list[Path] = []
+    home = env.get("HOME")
+    if home:
+        pin_roots.append(Path(os.path.abspath(home)) / PIN_ROOT_DIRNAME)
+    if pin_path:
+        pin_roots.extend(
+            parent
+            for parent in Path(os.path.abspath(pin_path)).parents
+            if parent.name == PIN_ROOT_DIRNAME
+        )
+
+    pythonpath = env.get("PYTHONPATH")
+    if not pythonpath or not pin_roots:
+        return
+    entries: list[str] = []
+    for entry in pythonpath.split(os.pathsep):
+        candidate = Path(os.path.abspath(entry))
+        if entry and any(candidate == root or candidate.is_relative_to(root) for root in pin_roots):
+            continue
+        entries.append(entry)
+    if entries:
+        env["PYTHONPATH"] = os.pathsep.join(entries)
+    else:
+        env.pop("PYTHONPATH", None)
 
 
 def strip_mail_identity(env: dict[str, str] | None) -> None:
