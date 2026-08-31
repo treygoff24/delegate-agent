@@ -168,7 +168,9 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         warnings = run.get("warnings")
         if isinstance(warnings, list):
             for warning in warnings:
-                if isinstance(warning, str) and warning.startswith("bare_handle_stale:"):
+                if isinstance(warning, str) and warning.startswith(
+                    ("bare_handle_stale:", "run_target_stale:")
+                ):
                     print(f"warning: {warning}", file=stdout)
     print("alias        status     quality          failure", file=stdout)
     for run in runs:
