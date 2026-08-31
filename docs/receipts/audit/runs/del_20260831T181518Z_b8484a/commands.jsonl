@@ -1,0 +1,10 @@
+{"tool": "read", "command": "", "path": "skill/references/reviewer-preamble.md"}
+{"tool": "bash", "command": "git status --porcelain", "path": ""}
+{"tool": "bash", "command": "git diff 702c5ba080b6f004e7ea54828d25cec3821611c9 5ba79ff25c16045522e5469f998dd83b5a6e033a --stat", "path": ""}
+{"tool": "bash", "command": "git diff 702c5ba080b6f004e7ea54828d25cec3821611c9 5ba79ff25c16045522e5469f998dd83b5a6e033a", "path": ""}
+{"tool": "read", "command": "", "path": "artifact://3"}
+{"tool": "read", "command": "", "path": "artifact://3:301-"}
+{"tool": "read", "command": "", "path": "src/delegate_agent/workflows/runtime.py:1120-1180"}
+{"tool": "read", "command": "", "path": "src/delegate_agent/workflows/runtime.py:4020-4170"}
+{"tool": "read", "command": "", "path": "src/delegate_agent/workflows/registry.py:120-150"}
+{"tool": "bash", "command": "git status --porcelain", "path": ""}

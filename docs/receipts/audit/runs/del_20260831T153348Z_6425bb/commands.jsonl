@@ -1,0 +1,2 @@
+{"tool": "hub", "command": "", "path": ""}
+{"tool": "bash", "command": "cd /home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-review-WD && git status --porcelain && echo \"clean-check-done\" && rm -rf /tmp/wdprobe-base /tmp/wdprobe-new", "path": ""}
