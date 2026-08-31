@@ -169,6 +169,33 @@ class InspectionCommandTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn(f"resolved handle: codex -> {latest_alias} (latest)", output)
 
+    def test_emit_snapshot_latest_warns_when_resolved_run_is_old(self):
+        run_id, alias = self.write_run(
+            harness="codex",
+            status="succeeded",
+            pid=None,
+            started_at="2026-05-20T12:00:00Z",
+        )
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_snapshot(
+            inspection_commands.SnapshotCommand(
+                handle=None,
+                latest_harness="codex",
+                json_mode=True,
+            ),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runId"], run_id)
+        self.assertEqual(payload["alias"], alias)
+        self.assertEqual(payload["resolvedStartedAt"], "2026-05-20T12:00:00Z")
+        self.assertEqual(payload["newerRunCount"], 0)
+        self.assertTrue(any("run_target_stale" in item for item in payload["warnings"]))
+
     def test_emit_runs_group_filter(self):
         self.write_run(harness="codex", group="wave4", assistant_text="included")
         self.write_run(harness="codex", group="other", assistant_text="excluded")
