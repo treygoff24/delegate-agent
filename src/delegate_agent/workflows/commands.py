@@ -190,6 +190,7 @@ def emit_run(
             recorded_script_hash = status.get("scriptSha256")
             script_hash = recorded_script_hash if isinstance(recorded_script_hash, str) else None
             warnings.extend(_resume_source_warnings(status))
+            warnings.extend(_resume_frozen_script_warnings(status, script_path))
             args_value = status.get("args")
             budget_total = command.budget
             if budget_total is None:
@@ -286,6 +287,7 @@ def emit_run(
             json_mode=command.json_mode,
             warnings=warnings,
             stdout=stdout,
+            stderr=stderr,
         )
     if lock_fd is None:
         lock_fd = _acquire_workflow_lock(root, wf_id)
@@ -400,6 +402,7 @@ def emit_dry_run(
     json_mode: bool,
     warnings: list[str],
     stdout: TextIO,
+    stderr: TextIO,
     notify: str | None = None,
     source_script: str | None = None,
     script_hash: str | None = None,
@@ -465,12 +468,13 @@ def emit_dry_run(
     if json_mode:
         rendering.print_json(payload, stdout)
     else:
-        print(f"warning: {DRY_RUN_WRITE_WARNING}", file=stdout)
-        print(f"scriptPath: {script_path}", file=stdout)
+        for warning in [*warnings, DRY_RUN_WRITE_WARNING]:
+            print(f"warning: {warning}", file=stderr)
+        print(f"scriptPath: {script_path}", file=stderr)
         if source_script is not None:
-            print(f"sourceScript: {source_script}", file=stdout)
+            print(f"sourceScript: {source_script}", file=stderr)
         if script_hash is not None:
-            print(f"scriptSha256: {script_hash}", file=stdout)
+            print(f"scriptSha256: {script_hash}", file=stderr)
         print(json.dumps(tree, indent=2, sort_keys=True), file=stdout)
     return EXIT_OK
 
@@ -920,6 +924,23 @@ def _resume_source_warnings(status: JsonObject) -> list[str]:
         return []
     return [
         f"source script differs from frozen copy: {source_script!r} "
+        f"(current sha256 {current_hash}; recorded {recorded_hash})"
+    ]
+
+
+def _resume_frozen_script_warnings(status: JsonObject, script_path: Path) -> list[str]:
+    """Warn when the frozen execution input no longer matches its recorded hash."""
+    recorded_hash = status.get("scriptSha256")
+    if not isinstance(recorded_hash, str):
+        return []
+    try:
+        current_hash = registry.script_sha256(script_path.read_bytes())
+    except OSError:
+        return []
+    if current_hash == recorded_hash:
+        return []
+    return [
+        f"frozen script differs from recorded hash: {script_path} "
         f"(current sha256 {current_hash}; recorded {recorded_hash})"
     ]
 
