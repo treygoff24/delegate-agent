@@ -24,6 +24,7 @@ SCHEMA_SHOW = "delegate.worktree-show.v1"
 SCHEMA_REMOVE = "delegate.worktree-remove.v1"
 SCHEMA_PRUNE = "delegate.worktree-prune.v1"
 SCHEMA_GC = "delegate.worktree-gc.v1"
+SCHEMA_REAP = "delegate.worktree-reap.v1"
 WORKTREE_ERROR_EXIT_CODE = 2
 MAX_DIRTY_PATHS_REPORTED = 20
 SYNCED_FILE_DIGESTS_KEY = "syncedFileDigests"
@@ -48,6 +49,7 @@ class PersistentWorktreeRecord(TypedDict, total=False):
     alias: str | None
     runId: str
     harness: str | None
+    group: str | None
     branch: str | None
     executionCwd: str | None
     sourceGitRoot: str | None

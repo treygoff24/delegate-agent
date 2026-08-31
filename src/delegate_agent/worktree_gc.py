@@ -2,7 +2,8 @@
 
 Implements ``delegate worktree prune`` (filtered batch removal), ``delegate
 worktree gc`` (registry reconciliation against the live ``git worktree list``),
-and the ``maybe_auto_prune`` hook fired opportunistically from ``worktree list``.
+the guarded ``delegate worktree reap`` pool cleanup, and the ``maybe_auto_prune``
+hook fired opportunistically from ``worktree list``.
 ``worktree_mgmt`` re-exports this surface so callers and tests keep importing
 from ``worktree_mgmt``.
 
@@ -15,7 +16,9 @@ Cross-cutting seams monkeypatched on the ``worktree_mgmt`` module
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import stat
 import time
 from collections.abc import Callable
@@ -23,11 +26,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-from delegate_agent import isolation, run_registry, run_status
+from delegate_agent import isolation, run_registry
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
     SCHEMA_PRUNE,
+    SCHEMA_REAP,
     STATUS_MISSING,
     STATUS_PRESENT,
     STATUS_REMOVED,
@@ -56,44 +60,10 @@ def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -
     return entry
 
 
-def _process_group_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def _owner_run_block_reason(registry_root: Path, record: PersistentWorktreeRecord) -> str | None:
-    """Refuse to prune a tree whose owning run has not provably finished.
+    """Compatibility seam delegating to the shared management predicate."""
 
-    ``live_attachments_for_path`` only sees resume-style attachments, so a
-    worktree's own still-running owner is invisible to it. That gap removed four
-    just-started lanes on 2026-08-26 and a running adjudicate-fix lane before
-    that: a lane with no commits yet reads mergedIntoSource=true, and nothing
-    else asked whether anyone was still working in it.
-    """
-
-    run_id = record.get("runId")
-    if not isinstance(run_id, str) or not run_id:
-        return None
-    state = run_registry.load_run_state_or_none(registry_root, run_id)
-    status = run_status.effective_status(state)
-    if status not in run_status.TERMINAL_STATUSES:
-        return "run_active" if status == run_status.STATUS_RUNNING else "run_not_terminal"
-    pgid = state.get("pgid") if isinstance(state, dict) else None
-    if (
-        isinstance(pgid, int)
-        and not isinstance(pgid, bool)
-        and pgid > 1
-        and _process_group_alive(pgid)
-    ):
-        return "process_group_alive"
-    return None
+    return wm._owner_run_block_reason(registry_root, record)
 
 
 def prune_worktrees(
@@ -138,7 +108,7 @@ def prune_worktrees(
                 skipped.append(_entry_ref(record, reason="live_attachment"))
                 continue
         if not force:
-            owner_block = _owner_run_block_reason(registry_root, record)
+            owner_block = wm._owner_run_block_reason(registry_root, record)
             if owner_block is not None:
                 skipped.append(_entry_ref(record, reason=owner_block))
                 continue
@@ -227,6 +197,439 @@ def prune_worktrees(
         "skipped": skipped,
         "errors": errors,
         "dryRun": dry_run,
+    }
+    if errors:
+        payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
+    return payload
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolved_record_path(record: PersistentWorktreeRecord) -> Path | None:
+    execution = record.get("executionCwd")
+    if not isinstance(execution, str):
+        return None
+    try:
+        return Path(execution).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _reap_pool_path(pool_data_home: Path, requested: str) -> tuple[Path | None, str | None]:
+    """Validate a path as one real, two-level entry in the worktree pool."""
+
+    try:
+        pool = pool_data_home.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None, "invalid_pool_root"
+    if not pool.is_dir():
+        return None, "invalid_pool_root"
+    raw = Path(requested).expanduser()
+    if not raw.is_absolute():
+        return None, "path_not_absolute"
+    try:
+        canonical = raw.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None, "path_unresolvable"
+    if not _path_is_relative_to(canonical, pool):
+        return None, "path_outside_pool"
+    parts = canonical.relative_to(pool).parts
+    if len(parts) != 2 or not isolation.is_pool_fingerprint_name(parts[0]):
+        return None, "path_not_pool_worktree"
+
+    # Check the lexical path as well as the resolved path.  A symlink that
+    # happens to resolve back inside the pool must still be refused.
+    try:
+        lexical = raw.relative_to(pool)
+    except ValueError:
+        lexical = None
+    if lexical is None or len(lexical.parts) != 2:
+        return None, "path_outside_pool"
+    cursor = pool
+    try:
+        for part in lexical.parts:
+            cursor = cursor / part
+            info = cursor.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return None, "path_symlink"
+        if not cursor.is_dir():
+            return None, "path_not_directory"
+    except FileNotFoundError:
+        return None, "path_missing"
+    except OSError:
+        return None, "path_unverifiable"
+    return canonical, None
+
+
+def _reap_path_age(path: Path, days: int) -> bool | None:
+    try:
+        modified = path.stat().st_mtime
+    except OSError:
+        return None
+    return time.time() - modified >= days * 24 * 60 * 60
+
+
+def _reap_entry(
+    *,
+    path: Path,
+    record: PersistentWorktreeRecord | None,
+    age_passed: bool,
+    source_gone: bool,
+    reason: str | None = None,
+) -> JsonObject:
+    entry: JsonObject = {
+        "worktreePath": str(path),
+        "agePassed": age_passed,
+        "sourceGone": source_gone,
+        "dirty": None,
+    }
+    if record is not None:
+        entry.update(
+            {
+                "alias": record.get("alias"),
+                "runId": record.get("runId"),
+                "branch": record.get("branch"),
+            }
+        )
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
+def _reap_pool_orphans(pool_data_home: Path) -> dict[str, JsonObject]:
+    """Return settled, source-gone pool entries keyed by canonical path."""
+
+    report = scan_worktree_pool(pool_data_home, required=True)
+    result: dict[str, JsonObject] = {}
+    for item in report.get("orphans", []):
+        if not isinstance(item, dict):
+            continue
+        path = item.get("worktreePath")
+        if not isinstance(path, str):
+            continue
+        source = item.get("sourceGitRoot")
+        if not isinstance(source, str) or Path(source).exists():
+            continue
+        canonical, error = _reap_pool_path(pool_data_home, path)
+        if canonical is None or error is not None:
+            continue
+        result[str(canonical)] = item
+    return result
+
+
+def reap_worktrees(
+    registry_root: Path | None = None,
+    *,
+    pool_data_home: Path | None = None,
+    handle: str | None = None,
+    path: str | None = None,
+    group: str | None = None,
+    older_than_days: int | None = None,
+    dry_run: bool = False,
+    yes: bool = False,
+    force: bool = False,
+    discard_uncommitted: bool = False,
+) -> JsonObject:
+    """Retire old pooled worktrees after an explicit selector and confirmation.
+
+    Source-gone pool entries have no Git command available to establish
+    cleanliness, so they are retained unless the caller explicitly opts into
+    discarding unknown dirt.  Such entries never have a branch deletion path.
+    """
+
+    # A pool-only caller may pass the pool as the first positional argument;
+    # the command layer passes both registry and pool explicitly.
+    if pool_data_home is None:
+        pool_data_home, registry_root = registry_root, None
+    if pool_data_home is None:
+        raise wm.WorktreeManagementError(
+            wm._error_payload("invalid_pool_root", "worktree reap requires a pool root.")
+        )
+
+    selectors = [("handle", handle), ("path", path), ("group", group)]
+    selected = [(name, value) for name, value in selectors if value is not None]
+    if len(selected) != 1:
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "reap_selector_required",
+                "worktree reap requires exactly one of --handle, --path, or --group.",
+            )
+        )
+    if older_than_days is None:
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "reap_age_required",
+                "worktree reap requires --older-than DAYS.",
+            )
+        )
+    if not is_non_negative_int(older_than_days):
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "invalid_option_value",
+                "worktree reap --older-than must be a non-negative integer.",
+            )
+        )
+
+    pool = Path(pool_data_home).expanduser()
+    pool_report = scan_worktree_pool(pool, required=True)
+    orphan_by_path = _reap_pool_orphans(pool)
+    pool_warnings_by_path = {
+        str(item.get("path")): str(item.get("reason"))
+        for item in pool_report.get("warnings", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("reason"), str)
+    }
+    records = load_persistent_records(registry_root) if registry_root is not None else []
+    selector_name, selector_value = selected[0]
+
+    candidates: list[tuple[Path, PersistentWorktreeRecord | None, bool]] = []
+    if selector_name == "path":
+        canonical, path_error = _reap_pool_path(pool, str(selector_value))
+        if canonical is None:
+            raise wm.WorktreeManagementError(
+                wm._error_payload(
+                    "invalid_reap_path",
+                    f"Cannot reap path {selector_value}: {path_error}.",
+                    path=str(selector_value),
+                )
+            )
+        record = next(
+            (item for item in records if _resolved_record_path(item) == canonical),
+            None,
+        )
+        source_gone = str(canonical) in orphan_by_path or (
+            record is not None
+            and isinstance(record.get("sourceGitRoot"), str)
+            and not Path(str(record["sourceGitRoot"])).exists()
+        )
+        candidates.append((canonical, record, source_gone))
+    elif selector_name == "handle":
+        for record in records:
+            if (
+                str(record.get("alias") or "") == selector_value
+                or str(record.get("runId") or "") == selector_value
+            ):
+                execution = record.get("executionCwd")
+                if isinstance(execution, str):
+                    canonical, path_error = _reap_pool_path(pool, execution)
+                    if canonical is not None and path_error is None:
+                        source_gone = str(canonical) in orphan_by_path or (
+                            isinstance(record.get("sourceGitRoot"), str)
+                            and not Path(str(record["sourceGitRoot"])).exists()
+                        )
+                        candidates.append((canonical, record, source_gone))
+                break
+        if not candidates:
+            for orphan_path, _orphan in orphan_by_path.items():
+                if Path(orphan_path).name == selector_value:
+                    candidates.append((Path(orphan_path), None, True))
+                    break
+    else:
+        candidates = []
+        for record in records:
+            if record.get("group") != selector_value:
+                continue
+            execution = record.get("executionCwd")
+            if not isinstance(execution, str):
+                continue
+            canonical, path_error = _reap_pool_path(pool, execution)
+            if canonical is not None and path_error is None:
+                source_gone = str(canonical) in orphan_by_path or (
+                    isinstance(record.get("sourceGitRoot"), str)
+                    and not Path(str(record["sourceGitRoot"])).exists()
+                )
+                candidates.append((canonical, record, source_gone))
+
+    if not candidates:
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "no_matching_worktrees",
+                f"No persistent worktrees found for {selector_name}: {selector_value}.",
+                selector={selector_name: selector_value},
+            )
+        )
+
+    planned: list[JsonObject] = []
+    reaped: list[JsonObject] = []
+    skipped: list[JsonObject] = []
+    errors: list[JsonObject] = []
+    for candidate_path, record, source_gone in candidates:
+        entry = _reap_entry(
+            path=candidate_path,
+            record=record,
+            age_passed=False,
+            source_gone=source_gone,
+        )
+        if not candidate_path.exists() or candidate_path.is_symlink():
+            entry["reason"] = "path_missing" if not candidate_path.exists() else "path_symlink"
+            skipped.append(entry)
+            continue
+        if record is not None:
+            old_enough = _older_than(record, older_than_days)
+        else:
+            old_enough = _reap_path_age(candidate_path, older_than_days)
+        if old_enough is None:
+            entry["reason"] = "invalid_last_activity"
+            skipped.append(entry)
+            continue
+        entry["agePassed"] = old_enough
+        if not old_enough:
+            entry["reason"] = "not_yet_old_enough"
+            skipped.append(entry)
+            continue
+        if record is not None and registry_root is not None:
+            owner_block = wm._owner_run_block_reason(registry_root, record)
+            if owner_block is not None and not force:
+                entry["reason"] = owner_block
+                skipped.append(entry)
+                continue
+            attachments = live_attachments_for_path(registry_root, str(candidate_path))
+            if attachments:
+                entry["reason"] = "live_attachment"
+                entry["attachedRuns"] = attachments
+                skipped.append(entry)
+                continue
+        elif record is None and not source_gone:
+            # A path that is not an orphan and has no reachable owner record is
+            # conservatively treated as live (most commonly a live backlink).
+            entry["reason"] = pool_warnings_by_path.get(str(candidate_path), "live_backlink")
+            skipped.append(entry)
+            continue
+        if not source_gone and record is not None:
+            status, _status_warnings = wm.detect_worktree_status(record)
+            if status in (STATUS_MISSING, STATUS_REMOVED):
+                entry["reason"] = "path_missing" if status == STATUS_MISSING else "already_removed"
+                skipped.append(entry)
+                continue
+            dirty, dirty_paths, _total, dirty_warnings = wm.dirty_info(record, status)
+            entry["dirty"] = dirty
+            if (dirty is None or dirty is True) and not (force or discard_uncommitted):
+                entry["reason"] = "dirty_unknown" if dirty is None else "dirty"
+                if dirty_paths:
+                    entry["dirtyPaths"] = dirty_paths
+                if dirty_warnings:
+                    entry["warnings"] = dirty_warnings
+                skipped.append(entry)
+                continue
+        elif source_gone and not (force or discard_uncommitted or yes):
+            entry["reason"] = "dirty_unknown"
+            skipped.append(entry)
+            continue
+        entry["sourceGone"] = source_gone
+        planned.append(entry)
+
+    if dry_run or not yes:
+        if not dry_run and planned:
+            for entry in planned:
+                entry["reason"] = "confirmation_required"
+            skipped.extend(planned)
+            planned = []
+            errors.append(
+                {
+                    "code": "confirmation_required",
+                    "message": "worktree reap requires --yes to remove paths.",
+                }
+            )
+        return {
+            "schema": SCHEMA_REAP,
+            "ok": not errors,
+            "dryRun": dry_run,
+            "selector": {selector_name: selector_value},
+            "olderThanDays": older_than_days,
+            "planned": planned,
+            "reaped": reaped,
+            "skipped": skipped,
+            "errors": errors,
+            "pool": str(pool),
+        }
+
+    # Destructive pass: the pool lock is outermost, then the registry lock.
+    # Re-read the pool report while those locks are held before touching a path.
+    lock_path = pool / ".delegate-reap.lock"
+    try:
+        with run_registry.file_lock(lock_path):
+            registry_context = (
+                run_registry.registry_lock(registry_root)
+                if registry_root is not None
+                else contextlib.nullcontext()
+            )
+            with registry_context:
+                fresh_orphans = _reap_pool_orphans(pool)
+                for entry in planned:
+                    target = Path(str(entry["worktreePath"]))
+                    fresh_target, path_error = _reap_pool_path(pool, str(target))
+                    if fresh_target is None or path_error is not None or fresh_target != target:
+                        errors.append({**entry, "code": "toctou_changed"})
+                        continue
+                    if entry.get("sourceGone") is True and str(target) not in fresh_orphans:
+                        errors.append({**entry, "code": "toctou_changed"})
+                        continue
+                    fresh_record = None
+                    run_id = entry.get("runId")
+                    if registry_root is not None and isinstance(run_id, str):
+                        fresh_record = _reload_record(registry_root, run_id)
+                        if fresh_record is None:
+                            errors.append({**entry, "code": "toctou_changed"})
+                            continue
+                        owner_block = wm._owner_run_block_reason(registry_root, fresh_record)
+                        if owner_block is not None and not force:
+                            errors.append({**entry, "code": owner_block})
+                            continue
+                        attached = live_attachments_for_path(registry_root, str(target))
+                        if attached:
+                            errors.append({**entry, "code": "live_attachment"})
+                            continue
+                        if entry.get("sourceGone") is not True:
+                            status, _ = wm.detect_worktree_status(fresh_record)
+                            dirty, _paths, _total, _warnings = wm.dirty_info(fresh_record, status)
+                            if (dirty is None or dirty is True) and not (
+                                force or discard_uncommitted
+                            ):
+                                errors.append(
+                                    {
+                                        **entry,
+                                        "code": "dirty_unknown" if dirty is None else "dirty",
+                                    }
+                                )
+                                continue
+                    if target.is_symlink() or not target.is_dir():
+                        errors.append({**entry, "code": "toctou_changed"})
+                        continue
+                    try:
+                        shutil.rmtree(target)
+                    except OSError as exc:
+                        errors.append({**entry, "code": "reap_failed", "message": str(exc)})
+                        continue
+                    record = fresh_record
+                    if record is not None and registry_root is not None:
+                        run_registry.set_worktree_status_locked(
+                            registry_root,
+                            str(record["runId"]),
+                            STATUS_REMOVED,
+                            removed_at=run_registry.utc_now_iso(),
+                        )
+                    reaped.append(entry)
+    except (OSError, TimeoutError) as exc:
+        errors.append({"code": "reap_lock_failed", "message": str(exc)})
+
+    payload: JsonObject = {
+        "schema": SCHEMA_REAP,
+        "ok": not errors,
+        "dryRun": False,
+        "selector": {selector_name: selector_value},
+        "olderThanDays": older_than_days,
+        "planned": planned,
+        "reaped": reaped,
+        "skipped": skipped,
+        "errors": errors,
+        "pool": str(pool),
     }
     if errors:
         payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
