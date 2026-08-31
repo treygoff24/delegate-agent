@@ -159,6 +159,17 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["runs"][0]["alias"], latest_alias)
         self.assertEqual(payload["runs"][0]["resolutionKind"], "latest")
 
+    def test_wait_stale_numbered_alias_renders_resolution_warning(self):
+        first_run_id, first_alias = self.write_run(status="succeeded")
+        self.write_run(status="succeeded")
+
+        code, out, err = self.run_cli(["wait", first_alias, "--interval", "1"])
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"resolved run: {first_run_id}", out)
+        self.assertIn("warning: run_target_stale:", out)
+        self.assertIn("1 newer codex run", out)
+
     def test_wait_bare_harness_reports_resolution_workspace_and_stale_warning(self):
         run_id, alias = self.write_run(status="succeeded")
         run_path = run_registry.run_directory(self.registry_root, run_id)
