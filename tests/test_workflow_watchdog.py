@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -365,10 +366,8 @@ class HeldWorkflowLockTests(unittest.TestCase):
         fd = os.open(stranger, os.O_RDWR)
 
         def _close() -> None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
 
         self.addCleanup(_close)
         self._with_lock_fd_env(str(fd))
