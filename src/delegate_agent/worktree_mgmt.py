@@ -3,7 +3,7 @@
 This module owns the worktree status/inspection layer (status detection, dirty
 and merged checks, ahead/behind, record decoration, ``list``/``show``) and the
 shared error envelope, and re-exports the record model (``worktree_records``),
-the removal pipeline (``worktree_remove``), and the prune/gc pipelines
+the removal pipeline (``worktree_remove``), and the prune/gc/reap pipelines
 (``worktree_gc``) so callers — ``worktree_commands``, ``cli``, and the test
 suite — keep importing the full surface from ``worktree_mgmt`` unchanged.
 
@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import os
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
-from delegate_agent import run_registry, worktree_summary
+from delegate_agent import run_registry, run_status, worktree_summary
 from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -37,6 +38,7 @@ from delegate_agent.worktree_records import (  # noqa: F401  # re-exported
     SCHEMA_GC,
     SCHEMA_LIST,
     SCHEMA_PRUNE,
+    SCHEMA_REAP,
     SCHEMA_REMOVE,
     SCHEMA_SHOW,
     STATUS_MISSING,
@@ -85,6 +87,64 @@ class WorktreeManagementError(Exception):
         self.payload = normalized
         self.code = code
         self.message = message
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """Return whether a process group can still be observed.
+
+    Permission failures are deliberately treated as alive.  Cleanup must have
+    positive proof that the group is gone rather than interpreting an inability
+    to inspect it as permission to remove its worktree.
+    """
+
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        # An error other than ESRCH does not prove that the group is gone.
+        return True
+    return True
+
+
+def _owner_run_block_reason(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+) -> str | None:
+    """Return a conservative reason to keep a worktree owned by a run.
+
+    Effective ``stale`` is terminal only when it came from a dead child and the
+    recorded process group is independently proven gone.  In particular,
+    ``missing_pid`` remains unknown and therefore blocks cleanup.
+    """
+
+    run_id = record.get("runId")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    fields = run_status.status_fields(state)
+    status = fields["effectiveStatus"]
+    if status == run_status.STATUS_STALE:
+        stale_reason = fields.get("staleReason")
+        if stale_reason not in (None, "dead_pid"):
+            return "run_not_terminal"
+        pgid = state.get("pgid") if isinstance(state, dict) else None
+        if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+            return "run_not_terminal"
+        return "process_group_alive" if _process_group_alive(pgid) else None
+    if status not in run_status.TERMINAL_STATUSES:
+        return "run_active" if status == run_status.STATUS_RUNNING else "run_not_terminal"
+    pgid = state.get("pgid") if isinstance(state, dict) else None
+    if (
+        isinstance(pgid, int)
+        and not isinstance(pgid, bool)
+        and pgid > 1
+        and _process_group_alive(pgid)
+    ):
+        return "process_group_alive"
+    return None
 
 
 def _ignored_for_retirement(path: str, patterns: tuple[str, ...]) -> bool:
@@ -1050,6 +1110,7 @@ from delegate_agent.worktree_gc import (  # noqa: E402, F401  # re-exported
     gc_worktrees,
     maybe_auto_prune,
     prune_worktrees,
+    reap_worktrees,
     scan_worktree_pool,
 )
 from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
