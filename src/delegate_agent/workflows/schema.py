@@ -168,7 +168,9 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     first_error: json.JSONDecodeError | None = None
     try:
         value, end = decoder.raw_decode(stripped)
-        candidates.append(_decode_string_payload(value, schema) if isinstance(value, str) else value)
+        candidates.append(
+            _decode_string_payload(value, schema) if isinstance(value, str) else value
+        )
         if not stripped[end:].strip():
             return candidates[0]
         position = end
