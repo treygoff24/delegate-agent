@@ -22,6 +22,7 @@ from pathlib import Path
 from delegate_agent import (
     notify,
     personas,
+    profiles,
     reasoning,
     run_registry,
     structured_output,
@@ -1279,7 +1280,7 @@ class WorkflowState:
         try:
             target = notify.parse_notify_target(target_spec)
             outcome = notify.send_notification(
-                target, message, cwd=str(self.workspace), env=os.environ
+                target, message, cwd=str(self.workspace), env=profiles.child_environment()
             )
         except Exception as exc:  # telemetry never fails the workflow
             self.append_journal_only(
