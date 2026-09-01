@@ -5,10 +5,16 @@ import re
 from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Literal
 
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 from delegate_agent.run_metadata import clean_harness_session_id
+from delegate_agent.terminal_states import (
+    PROVIDER_CANCELLED,
+    PROVIDER_MAX_TURNS,
+    PROVIDER_REFUSAL,
+)
 
 RecoveryQuality = Literal[
     "explicit_completion",
@@ -276,6 +282,130 @@ class EventBuffer:
 _CANCELLED_REASONS = {"abort", "aborted", "cancel", "cancelled", "canceled", "interrupted"}
 _FAILED_REASONS = {"error", "errored", "fail", "failed", "failure"}
 
+MODEL_PROVENANCE_EVENT_LIMIT = 32
+MODEL_PROVENANCE_EVENT_HEAD = 8
+
+_PROVIDER_REFUSAL_CODES = frozenset(
+    {
+        "refusal",
+        "refused",
+        "provider_refusal",
+        "content_filter",
+        "content_filtered",
+        "safety_refusal",
+        "error_refusal",
+    }
+)
+_PROVIDER_CANCELLED_CODES = frozenset(
+    {"cancelled", "canceled", "provider_cancelled", "provider_canceled", "stop_cancelled"}
+)
+_PROVIDER_MAX_TURNS_CODES = frozenset(
+    {"max_turns", "maximum_turns", "error_max_turns", "turn_limit"}
+)
+
+
+def _event_timestamp(payload: JsonObject) -> str:
+    for key in ("timestamp", "ts", "created_at", "createdAt"):
+        value = payload.get(key)
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and len(value) <= 64
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            return value.strip()
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _trusted_terminal_reason(payload: JsonObject, event_type: str) -> str:
+    values: list[str] = [event_type]
+    for key in ("stopReason", "stop_reason", "reason", "subtype", "code"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("type", "name", "code", "message"):
+            value = error.get(key)
+            if isinstance(value, str):
+                values.append(value)
+        data = error.get("data")
+        if isinstance(data, dict):
+            for key in ("code", "message"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    values.append(value)
+    if event_type == "error":
+        message = payload.get("message")
+        if isinstance(message, str):
+            values.append(message)
+    return " ".join(value.strip() for value in values if value.strip())
+
+
+def _normalized_terminal_code(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    return normalized or None
+
+
+def _structured_terminal_codes(payload: JsonObject) -> set[str]:
+    codes: set[str] = set()
+    for key in ("stopReason", "stop_reason", "subtype", "code"):
+        if (code := _normalized_terminal_code(payload.get(key))) is not None:
+            codes.add(code)
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("type", "name", "code"):
+            if (code := _normalized_terminal_code(error.get(key))) is not None:
+                codes.add(code)
+        data = error.get("data")
+        if (
+            isinstance(data, dict)
+            and (code := _normalized_terminal_code(data.get("code"))) is not None
+        ):
+            codes.add(code)
+    return codes
+
+
+def _provider_terminal_state(payload: JsonObject, event_type: str) -> tuple[str, str] | None:
+    codes = _structured_terminal_codes(payload)
+    reason = _trusted_terminal_reason(payload, event_type)
+    if codes & _PROVIDER_MAX_TURNS_CODES:
+        return PROVIDER_MAX_TURNS, reason
+    if codes & _PROVIDER_REFUSAL_CODES:
+        return PROVIDER_REFUSAL, reason
+    if event_type in {"turn.cancelled", "turn.canceled"} or codes & _PROVIDER_CANCELLED_CODES:
+        return PROVIDER_CANCELLED, reason
+    return None
+
+
+def append_bounded_model_event(events: list[JsonObject], event: JsonObject) -> None:
+    if len(events) < MODEL_PROVENANCE_EVENT_LIMIT:
+        events.append(event)
+        return
+    tail_size = MODEL_PROVENANCE_EVENT_LIMIT - MODEL_PROVENANCE_EVENT_HEAD - 1
+    events[:] = [*events[:MODEL_PROVENANCE_EVENT_HEAD], *events[-tail_size:], event]
+
+
+def _served_model(payload: JsonObject) -> str | None:
+    def clean(value: object) -> str | None:
+        if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            return None
+        return value
+
+    for key in ("servedModel", "served_model", "model", "modelName", "model_name"):
+        if (value := clean(payload.get(key))) is not None:
+            return value
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ("model", "modelName", "model_name"):
+            if (value := clean(message.get(key))) is not None:
+                return value
+    return None
+
 
 def _normalize_terminal_status(value: JsonValue) -> str | None:
     if not isinstance(value, str) or not value.strip():
@@ -308,6 +438,8 @@ def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
 @dataclass
 class StreamAccumulator:
     harness: str | None = None
+    requested_model: str | None = None
+    continuity_mode: str = "fungible"
     assistant_chunks: list[str] = field(default_factory=list)
     events: EventBuffer = field(default_factory=EventBuffer)
     completion_text: str | None = None
@@ -325,6 +457,16 @@ class StreamAccumulator:
     _pi_text_buffer: str = field(default="", repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
+    provider_terminal_state: str | None = None
+    provider_terminal_reason: str | None = None
+    served_model: str | None = None
+    model_observations: list[JsonObject] = field(default_factory=list)
+    model_fallback_hops: list[JsonObject] = field(default_factory=list)
+    model_observations_total: int = 0
+    model_fallback_hops_total: int = 0
+    sticky_model_turn: int | None = None
+    continuity_violation: JsonObject | None = None
+    turn_number: int = 0
     usage: JsonObject | None = None
     session_id: str | None = None
     structured_events_seen: int = 0
@@ -397,6 +539,19 @@ class StreamAccumulator:
         if not isinstance(event_type, str):
             self._ingest_role_content_message(payload)
             return
+        if event_type in {"turn.started", "turn_start", "step_start"}:
+            self.turn_number += 1
+        self._observe_model(payload, event_type)
+        if self.continuity_violation is not None:
+            return
+        provider_terminal = _provider_terminal_state(payload, event_type)
+        if provider_terminal is not None:
+            self.provider_terminal_state, self.provider_terminal_reason = provider_terminal
+            self._record_terminal_event(
+                event=event_type,
+                status="failed",
+                reason=self.provider_terminal_reason,
+            )
         self._capture_session_id(payload, event_type)
         if self.harness == "opencode":
             self._ingest_opencode_event(payload, event_type)
@@ -479,6 +634,72 @@ class StreamAccumulator:
         # includes kimi 0.26.0 meta lines such as
         # {"role":"meta","type":"session.resume_hint",...}, which carry no
         # assistant text, tool activity, or terminal signal worth normalizing.
+
+    def _observe_model(self, payload: JsonObject, event_type: str) -> None:
+        model = _served_model(payload)
+        if model is None:
+            return
+        turn = max(self.turn_number, 1)
+        observed_at = _event_timestamp(payload)
+        prior = self.served_model
+        if model == prior:
+            return
+        observation: JsonObject = {
+            "model": model,
+            "turn": turn,
+            "event": event_type,
+            "observedAt": observed_at,
+        }
+        self.model_observations_total += 1
+        append_bounded_model_event(self.model_observations, observation)
+        if prior is None:
+            self.served_model = model
+            requested = self.requested_model
+            if (
+                self.continuity_mode == "pinned"
+                and isinstance(requested, str)
+                and requested
+                and model != requested
+            ):
+                self.continuity_violation = {
+                    "reason": "served_model_mismatch",
+                    "requestedModel": requested,
+                    "servedModel": model,
+                    "turn": turn,
+                    "observedAt": observed_at,
+                }
+                self._record_terminal_event(
+                    event="model.continuity_paused",
+                    status="failed",
+                    reason=f"pinned model {requested} was replaced by {model}",
+                )
+            return
+        hop: JsonObject = {
+            "fromModel": prior,
+            "toModel": model,
+            "reason": "harness_reported_model_switch",
+            "turn": turn,
+            "stickyFromTurn": turn,
+            "observedAt": observed_at,
+        }
+        self.model_fallback_hops_total += 1
+        append_bounded_model_event(self.model_fallback_hops, hop)
+        self.served_model = model
+        self.sticky_model_turn = turn
+        if self.continuity_mode == "pinned":
+            self.continuity_violation = {
+                "reason": "mid_session_model_switch",
+                "requestedModel": self.requested_model,
+                "fromModel": prior,
+                "servedModel": model,
+                "turn": turn,
+                "observedAt": observed_at,
+            }
+            self._record_terminal_event(
+                event="model.continuity_paused",
+                status="failed",
+                reason=f"pinned model changed from {prior} to {model} at turn {turn}",
+            )
 
     def _capture_session_id(self, payload: JsonObject, event_type: str) -> None:
         candidate: object = None

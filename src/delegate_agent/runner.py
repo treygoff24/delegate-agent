@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import errno
+import hashlib
 import io
 import json
 import math
@@ -40,6 +41,7 @@ from delegate_agent import (
     sandbox_bwrap,
     seatbelt,
     stall_watchdog,
+    terminal_states,
     worktree_summary,
 )
 from delegate_agent import config as delegate_config
@@ -141,6 +143,7 @@ class RunContext:
     model_alias: str | None = None
     model_resolved: str | None = None
     model_requested: str | None = None
+    continuity_mode: str = "fungible"
     capability_model: str | None = None
     capability_model_source: str | None = None
     creation_context: JsonObject | None = None
@@ -324,6 +327,174 @@ def status_from_exit(exit_code: int) -> str:
     return run_registry.STATUS_SUCCEEDED if exit_code == 0 else run_registry.STATUS_FAILED
 
 
+def _requested_model(ctx: RunContext) -> str | None:
+    return ctx.model_requested or ctx.model_alias or ctx.model_resolved or ctx.model
+
+
+def _acceptance_slice(ctx: RunContext) -> JsonObject:
+    if ctx.source_prompt is None:
+        return {"promptPath": None, "sha256": None}
+    return {
+        "promptPath": PROMPT_TXT_FILE,
+        "sha256": hashlib.sha256(ctx.source_prompt.encode("utf-8")).hexdigest(),
+    }
+
+
+def _revision_binding(ctx: RunContext) -> JsonObject:
+    creation = ctx.creation_context if isinstance(ctx.creation_context, dict) else {}
+    return {
+        "sourceGitRoot": ctx.source_git_root,
+        "sourceHeadOid": creation.get("sourceHeadOid"),
+        "sourceHeadRef": creation.get("sourceHeadRef"),
+    }
+
+
+def _worktree_binding(ctx: RunContext) -> JsonObject:
+    return {
+        "executionCwd": ctx.execution_cwd,
+        "branch": ctx.branch,
+        "isolationLifecycle": ctx.isolation_lifecycle,
+    }
+
+
+def _model_provenance(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator | None = None,
+    *,
+    auth_fallback: JsonObject | None = None,
+) -> JsonObject:
+    fallback_hops = list(accumulator.model_fallback_hops) if accumulator is not None else []
+    model_observations = list(accumulator.model_observations) if accumulator is not None else []
+    fallback_hops_total = (
+        max(accumulator.model_fallback_hops_total, len(fallback_hops))
+        if accumulator is not None
+        else 0
+    )
+    model_observations_total = (
+        max(accumulator.model_observations_total, len(model_observations))
+        if accumulator is not None
+        else 0
+    )
+    if isinstance(auth_fallback, dict) and auth_fallback.get("triggered") is True:
+        fallback_hops_total += 1
+        harness_events.append_bounded_model_event(
+            fallback_hops,
+            {
+                "fromModel": ctx.model_resolved or ctx.model,
+                "toModel": ctx.model_resolved or ctx.model,
+                "fromRoute": auth_fallback.get("primaryAuthProfile"),
+                "toRoute": auth_fallback.get("fallbackProfile"),
+                "reason": auth_fallback.get("reason"),
+                "turn": (accumulator.turn_number if accumulator is not None else 0) or 0,
+                "stickyFromTurn": (accumulator.turn_number if accumulator is not None else 0) or 0,
+                "observedAt": run_registry.utc_now_iso(),
+            },
+        )
+    served_model = accumulator.served_model if accumulator is not None else None
+    return {
+        "requestedModel": _requested_model(ctx),
+        "resolvedModel": ctx.model_resolved or ctx.model,
+        "servedModel": served_model,
+        "servedModelSource": "harness_event" if served_model is not None else "unavailable",
+        "modelObservations": model_observations,
+        "modelObservationsTotal": model_observations_total,
+        "fallbackHops": fallback_hops,
+        "fallbackHopsTotal": fallback_hops_total,
+        "provenanceTruncated": (
+            model_observations_total > len(model_observations)
+            or fallback_hops_total > len(fallback_hops)
+        ),
+        "stickyModelTurn": (accumulator.sticky_model_turn if accumulator is not None else None),
+        "continuityMode": ctx.continuity_mode,
+        "panelDiversityRequested": ctx.continuity_mode == "panel",
+    }
+
+
+def _terminal_state_for(
+    *,
+    status: str,
+    result_quality: str,
+    accumulator: harness_events.StreamAccumulator,
+    failure_reason: str | None,
+    pinned_pause: bool,
+) -> terminal_states.TerminalState:
+    if pinned_pause:
+        return terminal_states.BLOCKED_DEPENDENCY
+    provider_state = accumulator.provider_terminal_state
+    if provider_state == terminal_states.PROVIDER_REFUSAL:
+        return terminal_states.PROVIDER_REFUSAL
+    if provider_state == terminal_states.PROVIDER_CANCELLED:
+        return terminal_states.PROVIDER_CANCELLED
+    if provider_state == terminal_states.PROVIDER_MAX_TURNS:
+        return terminal_states.PROVIDER_MAX_TURNS
+    if failure_reason == "stalled":
+        return terminal_states.STALLED
+    if status in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}:
+        return terminal_states.FAILED
+    if result_quality in harness_events.NO_OUTPUT_RESULT_QUALITIES:
+        return terminal_states.FAILED
+    return terminal_states.COMPLETED_UNVERIFIED
+
+
+def _terminal_record(
+    ctx: RunContext,
+    *,
+    terminal_state: terminal_states.TerminalState,
+    report_written: bool,
+    reason: str | None = None,
+) -> JsonObject:
+    record: JsonObject = {
+        "state": terminal_state,
+        "observedAt": run_registry.utc_now_iso(),
+        "revision": _revision_binding(ctx),
+        "worktree": _worktree_binding(ctx),
+        "acceptanceSlice": _acceptance_slice(ctx),
+        "proofPointer": (
+            completion_report_path(ctx.run_id)
+            if report_written
+            else f".delegate/runs/{ctx.run_id}/{EVENTS_JSONL}"
+        ),
+    }
+    if reason:
+        bounded, truncated, original_chars = harness_events.bounded_event_text(
+            redaction.redact_string(reason)
+        )
+        record["reason"] = bounded
+        if truncated:
+            record["reasonTruncated"] = True
+            record["reasonChars"] = original_chars
+    return record
+
+
+def _pinned_pause_notice(ctx: RunContext, *, reason: str) -> str:
+    model = _requested_model(ctx) or "requested model"
+    return (
+        f"[model-continuity] Pinned run paused: {model} became unavailable ({reason}); "
+        "Delegate did not start a fallback route. Resume after availability returns, or "
+        "restart explicitly with continuity mode fungible/panel."
+    )
+
+
+def _pinned_handoff_checkpoint(
+    ctx: RunContext,
+    *,
+    reason: str,
+    accumulator: harness_events.StreamAccumulator,
+) -> JsonObject:
+    return {
+        "kind": "model_continuity_pause",
+        "reason": reason,
+        "continuityMode": ctx.continuity_mode,
+        "requestedModel": _requested_model(ctx),
+        "servedModel": accumulator.served_model,
+        "turn": accumulator.turn_number or None,
+        "promptPath": PROMPT_TXT_FILE if ctx.source_prompt is not None else None,
+        "acceptanceSlice": _acceptance_slice(ctx),
+        "revision": _revision_binding(ctx),
+        "worktree": _worktree_binding(ctx),
+    }
+
+
 def _terminal_override_extra(accumulator: harness_events.StreamAccumulator) -> JsonObject:
     if accumulator.terminal_status not in {
         run_registry.STATUS_FAILED,
@@ -379,6 +550,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "model": ctx.model,
         "modelAlias": ctx.model_alias,
         "modelResolved": ctx.model_resolved or ctx.model,
+        "continuityMode": ctx.continuity_mode,
+        "modelProvenance": _model_provenance(ctx),
         "cwd": ctx.source_cwd,
         "executionCwd": ctx.execution_cwd,
         "workspaceRoot": str(Path(ctx.execution_cwd).resolve(strict=False)),
@@ -458,6 +631,8 @@ def build_state(
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
         "lastActivityAt": now,
+        "continuityMode": ctx.continuity_mode,
+        "modelProvenance": _model_provenance(ctx),
     }
     state["completionReportWritten"] = bool(
         extra.get("completionReportWritten") if extra is not None else False
@@ -544,6 +719,8 @@ def build_snapshot(
         "workspaceRoot": str(Path(ctx.execution_cwd).resolve(strict=False)),
         "mode": ctx.mode,
         "model": ctx.model,
+        "continuityMode": ctx.continuity_mode,
+        "modelProvenance": _model_provenance(ctx, accumulator),
         "startedAt": ctx.started_at,
         "current": (
             redaction.redact_string(accumulator.current)
@@ -671,6 +848,14 @@ def persist_progress(
 def _reconcile_cancel_extra(extra: JsonObject) -> None:
     extra["failureReason"] = "cancelled_by_user"
     extra["exitCode"] = 1
+    extra["terminalState"] = terminal_states.FAILED
+    terminal_record = extra.get("terminalRecord")
+    if isinstance(terminal_record, dict):
+        extra["terminalRecord"] = {
+            **terminal_record,
+            "state": terminal_states.FAILED,
+            "reason": "cancelled_by_user",
+        }
     extra.pop("error", None)
     extra.pop("message", None)
     extra.pop("nextActions", None)
@@ -745,7 +930,11 @@ def _persist_final_progress(
             completion_report_written=completion_report_written,
             extra=persisted_extra,
         )
-        snapshot["ok"] = run_registry.run_succeeded(persisted_status, snapshot.get("resultQuality"))
+        snapshot["ok"] = run_registry.run_succeeded(
+            persisted_status,
+            snapshot.get("resultQuality"),
+            snapshot.get("terminalState"),
+        )
         snapshot["status"] = persisted_status
         return persisted_status, persisted_extra, state, snapshot
 
@@ -928,6 +1117,7 @@ def _completion_report_text_and_source(
             in {
                 "cancelled_by_user",
                 "harness_cancelled",
+                terminal_states.PROVIDER_CANCELLED,
             }
             else "cancelled_by_user"
         )
@@ -1037,6 +1227,12 @@ def emit_bounded_text_summary(
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
     if extra is not None:
+        terminal_state = extra.get("terminalState")
+        if isinstance(terminal_state, str) and terminal_state:
+            print(f"terminal state: {terminal_state}", file=stdout)
+        failover_notice = extra.get("failoverNotice")
+        if isinstance(failover_notice, str) and failover_notice:
+            print(failover_notice, file=stdout)
         error = extra.get("error")
         message = extra.get("message")
         if isinstance(error, str) and error:
@@ -1124,6 +1320,8 @@ def completion_json_payload(
         "model": ctx.model,
         "modelAlias": ctx.model_alias,
         "modelResolved": ctx.model_resolved or ctx.model,
+        "continuityMode": ctx.continuity_mode,
+        "modelProvenance": _model_provenance(ctx),
         "cwd": ctx.source_cwd,
         "executionCwd": ctx.execution_cwd,
         "workspaceRoot": str(Path(ctx.execution_cwd).resolve(strict=False)),
@@ -1905,6 +2103,14 @@ def _record_tracked_launch_failure(
         "error": error.error,
         "message": error.message,
         "resultQuality": None,
+        "terminalState": terminal_states.FAILED,
+        "terminalRecord": _terminal_record(
+            ctx,
+            terminal_state=terminal_states.FAILED,
+            report_written=False,
+            reason=error.error,
+        ),
+        "modelProvenance": _model_provenance(ctx),
     }
     recorded = False
     accumulator = (
@@ -1987,7 +2193,11 @@ def _capture_tracked_process(
     process_group_pgid: int | None = None,
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> TrackedCaptureResult:
-    accumulator = harness_events.StreamAccumulator(harness=ctx.harness)
+    accumulator = harness_events.StreamAccumulator(
+        harness=ctx.harness,
+        requested_model=ctx.model_resolved or ctx.model or _requested_model(ctx),
+        continuity_mode=ctx.continuity_mode,
+    )
     watchdog = stall_watchdog.StallWatchdog(
         stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
         harness=ctx.harness,
@@ -2562,6 +2772,30 @@ def _finalize_tracked_run(
         status = capture.accumulator.terminal_status
         if status == run_registry.STATUS_CANCELLED or exit_code == 0:
             exit_code = 1
+    provider_terminal_state = capture.accumulator.provider_terminal_state
+    if provider_terminal_state is not None:
+        if capture.exit_code == 0:
+            merged_extra["childExitCode"] = 0
+        if provider_terminal_state == harness_events.PROVIDER_CANCELLED:
+            status = run_registry.STATUS_CANCELLED
+        else:
+            status = run_registry.STATUS_FAILED
+        exit_code = 1
+        merged_extra.update(
+            failureReason=provider_terminal_state,
+            error=provider_terminal_state,
+            message=(f"Child provider terminated the run with {provider_terminal_state}."),
+        )
+    if capture.accumulator.continuity_violation is not None:
+        if capture.exit_code == 0:
+            merged_extra["childExitCode"] = 0
+        status = run_registry.STATUS_FAILED
+        exit_code = 1
+        merged_extra.update(
+            failureReason="model_continuity_paused",
+            error="model_continuity_paused",
+            message="Pinned model continuity was interrupted; the run paused with a checkpoint.",
+        )
     # Marker protocol (finalize-first race): cancel stamps cancelRequested under
     # the registry lock BEFORE signaling. If the child exits 0 on SIGTERM and
     # the runner finalizes before cancel's post-grace terminal write, the
@@ -2576,6 +2810,8 @@ def _finalize_tracked_run(
     if cancel_requested:
         status = run_registry.STATUS_CANCELLED
         exit_code = 1
+        capture.accumulator.provider_terminal_state = None
+        capture.accumulator.provider_terminal_reason = None
         _reconcile_cancel_extra(merged_extra)
     elif status == run_registry.STATUS_SUCCEEDED:
         work_summary = merged_extra.get("workSummary")
@@ -2660,6 +2896,35 @@ def _finalize_tracked_run(
     merged_extra["completionReportWritten"] = report_written
     merged_extra["completionReportSource"] = report_source if report_written else None
     merged_extra["resultQuality"] = result_quality
+    failure_reason_value = merged_extra.get("failureReason")
+    terminal_state = _terminal_state_for(
+        status=status,
+        result_quality=result_quality,
+        accumulator=capture.accumulator,
+        failure_reason=(
+            failure_reason_value if isinstance(failure_reason_value, str) else failure_reason
+        ),
+        pinned_pause=merged_extra.get("pinnedContinuityPause") is True,
+    )
+    merged_extra["terminalState"] = terminal_state
+    merged_extra["terminalRecord"] = _terminal_record(
+        ctx,
+        terminal_state=terminal_state,
+        report_written=report_written,
+        reason=(
+            capture.accumulator.provider_terminal_reason
+            or (failure_reason_value if isinstance(failure_reason_value, str) else failure_reason)
+        ),
+    )
+    merged_extra["modelProvenance"] = _model_provenance(
+        ctx,
+        capture.accumulator,
+        auth_fallback=(
+            merged_extra.get("codexAuthFallback")
+            if isinstance(merged_extra.get("codexAuthFallback"), dict)
+            else None
+        ),
+    )
     if result_quality != RESULT_QUALITY_OK:
         warnings = list(merged_extra.get("warnings") or [])
         _append_unique(warnings, _quality_warning(result_quality, harness=ctx.harness))
@@ -2675,9 +2940,13 @@ def _finalize_tracked_run(
         completion_report_written=report_written,
         extra=merged_extra,
     )
-    if (
+    cancel_was_reconciled = (
         persisted_status == run_registry.STATUS_CANCELLED
-        and status != run_registry.STATUS_CANCELLED
+        and persisted_extra.get("failureReason") == "cancelled_by_user"
+        and merged_extra.get("failureReason") != "cancelled_by_user"
+    )
+    if persisted_status == run_registry.STATUS_CANCELLED and (
+        status != run_registry.STATUS_CANCELLED or cancel_was_reconciled
     ):
         # Cancel arrived after the preliminary state read and report decision.
         # Rebuild the report for the authoritative cancelled outcome, then
@@ -3134,7 +3403,11 @@ def _merge_tracked_attempt_captures(
     prior_capture: TrackedCaptureResult,
     current_capture: TrackedCaptureResult,
 ) -> TrackedCaptureResult:
-    accumulator = harness_events.StreamAccumulator(harness=current_capture.accumulator.harness)
+    accumulator = harness_events.StreamAccumulator(
+        harness=current_capture.accumulator.harness,
+        requested_model=current_capture.accumulator.requested_model,
+        continuity_mode=current_capture.accumulator.continuity_mode,
+    )
     accumulator.assistant_chunks = [
         *prior_capture.accumulator.assistant_chunks,
         *current_capture.accumulator.assistant_chunks,
@@ -3147,6 +3420,51 @@ def _merge_tracked_attempt_captures(
     accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
     accumulator.terminal_event = current_capture.accumulator.terminal_event
     accumulator.terminal_status = current_capture.accumulator.terminal_status
+    accumulator.provider_terminal_state = (
+        current_capture.accumulator.provider_terminal_state
+        or prior_capture.accumulator.provider_terminal_state
+    )
+    accumulator.provider_terminal_reason = (
+        current_capture.accumulator.provider_terminal_reason
+        or prior_capture.accumulator.provider_terminal_reason
+    )
+    accumulator.served_model = (
+        current_capture.accumulator.served_model or prior_capture.accumulator.served_model
+    )
+    for event in (
+        *prior_capture.accumulator.model_observations,
+        *current_capture.accumulator.model_observations,
+    ):
+        harness_events.append_bounded_model_event(accumulator.model_observations, event)
+    for event in (
+        *prior_capture.accumulator.model_fallback_hops,
+        *current_capture.accumulator.model_fallback_hops,
+    ):
+        harness_events.append_bounded_model_event(accumulator.model_fallback_hops, event)
+    accumulator.model_observations_total = max(
+        prior_capture.accumulator.model_observations_total,
+        len(prior_capture.accumulator.model_observations),
+    ) + max(
+        current_capture.accumulator.model_observations_total,
+        len(current_capture.accumulator.model_observations),
+    )
+    accumulator.model_fallback_hops_total = max(
+        prior_capture.accumulator.model_fallback_hops_total,
+        len(prior_capture.accumulator.model_fallback_hops),
+    ) + max(
+        current_capture.accumulator.model_fallback_hops_total,
+        len(current_capture.accumulator.model_fallback_hops),
+    )
+    accumulator.sticky_model_turn = (
+        current_capture.accumulator.sticky_model_turn or prior_capture.accumulator.sticky_model_turn
+    )
+    accumulator.continuity_violation = (
+        current_capture.accumulator.continuity_violation
+        or prior_capture.accumulator.continuity_violation
+    )
+    accumulator.turn_number = (
+        prior_capture.accumulator.turn_number + current_capture.accumulator.turn_number
+    )
     prior_usage = prior_capture.accumulator.usage
     current_usage = current_capture.accumulator.usage
     if prior_usage is None and current_usage is None:
@@ -3409,7 +3727,7 @@ def _execute_tracked(
             ctx.codex_fallback_failover_identity,
             profile_alias=ctx.fallback_auth_profile,
         )
-        if primary_blocked and not fallback_blocked:
+        if primary_blocked and not fallback_blocked and ctx.continuity_mode != "pinned":
             attempt_env = ctx.fallback_env_overrides
             preflight_swap = True
 
@@ -3586,6 +3904,17 @@ def _execute_tracked(
                         "codex_auth_fallback: skipped because the fallback profile is also blocked."
                     ],
                 }
+            elif ctx.continuity_mode == "pinned":
+                pause_reason = "usage_limit"
+                fallback_extra = {
+                    "pinnedContinuityPause": True,
+                    "failoverNotice": _pinned_pause_notice(ctx, reason=pause_reason),
+                    "handoffCheckpoint": _pinned_handoff_checkpoint(
+                        ctx,
+                        reason=pause_reason,
+                        accumulator=capture.accumulator,
+                    ),
+                }
             else:
                 _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 fallback_capture = run_attempt(
@@ -3743,6 +4072,18 @@ def _execute_tracked(
         }
     if capture.stopped_after_completion:
         final_extra["stoppedAfterCompletion"] = True
+    if capture.accumulator.continuity_violation is not None:
+        reason = str(
+            capture.accumulator.continuity_violation.get("reason") or "model_continuity_violation"
+        )
+        final_extra["pinnedContinuityPause"] = True
+        final_extra["failoverNotice"] = _pinned_pause_notice(ctx, reason=reason)
+        final_extra["handoffCheckpoint"] = _pinned_handoff_checkpoint(
+            ctx,
+            reason=reason,
+            accumulator=capture.accumulator,
+        )
+        final_extra["modelContinuityViolation"] = capture.accumulator.continuity_violation
     if capture.stall is not None:
         final_extra["stall"] = capture.stall
     if capture.error is not None:

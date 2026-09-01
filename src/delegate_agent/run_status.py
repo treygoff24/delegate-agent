@@ -7,6 +7,7 @@ from pathlib import Path
 from delegate_agent import archived_logs
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
+from delegate_agent.terminal_states import COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, STALLED
 
 LARGE_LOG_WARN_MIB = 50
 # 1 << 20 == 1 MiB == run_registry.BYTES_PER_MIB. Inlined so this module needs no
@@ -25,7 +26,11 @@ STATUS_FILTER_RUNNING = "running"
 STATUS_FILTER_STALE = "stale"
 
 
-def run_succeeded(status: str, result_quality: str | None) -> bool:
+def run_succeeded(
+    status: str,
+    result_quality: str | None,
+    terminal_state: object = None,
+) -> bool:
     """Did this run finish AND come back with usable work?
 
     ``status`` alone answers a narrower question -- whether the child harness ran
@@ -39,6 +44,11 @@ def run_succeeded(status: str, result_quality: str | None) -> bool:
     about the content of real output stay warnings.
     """
     if status != STATUS_SUCCEEDED:
+        return False
+    if terminal_state is not None and terminal_state not in {
+        COMPLETED_VERIFIED,
+        COMPLETED_UNVERIFIED,
+    }:
         return False
     return result_quality not in NO_OUTPUT_RESULT_QUALITIES
 
@@ -105,6 +115,8 @@ def status_fields(state: JsonObject | None) -> JsonObject:
     }
     if reason is not None:
         fields["staleReason"] = reason
+    if effective == STATUS_STALE:
+        fields["terminalState"] = STALLED
     return fields
 
 
@@ -232,6 +244,8 @@ def build_run_summary(
         for key in (
             "modelAlias",
             "modelResolved",
+            "continuityMode",
+            "modelProvenance",
             "terminalEvent",
             "terminalStatus",
             "resumedFrom",
@@ -249,6 +263,10 @@ def build_run_summary(
         for key in (
             "terminalEvent",
             "terminalStatus",
+            "terminalState",
+            "terminalRecord",
+            "continuityMode",
+            "modelProvenance",
             "failureReason",
             "error",
             "message",

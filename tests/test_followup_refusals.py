@@ -34,6 +34,7 @@ class FollowupRefusalsTests(unittest.TestCase):
         harness_session_id: str | None = "th_test123456",
         resumable: bool = True,
         pid: int | None = None,
+        continuity_mode: str | None = None,
     ) -> tuple[str, str]:
         run_id, alias = write_snapshot_run(
             run_registry,
@@ -52,6 +53,8 @@ class FollowupRefusalsTests(unittest.TestCase):
         manifest["model"] = "gpt-5"
         if resumable:
             manifest["resumable"] = True
+        if continuity_mode is not None:
+            manifest["continuityMode"] = continuity_mode
         run_registry.write_json_atomic(run_path / "manifest.json", manifest)
 
         # Update state
@@ -191,6 +194,22 @@ class FollowupRefusalsTests(unittest.TestCase):
         self.assertGreater(argv.index("resume"), exec_idx)
         self.assertIn("th_valid12345", argv)
         self.assertNotIn("--ephemeral", argv)
+
+    def test_followup_inherits_pinned_continuity_mode(self):
+        _run_id, alias = self.write_test_run(
+            harness="codex",
+            mode="work",
+            status="succeeded",
+            harness_session_id="th_valid12345",
+            continuity_mode="pinned",
+        )
+
+        exit_code, stdout, _stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", alias, "continue working"]
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout)["continuityMode"], "pinned")
 
     def test_dry_run_preserves_notify_target(self):
         _run_id, alias = self.write_test_run(

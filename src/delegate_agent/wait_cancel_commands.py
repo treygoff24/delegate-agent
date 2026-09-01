@@ -158,7 +158,9 @@ def _status_label(payload: JsonObject) -> str:
 def _run_succeeded(payload: JsonObject) -> bool:
     quality = payload.get("resultQuality")
     return run_registry.run_succeeded(
-        _status_label(payload), quality if isinstance(quality, str) else None
+        _status_label(payload),
+        quality if isinstance(quality, str) else None,
+        payload.get("terminalState"),
     )
 
 

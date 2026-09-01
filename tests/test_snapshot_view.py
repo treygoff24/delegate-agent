@@ -59,6 +59,7 @@ class SnapshotViewTests(unittest.TestCase):
         self.assertEqual(view["effectiveStatus"], "stale")
         self.assertEqual(view["status"], "stale")
         self.assertEqual(view["staleReason"], "missing_pid")
+        self.assertEqual(view["terminalState"], "stalled")
         self.assertEqual(
             view["snapshotCommand"],
             run_registry.snapshot_command(alias, cwd=str(workspace)),

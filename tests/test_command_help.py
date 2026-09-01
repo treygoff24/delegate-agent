@@ -365,6 +365,27 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
         self.assertIn("--output-schema", text)
         self.assertIn("JSON Schema", text)
 
+    def test_launch_help_documents_continuity_mode(self):
+        for command in (
+            "cursor",
+            "kimi",
+            "codex",
+            "claude",
+            "grok",
+            "devin",
+            "opencode",
+            "pi",
+            "omp",
+            "droid",
+            "cursor call",
+            "dry-run call",
+            "resume",
+        ):
+            with self.subTest(command=command):
+                payload = command_help.command_help_payload(command_help.COMMAND_SPECS[command])
+                flags = {option["flag"] for option in payload["options"]}
+                self.assertIn("--continuity-mode", flags)
+
     def test_safe_help_documents_effective_isolation_backend(self):
         text = command_help.render_command_help_text(command_help.COMMAND_SPECS["omp"])
         self.assertIn("isolationBackend=copy", text)

@@ -24,6 +24,127 @@ def load_harness_events():
 
 
 class HarnessEventsTests(unittest.TestCase):
+    def test_provider_refusal_is_runtime_observed_but_assistant_text_cannot_forge_it(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "provider_refusal is just prose here"}]
+                    },
+                }
+            )
+        )
+        self.assertIsNone(acc.provider_terminal_state)
+
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "error",
+                    "code": "provider_refusal",
+                    "message": "Provider refusal: policy",
+                }
+            )
+        )
+
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_free_text_error_words_do_not_forge_provider_terminal_state(self):
+        for message in (
+            "stream cancelled while reconnecting",
+            "worker refused a retry request",
+            "usage limit",
+        ):
+            with self.subTest(message=message):
+                acc = self.events.StreamAccumulator(harness="codex")
+                acc.ingest_line(json.dumps({"type": "error", "message": message}))
+                self.assertIsNone(acc.provider_terminal_state)
+                self.assertIsNone(acc.terminal_status)
+
+    def test_provider_max_turns_is_typed_from_result_metadata(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_max_turns",
+                    "is_error": True,
+                    "result": "partial",
+                }
+            )
+        )
+
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_model_provenance_records_switch_and_sticky_turn(self):
+        acc = self.events.StreamAccumulator(
+            harness="codex",
+            requested_model="model-a",
+            continuity_mode="fungible",
+        )
+
+        acc.ingest_line(json.dumps({"type": "turn.started", "model": "model-a"}))
+        acc.ingest_line(json.dumps({"type": "turn.started", "model": "model-b"}))
+
+        self.assertEqual(acc.served_model, "model-b")
+        self.assertEqual(acc.sticky_model_turn, 2)
+        self.assertEqual(
+            acc.model_fallback_hops,
+            [
+                {
+                    "fromModel": "model-a",
+                    "toModel": "model-b",
+                    "reason": "harness_reported_model_switch",
+                    "turn": 2,
+                    "stickyFromTurn": 2,
+                    "observedAt": acc.model_fallback_hops[0]["observedAt"],
+                }
+            ],
+        )
+        self.assertIsNone(acc.continuity_violation)
+
+    def test_pinned_model_switch_pauses_while_panel_records_diversity(self):
+        pinned = self.events.StreamAccumulator(
+            harness="codex",
+            requested_model="model-a",
+            continuity_mode="pinned",
+        )
+        panel = self.events.StreamAccumulator(
+            harness="codex",
+            requested_model="model-a",
+            continuity_mode="panel",
+        )
+        for acc in (pinned, panel):
+            acc.ingest_line(json.dumps({"type": "turn.started", "model": "model-a"}))
+            acc.ingest_line(json.dumps({"type": "turn.started", "model": "model-b"}))
+
+        self.assertEqual(pinned.terminal_status, "failed")
+        self.assertEqual(pinned.continuity_violation["reason"], "mid_session_model_switch")
+        self.assertEqual(pinned.continuity_violation["turn"], 2)
+        self.assertIsNone(panel.continuity_violation)
+        self.assertEqual(panel.served_model, "model-b")
+
+    def test_model_provenance_events_are_bounded_under_oscillation(self):
+        acc = self.events.StreamAccumulator(harness="codex", continuity_mode="fungible")
+        for turn in range(100):
+            acc.ingest_line(
+                json.dumps(
+                    {
+                        "type": "turn.started",
+                        "model": "model-a" if turn % 2 == 0 else "model-b",
+                    }
+                )
+            )
+
+        self.assertEqual(len(acc.model_observations), self.events.MODEL_PROVENANCE_EVENT_LIMIT)
+        self.assertEqual(len(acc.model_fallback_hops), self.events.MODEL_PROVENANCE_EVENT_LIMIT)
+        self.assertEqual(acc.model_observations_total, 100)
+        self.assertEqual(acc.model_fallback_hops_total, 99)
+
     def setUp(self):
         self.events = load_harness_events()
 

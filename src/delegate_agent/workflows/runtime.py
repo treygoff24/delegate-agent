@@ -166,6 +166,9 @@ def _normalize_child_failure_reason(value: object, *, default: str) -> str:
             "stalled": "stall",
             "stall": "stall",
             "harness_cancelled": "stall",
+            "provider_cancelled": "stall",
+            "provider_refusal": "nonzero_exit",
+            "provider_max_turns": "nonzero_exit",
             "nonzero_exit": "nonzero_exit",
             "structured": "structured",
         }

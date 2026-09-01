@@ -821,7 +821,8 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["status"], "cancelled")
             self.assertEqual(payload["terminalStatus"], "cancelled")
-            self.assertEqual(payload["failureReason"], "harness_cancelled")
+            self.assertEqual(payload["failureReason"], "provider_cancelled")
+            self.assertEqual(payload["terminalState"], "provider_cancelled")
             state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "cancelled")
             self.assertEqual(state["terminalStatus"], "cancelled")
@@ -872,7 +873,7 @@ class RunnerCaptureTests(unittest.TestCase):
             report = (root / "runs" / run_id / "completion-report.md").read_text(encoding="utf-8")
             self.assertIn("Synthesized by delegate", report)
             self.assertIn("Status: cancelled", report)
-            self.assertIn("Failure reason: harness_cancelled", report)
+            self.assertIn("Failure reason: provider_cancelled", report)
             self.assertIn("run-output", report)
             self.assertIn("partial output", report)
             # What the harness produced before cancelling itself is the most
@@ -926,6 +927,8 @@ class RunnerCaptureTests(unittest.TestCase):
                 started_at=requested_at,
             )
             accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            accumulator.ingest_line(json.dumps({"type": "turn.cancelled"}))
+            self.assertEqual(accumulator.provider_terminal_state, "provider_cancelled")
 
             self.runner.persist_progress(
                 run_path,
@@ -1099,6 +1102,8 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(finalization.status, "cancelled")
             self.assertEqual(finalization.exit_code, 1)
             self.assertEqual(finalization.extra.get("failureReason"), "cancelled_by_user")
+            self.assertEqual(finalization.extra.get("terminalState"), "failed")
+            self.assertEqual(finalization.extra["terminalRecord"]["state"], "failed")
             ok = finalization.exit_code == 0
             self.assertFalse(ok, "finalize-first with cancelRequested and exit 0 must be ok=False")
             # A synthesized cancelled report must have been written.
@@ -1113,6 +1118,7 @@ class RunnerCaptureTests(unittest.TestCase):
             persisted = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted["status"], "cancelled")
             self.assertEqual(persisted["failureReason"], "cancelled_by_user")
+            self.assertEqual(persisted["terminalState"], "failed")
             self.assertEqual(persisted.get("exitCode"), 1)
 
     def test_timeout_with_cancel_marker_returns_cancelled_without_timeout_error(self):
@@ -1260,6 +1266,63 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("Failure reason: cancelled_by_user", report)
             self.assertNotIn("Status: failed", report)
             self.assertNotIn("call_timeout", report)
+
+    def test_late_operator_cancel_overrides_provider_cancel_receipt_and_report(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            accumulator.ingest_line(json.dumps({"type": "turn.cancelled"}))
+            capture = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+            )
+            running = {"status": "running"}
+            cancel_requested = {"status": "running", "cancelRequested": True}
+
+            with mock.patch.object(
+                self.runner.run_registry,
+                "load_run_state_or_none",
+                side_effect=(running, cancel_requested, cancel_requested),
+            ):
+                finalization = self.runner._finalize_tracked_run(
+                    self.runner.TrackedRunFiles(
+                        run_path=run_path,
+                        stdout_log=run_path / self.registry.STDOUT_LOG,
+                        stderr_log=run_path / self.registry.STDERR_LOG,
+                    ),
+                    ctx,
+                    capture,
+                    completion_report_mode="off",
+                )
+
+            self.assertEqual(finalization.extra["failureReason"], "cancelled_by_user")
+            self.assertEqual(finalization.extra["terminalState"], "failed")
+            self.assertEqual(finalization.extra["terminalRecord"]["state"], "failed")
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Failure reason: cancelled_by_user", report)
+            self.assertNotIn("Failure reason: provider_cancelled", report)
 
     def test_tracked_run_gives_child_eof_stdin(self):
         temp = tempfile.TemporaryDirectory()
@@ -4102,6 +4165,297 @@ class RunnerCaptureTests(unittest.TestCase):
             markers = stderr_log.read_text(encoding="utf-8")
             self.assertIn("--- delegate codex auth attempt: fallback ---", markers)
             self.assertIn("--- delegate empty-retry attempt: empty-success-retry ---", markers)
+
+    def test_zero_exit_provider_refusal_is_typed_failure_with_bound_receipt(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\n\' \'{"type":"thread.started","thread_id":"thr-1","model":"gpt-test"}\'\n'
+                'printf \'%s\\n\' \'{"type":"error","code":"provider_refusal","message":"Provider refusal: policy"}\'\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="gpt-test",
+                model_requested="sol",
+                model_resolved="gpt-test",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+                source_git_root="/source/repo",
+                creation_context={
+                    "sourceHeadOid": "abc123",
+                    "sourceHeadRef": "refs/heads/main",
+                },
+                source_prompt="Implement the acceptance slice.",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 1)
+            assert payload is not None
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["childExitCode"], 0)
+            self.assertEqual(payload["terminalState"], "provider_refusal")
+            self.assertEqual(payload["modelProvenance"]["requestedModel"], "sol")
+            self.assertEqual(payload["modelProvenance"]["servedModel"], "gpt-test")
+            record = payload["terminalRecord"]
+            self.assertEqual(record["state"], "provider_refusal")
+            self.assertEqual(record["revision"]["sourceHeadOid"], "abc123")
+            self.assertEqual(record["worktree"]["executionCwd"], workspace)
+            self.assertRegex(record["acceptanceSlice"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(record["proofPointer"])
+            state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["terminalState"], "provider_refusal")
+            index = self.registry.load_index(root)
+            summary = self.registry.build_run_summary(root, run_id, index["runs"][run_id])
+            self.assertEqual(summary["terminalState"], "provider_refusal")
+            self.assertEqual(summary["terminalRecord"]["state"], "provider_refusal")
+
+    def test_zero_exit_free_text_cancelled_error_does_not_forge_provider_failure(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\n\' \'{"type":"error","message":"stream cancelled while reconnecting"}\'\n'
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed after reconnect."}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="gpt-test",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["terminalState"], "completed_unverified")
+            self.assertNotIn("failureReason", payload)
+
+    def test_forced_auth_fallback_records_provenance_hop_and_sticky_turn(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf 'You exceeded your current quota usage limit\\n' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                'printf \'%s\\n\' \'{"type":"turn.started","model":"gpt-test"}\'\n'
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed via fallback."}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="gpt-test",
+                model_requested="sol",
+                model_resolved="gpt-test",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["terminalState"], "completed_unverified")
+            provenance = payload["modelProvenance"]
+            self.assertEqual(provenance["requestedModel"], "sol")
+            self.assertEqual(provenance["servedModel"], "gpt-test")
+            self.assertEqual(len(provenance["fallbackHops"]), 1)
+            hop = provenance["fallbackHops"][0]
+            self.assertEqual(hop["reason"], "usage_limit")
+            self.assertEqual(hop["fromRoute"], "primary")
+            self.assertEqual(hop["toRoute"], "fallback")
+            self.assertIn("observedAt", hop)
+            self.assertIn("stickyFromTurn", hop)
+
+    def test_pinned_usage_limit_pauses_with_notice_and_checkpoint_without_fallback(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            attempts = Path(workspace) / "attempts.txt"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "${{ATTEMPT}}" >> "{attempts}"\n'
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf 'You exceeded your current quota usage limit\\n' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                'printf \'%s\\n\' \'{"type":"turn.started","model":"other-model"}\'\n',
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="gpt-test",
+                model_requested="sol",
+                model_resolved="gpt-test",
+                continuity_mode="pinned",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 1)
+            assert payload is not None
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["primary"])
+            self.assertEqual(payload["terminalState"], "blocked_dependency")
+            self.assertTrue(payload["pinnedContinuityPause"])
+            self.assertIn("Pinned run paused", payload["failoverNotice"])
+            self.assertEqual(payload["handoffCheckpoint"]["kind"], "model_continuity_pause")
+            self.assertNotIn("codexAuthFallback", payload)
+            visible = io.StringIO()
+            self.runner.emit_bounded_text_summary(
+                ctx,
+                status="failed",
+                duration_ms=1,
+                stdout=visible,
+                extra=payload,
+            )
+            self.assertIn("Pinned run paused", visible.getvalue())
+            self.assertIn("terminal state: blocked_dependency", visible.getvalue())
+
+    def test_mid_session_model_switch_pauses_pinned_run(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\n\' \'{"type":"turn.started","model":"model-a"}\'\n'
+                'printf \'%s\\n\' \'{"type":"turn.started","model":"model-b"}\'\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="model-a",
+                model_requested="model-a",
+                model_resolved="model-a",
+                continuity_mode="pinned",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 1)
+            assert payload is not None
+            self.assertEqual(payload["terminalState"], "blocked_dependency")
+            self.assertEqual(
+                payload["modelContinuityViolation"]["reason"],
+                "mid_session_model_switch",
+            )
+            self.assertEqual(payload["handoffCheckpoint"]["turn"], 2)
 
     def test_fallback_configured_single_attempt_keeps_stderr_unprefixed(self):
         with tempfile.TemporaryDirectory() as workspace:

@@ -92,6 +92,8 @@ from delegate_agent.prompt_transport import (
     prompt_file_display_argv,
 )
 from delegate_agent.request_models import (
+    CONTINUITY_MODES,
+    DEFAULT_CONTINUITY_MODE,
     EngineBuildInput,
     EngineRequestParts,
     GlobalOptions,
@@ -130,6 +132,7 @@ RUN_INPUT_KEYS = {
     "structuredRetrySessionId",
     "structuredRetryBackend",
     "resumable",
+    "continuityMode",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -1501,6 +1504,7 @@ def request_from_parsed(
                 persona_digest_override=launch.persona_record_digest,
                 persona_path_override=launch.persona_record_path,
                 mail_push=launch.mail_push,
+                continuity_mode=launch.continuity_mode,
                 frame_prompt=True,
             )
         except BaseException:
@@ -1642,6 +1646,7 @@ def request_from_parsed(
         mail_push=launch.mail_push,
         resumable=launch.resumable,
         resume_session_id=launch.resume_session_id,
+        continuity_mode=launch.continuity_mode,
         frame_prompt=True,
     )
 
@@ -1876,6 +1881,12 @@ def request_from_input_json(
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use resumable with codex or claude."],
         )
+    raw_continuity_mode = raw.get("continuityMode", DEFAULT_CONTINUITY_MODE)
+    if not isinstance(raw_continuity_mode, str) or raw_continuity_mode not in CONTINUITY_MODES:
+        raise DelegateError(
+            "invalid_continuity_mode",
+            "continuityMode must be pinned, fungible, or panel.",
+        )
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -2053,6 +2064,7 @@ def request_from_input_json(
                 pass_through=global_options.pass_through,
                 stderr=stderr,
                 mail_push=raw_mail_push,
+                continuity_mode=raw_continuity_mode,
                 frame_prompt=True,
             )
         except BaseException:
@@ -2277,6 +2289,7 @@ def request_from_input_json(
         persist_session=raw_structured_session,
         resume_session_id=raw_structured_retry_session_id,
         preserve_safe_workspace=raw_structured_retry_workspace,
+        continuity_mode=raw_continuity_mode,
     )
 
 
@@ -2332,6 +2345,7 @@ def build_request(
     frame_prompt: bool | None = None,
     persist_session: bool = False,
     preserve_safe_workspace: bool = False,
+    continuity_mode: str | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -2365,6 +2379,13 @@ def build_request(
             f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use --resumable with codex or claude."],
+        )
+    if continuity_mode is None:
+        continuity_mode = DEFAULT_CONTINUITY_MODE
+    elif not isinstance(continuity_mode, str) or continuity_mode not in CONTINUITY_MODES:
+        raise DelegateError(
+            "invalid_continuity_mode",
+            "continuity mode must be pinned, fungible, or panel.",
         )
     _validate_output_schema_mode(engine, mode, output_schema or output_schema_text)
     if output_schema_text is not None:
@@ -2549,6 +2570,7 @@ def build_request(
             frame_prompt=frame_prompt,
             persist_session=persist_session,
             preserve_safe_workspace=preserve_safe_workspace,
+            continuity_mode=continuity_mode,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -3463,6 +3485,7 @@ def _build_request_for_workspace(
     frame_prompt: bool = True,
     persist_session: bool = False,
     preserve_safe_workspace: bool = False,
+    continuity_mode: str = DEFAULT_CONTINUITY_MODE,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -3670,6 +3693,7 @@ def _build_request_for_workspace(
             followup_of=followup_of,
             resume_session_id=resume_session_id,
             structured_retry=preserve_safe_workspace,
+            continuity_mode=continuity_mode,
         ),
         config,
         resolution=profile_resolution,

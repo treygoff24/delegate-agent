@@ -29,6 +29,9 @@ from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.workflows import commands as workflow_commands
 
+CONTINUITY_MODES = frozenset({"pinned", "fungible", "panel"})
+DEFAULT_CONTINUITY_MODE = "fungible"
+
 
 @dataclass
 class GlobalOptions:
@@ -75,6 +78,7 @@ class LaunchOptions:
     mail_push: bool = False
     resumable: bool = False
     resume_session_id: str | None = None
+    continuity_mode: str | None = None
 
 
 @dataclass
@@ -100,6 +104,7 @@ class ResumeOptions:
     no_persona: bool = False
     allow_repo_persona: bool = False
     mail_push: bool = False
+    continuity_mode: str | None = None
 
 
 @dataclass
@@ -211,6 +216,7 @@ class PromptTail(NamedTuple):
     no_persona: bool
     allow_repo_persona: bool
     resumable: bool = False
+    continuity_mode: str | None = None
 
 
 @dataclass
@@ -309,6 +315,7 @@ class Request:
     # structured-output retries. Completion must retain the tree until the
     # supervisor releases it.
     structured_retry: bool = False
+    continuity_mode: str = DEFAULT_CONTINUITY_MODE
 
 
 @dataclass(frozen=True)

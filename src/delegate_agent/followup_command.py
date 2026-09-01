@@ -42,6 +42,8 @@ from delegate_agent.private_io import (
     read_private_text_bounded,
 )
 from delegate_agent.request_models import (
+    CONTINUITY_MODES,
+    DEFAULT_CONTINUITY_MODE,
     GlobalOptions,
     LaunchOptions,
     ParsedCommand,
@@ -310,6 +312,15 @@ def build_followup_plan(
     fast = (
         manifest.get("requestedFast") if isinstance(manifest.get("requestedFast"), bool) else None
     )
+    recorded_continuity = manifest.get("continuityMode")
+    if recorded_continuity is None:
+        continuity_mode = DEFAULT_CONTINUITY_MODE
+    elif isinstance(recorded_continuity, str) and recorded_continuity in CONTINUITY_MODES:
+        continuity_mode = recorded_continuity
+    else:
+        raise _record_invalid(
+            "continuityMode in the source manifest must be pinned, fungible, or panel."
+        )
 
     timeout = opts.timeout
     if timeout is None:
@@ -369,6 +380,7 @@ def build_followup_plan(
         model=model,
         resumable=True,
         resume_session_id=session_id,
+        continuity_mode=continuity_mode,
     )
     synthetic = ParsedCommand(
         source_engine,

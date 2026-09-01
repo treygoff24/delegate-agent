@@ -40,6 +40,7 @@ class WaitCancelCommandTests(unittest.TestCase):
         execution_cwd: str | None = None,
         isolated_workspace: bool | None = None,
         result_quality: str | None = None,
+        terminal_state: str | None = None,
     ):
         metadata = {"mode": "work", "cwd": str(self.workspace)}
         if group is not None:
@@ -61,6 +62,8 @@ class WaitCancelCommandTests(unittest.TestCase):
             state["group"] = group
         if result_quality is not None:
             state["resultQuality"] = result_quality
+        if terminal_state is not None:
+            state["terminalState"] = terminal_state
         if pid is not None:
             state["pid"] = pid
         if pgid is not None:
@@ -1275,6 +1278,20 @@ class WaitCancelCommandTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertTrue(json.loads(out)["ok"])
 
+    def test_wait_rejects_retained_provider_failure_even_with_succeeded_status(self) -> None:
+        _, alias = self.write_run(
+            status=run_registry.STATUS_SUCCEEDED,
+            result_quality="ok",
+            terminal_state="provider_refusal",
+        )
+
+        code, out, _ = self.run_cli(["wait", alias, "--json", "--timeout", "5"])
+
+        self.assertEqual(code, 1)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["runs"][0]["terminalState"], "provider_refusal")
+
     def test_predicate_truth_table(self) -> None:
         cases = {
             (run_registry.STATUS_SUCCEEDED, None): True,
@@ -1290,3 +1307,17 @@ class WaitCancelCommandTests(unittest.TestCase):
         for (status, quality), expected in cases.items():
             with self.subTest(status=status, quality=quality):
                 self.assertIs(run_registry.run_succeeded(status, quality), expected)
+        self.assertTrue(
+            run_registry.run_succeeded(
+                run_registry.STATUS_SUCCEEDED,
+                "ok",
+                "completed_unverified",
+            )
+        )
+        self.assertFalse(
+            run_registry.run_succeeded(
+                run_registry.STATUS_SUCCEEDED,
+                "ok",
+                "provider_refusal",
+            )
+        )
