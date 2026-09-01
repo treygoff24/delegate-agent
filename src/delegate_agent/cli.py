@@ -399,7 +399,8 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         "ok": True,
         "dryRun": True,
         "cwd": request.workspace,
-        "workspaceRoot": request.workspace,
+        "executionCwd": request.launch_cwd or request.workspace,
+        "workspaceRoot": request.launch_cwd or request.workspace,
         "workspaceKind": request.workspace_kind,
         "engine": request.engine,
         "mode": request.mode,
@@ -707,12 +708,7 @@ def make_run_context(
         if request.isolation_context is not None
         else source_workspace.path
     )
-    execution_cwd = request.workspace
-    if (
-        request.isolation_context is None
-        or request.isolation_context.isolation_lifecycle == "none"
-    ) and source_workspace.launch_cwd is not None:
-        execution_cwd = source_workspace.launch_cwd
+    execution_cwd = request.launch_cwd or request.workspace
     # isolated_workspace must reflect the EFFECTIVE behavior, not the
     # mere presence of an isolation_context object.  Only "temporary",
     # "persistent", or "attached" lifecycle means a physically separate
@@ -837,7 +833,7 @@ def make_run_context(
 
 
 def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -> None:
-    execution_root = str(Path(request.workspace).resolve(strict=False))
+    execution_root = str(Path(request.launch_cwd or request.workspace).resolve(strict=False))
     source_root = (
         execution_root
         if request.mode == MODE_CALL

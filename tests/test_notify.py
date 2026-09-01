@@ -300,6 +300,8 @@ class RunnerHookTests(unittest.TestCase):
             ctx.run_id = "del_test"
             ctx.registry_root = registry
             ctx.harness = "omp"
+            ctx.source_prompt = None
+            ctx.creation_context = None
             files = mock.Mock()
             files.run_path = run_path
             error = runner.RunnerLaunchError("child_launch_failed", "nope")

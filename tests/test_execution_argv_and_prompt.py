@@ -926,12 +926,48 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.addCleanup(repo.cleanup)
         launch_cwd = Path(repo.name) / "research-lane"
         launch_cwd.mkdir()
-        fake_bin = self.make_cursor_safe_fake_agent()
+        fake_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(fake_dir.cleanup)
+        fake_bin = Path(fake_dir.name)
+        # Three ways a real engine finds its root: spawn cwd, WORKSPACE_ROOT,
+        # and its own --workspace argv. Each must land in the launch dir.
+        (fake_bin / "agent").write_text(
+            "#!/usr/bin/env bash\n"
+            "touch mutated-by-agent.txt\n"
+            '(cd "$WORKSPACE_ROOT" && touch mutated-via-env.txt)\n'
+            "while [ $# -gt 0 ]; do\n"
+            '  if [ "$1" = "--workspace" ]; then (cd "$2" && touch mutated-via-argv.txt); fi\n'
+            "  shift\n"
+            "done\n"
+        )
+        (fake_bin / "agent").chmod(0o755)
         config = Path(repo.name) / "config.json"
         config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
+
+        dry = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--cwd",
+                str(launch_cwd),
+                "--json",
+                "dry-run",
+                "cursor",
+                "work",
+                "write the research output",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        dry_payload = json.loads(dry.stdout)
+        self.assertEqual(Path(dry_payload["cwd"]).resolve(), Path(repo.name).resolve())
+        self.assertEqual(Path(dry_payload["executionCwd"]).resolve(), launch_cwd.resolve())
 
         completed = subprocess.run(
             [
@@ -955,8 +991,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertTrue(payload["ok"])
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertEqual(Path(payload["executionCwd"]).resolve(), launch_cwd.resolve())
-        self.assertTrue((launch_cwd / "mutated-by-agent.txt").is_file())
-        self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
+        for name in ("mutated-by-agent.txt", "mutated-via-env.txt", "mutated-via-argv.txt"):
+            self.assertTrue((launch_cwd / name).is_file(), name)
+            self.assertFalse((Path(repo.name) / name).exists(), name)
 
     def make_codex_safe_fake(self):
         temp = tempfile.TemporaryDirectory()
