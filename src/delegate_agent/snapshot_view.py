@@ -73,6 +73,10 @@ class SnapshotView(TypedDict, total=False):
     completionReportWritten: bool
     completionReportSource: str
     resultQuality: str
+    terminalState: str
+    terminalRecord: JsonObject
+    continuityMode: str
+    modelProvenance: JsonObject
 
 
 def _snapshot_value(snapshot: JsonObject | None, key: str) -> object:
@@ -87,6 +91,7 @@ def _write_status_contract(view: SnapshotView, state: JsonObject | None) -> str 
     effective_status = status.get("effectiveStatus")
     display_status = status.get("status")
     stale_reason = status.get("staleReason")
+    terminal_state = status.get("terminalState")
     if isinstance(raw_status, str):
         view["rawStatus"] = raw_status
     if isinstance(effective_status, str):
@@ -95,6 +100,8 @@ def _write_status_contract(view: SnapshotView, state: JsonObject | None) -> str 
         view["status"] = display_status
     if isinstance(stale_reason, str):
         view["staleReason"] = stale_reason
+    if isinstance(terminal_state, str):
+        view["terminalState"] = terminal_state
     return effective_status if isinstance(effective_status, str) else None
 
 
@@ -180,6 +187,10 @@ def merge_snapshot_view(
             "completionReportWritten",
             "completionReportSource",
             "resultQuality",
+            "terminalState",
+            "terminalRecord",
+            "continuityMode",
+            "modelProvenance",
         ):
             if key in state and key not in view:
                 view[key] = state[key]

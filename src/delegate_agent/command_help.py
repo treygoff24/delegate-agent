@@ -166,6 +166,11 @@ _MODEL_OPTION = OptionSpec(
     "<alias-or-model>",
     "Select a config alias from <engine>.models or a raw model ID (unknown values pass through verbatim).",
 )
+_CONTINUITY_MODE_OPTION = OptionSpec(
+    "--continuity-mode",
+    "MODE",
+    "Select pinned, fungible (default), or panel model continuity for this run.",
+)
 _AGENT_OPTION = OptionSpec(
     "--agent",
     "NAME",
@@ -273,6 +278,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -310,6 +316,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -352,6 +359,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _FAST_OPTION,
             _NO_FAST_OPTION,
@@ -401,6 +409,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -448,6 +457,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -497,6 +507,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_DEVIN_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -533,6 +544,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _AGENT_OPTION,
             _PROGRESS_OPTION,
@@ -575,6 +587,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -614,6 +627,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -662,6 +676,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -733,6 +748,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         options=(
             _MODEL_OPTION,
+            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _AGENT_OPTION,
             _FAST_OPTION,
@@ -819,6 +835,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             OptionSpec("--engine", "ENGINE", "Resume on a different engine (cross-engine resume)."),
             OptionSpec("--model", "MODEL", "Override the inherited model selection."),
+            _CONTINUITY_MODE_OPTION,
             OptionSpec("--reasoning-effort", "LEVEL", "Override the inherited reasoning effort."),
             OptionSpec("--fast", None, "Codex only: request the Fast service tier."),
             OptionSpec("--no-fast", None, "Codex only: pin the default service tier."),
@@ -843,7 +860,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate resume --dry-run cursor-1",
         ),
         notes=(
-            "The new Run inherits engine, mode, model, effort, timeout, group, and "
+            "The new Run inherits engine, mode, model, continuity mode, effort, timeout, group, and "
             "commit policy from the source Run's manifest; resume options and "
             "global --group/--auth-profile override per field. Mode is never "
             "overridable, and call runs cannot be resumed.",
@@ -897,7 +914,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Re-enters the completed child's harness-native session (Codex exec resume, Claude Code --resume), "
             "preserving full conversation context. For cross-engine or plain-text prompt continuation, use `delegate resume`.",
-            "The followup run inherits engine, mode, model, effort, timeout, group, and "
+            "The followup run inherits engine, mode, model, continuity mode, effort, timeout, group, and "
             "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
             "The source run must have been launched with --resumable to capture its native session ID.",
             "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",

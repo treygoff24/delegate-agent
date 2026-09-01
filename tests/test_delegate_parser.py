@@ -590,6 +590,30 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.progress_intent, "on")
         self.assertEqual(parsed.launch.prompt_parts, ["review"])
 
+    def test_continuity_mode_is_parsed_before_prompt(self):
+        for continuity_mode in ("pinned", "fungible", "panel"):
+            with self.subTest(continuity_mode=continuity_mode):
+                parsed = self.delegate.parse_cli(
+                    [
+                        "codex",
+                        "work",
+                        "--continuity-mode",
+                        continuity_mode,
+                        "implement",
+                    ]
+                )
+                self.assertEqual(parsed.launch.continuity_mode, continuity_mode)
+                self.assertEqual(parsed.launch.prompt_parts, ["implement"])
+
+    def test_continuity_mode_rejects_missing_and_unknown_values(self):
+        for args in (
+            ["codex", "work", "--continuity-mode"],
+            ["codex", "work", "--continuity-mode", "elastic", "implement"],
+        ):
+            with self.subTest(args=args), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(args)
+            self.assertEqual(ctx.exception.error, "invalid_continuity_mode")
+
     def test_progress_after_prompt_is_prompt_text(self):
         parsed = self.delegate.parse_cli(["codex", "safe", "review", "--progress"])
         self.assertIsNone(parsed.launch.progress_intent)
@@ -1451,6 +1475,59 @@ class ParserTests(unittest.TestCase):
         self.assertIn("progress", self.delegate.RUN_INPUT_KEYS)
         self.assertIn("pure", self.delegate.RUN_INPUT_KEYS)
         self.assertIn("timeout", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("continuityMode", self.delegate.RUN_INPUT_KEYS)
+
+    def test_run_input_json_accepts_continuity_mode_and_defaults_to_fungible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for value, expected in (
+                ("pinned", "pinned"),
+                ("fungible", "fungible"),
+                ("panel", "panel"),
+                (None, "fungible"),
+            ):
+                with self.subTest(value=value):
+                    task = Path(tmp) / f"task-{value or 'default'}.json"
+                    payload = {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                    }
+                    if value is not None:
+                        payload["continuityMode"] = value
+                    task.write_text(json.dumps(payload))
+                    parsed = self.delegate.ParsedCommand(
+                        "run",
+                        global_options=self.delegate.GlobalOptions(json_mode=True),
+                        run_json=self.delegate.RunJsonOptions(str(task)),
+                    )
+                    request = self.delegate.request_from_input_json(
+                        parsed, self.delegate.DEFAULT_CONFIG
+                    )
+                    self.assertEqual(request.continuity_mode, expected)
+
+    def test_run_input_json_rejects_invalid_continuity_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "continuityMode": None,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_continuity_mode")
 
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

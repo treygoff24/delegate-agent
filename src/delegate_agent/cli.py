@@ -407,6 +407,7 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         "argv": public_argv(request),
         "promptTransport": request.prompt_transport,
         "promptInstructionMode": request.prompt_instruction_mode,
+        "continuityMode": request.continuity_mode,
     }
     if request.mail_push:
         payload["mailPush"] = True
@@ -738,6 +739,17 @@ def make_run_context(
         warnings = ()
         sandbox = None
 
+    if source_workspace.kind == "git":
+        git_root, _git_common_dir, head_oid, head_ref, _branch_name = capture_git_metadata(
+            source_cwd
+        )
+        source_git_root = source_git_root or git_root
+        if creation_context is None and head_oid is not None:
+            creation_context = {
+                "sourceHeadOid": head_oid,
+                "sourceHeadRef": head_ref,
+            }
+
     return delegate_runner.RunContext(
         registry_root=registry_root,
         run_id=run_id,
@@ -756,6 +768,7 @@ def make_run_context(
         model_requested=request.model_requested,
         capability_model=request.capability_model,
         capability_model_source=request.capability_model_source,
+        continuity_mode=request.continuity_mode,
         creation_context=creation_context,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,

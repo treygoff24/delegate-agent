@@ -44,6 +44,8 @@ from delegate_agent.prompt_transport import (
     ARGV_PROMPT_TRANSPORT_ENGINES,
 )
 from delegate_agent.request_models import (
+    CONTINUITY_MODES,
+    DEFAULT_CONTINUITY_MODE,
     GlobalOptions,
     LaunchOptions,
     ParsedCommand,
@@ -682,6 +684,17 @@ def build_resume_plan(
     # Inheritance table (see docs/cli-reference.md): per-field source key,
     # override flag, legacy-absent semantics, and cross-engine drop rule.
     model_alias, model = _inherit_model(opts, manifest, engine, source_engine, notes)
+    continuity_mode = opts.continuity_mode
+    if continuity_mode is None:
+        recorded_continuity = manifest.get("continuityMode")
+        if recorded_continuity is None:
+            continuity_mode = DEFAULT_CONTINUITY_MODE
+        elif isinstance(recorded_continuity, str) and recorded_continuity in CONTINUITY_MODES:
+            continuity_mode = recorded_continuity
+        else:
+            raise _record_invalid(
+                "continuityMode in the source manifest must be pinned, fungible, or panel."
+            )
 
     reasoning_effort = opts.reasoning_effort
     source_effort = _manifest_str(manifest, "requestedReasoningEffort") or _manifest_str(
@@ -866,6 +879,7 @@ def build_resume_plan(
         persona_record_digest=persona_record_digest,
         persona_record_path=persona_record_path,
         mail_push=opts.mail_push,
+        continuity_mode=continuity_mode,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",

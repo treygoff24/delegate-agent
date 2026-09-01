@@ -134,6 +134,7 @@ class ResumeInheritanceTests(ResumeFixture):
                 "commitPolicy": {"forbidCommit": True},
                 "includeDirty": True,
                 "isolationMode": "none",
+                "continuityMode": "pinned",
             }
         )
 
@@ -150,6 +151,7 @@ class ResumeInheritanceTests(ResumeFixture):
         self.assertEqual(inherited["group"], "source-group")
         self.assertEqual(inherited["authProfile"], "source-profile")
         self.assertEqual(inherited["commitPolicy"], {"forbidCommit": True})
+        self.assertEqual(inherited["continuityMode"], "pinned")
         self.assertEqual(inherited["resumedFrom"]["alias"], alias)
         self.assertNotIn("includeDirty", inherited)
         self.assertIn("includeDirty is creation-only", stderr)
@@ -160,6 +162,8 @@ class ResumeInheritanceTests(ResumeFixture):
                 "gpt-5.4-mini",
                 "--reasoning-effort",
                 "low",
+                "--continuity-mode",
+                "panel",
                 "--no-fast",
                 "--no-progress",
                 "--timeout",
@@ -171,6 +175,7 @@ class ResumeInheritanceTests(ResumeFixture):
         )
         self.assertEqual(overridden["modelRequested"], "gpt-5.4-mini")
         self.assertEqual(overridden["resolvedReasoningEffort"], "low")
+        self.assertEqual(overridden["continuityMode"], "panel")
         self.assertEqual(overridden["requestedFast"], False)
         self.assertNotIn("progressRequested", overridden)
         self.assertEqual(overridden["timeoutSeconds"], 9)
@@ -179,6 +184,29 @@ class ResumeInheritanceTests(ResumeFixture):
             ["--fast", "--dry-run", alias, "continue with fast service"]
         )
         self.assertTrue(fast_override["requestedFast"])
+
+    def test_resume_legacy_continuity_defaults_fungible_and_invalid_record_is_refused(self):
+        self.write_config({})
+        _run_id, alias, _run_path = self.seed_run(manifest={"isolationMode": "none"})
+        payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
+        self.assertEqual(payload["continuityMode"], "fungible")
+
+        _run_id, invalid_alias, _run_path = self.seed_run(
+            manifest={"isolationMode": "none", "continuityMode": "elastic"}
+        )
+        code, stdout, _stderr = self.run_main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "resume",
+                "--dry-run",
+                invalid_alias,
+                "continue",
+            ]
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
 
     def test_reasoning_from_config_is_reresolved_against_target(self):
         self.write_config(

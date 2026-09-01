@@ -13,6 +13,19 @@ from delegate_agent.workflows import schema as workflow_schema
 
 
 class ChildAttemptOutcomeTests(unittest.TestCase):
+    def test_provider_terminal_reasons_keep_explicit_workflow_retry_aliases(self) -> None:
+        expected = {
+            "provider_cancelled": "stall",
+            "provider_refusal": "nonzero_exit",
+            "provider_max_turns": "nonzero_exit",
+        }
+        for reason, normalized in expected.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    runtime._normalize_child_failure_reason(reason, default="structured"),
+                    normalized,
+                )
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
