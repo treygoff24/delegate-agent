@@ -278,7 +278,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -316,7 +315,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -359,7 +357,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _FAST_OPTION,
             _NO_FAST_OPTION,
@@ -409,7 +406,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -457,7 +453,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -507,7 +502,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_DEVIN_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -544,7 +538,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _AGENT_OPTION,
             _PROGRESS_OPTION,
@@ -587,7 +580,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -627,7 +619,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -676,7 +667,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -748,7 +738,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         options=(
             _MODEL_OPTION,
-            _CONTINUITY_MODE_OPTION,
             _REASONING_EFFORT_OPTION,
             _AGENT_OPTION,
             _FAST_OPTION,
@@ -2083,6 +2072,7 @@ for _mail_command in (
         options=(
             *_spec.options[: -len(PERSONA_OPTIONS)],
             _MAIL_PUSH_OPTION,
+            _CONTINUITY_MODE_OPTION,
             *_spec.options[-len(PERSONA_OPTIONS) :],
         ),
         examples=_spec.examples,

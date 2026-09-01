@@ -541,7 +541,8 @@ class PersonaRecordTests(unittest.TestCase):
         )
         launch_options = payload["launchOptions"]
         persona_options = ("--persona", "--no-persona", "--allow-repo-persona")
-        self.assertEqual(tuple(launch_options[9:12]), persona_options)
+        self.assertEqual(launch_options[9], "--continuity-mode")
+        self.assertEqual(tuple(launch_options[10:13]), persona_options)
         command_names = {command["name"] for command in payload["commands"]}
         self.assertIn("personas", command_names)
         for command in payload["commands"]:
