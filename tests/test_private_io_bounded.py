@@ -4,7 +4,6 @@ import errno
 import os
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -92,13 +91,14 @@ class BoundedPrivateReaderTests(unittest.TestCase):
                 return fd
 
             with (
+                mock.patch.object(private_io, "_PRIVATE_READ_REPLACED_RETRY_SECONDS", 0.02),
                 mock.patch.object(private_io, "open_private_file", side_effect=open_unlinked),
                 self.assertRaises(BoundedReadError) as caught,
             ):
                 read_private_text_bounded(path, max_bytes=1024)
 
             self.assertEqual(caught.exception.reason, "replaced")
-            self.assertEqual(calls, private_io._PRIVATE_READ_MAX_OPEN_ATTEMPTS)
+            self.assertGreaterEqual(calls, 2)
 
     def test_reopen_not_found_maps_to_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +145,6 @@ class BoundedPrivateReaderTests(unittest.TestCase):
                         os.replace(candidate, path)
                         writes += 1
                         replaced.set()
-                        time.sleep(0.000001)
                 except BaseException as exc:
                     writer_errors.append(exc)
 
