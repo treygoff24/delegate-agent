@@ -565,13 +565,6 @@ def _preflight_codex_output_schema(
     return json.dumps(normalized), warnings
 
 
-def _validate_output_schema_mode(engine: str, mode: str, output_schema: object) -> None:
-    if engine == "claude" and output_schema is not None and mode != MODE_CALL:
-        raise DelegateError(
-            "unsupported_output_schema", "Claude --output-schema is only supported in call mode."
-        )
-
-
 def _completion_report_prompt_mode(
     completion_report_mode: str,
     output_schema: str | None,
@@ -1526,9 +1519,6 @@ def request_from_parsed(
             "--progress is incompatible with --pass-through.",
         )
     progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
-    _validate_output_schema_mode(
-        launch.engine, launch.mode, launch.output_schema or launch.output_schema_text
-    )
     output_schema = (
         INLINE_OUTPUT_SCHEMA_PLACEHOLDER
         if launch.output_schema_text is not None
@@ -1931,7 +1921,6 @@ def request_from_input_json(
     raw_allow_repo_persona = raw.get("allowRepoPersona", False)
     if not isinstance(raw_allow_repo_persona, bool):
         raise DelegateError("invalid_allow_repo_persona", "allowRepoPersona must be true or false.")
-    _validate_output_schema_mode(str(engine), str(mode), raw.get("outputSchema"))
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
@@ -2388,7 +2377,6 @@ def build_request(
             "invalid_continuity_mode",
             "continuity mode must be pinned, fungible, or panel.",
         )
-    _validate_output_schema_mode(engine, mode, output_schema or output_schema_text)
     if output_schema_text is not None:
         if not output_schema_text:
             raise DelegateError("invalid_output_schema", "outputSchema must be a non-empty string.")

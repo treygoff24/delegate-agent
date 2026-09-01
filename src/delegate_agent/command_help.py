@@ -399,7 +399,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--output-schema FILE] "
+            "[--prompt-file PATH] [prompt...]",
             "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] "
             "[--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
@@ -2241,7 +2242,7 @@ def render_overview_text() -> str:
         "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",

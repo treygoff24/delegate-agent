@@ -834,10 +834,9 @@ def build_resume_plan(
     else:
         schema_text = manifest.get("outputSchema")
         if isinstance(schema_text, str) and schema_text:
-            # Soft-drop BEFORE the validator for engine/mode pairs that cannot
-            # carry a schema in tracked modes (claude is call-only; grok and the
-            # rest have no native enforcement).
-            if engine == "codex":
+            # Soft-drop BEFORE the validator for engines that cannot enforce a
+            # schema in tracked modes (grok and the rest have no native support).
+            if engine in {"codex", "claude"}:
                 output_schema_text = schema_text
             else:
                 notes.append(
