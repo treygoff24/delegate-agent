@@ -385,7 +385,7 @@ def workspace_for(path_text: str) -> ResolvedWorkspace:
         raise DelegateError("invalid_cwd", f"cwd does not exist or is not a directory: {path}")
     git_root = git_root_for(path)
     if git_root is not None:
-        return ResolvedWorkspace(git_root, "git")
+        return ResolvedWorkspace(str(path), "git")
     return ResolvedWorkspace(str(path), "directory")
 
 
