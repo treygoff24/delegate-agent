@@ -846,19 +846,16 @@ def persist_progress(
 
 
 def _reconcile_cancel_extra(extra: JsonObject) -> None:
-    extra["failureReason"] = "cancelled_by_user"
-    extra["exitCode"] = 1
-    extra["terminalState"] = terminal_states.FAILED
-    terminal_record = extra.get("terminalRecord")
-    if isinstance(terminal_record, dict):
-        extra["terminalRecord"] = {
-            **terminal_record,
-            "state": terminal_states.FAILED,
-            "reason": "cancelled_by_user",
-        }
-    extra.pop("error", None)
-    extra.pop("message", None)
-    extra.pop("nextActions", None)
+    terminal_states.apply_operator_cancel_override(extra)
+
+
+def _clear_operator_cancel_terminal_evidence(
+    accumulator: harness_events.StreamAccumulator,
+) -> None:
+    accumulator.provider_terminal_state = None
+    accumulator.provider_terminal_reason = None
+    accumulator.terminal_event = None
+    accumulator.terminal_status = None
 
 
 def _persist_final_progress(
@@ -911,6 +908,7 @@ def _persist_final_progress(
             # replay owner applies the same rule to a WAL published after this
             # read, so a late cancel cannot be downgraded by success.
             persisted_status = run_registry.STATUS_CANCELLED
+            _clear_operator_cancel_terminal_evidence(accumulator)
             _reconcile_cancel_extra(persisted_extra)
         persisted_exit_code = 1 if persisted_status == run_registry.STATUS_CANCELLED else exit_code
         state = build_state(
@@ -2810,8 +2808,7 @@ def _finalize_tracked_run(
     if cancel_requested:
         status = run_registry.STATUS_CANCELLED
         exit_code = 1
-        capture.accumulator.provider_terminal_state = None
-        capture.accumulator.provider_terminal_reason = None
+        _clear_operator_cancel_terminal_evidence(capture.accumulator)
         _reconcile_cancel_extra(merged_extra)
     elif status == run_registry.STATUS_SUCCEEDED:
         work_summary = merged_extra.get("workSummary")
