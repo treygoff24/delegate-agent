@@ -15,9 +15,11 @@ Updated: 2026-09-01 (night; Stack Upgrade lane WS-2/WS-3/WS-5 shipped after the 
   `executionCwd` (9379aad, fa5c1d0). Three Grok review rounds
   (.delegate/runs grok-1/3/4) adjudicated on the channel. Gate: see the
   final lane report on #stack-upgrade for the c408142 run.
-- **Installed runtime (~/.delegate/src) is still 1a74bec** — pre-receipts.
-  Runs launched via the PATH `delegate` show `terminalState: null`; promote
-  deliberately (Trey's call) once the gate record is accepted.
+- **Installed runtime (~/.delegate/src) promoted to c408142** (Trey's call,
+  2026-09-01 20:40): atomic rename swap, prior tree kept at
+  `~/.delegate/src.prev-1a74bec` as rollback; `.installed-rev` marks the
+  revision. Three plain runs were live during the swap (already-imported
+  code unaffected; the atlasos workflow ran on its pin).
 - Earlier today: watchdog rewritten by deletion (1a74bec, net −235 lines) —
   kills only on positive evidence; root-cause reports in
   docs/evidence/runkillers/.
