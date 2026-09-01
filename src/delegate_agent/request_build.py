@@ -3578,12 +3578,20 @@ def _build_request_for_workspace(
         if requested_effort is not None
         else None
     )
+    launch_cwd = (
+        resolved.launch_cwd
+        if isolation_context is None or isolation_context.isolation_lifecycle == "none"
+        else None
+    )
+    argv_workspace = (
+        ResolvedWorkspace(launch_cwd, resolved.kind) if launch_cwd is not None else resolved
+    )
     parts = _engine_request_parts(
         engine,
         build=EngineBuildInput(
             mode=mode,
             model_alias=model_alias,
-            resolved=resolved,
+            resolved=argv_workspace,
             prompt=prompt,
             config=config,
             stream_capture=stream_capture,
@@ -3630,6 +3638,7 @@ def _build_request_for_workspace(
             capability_model_source=parts.capability_model_source,
             output_schema=output_schema,
             output_schema_text=materialized_schema_text,
+            launch_cwd=launch_cwd,
             pure=pure,
             timeout=timeout,
             dry_run=dry_run,

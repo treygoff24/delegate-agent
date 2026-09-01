@@ -321,6 +321,10 @@ class Request:
     # supervisor releases it.
     structured_retry: bool = False
     continuity_mode: str = DEFAULT_CONTINUITY_MODE
+    # Literal launch directory for a non-isolated run below a Git root; the
+    # child spawns there, its engine cwd argv and WORKSPACE_ROOT point there,
+    # while `workspace` stays the repository root.
+    launch_cwd: str | None = None
 
 
 @dataclass(frozen=True)
