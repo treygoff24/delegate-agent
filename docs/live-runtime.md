@@ -29,7 +29,7 @@ When `AI_PROFILE=work|personal` is set and the matching
 and mutation commands but allows read-only diagnostics (`profiles`, `runs`,
 `run-output`, `snapshot`, cached `capabilities`, `worktree show`,
 `worktree list`, `workflow check|status|watch|events|result|wait|list`,
-`describe`, `models`) with a warning. This check runs inside
+`describe`, `models`, `doctor`) with a warning. This check runs inside
 `delegate_agent.cli:main` (`src/delegate_agent/profile_guard.py`), so it applies
 regardless of entrypoint: the installed pip console script, `python -m
 delegate_agent.cli`, or `bin/delegate.py`. Some local installs additionally put
@@ -56,6 +56,8 @@ Several agents can share one `~/.delegate/src`; when one of them installs a new 
 1. Install the reviewed checkout into `~/.delegate/src` (rsync or tarball).
 2. `delegate promote --actor <who> --source <commit or branch>` -- run through the installed command so the recorded digest is the live one. This writes `~/.delegate/last-promotion.json` and lists workflow supervisors still pinned to the previous runtime.
 3. `delegate doctor` -- confirm `promotionMatchesRuntime: true`.
+
+If `AI_PROFILE` is set and its overlay is missing mid-upgrade, the profile guard blocks `promote` like any other mutation; run it as `env -u AI_PROFILE delegate promote ...`.
 
 `delegate doctor` compares the digest of the runtime it is running against the stamped digest and warns on mismatch, so a lane that hits unexpected behavior can see that the code under it changed, when, and who changed it. Backfilling a stamp for a runtime you are not executing is possible with `--runtime-digest`, but the normal path is to promote from the installed command.
 

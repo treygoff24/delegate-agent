@@ -394,7 +394,7 @@ finally:
         )
         report = workflow_pinning.doctor(home=self.home)
         self.assertEqual(report["promotion"], stamp)
-        self.assertEqual(report["schema"], workflow_pinning.ACTIVE_INDEX_SCHEMA)
+        self.assertEqual(report["schema"], workflow_pinning.DOCTOR_SCHEMA)
         # A stamp naming some other runtime is exactly the rsync-without-stamp
         # case; doctor must call it out rather than report a clean surface.
         self.assertEqual(report["runtimeDigest"], workflow_pinning.live_runtime_digest())
@@ -420,6 +420,100 @@ finally:
         report = workflow_pinning.doctor(home=self.home)
         self.assertTrue(report["promotionMatchesRuntime"])
         self.assertNotIn("warnings", report)
+
+    def test_doctor_never_writes_the_supervisor_index(self) -> None:
+        index_path = workflow_pinning.active_index_path(self.home)
+        self.assertFalse(index_path.exists())
+        workflow_pinning.doctor(home=self.home)
+        self.assertFalse(index_path.exists(), "doctor created the index it claims only to read")
+        # A stale entry (dead workflow root) is dropped from the view but the
+        # bytes on disk stay exactly as they were.
+        stale = json.dumps(
+            {
+                "schema": workflow_pinning.ACTIVE_INDEX_SCHEMA,
+                "supervisors": {
+                    "wf_deadbeef0000": {"workflowRoot": str(self.root / "gone"), "workspace": "x"}
+                },
+            },
+            indent=1,
+        )
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(stale, encoding="utf-8")
+        report = workflow_pinning.doctor(home=self.home)
+        self.assertEqual(report["activeSupervisors"], {})
+        self.assertEqual(index_path.read_text(encoding="utf-8"), stale)
+        # The mutating reconcile still prunes, so the two paths are distinct.
+        workflow_pinning.reconcile_active_supervisors(home=self.home)
+        self.assertNotEqual(index_path.read_text(encoding="utf-8"), stale)
+
+    def test_doctor_warns_when_launcher_differs_from_promotion(self) -> None:
+        stamp = workflow_pinning.promote(
+            actor="test",
+            runtime_digest=workflow_pinning.live_runtime_digest(),
+            source="unit-test",
+            home=self.home,
+        )
+        self.assertEqual(stamp["entrypointDigest"], workflow_pinning.entrypoint_digest())
+        self.assertNotIn("warnings", workflow_pinning.doctor(home=self.home))
+        path = workflow_pinning.promotion_path(self.home)
+        stamped = json.loads(path.read_text(encoding="utf-8"))
+        stamped["entrypointDigest"] = "0" * 64
+        path.write_text(json.dumps(stamped), encoding="utf-8")
+        report = workflow_pinning.doctor(home=self.home)
+        self.assertTrue(report["promotionMatchesRuntime"])
+        self.assertTrue(any("launcher" in warning for warning in report["warnings"]))
+
+    def test_promote_serializes_under_the_promotion_lock(self) -> None:
+        import threading
+
+        from delegate_agent import run_registry
+
+        lock_path = workflow_pinning.promotion_path(self.home).with_name(
+            workflow_pinning.PROMOTION_LOCK_FILE
+        )
+        finished = threading.Event()
+
+        def promote_in_thread() -> None:
+            workflow_pinning.promote(
+                actor="late", runtime_digest="b" * 64, source="thread", home=self.home
+            )
+            finished.set()
+
+        workflow_pinning.promote(
+            actor="early", runtime_digest="a" * 64, source="main", home=self.home
+        )
+        run_registry.ensure_private_dir(lock_path.parent)
+        with run_registry.file_lock(lock_path):
+            worker = threading.Thread(target=promote_in_thread)
+            worker.start()
+            self.assertFalse(finished.wait(0.5), "promote wrote while the lock was held")
+            held = json.loads(
+                workflow_pinning.promotion_path(self.home).read_text(encoding="utf-8")
+            )
+            self.assertEqual(held["actor"], "early")
+        worker.join(timeout=10)
+        self.assertTrue(finished.is_set())
+        final = json.loads(workflow_pinning.promotion_path(self.home).read_text(encoding="utf-8"))
+        self.assertEqual(final["actor"], "late")
+        self.assertGreater(final["promotedAt"], held["promotedAt"])
+
+    def test_cli_doctor_is_allowed_by_profile_guard_with_missing_overlay(self) -> None:
+        from delegate_agent import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AI_PROFILE": "work"}):
+            code = cli.main(["--json", "doctor"], stdout=out, stderr=err)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("read-only", err.getvalue())
+        self.assertFalse(workflow_pinning.active_index_path(self.home).exists())
+        with mock.patch.dict(os.environ, {"AI_PROFILE": "work"}):
+            code = cli.main(
+                ["--json", "promote", "--actor", "a", "--source", "b"],
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertNotEqual(code, 0)
+        self.assertFalse(workflow_pinning.promotion_path(self.home).exists())
 
     def test_cli_doctor_and_promote_round_trip_through_main(self) -> None:
         from delegate_agent import cli

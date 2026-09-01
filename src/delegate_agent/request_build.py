@@ -2978,8 +2978,8 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         effort_source=build.effort_source,
     )
     effort = capability.effort if capability is not None else None
-    schema_contents = None
-    if build.output_schema is not None:
+    schema_contents = build.output_schema_text
+    if schema_contents is None and build.output_schema is not None:
         try:
             schema_contents = Path(build.output_schema).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -3480,18 +3480,22 @@ def _build_request_for_workspace(
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
         engine, output_schema, schema_text=output_schema_text
     )
-    output_schema_record_text = (
-        materialized_schema_text if engine == "codex" and mode != MODE_CALL else None
-    )
+    # Tracked runs record the schema text in the manifest so resume can
+    # re-materialize it: codex stores its normalized preflight form, claude the
+    # raw text it inlines as --json-schema. Call mode has no manifest.
+    output_schema_record_text: str | None = None
+    if mode != MODE_CALL:
+        if engine == "codex":
+            output_schema_record_text = materialized_schema_text
+        elif engine == "claude":
+            output_schema_record_text = output_schema_text
     if (
         output_schema is not None
         and output_schema_record_text is None
         and output_schema_text is None
-        and engine == "codex"
+        and engine in {"codex", "claude"}
         and mode != MODE_CALL
     ):
-        # Record the schema text in the manifest (codex stores its normalized
-        # preflight form above); resume re-materializes it to a file at launch.
         try:
             output_schema_record_text = Path(output_schema).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -3589,6 +3593,7 @@ def _build_request_for_workspace(
             discovery=discovery,
             fast=fast,
             output_schema=output_schema,
+            output_schema_text=output_schema_text,
             call_read_only=call_read_only,
             pure=pure,
             model_override=model_override,

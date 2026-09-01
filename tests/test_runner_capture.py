@@ -3054,6 +3054,54 @@ class RunnerCaptureTests(unittest.TestCase):
                 f"expected no suspect_short warning, got {payload.get('warnings')}",
             )
 
+    def test_compact_schema_bound_claude_result_is_not_suspect_short(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "claude"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "cat >/dev/null\n"
+            'printf \'%s\\n\' \'{"type":"result","subtype":"success",'
+            '"is_error":false,"result":"{\\"ok\\":true}"}\'\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        for structured_output, expected in ((True, "ok"), (False, "suspect_short")):
+            with (
+                self.subTest(structured_output=structured_output),
+                tempfile.TemporaryDirectory() as workspace,
+            ):
+                root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+                run_id, alias = self.registry.register_run(root, harness="claude")
+                ctx = self.runner.RunContext(
+                    registry_root=root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="claude",
+                    engine="claude",
+                    mode="safe",
+                    model=None,
+                    source_cwd=workspace,
+                    execution_cwd=workspace,
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at="2026-09-01T21:00:00Z",
+                    structured_output=structured_output,
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script)],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+                self.assertEqual(code, 0)
+                assert payload is not None
+                self.assertEqual(payload["completionReportSource"], "child")
+                self.assertEqual(payload["resultQuality"], expected)
+
     def test_preamble_only_short_child_report_is_suspect_short(self):
         # F1: a preamble-only fragment like "Performing an adversarial review..."
         # that is short and NOT substantive must still flag suspect_short.
