@@ -229,7 +229,7 @@ $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
 
-For Codex fan-outs that must return machine-parseable records, add
+For Codex or Claude fan-outs that must return machine-parseable records, add
 `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report
 injection so the schema owns the final message. Codex schemas are
 strict-preflighted recursively: every property must be required, and a missing

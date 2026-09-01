@@ -116,9 +116,9 @@ delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fas
 delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 delegate codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
-delegate claude safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate claude work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate claude safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate claude work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
 delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
@@ -279,7 +279,7 @@ delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-o
 - Model selection uses `--model` (alias from `codex.models` or a raw model ID), the run-input JSON `model`, or `codex.defaultModel`.
 - `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved. The `max` level is bundled only for `gpt-5.6-sol` as of 2026-07.
 - `--fast` requests Codex Fast for one run; `--no-fast` explicitly requests Standard; omission inherits Codex configuration. The selected tier is recorded as `requestedFast` when explicit.
-- For Codex, `--output-schema FILE` supplies the JSON Schema OpenAI enforces on the final message. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. Delegate recursively preflights strict object schemas: missing `additionalProperties: false` is supplied in a temporary execution copy with a warning, while an incomplete `required` list or `additionalProperties` value other than `false` fails before launch. The source file is never modified. When set, Delegate suppresses completion-report prompt injection so the schema owns the whole final message. Claude also supports `--output-schema` in call mode; other engines reject it.
+- For Codex, `--output-schema FILE` supplies the JSON Schema OpenAI enforces on the final message. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. Delegate recursively preflights strict object schemas: missing `additionalProperties: false` is supplied in a temporary execution copy with a warning, while an incomplete `required` list or `additionalProperties` value other than `false` fails before launch. The source file is never modified. When set, Delegate suppresses completion-report prompt injection so the schema owns the whole final message. Claude supports `--output-schema` in every mode: the schema contents are inlined as `--json-schema`, and in tracked safe/work runs the child keeps `stream-json` so live snapshots still work while the final result text is the schema-bound JSON. Other engines reject it.
 
 Examples:
 
@@ -298,8 +298,8 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -857,7 +857,7 @@ Supported input keys:
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
-- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude call mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
+- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config
@@ -1103,7 +1103,7 @@ creating a Run or writing a prompt record.
 | Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |
 | Progress intent | `progressRequested` (`on`, `off`, or omitted) | `--progress` or `--no-progress` | Omitted uses target progress configuration and emits a note; only `on` and `off` are inherited. | Retained; progress intent is not engine-specific. |
 | Timeout | `timeoutSeconds` | `--timeout` | Omitted uses the target timeout default and emits a note. A present value must be a positive integer (an integral JSON float is accepted). | Retained. |
-| Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Only Codex inherits inline schema text. Other engines soft-drop it with a note before output-schema validation. |
+| Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Codex and Claude inherit inline schema text. Other engines soft-drop it with a note before output-schema validation. |
 | OpenCode agent | `agent` | None | Omitted means no agent selection. | Inherited only for a same-engine OpenCode resume; otherwise dropped with a note. |
 | Workspace cwd / execution cwd | `cwd`; persistent records also derive `executionCwd`, branch, and source Git root | None (`--cwd` selects the registry workspace and must match recorded `cwd`) | Missing `cwd` falls back to the selected registry workspace; missing persistent-worktree metadata causes attachment validation to refuse. | Retained as workspace context; an attach uses the validated existing worktree rather than copying `executionCwd` into a new worktree. |
 | Isolation / lifecycle | `isolationMode`; persistent detection also reads `isolationLifecycle`, `preservedWorkspace`, `worktreeStatus`, and `worktreeAttachment` | None; `--isolation` is rejected for resume. | Missing ordinary `isolationMode` uses target isolation configuration and emits a note. | Retained. Persistent or attached sources become an `attached` execution lifecycle. |

@@ -155,6 +155,46 @@ class ValidationTests(unittest.TestCase):
                         )
                     self.assertEqual(ctx.exception.error, "unsupported_output_schema")
 
+    def test_claude_output_schema_is_accepted_in_tracked_modes(self):
+        contents = (
+            '{"type":"object","properties":{"answer":{"type":"string"}},'
+            '"required":["answer"],"additionalProperties":false}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text(contents, encoding="utf-8")
+            for mode in ("safe", "work"):
+                with self.subTest(mode=mode):
+                    parsed = self.delegate.parse_cli(
+                        ["--cwd", tmp, "claude", mode, "--output-schema", str(schema), "review"]
+                    )
+                    request = self.delegate.request_from_parsed(
+                        parsed,
+                        self.delegate.DEFAULT_CONFIG,
+                        TtyStdin(),
+                    )
+                    argv = request.argv
+                    # Tracked runs keep stream-json so snapshots and the result
+                    # event parser still work; the schema rides on --json-schema.
+                    self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+                    self.assertEqual(argv[argv.index("--json-schema") + 1], contents)
+                    self.assertNotIn(
+                        self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(),
+                        request.prompt,
+                    )
+            # Call mode still reads a single JSON envelope.
+            call = self.delegate.build_request(
+                "claude",
+                "call",
+                None,
+                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                "answer",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                output_schema=str(schema),
+            )
+            self.assertEqual(call.argv[call.argv.index("--output-format") + 1], "json")
+
     def test_output_schema_suppresses_completion_report_prompt_and_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"

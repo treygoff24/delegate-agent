@@ -256,7 +256,10 @@ def build_claude_argv(
     resumable: bool = False,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
-    if pure or output_schema is not None:
+    # Call mode reads one JSON envelope; tracked safe/work runs keep stream-json
+    # so live snapshots still work -- Claude's result event carries the
+    # schema-bound JSON as its result text either way.
+    if pure or (output_schema is not None and mode == MODE_CALL):
         output_format = "json"
     elif stream_capture:
         output_format = "stream-json"
