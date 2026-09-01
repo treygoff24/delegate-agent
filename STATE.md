@@ -1,15 +1,27 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-01 (evening; watchdog deletion shipped)
+Updated: 2026-09-01 (night; Stack Upgrade lane WS-2/WS-3/WS-5 shipped after the OOM reboot)
 
-- **Engine at main 3c4054e, dogfooding live.** Today: watchdog rewritten by
-  deletion (1a74bec, net −235 lines) — kills only on positive evidence
-  (twice-confirmed ENOENT or terminal status); heartbeat file/writer,
-  staleness window, watchdogTimeoutSeconds knob + env override all removed.
-  Root-cause reports: docs/evidence/runkillers/ (three sol xhigh diagnoses).
-  Full gate 2611 green; smoke: 8s journal-silent workflow survives.
-- **Installed runtime** (~/.delegate/src) promoted to 1a74bec, stamped in
-  ~/.delegate/last-promotion.json (digest 45b5c8b7…), smoked.
+- **Engine at main c408142.** Stack Upgrade Directive lane (bead dlg-nek,
+  channel #stack-upgrade): typed terminal receipts (`terminalState` +
+  `terminalRecord`, nine ratified values in `terminal_states.py`, seam
+  verbatim with writing-plans), model provenance (requested/resolved/served,
+  bounded fallback hops, sticky turn) and `--continuity-mode
+  pinned|fungible|panel` with pinned-pause notice + handoff checkpoint
+  (2721a7b, 9dbfe06); operator cancel overrides provider receipts on all
+  three write paths via `apply_operator_cancel_override`. WS-5: workspace
+  identity stays the git root while `Request.launch_cwd` drives spawn cwd,
+  engine `--cd/--workspace` argv, `WORKSPACE_ROOT`, and dry-run
+  `executionCwd` (9379aad, fa5c1d0). Three Grok review rounds
+  (.delegate/runs grok-1/3/4) adjudicated on the channel. Gate: see the
+  final lane report on #stack-upgrade for the c408142 run.
+- **Installed runtime (~/.delegate/src) is still 1a74bec** — pre-receipts.
+  Runs launched via the PATH `delegate` show `terminalState: null`; promote
+  deliberately (Trey's call) once the gate record is accepted.
+- Earlier today: watchdog rewritten by deletion (1a74bec, net −235 lines) —
+  kills only on positive evidence; root-cause reports in
+  docs/evidence/runkillers/.
+
 - **writing-plans is fully live** at 779585f (repo pushed, skill live-linked,
   install --verify green): receipt history, durable settled transitions,
   H1/H2/H3 review-machinery fixes, 1 MiB script cap match in this repo.
