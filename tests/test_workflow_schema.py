@@ -134,6 +134,37 @@ class SchemaSubsetMatchesClaudePreflight(unittest.TestCase):
         # Booleans are not numbers, and strings are not their numeric spellings.
         workflow_schema.validate_schema_subset({"enum": ["a", "b", 1, "1", None, True, 1.5]})
 
+    def test_enum_integers_beyond_binary64_precision_rejected(self) -> None:
+        for enum in (
+            [9007199254740993, 9007199254740992.0],
+            [9007199254740992, 9007199254740993],
+            [-9223372036854775808],
+        ):
+            with self.subTest(enum=enum), self.assertRaises(workflow_schema.SchemaError):
+                workflow_schema.validate_schema_subset({"enum": enum})
+        workflow_schema.validate_schema_subset({"enum": [9007199254740992, -9007199254740992]})
+
+    def test_enum_objects_with_non_string_keys_rejected(self) -> None:
+        for enum in (
+            [{1: "x"}, {"1": "x"}],
+            [{True: "x"}],
+            [{1: "a", "b": 2}],
+            [{float("nan"): 1}],
+        ):
+            with self.subTest(enum=enum), self.assertRaises(workflow_schema.SchemaError):
+                workflow_schema.validate_schema_subset({"enum": enum})
+
+    def test_enum_membership_uses_json_equality(self) -> None:
+        for value, enum in ((True, [1]), (1, [True]), ({"k": True}, [{"k": 1}]), ([True], [[1]])):
+            with (
+                self.subTest(value=value, enum=enum),
+                self.assertRaises(workflow_schema.SchemaError),
+            ):
+                workflow_schema.validate_value(value, {"enum": enum})
+        workflow_schema.validate_value(1.0, {"enum": [1]})
+        workflow_schema.validate_value({"k": 1}, {"enum": [{"k": 1.0}]})
+        workflow_schema.validate_value("x", {"type": "string", "enum": ["x", "y"]})
+
     def test_non_finite_enum_numbers_rejected(self) -> None:
         for bad in (float("nan"), float("inf"), float("-inf")):
             with self.subTest(bad=bad), self.assertRaises(workflow_schema.SchemaError):

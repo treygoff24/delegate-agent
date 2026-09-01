@@ -21,11 +21,21 @@ class SchemaError(ValueError):
     pass
 
 
+# Claude's schema preflight parses numbers at binary64 precision, so integers
+# past 2**53 collapse onto their neighbours there; refusing them keeps the
+# subset's notion of "distinct" identical to the consumer's.
+MAX_EXACT_INTEGER = 2**53
+
+
 def _json_identity(value: object, *, path: str) -> object:
     """Hashable key under JSON equality: 1 == 1.0, true != 1, NaN is not JSON."""
     if isinstance(value, bool):
         return ("bool", value)
     if isinstance(value, int):
+        if abs(value) > MAX_EXACT_INTEGER:
+            raise SchemaError(
+                f"{path} contains an integer beyond 2**53, which JSON consumers round."
+            )
         return ("number", value)
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -36,6 +46,8 @@ def _json_identity(value: object, *, path: str) -> object:
     if isinstance(value, list):
         return ("array", tuple(_json_identity(item, path=path) for item in value))
     if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise SchemaError(f"{path} contains an object with non-string keys, which is not JSON.")
         return (
             "object",
             tuple(sorted((key, _json_identity(item, path=path)) for key, item in value.items())),
@@ -106,8 +118,12 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
 
 def validate_value(value: object, schema: JsonObject, *, path: str = "value") -> None:
     validate_schema_subset(schema)
-    if "enum" in schema and value not in schema["enum"]:
-        raise SchemaError(f"{path} must be one of {schema['enum']!r}.")
+    if "enum" in schema:
+        # Membership under JSON equality, matching the declaration check:
+        # Python would accept True for 1 and 1.0 for 1, JSON does not.
+        allowed = {_json_identity(item, path=path) for item in schema["enum"]}
+        if _json_identity(value, path=path) not in allowed:
+            raise SchemaError(f"{path} must be one of {schema['enum']!r}.")
     schema_type = schema.get("type")
     if schema_type is not None and not _matches_type(value, schema_type):
         raise SchemaError(f"{path} must be {schema_type!r}.")
