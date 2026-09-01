@@ -159,6 +159,15 @@ class PersonaParserTests(unittest.TestCase):
         self.assertRegex(
             source, r"profiles\|runs\|ps\|run-output\|describe\|snapshot\|agent-help\|personas\|"
         )
+        # doctor is read-only in both layers; promote stays a mutation in both.
+        self.assertTrue(profile_guard.is_read_only_command(cli_parser.parse_cli(["doctor"])))
+        self.assertRegex(source, r"\|personas\|doctor\|")
+        self.assertFalse(
+            profile_guard.is_read_only_command(
+                cli_parser.parse_cli(["promote", "--actor", "a", "--source", "b"])
+            )
+        )
+        self.assertNotRegex(source, r"\|promote\|")
 
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / "delegate.py"

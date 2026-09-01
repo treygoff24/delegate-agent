@@ -817,6 +817,39 @@ overlay is missing, the profile guard (enforced in the CLI itself, and again
 by `bin/delegate-profile-shim` if that's in front of it) blocks it too -- run
 it as `env -u AI_PROFILE delegate config sync-profiles`.
 
+### Runtime doctor and promotion
+
+```bash
+delegate doctor
+delegate --json doctor
+delegate promote --actor WHO --source TEXT [--runtime-digest HEX]
+```
+
+Both commands are machine-local: they read and write under `~/.delegate`
+and never touch a workspace, an account, or a harness.
+
+`delegate doctor` reports the digest of the runtime that is executing the
+command, the last promotion stamp (`~/.delegate/last-promotion.json`), whether
+the two agree, and the workflow supervisors still running on launch-time
+pinned runtimes (stale entries are reconciled on read). It is read-only under
+the profile guard. It warns when the live digest differs from the stamped one
+-- the installed runtime changed without a `promote` -- and when no stamp
+exists at all. JSON fields: `runtimeDigest`, `promotion`,
+`promotionMatchesRuntime`, `activeSupervisors`, `warnings`.
+
+`delegate promote` records who installed the runtime, from what source, and
+its digest (`delegate.promotion.v1`). It copies no code. Run it through the
+installed command *after* installing, so the default digest is the live one;
+pass `--runtime-digest` only to backfill a stamp for a runtime you are not
+running. The stamp also lists active supervisors that may still be on an older
+pinned runtime. `--actor` and `--source` are required.
+
+The promotion ritual, in order: install the checkout into `~/.delegate/src`
+(rsync or tarball), run `delegate promote --actor <you> --source <commit>`
+through the installed command, then `delegate doctor` to confirm
+`promotionMatchesRuntime: true`. An rsync without the promote step is what
+`doctor` exists to catch.
+
 ### JSON input
 
 ```bash

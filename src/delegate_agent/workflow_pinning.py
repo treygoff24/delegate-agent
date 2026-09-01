@@ -269,6 +269,16 @@ def _runtime_digest(files: list[tuple[str, bytes]]) -> str:
     return digest.hexdigest()
 
 
+def live_runtime_digest() -> str:
+    """Digest of the runtime this process is executing.
+
+    Launched through ``~/.delegate/bin/delegate.py`` this is the installed
+    runtime's identity, which is what ``doctor`` compares against the last
+    promotion stamp and what ``promote`` records by default.
+    """
+    return _runtime_digest(_runtime_source_files())
+
+
 def _runtime_directory_digest(root: Path) -> str:
     files: list[tuple[str, bytes]] = []
     for source in sorted(root.rglob("*")):
@@ -618,19 +628,44 @@ def register_active_supervisor(
 
 
 def doctor(*, home: Path | None = None) -> JsonObject:
-    """Return the machine-local running-supervisor view with stale entries fixed."""
+    """Return the machine-local runtime view: live digest, promotion stamp, supervisors.
+
+    The digest comparison is what makes a stamp-less promotion visible: an
+    rsync into ``~/.delegate/src`` changes the live digest while the stamp
+    keeps naming the previous runtime, so the two disagree until someone runs
+    ``delegate promote``.
+    """
     index = reconcile_active_supervisors(home=home)
     entries = index.get("supervisors")
+    promotion = _read_promotion(home=home)
+    live_digest = live_runtime_digest()
+    stamped_digest = promotion.get("runtimeDigest") if promotion is not None else None
+    matches = isinstance(stamped_digest, str) and stamped_digest == live_digest
     payload: JsonObject = {
         "ok": True,
         "schema": ACTIVE_INDEX_SCHEMA,
+        "runtimeDigest": live_digest,
+        "promotion": promotion,
+        "promotionMatchesRuntime": matches,
         "activeSupervisors": entries if isinstance(entries, dict) else {},
-        "promotion": _read_promotion(home=home),
     }
+    warnings: list[str] = []
+    if promotion is None:
+        warnings.append(
+            "no promotion stamp: the installed runtime has never been recorded; run "
+            "'delegate promote --actor <who> --source <commit-or-branch>' after installing."
+        )
+    elif not matches:
+        warnings.append(
+            f"runtime digest {live_digest[:12]} does not match the last promotion stamp "
+            f"{str(stamped_digest)[:12]} (promoted {promotion.get('promotedAt')} by "
+            f"{promotion.get('actor')} from {promotion.get('source')}); the installed "
+            "runtime changed without 'delegate promote'."
+        )
     if isinstance(entries, dict) and entries:
-        payload["warnings"] = [
-            f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes."
-        ]
+        warnings.append(f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes.")
+    if warnings:
+        payload["warnings"] = warnings
     return payload
 
 
@@ -686,6 +721,17 @@ def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = F
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
+        print(f"runtime digest: {payload['runtimeDigest']}", file=stdout)
+        promotion = payload.get("promotion")
+        if isinstance(promotion, dict):
+            print(
+                f"last promotion: {str(promotion.get('runtimeDigest'))[:12]} at "
+                f"{promotion.get('promotedAt')} by {promotion.get('actor')} "
+                f"({promotion.get('source')})",
+                file=stdout,
+            )
+        else:
+            print("last promotion: none", file=stdout)
         active = payload.get("activeSupervisors")
         count = len(active) if isinstance(active, dict) else 0
         print(f"active supervisors: {count}", file=stdout)
@@ -701,15 +747,15 @@ def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = F
 def emit_promote(
     *,
     actor: str,
-    runtime_digest: str,
     source: str,
+    runtime_digest: str | None = None,
     home: Path | None = None,
     stdout: TextIO,
     json_mode: bool = False,
 ) -> int:
     payload = promote(
         actor=actor,
-        runtime_digest=runtime_digest,
+        runtime_digest=runtime_digest if runtime_digest is not None else live_runtime_digest(),
         source=source,
         home=home,
     )
@@ -730,6 +776,7 @@ __all__ = [
     "doctor",
     "emit_doctor",
     "emit_promote",
+    "live_runtime_digest",
     "load_pin",
     "pin_directory",
     "pin_path",

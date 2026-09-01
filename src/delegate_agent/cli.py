@@ -38,6 +38,7 @@ from delegate_agent import (
     sandbox_bwrap,
     setup_commands,
     wait_cancel_commands,
+    workflow_pinning,
     worktree_commands,
     worktree_execution,
     worktree_mgmt,
@@ -373,6 +374,19 @@ def emit_config_command(parsed: ParsedCommand, stdout: TextIO) -> int:
     if command is None:
         raise DelegateError("invalid_command", "config options are required.")
     return config_commands.emit(command, stdout)
+
+
+def emit_promote_command(parsed: ParsedCommand, stdout: TextIO) -> int:
+    options = parsed.promote
+    if options is None:
+        raise DelegateError("invalid_command", "promote options are required.")
+    return workflow_pinning.emit_promote(
+        actor=options.actor,
+        source=options.source,
+        runtime_digest=options.runtime_digest,
+        stdout=stdout,
+        json_mode=parsed.global_options.json_mode,
+    )
 
 
 def emit_personas(workspace: ResolvedWorkspace, *, json_mode: bool, stdout: TextIO) -> int:
@@ -1761,6 +1775,10 @@ def main(
                 stdout=stdout,
                 stderr=stderr,
             )
+        if parsed.subcommand == "doctor":
+            return workflow_pinning.emit_doctor(stdout=stdout, json_mode=global_options.json_mode)
+        if parsed.subcommand == "promote":
+            return emit_promote_command(parsed, stdout)
 
         # For run --input-json, pre-read the JSON to discover config from the
         # JSON-resolved workspace before loading/finalizing config.

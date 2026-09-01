@@ -62,6 +62,10 @@ class ParserTests(unittest.TestCase):
             ["setup"],
             ["--json", "setup"],
             ["--auth-profile", "work", "setup"],
+            ["doctor"],
+            ["--json", "doctor"],
+            ["promote", "--actor", "hq", "--source", "main cba3446"],
+            ["--json", "promote", "--actor", "hq", "--source", "v1", "--runtime-digest", "a" * 64],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
@@ -186,6 +190,40 @@ class ParserTests(unittest.TestCase):
 
         trailing_json = self.delegate.parse_cli(["setup", "--json"])
         self.assertTrue(trailing_json.global_options.json_mode)
+
+    def test_doctor_and_promote_parse_and_refuse_bad_input(self):
+        parsed = self.delegate.parse_cli(["--json", "doctor"])
+        self.assertEqual(parsed.subcommand, "doctor")
+        self.assertTrue(parsed.global_options.json_mode)
+        parsed = self.delegate.parse_cli(
+            ["promote", "--source", "main", "--actor", "hq", "--runtime-digest", "b" * 64]
+        )
+        self.assertEqual(parsed.subcommand, "promote")
+        self.assertEqual(parsed.promote.actor, "hq")
+        self.assertEqual(parsed.promote.source, "main")
+        self.assertEqual(parsed.promote.runtime_digest, "b" * 64)
+        self.assertEqual(self.delegate.parse_cli(["promote", "--help"]).subcommand, "help")
+        failures = [
+            (["doctor", "extra"], "unexpected_argument"),
+            (["--cwd", "/tmp", "doctor"], "invalid_option_combination"),
+            (
+                ["--auth-profile", "work", "promote", "--actor", "a", "--source", "b"],
+                "invalid_option_combination",
+            ),
+            (["promote", "--source", "main"], "missing_actor"),
+            (["promote", "--actor", "hq"], "missing_source"),
+            (["promote", "--actor", "--source", "main"], "missing_option_value"),
+            (
+                ["promote", "--actor", "hq", "--source", "main", "--runtime-digest", "xyz"],
+                "invalid_runtime_digest",
+            ),
+            (["promote", "--actor", "hq", "--source", "main", "stray"], "unexpected_argument"),
+        ]
+        for argv, error in failures:
+            with self.subTest(argv=argv):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(argv)
+                self.assertEqual(ctx.exception.error, error)
 
     def test_setup_rejects_trailing_arguments(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
