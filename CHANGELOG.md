@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Claude `--output-schema` is accepted in tracked `safe`/`work` modes, not only
+  `call`, and is passed natively as `--json-schema`, recorded in the manifest,
+  and inherited on resume. Unblocks structured Claude review lanes such as
+  deslop's `--runner delegate --lane claude`.
+- Workflow `schema=` validation now matches Claude's schema preflight: empty or
+  duplicate `enum` values (JSON equality, integers beyond 2**53 and non-string
+  object keys refused), repeated `required` or `type` entries are rejected
+  before launch, and runtime enum membership uses the same JSON equality.
+  Claude workflow children receive every supported schema natively.
 - Worktree retirement no longer treats the shared `.beads/` and
   `.papercuts.jsonl` ledgers as lane work, so a run that filed a papercut or
   closed a bead can retire its worktree instead of stranding it. Configurable
@@ -21,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds the run with a `dry_run_timeout` error.
 
 ### Added
+- `delegate doctor` (read-only, `delegate.doctor.v1`) reports the live runtime
+  digest against the last promotion stamp and warns when the installed runtime
+  changed without a promotion, when the installed launcher drifted, and which
+  workflow supervisors are still pinned to older runtimes. `delegate promote
+  --actor WHO --source TEXT [--runtime-digest HEX]` writes the stamp
+  (`~/.delegate/last-promotion.json`) under a lock, reading the live digest
+  inside it.
 - Structured-output retries now resume in place when the harness supports it,
   retaining a safe temporary workspace across attempts and reaping it from
   durable child snapshots on timeout, kill, crash, or supervisor resume.
