@@ -59,6 +59,37 @@ def reap_process_group(pgid: int) -> None:
     _reap_recorded_group(pgid)
 
 
+def reap_recorded_group_matching(pgid: int, marker: str) -> None:
+    """Reap a recorded group only when a member's command line carries ``marker``.
+
+    Used for launch-time captured groups whose identity-checked supervisor is
+    already gone: the marker (a unique per-test workspace path) keeps a reused
+    group id from authorizing a signal to an unrelated group. When ``ps`` is
+    unavailable or no member matches, nothing is signalled — the suite-end
+    live-group assertion surfaces a leak loudly instead of a silent wrong kill.
+    """
+    _record_pgid(pgid)
+    result = subprocess.run(
+        ["ps", "-axo", "pgid=,args="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) < 2:
+            continue
+        try:
+            member_pgid = int(fields[0])
+        except ValueError:
+            continue
+        if member_pgid == pgid and marker in fields[1]:
+            _reap_recorded_group(pgid)
+            return
+
+
 def _process_snapshot() -> dict[int, tuple[int, int]]:
     result = subprocess.run(
         ["ps", "-eo", "pid=,ppid=,pgid="],
@@ -206,6 +237,14 @@ def spawn_process(
         yield process
     finally:
         _reap_process_tree(process.pid, pgid)
+        if process.poll() is not None and _group_has_live_members(pgid):
+            # The leader is gone, so identity-gated tree discovery reaped
+            # nothing — but the launch-time group still has members, which can
+            # only be our descendants unless the entire group died and the id
+            # was reused within this context's lifetime (the same residual
+            # window the pre-identity design carried). Reap the recorded group
+            # rather than leaking them.
+            _reap_recorded_group(pgid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5)
 
@@ -261,6 +300,7 @@ __all__ = [
     "assert_no_live_process_groups",
     "reap_process_group",
     "reap_process_tree",
+    "reap_recorded_group_matching",
     "reap_workflow_now",
     "register_process_tree",
     "spawn_process",
