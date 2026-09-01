@@ -874,6 +874,42 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 time.sleep(0.02)
             self.assertEqual(safe_temp_dirs(base), set())
 
+    def test_cursor_work_explicit_cwd_under_git_parent_writes_in_literal_directory(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        launch_cwd = Path(repo.name) / "research-lane"
+        launch_cwd.mkdir()
+        fake_bin = self.make_cursor_safe_fake_agent()
+        config = Path(repo.name) / "config.json"
+        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["DELEGATE_CONFIG"] = str(config)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--cwd",
+                str(launch_cwd),
+                "--json",
+                "cursor",
+                "work",
+                "write the research output",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(Path(payload["cwd"]), launch_cwd.resolve())
+        self.assertTrue((launch_cwd / "mutated-by-agent.txt").is_file())
+        self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
+
     def make_codex_safe_fake(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
