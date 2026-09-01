@@ -193,6 +193,11 @@ class ParsedCommand:
 class ResolvedWorkspace:
     path: str
     kind: str
+    # Literal launch directory when it sits below a Git root. `path` stays the
+    # repository root (registry, worktrees, fleet identity); a non-isolated
+    # child executes in `launch_cwd` so relative outputs land where the
+    # caller stood, not at the repository root.
+    launch_cwd: str | None = None
 
 
 class PromptTail(NamedTuple):
