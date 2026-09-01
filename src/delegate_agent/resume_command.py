@@ -85,12 +85,18 @@ def _record_invalid(message: str) -> DelegateError:
     return DelegateError("resume_record_invalid", message)
 
 
+def _record_replaced(message: str) -> DelegateError:
+    return DelegateError("resume_record_replaced", message)
+
+
 def _read_record_text(path: Path, *, prompt: bool = False) -> str:
     try:
         return read_private_text_bounded(path, max_bytes=RESUME_RECORD_READ_MAX_BYTES)
     except BoundedReadError as exc:
         if exc.reason == "not_found":
             raise
+        if exc.reason == "replaced":
+            raise _record_replaced(str(exc)) from exc
         if exc.reason == "too_large" and prompt:
             raise DelegateError(
                 "resume_prompt_too_large",
@@ -123,6 +129,8 @@ def _read_recorded_persona(run_path: Path, manifest: JsonObject) -> tuple[str, s
             max_bytes=personas.PERSONA_MAX_BYTES,
         )
     except BoundedReadError as exc:
+        if exc.reason == "replaced":
+            raise _record_replaced(str(exc)) from exc
         raise _record_invalid("source run persona.txt artifact is unavailable") from exc
     if personas.contains_c0_control(text):
         raise _record_invalid("source run persona.txt contains a disallowed C0 control character")
