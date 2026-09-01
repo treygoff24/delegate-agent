@@ -7,7 +7,7 @@ evidence roots:
   child runs: /home/trey-agent/Code/delegate-worktrees/7b64c29d2f41/codex-20260831T235228Z_bf9790/.delegate/runs [4 run(s) audited; 0 excluded before since; 0 unreadable manifest(s)]
   child runs: /home/trey-agent/Code/delegate-worktrees/7b64c29d2f41/codex-20260831T235230Z_42b4ad/.delegate/runs [1 run(s) audited; 0 excluded before since; 0 unreadable manifest(s)]
   child runs: /home/trey-agent/Code/delegate-worktrees/7b64c29d2f41/codex-20260831T235911Z_fedb2b/.delegate/runs [3 run(s) audited; 0 excluded before since; 0 unreadable manifest(s)]
-runs considered: 51 (excluded 0 before since)
+runs considered: 63 (excluded 0 before since)
 run del_20260831T224254Z_46899b engine=codex mode=work started=2026-08-31T22:42:54Z worktree=/home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/codex-20260831T224254Z_46899b
   evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
   counter 1 reviewer diff/commit (worktree-derived): n/a (role=executor)
@@ -295,6 +295,104 @@ run del_20260901T003251Z_ad1e88 engine=claude mode=work started=2026-09-01T00:32
   note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
   note: unaudited: claude — no structured tool events (/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2/.delegate/runs/del_20260901T003251Z_ad1e88/stdout.log)
 run del_20260901T012626Z_4e3379 engine=codex mode=work started=2026-09-01T01:26:26Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T014655Z_c218c8 engine=codex mode=work started=2026-09-01T01:46:55Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T015312Z_c43778 engine=codex mode=work started=2026-09-01T01:53:12Z worktree=/home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/codex-20260901T015312Z_c43778
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: worktree pruned
+  counter 2 writes outside owned files (worktree-derived): unobservable: worktree pruned
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: worktree pruned, pushes indeterminate
+  note: unobservable: worktree pruned — expected at /home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/codex-20260901T015312Z_c43778; the audit must run before any delegate worktree prune
+run del_20260901T020857Z_045a62 engine=omp mode=work started=2026-09-01T02:08:57Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): unobservable: omp
+  counter 4 secret-path reads (transcript-derived): unobservable: omp
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+  note: unaudited: omp — no structured tool events (/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2/.delegate/runs/del_20260901T020857Z_045a62/stdout.log)
+run del_20260901T020857Z_25685b engine=codex mode=work started=2026-09-01T02:08:57Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T020857Z_b046ac engine=claude mode=work started=2026-09-01T02:08:58Z worktree=/home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/claude-20260901T020857Z_b046ac
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: worktree pruned
+  counter 2 writes outside owned files (worktree-derived): unobservable: worktree pruned
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: worktree pruned, pushes indeterminate
+  note: unobservable: worktree pruned — expected at /home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/claude-20260901T020857Z_b046ac; the audit must run before any delegate worktree prune
+run del_20260901T020905Z_34f27f engine=omp mode=work started=2026-09-01T02:09:05Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): unobservable: omp
+  counter 4 secret-path reads (transcript-derived): unobservable: omp
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+  note: unaudited: omp — no structured tool events (/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2/.delegate/runs/del_20260901T020905Z_34f27f/stdout.log)
+run del_20260901T021343Z_7e5af6 engine=claude mode=work started=2026-09-01T02:13:43Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T022305Z_87ec93 engine=codex mode=work started=2026-09-01T02:23:05Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 1
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T024132Z_aa00e4 engine=codex mode=work started=2026-09-01T02:41:32Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T025136Z_5104b7 engine=codex mode=work started=2026-09-01T02:51:36Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T025137Z_8f5cd0 engine=codex mode=work started=2026-09-01T02:51:37Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260901T031407Z_a6b830 engine=codex mode=work started=2026-09-01T03:14:07Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown-r2
   evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
   counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
   counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
