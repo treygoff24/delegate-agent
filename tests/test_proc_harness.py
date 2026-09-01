@@ -41,6 +41,52 @@ class ProcessHarnessTests(unittest.TestCase):
         self.assertIsNotNone(child_pid)
         self._assert_process_gone(child_pid)
 
+    def test_spawn_reaps_group_members_after_leader_already_exited(self) -> None:
+        # Regression PG-REG-001: a leader waited on inside the context leaves
+        # identity-gated tree discovery nothing to walk; the recorded
+        # launch-time group must still be reaped or same-group children leak.
+        parent = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            "print(child.pid, flush=True)\n"
+        )
+        child_pid: int | None = None
+        with proc_harness.spawn_process(
+            [sys.executable, "-c", parent],
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as process:
+            self.assertIsNotNone(process.stdout)
+            line = process.stdout.readline() if process.stdout is not None else ""
+            child_pid = int(line.strip())
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait(timeout=10)
+        self.assertIsNotNone(child_pid)
+        self._assert_process_gone(child_pid)
+
+    def test_matching_reap_requires_the_marker(self) -> None:
+        # Regression PG-REG-002: captured pgids must not authorize a raw
+        # killpg once their supervisor is gone; only a group whose member
+        # command line carries the caller's marker may be signalled.
+        sentinel = f"proc-harness-marker-{os.getpid()}-{time.time_ns()}"
+        script = f"import time\n# {sentinel}\ntime.sleep(30)\n"
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            start_new_session=True,
+        )
+        try:
+            pgid = os.getpgid(process.pid)
+            proc_harness.reap_recorded_group_matching(pgid, "no-such-marker-anywhere")
+            self.assertIsNone(process.poll(), "reap fired without a marker match")
+            proc_harness.reap_recorded_group_matching(pgid, sentinel)
+            self._assert_process_gone(process.pid)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+
     def test_workflow_reap_tolerates_an_already_dead_group(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp)
