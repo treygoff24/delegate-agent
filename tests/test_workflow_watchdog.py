@@ -50,9 +50,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.config = self.workspace / ".delegate" / "config.json"
         self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(
-            json.dumps(
-                {"codex": {"binary": str(self.codex)}}
-            ),
+            json.dumps({"codex": {"binary": str(self.codex)}}),
             encoding="utf-8",
         )
 
@@ -181,7 +179,6 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         shutil.rmtree(root)
         self._wait_process_gone(pid)
 
-
     def test_healthy_long_child_is_not_killed(self) -> None:
         _, root = self._launch(2)
         self._wait_for(
@@ -214,8 +211,6 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             ),
             timeout=8,
         )
-
-
 
     def test_slow_gate_and_soft_park_notifications_do_not_break_pause(self) -> None:
         post = self.bin_dir / "post"
