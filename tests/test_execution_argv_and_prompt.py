@@ -953,7 +953,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertTrue(payload["ok"])
-        self.assertEqual(Path(payload["cwd"]), launch_cwd.resolve())
+        self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
+        self.assertEqual(Path(payload["executionCwd"]).resolve(), launch_cwd.resolve())
         self.assertTrue((launch_cwd / "mutated-by-agent.txt").is_file())
         self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
 

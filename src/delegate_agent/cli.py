@@ -708,6 +708,11 @@ def make_run_context(
         else source_workspace.path
     )
     execution_cwd = request.workspace
+    if (
+        request.isolation_context is None
+        or request.isolation_context.isolation_lifecycle == "none"
+    ) and source_workspace.launch_cwd is not None:
+        execution_cwd = source_workspace.launch_cwd
     # isolated_workspace must reflect the EFFECTIVE behavior, not the
     # mere presence of an isolation_context object.  Only "temporary",
     # "persistent", or "attached" lifecycle means a physically separate
@@ -1600,7 +1605,7 @@ def execute_request(
             mail_push_cleanup_transferred = provision is not None
             return delegate_runner.execute_tracked(
                 isolated_request.argv,
-                isolated_request.workspace,
+                ctx_runner.execution_cwd,
                 ctx_runner,
                 json_mode=json_mode,
                 stdout=stdout,
