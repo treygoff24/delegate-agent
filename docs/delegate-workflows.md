@@ -153,7 +153,7 @@ disposable checkout. The CLI includes this warning in dry-run output.
 
 Workflow scripts are intentionally capped:
 
-- Script size: 512 KiB.
+- Script size: 1 MiB.
 - Nesting depth: 3 workflow levels.
 - Lifetime `agent()` calls per workflow tree: 1000.
 - `pipeline()`/`parallel()` item count: 4096.
