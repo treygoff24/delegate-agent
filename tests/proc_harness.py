@@ -5,6 +5,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +14,8 @@ from typing import Any
 from delegate_agent.workflows import registry
 
 _RECORDED_PGIDS: set[int] = set()
+_PROCESS_GROUP_GRACE_SECONDS = 1.0
+_PROCESS_GROUP_POLL_SECONDS = 0.05
 
 
 def _record_pgid(pgid: int) -> None:
@@ -25,30 +28,154 @@ def _signal_group(pgid: int, sig: signal.Signals) -> None:
         os.killpg(pgid, sig)
 
 
-def reap_process_group(pgid: int) -> None:
-    """Terminate every process in a recorded group, tolerating ESRCH."""
-    _record_pgid(pgid)
+def _wait_for_group_exit(pgid: int) -> bool:
+    """Wait briefly for a process group to disappear after SIGTERM."""
+    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return True
+        time.sleep(_PROCESS_GROUP_POLL_SECONDS)
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    return False
+
+
+def _reap_recorded_group(pgid: int) -> None:
+    """Terminate one process group, allowing cooperative shutdown first."""
     _signal_group(pgid, signal.SIGTERM)
-    _signal_group(pgid, signal.SIGKILL)
+    if not _wait_for_group_exit(pgid):
+        _signal_group(pgid, signal.SIGKILL)
 
 
-def _workflow_pgid(workspace: Path, wf_id: str) -> int | None:
+def reap_process_group(pgid: int) -> None:
+    """Terminate every process in one group, tolerating an already-dead group."""
+    _record_pgid(pgid)
+    _reap_recorded_group(pgid)
+
+
+def _process_snapshot() -> dict[int, tuple[int, int]]:
+    result = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,pgid="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+    snapshot: dict[int, tuple[int, int]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            pid, ppid, pgid = (int(value) for value in fields[:3])
+        except ValueError:
+            continue
+        snapshot[pid] = (ppid, pgid)
+    return snapshot
+
+
+def _descendant_pgids(supervisor_pid: int) -> set[int]:
+    """Return all process groups in the supervisor's transitive process tree."""
+    snapshot = _process_snapshot()
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _pgid) in snapshot.items():
+        children.setdefault(ppid, []).append(pid)
+    pgids: set[int] = set()
+    pending = [supervisor_pid]
+    seen: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        record = snapshot.get(pid)
+        if record is not None:
+            pgids.add(record[1])
+        pending.extend(children.get(pid, ()))
+    return {pgid for pgid in pgids if pgid > 1}
+
+
+def register_process_tree(supervisor_pid: int, supervisor_pgid: int) -> set[int]:
+    """Record a supervisor group and all currently visible descendant groups.
+
+    The PID/PGID identity check prevents a reused PID from authorizing a reap
+    of an unrelated group.
+    """
+    if (
+        not isinstance(supervisor_pid, int)
+        or isinstance(supervisor_pid, bool)
+        or supervisor_pid <= 1
+        or not isinstance(supervisor_pgid, int)
+        or isinstance(supervisor_pgid, bool)
+        or supervisor_pgid <= 1
+    ):
+        raise ValueError("invalid supervisor process identity")
+    try:
+        live_pgid = os.getpgid(supervisor_pid)
+    except (ProcessLookupError, PermissionError) as exc:
+        raise RuntimeError("supervisor process is no longer available") from exc
+    if live_pgid != supervisor_pgid:
+        raise RuntimeError("supervisor process group identity changed")
+    pgids = _descendant_pgids(supervisor_pid)
+    pgids.add(supervisor_pgid)
+    for pgid in pgids:
+        _record_pgid(pgid)
+    return pgids
+
+
+def _reap_process_tree(supervisor_pid: int, supervisor_pgid: int) -> None:
+    """Reap an identity-checked supervisor and every descendant group."""
+    try:
+        live_pgid = os.getpgid(supervisor_pid)
+    except (ProcessLookupError, PermissionError):
+        return
+    if live_pgid != supervisor_pgid:
+        return
+    pgids = _descendant_pgids(supervisor_pid)
+    pgids.add(supervisor_pgid)
+    for pgid in pgids:
+        _record_pgid(pgid)
+    for pgid in sorted(pgids):
+        _reap_recorded_group(pgid)
+
+
+def reap_process_tree(supervisor_pid: int, supervisor_pgid: int) -> None:
+    """Reap an identity-checked supervisor and its current descendants."""
+    _reap_process_tree(supervisor_pid, supervisor_pgid)
+
+
+def _workflow_identity(workspace: Path, wf_id: str) -> tuple[int, int] | None:
     try:
         root = registry.workflow_dir(workspace, wf_id)
     except (TypeError, ValueError):
         return None
     status = registry.read_json(root / registry.STATUS_FILE) or {}
+    supervisor_pid = status.get("supervisorPid")
     pgid = status.get("supervisorPgid")
-    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+    if (
+        not isinstance(supervisor_pid, int)
+        or isinstance(supervisor_pid, bool)
+        or supervisor_pid <= 1
+        or not isinstance(pgid, int)
+        or isinstance(pgid, bool)
+        or pgid <= 1
+    ):
         return None
-    return pgid
+    return supervisor_pid, pgid
 
 
 def reap_workflow_now(workspace: Path, wf_id: str) -> None:
     """Reap a workflow supervisor group using its durable status record."""
-    pgid = _workflow_pgid(workspace, wf_id)
-    if pgid is not None:
-        reap_process_group(pgid)
+    identity = _workflow_identity(workspace, wf_id)
+    if identity is not None:
+        _reap_process_tree(*identity)
 
 
 @contextmanager
@@ -78,7 +205,7 @@ def spawn_process(
     try:
         yield process
     finally:
-        reap_process_group(pgid)
+        _reap_process_tree(process.pid, pgid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5)
 
@@ -133,7 +260,9 @@ atexit.register(_assert_at_suite_end)
 __all__ = [
     "assert_no_live_process_groups",
     "reap_process_group",
+    "reap_process_tree",
     "reap_workflow_now",
+    "register_process_tree",
     "spawn_process",
     "workflow_reap",
 ]
