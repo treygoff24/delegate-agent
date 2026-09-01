@@ -35,6 +35,7 @@ READ_ONLY_SUBCOMMANDS = frozenset(
         "version",
         "agent-help",
         "personas",
+        "doctor",
         "describe",
         "profiles",
         "snapshot",

@@ -1614,6 +1614,68 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--no-completion-report",
         ),
     ),
+    "doctor": CommandSpec(
+        name="doctor",
+        summary="Show the installed runtime digest, the last promotion stamp, and active workflow supervisors.",
+        usage=("delegate [--json] doctor",),
+        examples=("delegate doctor", "delegate --json doctor"),
+        notes=(
+            "Read-only and machine-local: reads ~/.delegate/last-promotion.json and "
+            "~/.delegate/active-supervisors.json, reconciling stale supervisor entries.",
+            "Warns when the live runtime digest differs from the stamped one -- the "
+            "installed runtime changed without 'delegate promote' -- or when no stamp exists.",
+            "JSON reports runtimeDigest, promotion, promotionMatchesRuntime, activeSupervisors, "
+            "and warnings.",
+        ),
+        see_also=("promote", "workflow list", "describe"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--auth-profile",
+            "--group",
+            "--notify",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
+    "promote": CommandSpec(
+        name="promote",
+        summary="Stamp who promoted the installed runtime, from what source, and its digest.",
+        usage=("delegate [--json] promote --actor WHO --source TEXT [--runtime-digest HEX]",),
+        options=(
+            OptionSpec("--actor", "WHO", "Who performed the promotion (agent or person)."),
+            OptionSpec("--source", "TEXT", "What was installed: commit, branch, or tarball."),
+            OptionSpec(
+                "--runtime-digest",
+                "HEX",
+                "64-hex runtime digest to record; defaults to the digest of the runtime "
+                "running this command.",
+            ),
+        ),
+        examples=(
+            'delegate promote --actor "hq coordinator" --source "delegate-agent main cba3446"',
+            "delegate --json promote --actor trey --source v0.31.0",
+        ),
+        notes=(
+            "Records a stamp only; it does not copy code. Install the runtime first, then run "
+            "promote through the installed command so the default digest is the live one.",
+            "Writes ~/.delegate/last-promotion.json (mode 0600) and lists active supervisors "
+            "still pinned to an older runtime.",
+            "Promotion stamps carry no authority: 'delegate doctor' is the read side.",
+        ),
+        see_also=("doctor", "workflow list"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--auth-profile",
+            "--group",
+            "--notify",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
     "worktree": CommandSpec(
         name="worktree",
         summary="Manage persistent isolation worktrees (list, show, remove, prune, gc, reap).",
@@ -2312,6 +2374,8 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] workflow list",
         "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
         "delegate [--json] [--auth-profile NAME] setup",
+        "delegate [--json] doctor",
+        "delegate [--json] promote --actor WHO --source TEXT [--runtime-digest HEX]",
         "delegate [--json] [--auth-profile NAME] models [--summary]",
         "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
         "delegate [--json] [--auth-profile NAME] capabilities [refresh [<engine> ...]]",

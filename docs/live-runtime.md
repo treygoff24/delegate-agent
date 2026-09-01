@@ -49,6 +49,16 @@ after the selected profile overlay passes validation.
 
 Repository development should not overwrite an installed runtime, user config, or local worktree store as a side effect. Promote a checkout to an installed command only through an explicit install/update step after review and tests.
 
+## Promotion ritual and `delegate doctor`
+
+Several agents can share one `~/.delegate/src`; when one of them installs a new runtime, every child the others launch from that moment runs the new code, and nothing in the launch path says so. The stamp is how that becomes visible:
+
+1. Install the reviewed checkout into `~/.delegate/src` (rsync or tarball).
+2. `delegate promote --actor <who> --source <commit or branch>` -- run through the installed command so the recorded digest is the live one. This writes `~/.delegate/last-promotion.json` and lists workflow supervisors still pinned to the previous runtime.
+3. `delegate doctor` -- confirm `promotionMatchesRuntime: true`.
+
+`delegate doctor` compares the digest of the runtime it is running against the stamped digest and warns on mismatch, so a lane that hits unexpected behavior can see that the code under it changed, when, and who changed it. Backfilling a stamp for a runtime you are not executing is possible with `--runtime-digest`, but the normal path is to promote from the installed command.
+
 ## Run metadata
 
 Tracked runs may write workspace-local metadata under `.delegate/`. That metadata is for inspection commands such as:

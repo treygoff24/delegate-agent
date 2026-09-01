@@ -124,6 +124,13 @@ class InspectionOptions:
 
 
 @dataclass(init=False)
+@dataclass(frozen=True)
+class PromoteOptions:
+    actor: str
+    source: str
+    runtime_digest: str | None = None
+
+
 class ParsedCommand:
     subcommand: str
     global_options: GlobalOptions
@@ -144,6 +151,7 @@ class ParsedCommand:
     resume: ResumeOptions | None = None
     followup: FollowupOptions | None = None
     mail_command: mail.MailCommand | None = None
+    promote: PromoteOptions | None = None
 
     def __init__(
         self,
@@ -167,6 +175,7 @@ class ParsedCommand:
         resume: ResumeOptions | None = None,
         followup: FollowupOptions | None = None,
         mail_command: mail.MailCommand | None = None,
+        promote: PromoteOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -187,6 +196,7 @@ class ParsedCommand:
         self.resume = resume
         self.followup = followup
         self.mail_command = mail_command
+        self.promote = promote
 
 
 @dataclass(frozen=True)

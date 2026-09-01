@@ -48,6 +48,7 @@ from delegate_agent.request_models import (
     InspectionOptions,
     LaunchOptions,
     ParsedCommand,
+    PromoteOptions,
     PromptTail,
     ResumeOptions,
     RunJsonOptions,
@@ -406,6 +407,76 @@ def parse_setup_subcommand(
     )
 
 
+RUNTIME_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def parse_runtime_subcommand(
+    name: str,
+    rest: list[str],
+    *,
+    json_mode: bool,
+    cwd: str | None,
+    pass_through: bool,
+    completion_report: str | None,
+    isolation: str | None,
+    auth_profile: str | None,
+) -> ParsedCommand:
+    """Parse ``doctor`` and ``promote``: machine-local runtime commands under ~/.delegate."""
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, name)
+    if (
+        cwd is not None
+        or pass_through
+        or completion_report is not None
+        or isolation is not None
+        or auth_profile is not None
+    ):
+        raise DelegateError(
+            "invalid_option_combination",
+            f"delegate {name} does not use --cwd, --isolation, --pass-through, "
+            "--auth-profile, or completion-report options.",
+        )
+    if name == "doctor":
+        require_no_extra(rest, "doctor")
+        return ParsedCommand("doctor", global_options=GlobalOptions(json_mode=json_mode))
+    actor: str | None = None
+    source: str | None = None
+    runtime_digest: str | None = None
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token in {"--actor", "--source", "--runtime-digest"}:
+            if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+                raise DelegateError("missing_option_value", f"{token} requires a value.")
+            value = rest[i + 1]
+            if token == "--actor":
+                actor = value
+            elif token == "--source":
+                source = value
+            else:
+                if RUNTIME_DIGEST_RE.fullmatch(value) is None:
+                    raise DelegateError(
+                        "invalid_runtime_digest",
+                        "--runtime-digest must be 64 lowercase hex characters.",
+                    )
+                runtime_digest = value
+            i += 2
+            continue
+        require_no_extra([token], "promote")
+    if not actor or not actor.strip():
+        raise DelegateError("missing_actor", "promote requires --actor <who promoted>.")
+    if not source or not source.strip():
+        raise DelegateError(
+            "missing_source", "promote requires --source <commit, branch, or tarball>."
+        )
+    return ParsedCommand(
+        "promote",
+        global_options=GlobalOptions(json_mode=json_mode),
+        promote=PromoteOptions(actor=actor, source=source, runtime_digest=runtime_digest),
+    )
+
+
 def parse_cli(argv: list[str]) -> ParsedCommand:
     if not argv or argv[0] in ("--help", "-h"):
         return ParsedCommand("help")
@@ -581,6 +652,17 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "setup":
         return parse_setup_subcommand(
+            rest,
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            isolation=isolation,
+            auth_profile=auth_profile,
+        )
+    if subcommand in {"doctor", "promote"}:
+        return parse_runtime_subcommand(
+            subcommand,
             rest,
             json_mode=json_mode,
             cwd=cwd,
