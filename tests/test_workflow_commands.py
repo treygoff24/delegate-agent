@@ -2157,7 +2157,7 @@ class WorkflowCommandTests(unittest.TestCase):
         status.update(
             {
                 "watchdogFiredAt": "2026-08-31T00:00:00Z",
-                "watchdogReason": "heartbeat_stale",
+                "watchdogReason": "state_missing",
                 "watchdogCancelRequested": True,
             }
         )
@@ -2171,7 +2171,7 @@ class WorkflowCommandTests(unittest.TestCase):
         }
         workflow_registry.write_status(root, rebuilt)
         preserved = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
-        self.assertEqual(preserved.get("watchdogReason"), "heartbeat_stale")
+        self.assertEqual(preserved.get("watchdogReason"), "state_missing")
         self.assertIs(preserved.get("watchdogCancelRequested"), True)
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
