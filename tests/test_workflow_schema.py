@@ -118,10 +118,28 @@ class SchemaSubsetMatchesClaudePreflight(unittest.TestCase):
             workflow_schema.validate_schema_subset({"type": "string", "enum": []})
 
     def test_duplicate_enum_values_rejected(self) -> None:
-        for enum in (["a", "a"], [1, 1], [{"k": 1}, {"k": 1}], [None, None]):
+        # JSON equality, as Claude applies it: 1 and 1.0 are the same value,
+        # 0 and -0.0 are the same value, and that holds inside nesting.
+        for enum in (
+            ["a", "a"],
+            [1, 1],
+            [1, 1.0],
+            [0, -0.0],
+            [{"k": 1}, {"k": 1.0}],
+            [[1], [1.0]],
+            [None, None],
+        ):
             with self.subTest(enum=enum), self.assertRaises(workflow_schema.SchemaError):
                 workflow_schema.validate_schema_subset({"enum": enum})
-        workflow_schema.validate_schema_subset({"enum": ["a", "b", 1, "1", None]})
+        # Booleans are not numbers, and strings are not their numeric spellings.
+        workflow_schema.validate_schema_subset({"enum": ["a", "b", 1, "1", None, True, 1.5]})
+
+    def test_non_finite_enum_numbers_rejected(self) -> None:
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad), self.assertRaises(workflow_schema.SchemaError):
+                workflow_schema.validate_schema_subset({"enum": [bad]})
+            with self.subTest(bad=bad, nested=True), self.assertRaises(workflow_schema.SchemaError):
+                workflow_schema.validate_schema_subset({"enum": [{"k": [bad]}]})
 
     def test_duplicate_required_rejected(self) -> None:
         schema = {"type": "object", "required": ["a", "a"], "properties": {"a": {"type": "string"}}}

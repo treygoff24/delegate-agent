@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from delegate_agent.json_types import JsonObject, JsonValue
 
@@ -18,6 +19,28 @@ SUPPORTED_KEYS = {
 
 class SchemaError(ValueError):
     pass
+
+
+def _json_identity(value: object, *, path: str) -> object:
+    """Hashable key under JSON equality: 1 == 1.0, true != 1, NaN is not JSON."""
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("number", value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise SchemaError(f"{path} contains a non-finite number, which is not JSON.")
+        return ("number", int(value) if value.is_integer() else value)
+    if value is None or isinstance(value, str):
+        return (type(value).__name__, value)
+    if isinstance(value, list):
+        return ("array", tuple(_json_identity(item, path=path) for item in value))
+    if isinstance(value, dict):
+        return (
+            "object",
+            tuple(sorted((key, _json_identity(item, path=path)) for key, item in value.items())),
+        )
+    raise SchemaError(f"{path} contains a non-JSON value: {type(value).__name__}.")
 
 
 def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
@@ -62,8 +85,8 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
         # validated here fails the moment the child starts.
         if not isinstance(enum, list) or not enum:
             raise SchemaError(f"{path}.enum must be a non-empty array.")
-        encoded = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in enum]
-        if len(set(encoded)) != len(encoded):
+        keys = [_json_identity(item, path=f"{path}.enum") for item in enum]
+        if len(set(keys)) != len(keys):
             raise SchemaError(f"{path}.enum must not repeat a value.")
     additional = schema.get("additionalProperties")
     if isinstance(additional, dict):

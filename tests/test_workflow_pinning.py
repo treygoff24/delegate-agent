@@ -510,8 +510,14 @@ finally:
             workflow_pinning, "live_runtime_digest", side_effect=digest_while_checking_lock
         ):
             stamp = workflow_pinning.promote(actor="test", source="unit-test", home=self.home)
-        self.assertEqual(observed, [True], "live digest was read outside the promotion lock")
+            # The CLI path is the one that used to capture the digest early.
+            stdout = io.StringIO()
+            workflow_pinning.emit_promote(
+                actor="cli", source="unit-test", home=self.home, stdout=stdout, json_mode=True
+            )
+        self.assertEqual(observed, [True, True], "live digest was read outside the promotion lock")
         self.assertEqual(stamp["runtimeDigest"], "c" * 64)
+        self.assertEqual(json.loads(stdout.getvalue())["runtimeDigest"], "c" * 64)
 
     def test_promote_serializes_under_the_promotion_lock(self) -> None:
         import threading
