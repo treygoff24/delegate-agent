@@ -54,9 +54,7 @@ class WorkflowWatchdogUnitTests(unittest.TestCase):
 
     def test_terminal_status_reports_terminal(self) -> None:
         for status in ("succeeded", "failed", "killed"):
-            registry.write_status(
-                self.root, {"wfId": "wf_000000000001", "status": status}
-            )
+            registry.write_status(self.root, {"wfId": "wf_000000000001", "status": status})
             self.assertEqual(self._check(), "terminal")
 
     def test_deleted_state_reports_state_missing(self) -> None:
@@ -68,11 +66,11 @@ class WorkflowWatchdogUnitTests(unittest.TestCase):
             OSError(errno.EMFILE, "too many open files"),
             PermissionError(errno.EACCES, "denied"),
         ):
-            with self.subTest(exc=exc):
-                with mock.patch(
-                    "delegate_agent.workflows.runtime.os.stat", side_effect=exc
-                ):
-                    self.assertIsNone(self._check())
+            with (
+                self.subTest(exc=exc),
+                mock.patch("delegate_agent.workflows.runtime.os.stat", side_effect=exc),
+            ):
+                self.assertIsNone(self._check())
 
     def test_malformed_status_is_no_information(self) -> None:
         self.status_path.write_text("{not json", encoding="utf-8")

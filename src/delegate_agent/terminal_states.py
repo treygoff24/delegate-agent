@@ -52,9 +52,7 @@ def apply_operator_cancel_override(extra: JsonObject) -> None:
     extra["terminalState"] = FAILED
 
     existing_record = extra.get("terminalRecord")
-    terminal_record: JsonObject = (
-        dict(existing_record) if isinstance(existing_record, dict) else {}
-    )
+    terminal_record: JsonObject = dict(existing_record) if isinstance(existing_record, dict) else {}
     terminal_record["state"] = FAILED
     terminal_record["reason"] = OPERATOR_CANCEL_REASON
     for key in ("error", "message", "nextActions", "reasonTruncated", "reasonChars"):
