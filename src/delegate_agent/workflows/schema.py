@@ -21,9 +21,10 @@ class SchemaError(ValueError):
     pass
 
 
-# Claude's schema preflight parses numbers at binary64 precision, so integers
-# past 2**53 collapse onto their neighbours there; refusing them keeps the
-# subset's notion of "distinct" identical to the consumer's.
+# Claude's schema preflight parses numbers at binary64 precision. Above 2**53
+# that parse is no longer injective -- some distinct integers land on the same
+# double -- so refusing the whole range keeps the subset's notion of "distinct"
+# identical to the consumer's without modelling which pairs collide.
 MAX_EXACT_INTEGER = 2**53
 
 
@@ -34,7 +35,8 @@ def _json_identity(value: object, *, path: str) -> object:
     if isinstance(value, int):
         if abs(value) > MAX_EXACT_INTEGER:
             raise SchemaError(
-                f"{path} contains an integer beyond 2**53, which JSON consumers round."
+                f"{path} contains an integer beyond 2**53, where JSON consumers cannot keep "
+                "distinct integers distinct."
             )
         return ("number", value)
     if isinstance(value, float):
@@ -120,7 +122,8 @@ def validate_value(value: object, schema: JsonObject, *, path: str = "value") ->
     validate_schema_subset(schema)
     if "enum" in schema:
         # Membership under JSON equality, matching the declaration check:
-        # Python would accept True for 1 and 1.0 for 1, JSON does not.
+        # Python would accept True for 1; JSON keeps booleans and numbers apart
+        # while treating 1.0 and 1 as the same number.
         allowed = {_json_identity(item, path=path) for item in schema["enum"]}
         if _json_identity(value, path=path) not in allowed:
             raise SchemaError(f"{path} must be one of {schema['enum']!r}.")
