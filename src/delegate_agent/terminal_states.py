@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal, TypeAlias
 
+from delegate_agent.json_types import JsonObject
+
 TerminalState: TypeAlias = Literal[
     "completed_verified",
     "completed_unverified",
@@ -39,3 +41,25 @@ TERMINAL_STATES = frozenset(
 )
 
 PROVIDER_FAILURE_STATES = frozenset({PROVIDER_REFUSAL, PROVIDER_CANCELLED, PROVIDER_MAX_TURNS})
+
+OPERATOR_CANCEL_REASON = "cancelled_by_user"
+
+
+def apply_operator_cancel_override(extra: JsonObject) -> None:
+    """Replace any child/provider terminal receipt with the operator outcome."""
+    extra["failureReason"] = OPERATOR_CANCEL_REASON
+    extra["exitCode"] = 1
+    extra["terminalState"] = FAILED
+
+    existing_record = extra.get("terminalRecord")
+    terminal_record: JsonObject = (
+        dict(existing_record) if isinstance(existing_record, dict) else {}
+    )
+    terminal_record["state"] = FAILED
+    terminal_record["reason"] = OPERATOR_CANCEL_REASON
+    for key in ("error", "message", "nextActions", "reasonTruncated", "reasonChars"):
+        terminal_record.pop(key, None)
+    extra["terminalRecord"] = terminal_record
+
+    for key in ("error", "message", "nextActions", "terminalEvent", "terminalStatus"):
+        extra.pop(key, None)

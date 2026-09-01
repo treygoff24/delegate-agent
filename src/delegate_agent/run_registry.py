@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io
+from delegate_agent import archived_logs, private_io, terminal_states
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
@@ -420,22 +420,14 @@ def _replay_finalize_wal_locked(registry_root: Path) -> None:
                 state = dict(state)
                 snapshot = dict(snapshot)
                 state["status"] = STATUS_CANCELLED
-                state["exitCode"] = 1
-                state["failureReason"] = "cancelled_by_user"
-                state.pop("error", None)
-                state.pop("message", None)
-                state.pop("nextActions", None)
+                terminal_states.apply_operator_cancel_override(state)
                 if isinstance(current, dict):
                     for key in ("cancelRequested", "cancelRequestedAt"):
                         if key in current:
                             state[key] = current[key]
                 snapshot["status"] = STATUS_CANCELLED
-                snapshot["exitCode"] = 1
                 snapshot["ok"] = False
-                snapshot["failureReason"] = "cancelled_by_user"
-                snapshot.pop("error", None)
-                snapshot.pop("message", None)
-                snapshot.pop("nextActions", None)
+                terminal_states.apply_operator_cancel_override(snapshot)
             write_json_atomic(run_path / STATE_FILE, state)
             write_snapshot(run_path, snapshot)
             wal_path.unlink(missing_ok=True)

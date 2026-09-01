@@ -10,7 +10,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, profiles, run_registry, snapshot_view
+from delegate_agent import command_errors, profiles, run_registry, snapshot_view, terminal_states
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
@@ -467,7 +467,6 @@ def _persist_cancelled_terminal_locked(
         # Preserve the runner's work summary/output metadata, but cancellation
         # wins status and exit-code precedence.
         updated["status"] = run_registry.STATUS_CANCELLED
-        updated["failureReason"] = "cancelled_by_user"
         updated["finishedAt"] = now
         updated["lastActivityAt"] = now
         updated["stdoutBytes"] = stdout_bytes
@@ -479,18 +478,13 @@ def _persist_cancelled_terminal_locked(
                 "runId": target.run_id,
                 "alias": target.alias,
                 "status": run_registry.STATUS_CANCELLED,
-                "failureReason": "cancelled_by_user",
-                "exitCode": 1,
                 "finishedAt": now,
                 "lastActivityAt": now,
                 "stdoutBytes": stdout_bytes,
                 "stderrBytes": stderr_bytes,
             }
         )
-    updated["exitCode"] = 1
-    updated.pop("error", None)
-    updated.pop("message", None)
-    updated.pop("nextActions", None)
+    terminal_states.apply_operator_cancel_override(updated)
     if warnings:
         existing = updated.get("warnings") if isinstance(updated.get("warnings"), list) else []
         updated["warnings"] = [
@@ -507,16 +501,12 @@ def _persist_cancelled_terminal_locked(
             "runId": target.run_id,
             "alias": target.alias,
             "status": run_registry.STATUS_CANCELLED,
-            "failureReason": "cancelled_by_user",
             "finishedAt": now,
             "stdoutBytes": stdout_bytes,
             "stderrBytes": stderr_bytes,
-            "exitCode": 1,
         }
     )
-    snapshot.pop("error", None)
-    snapshot.pop("message", None)
-    snapshot.pop("nextActions", None)
+    terminal_states.apply_operator_cancel_override(snapshot)
     if warnings:
         existing = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
         snapshot["warnings"] = [
