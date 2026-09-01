@@ -327,6 +327,29 @@ by deriving and validating its Registry record; it does not weaken
 safe/worktree path checks or create a replacement worktree when the original
 has moved.
 
+### Bounded private reader retry contract
+
+The bounded private readers refuse tamper signals on first observation, with
+no retry: a symlinked path, `st_nlink > 1` (an extra hard link), a
+non-regular file, oversized content, and invalid UTF-8 are all hard
+refusals. The one retried condition is `st_nlink == 0` on a just-opened fd:
+the inode was unlinked by `os.replace` between `open` and `fstat`, which is
+benign writer activity, not tamper. The reader closes the fd and reopens the
+path against the new inode, re-running the full check set on every reopened
+fd, for a bounded wall-clock budget with backoff (250ms, 1ms sleep). A
+persistent zero-link inode — a replace spinner — still fails closed as
+`BoundedReadError("replaced")` once the budget expires, so the retry is
+bounded against a malicious writer while absorbing real atomic-replacement
+churn.
+
+A fixed reopen count is not an acceptable substitute for the time budget.
+The independence model behind a small fixed count is wrong in practice:
+retries reissued microseconds apart are phase-correlated with the writer,
+and a phase-locked replace storm exhausts any small attempt count (measured
+~47 spurious failures per 20,000 reads under a 4-attempt budget versus zero
+across the same load for the time-budget reader). Do not replace the
+wall-clock budget with an attempt counter.
+
 ## Config and secret hygiene
 
 - Keep real config in `~/.delegate/config.json` or a private `DELEGATE_CONFIG` path. Repository-local `.delegate/config.json` is not loaded implicitly.
