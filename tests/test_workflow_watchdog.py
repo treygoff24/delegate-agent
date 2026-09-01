@@ -82,7 +82,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             if identity is not None:
                 proc_harness.reap_process_tree(*identity)
             for pgid in self.captured_workflow_pgids.get(wf_id, ()):
-                proc_harness.reap_process_group(pgid)
+                proc_harness.reap_recorded_group_matching(pgid, str(self.workspace))
 
     def _launch(
         self,
