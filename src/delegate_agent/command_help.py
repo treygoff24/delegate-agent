@@ -1662,7 +1662,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Records a stamp only; it does not copy code. Install the runtime first, then run "
             "promote through the installed command so the default digest is the live one.",
             "Writes ~/.delegate/last-promotion.json (mode 0600) under a lock and lists active "
-            "supervisors still pinned to an older runtime; also records the launcher that ran it.",
+            "supervisors still pinned to an older runtime; also records the digest of the installed "
+            "launcher (~/.delegate/bin/delegate.py), whichever entrypoint ran the command.",
             "promote is a mutation under the profile guard; with AI_PROFILE set and its overlay "
             "missing mid-upgrade, run 'env -u AI_PROFILE delegate promote ...'.",
             "Promotion stamps carry no authority: 'delegate doctor' is the read side.",
