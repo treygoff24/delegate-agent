@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -394,6 +395,67 @@ finally:
         report = workflow_pinning.doctor(home=self.home)
         self.assertEqual(report["promotion"], stamp)
         self.assertEqual(report["schema"], workflow_pinning.ACTIVE_INDEX_SCHEMA)
+        # A stamp naming some other runtime is exactly the rsync-without-stamp
+        # case; doctor must call it out rather than report a clean surface.
+        self.assertEqual(report["runtimeDigest"], workflow_pinning.live_runtime_digest())
+        self.assertFalse(report["promotionMatchesRuntime"])
+        self.assertTrue(
+            any("without 'delegate promote'" in warning for warning in report["warnings"])
+        )
+
+    def test_doctor_warns_when_no_promotion_stamp_exists(self) -> None:
+        report = workflow_pinning.doctor(home=self.home)
+        self.assertIsNone(report["promotion"])
+        self.assertFalse(report["promotionMatchesRuntime"])
+        self.assertTrue(any("no promotion stamp" in warning for warning in report["warnings"]))
+
+    def test_promote_defaults_to_live_digest_and_doctor_then_matches(self) -> None:
+        stdout = io.StringIO()
+        code = workflow_pinning.emit_promote(
+            actor="test", source="unit-test", home=self.home, stdout=stdout, json_mode=True
+        )
+        self.assertEqual(code, 0)
+        stamp = json.loads(stdout.getvalue())
+        self.assertEqual(stamp["runtimeDigest"], workflow_pinning.live_runtime_digest())
+        report = workflow_pinning.doctor(home=self.home)
+        self.assertTrue(report["promotionMatchesRuntime"])
+        self.assertNotIn("warnings", report)
+
+    def test_cli_doctor_and_promote_round_trip_through_main(self) -> None:
+        from delegate_agent import cli
+
+        out = io.StringIO()
+        self.assertEqual(cli.main(["--json", "doctor"], stdout=out, stderr=io.StringIO()), 0)
+        before = json.loads(out.getvalue())
+        self.assertIsNone(before["promotion"])
+        self.assertFalse(before["promotionMatchesRuntime"])
+
+        out = io.StringIO()
+        code = cli.main(
+            ["--json", "promote", "--actor", "unit", "--source", "deadbeef"],
+            stdout=out,
+            stderr=io.StringIO(),
+        )
+        self.assertEqual(code, 0)
+        stamp = json.loads(out.getvalue())
+        self.assertEqual(stamp["actor"], "unit")
+        self.assertEqual(stamp["source"], "deadbeef")
+        path = workflow_pinning.promotion_path(self.home)
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+        out = io.StringIO()
+        self.assertEqual(cli.main(["doctor"], stdout=out, stderr=io.StringIO()), 0)
+        text = out.getvalue()
+        self.assertIn(f"runtime digest: {stamp['runtimeDigest']}", text)
+        self.assertIn("by unit (deadbeef)", text)
+        self.assertNotIn("warning:", text)
+
+        out = io.StringIO()
+        self.assertEqual(cli.main(["--json", "doctor"], stdout=out, stderr=io.StringIO()), 0)
+        after = json.loads(out.getvalue())
+        self.assertTrue(after["promotionMatchesRuntime"])
+        self.assertEqual(after["promotion"], stamp)
 
 
 if __name__ == "__main__":
