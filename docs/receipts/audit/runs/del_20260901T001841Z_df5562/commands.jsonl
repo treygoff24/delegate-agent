@@ -1,0 +1,25 @@
+{"tool": "read", "command": "", "path": "git log -1 -p"}
+{"tool": "read", "command": "", "path": "."}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts:100-200"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts:200-300"}
+{"tool": "read", "command": "", "path": "scripts/shared/destructive-db-guard.ts"}
+{"tool": "read", "command": "", "path": "scripts/shared/database-host.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.test.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.test.ts:400-600"}
+{"tool": "read", "command": "", "path": "scripts/shared/database-host.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts:1-50"}
+{"tool": "read", "command": "", "path": "git"}
+{"tool": "read", "command": "", "path": ".git"}
+{"tool": "read", "command": "", "path": ".git/HEAD"}
+{"tool": "read", "command": "", "path": "/home/trey-agent/Code/atlasos/.git/worktrees/wt/HEAD"}
+{"tool": "read", "command": "", "path": "/home/trey-agent/Code/atlasos/.git/objects/b0/3845db408898e9910ef08645cb37a08e5aae7e"}
+{"tool": "read", "command": "", "path": "git"}
+{"tool": "read", "command": "", "path": "/usr/bin/git"}
+{"tool": "read", "command": "", "path": "/home/trey-agent/Code/atlasos/.git/worktrees/wt/logs/HEAD"}
+{"tool": "read", "command": "", "path": "/home/trey-agent/Code/atlasos/.git/objects/38/"}
+{"tool": "read", "command": "", "path": "/home/trey-agent/Code/atlasos/.git/objects/38/3576391f02cf8e629a20d193d1b00e2d67f834"}
+{"tool": "read", "command": "", "path": "scripts/shared/database-host.ts"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts:280-290"}
+{"tool": "read", "command": "", "path": "scripts/verification-gates.ts:294-300"}
