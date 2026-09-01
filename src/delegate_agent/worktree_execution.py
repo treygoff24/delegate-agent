@@ -294,6 +294,7 @@ def _build_persistent_worktree_run_context(
         capability_model=request.capability_model,
         capability_model_source=request.capability_model_source,
         creation_context=creation_context,
+        structured_output=request.output_schema is not None,
         source_git_root=iso_ctx.source_git_root or preflight.source_git_root,
         isolation_mode=iso_ctx.isolation_mode,
         effective_isolation=iso_ctx.effective_isolation,

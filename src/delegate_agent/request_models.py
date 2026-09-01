@@ -123,7 +123,6 @@ class InspectionOptions:
     live: bool = False
 
 
-@dataclass(init=False)
 @dataclass(frozen=True)
 class PromoteOptions:
     actor: str
@@ -131,6 +130,7 @@ class PromoteOptions:
     runtime_digest: str | None = None
 
 
+@dataclass(init=False)
 class ParsedCommand:
     subcommand: str
     global_options: GlobalOptions
@@ -378,6 +378,7 @@ class EngineBuildInput:
     discovery: JsonObject | None = None
     fast: bool | None = None
     output_schema: str | None = None
+    output_schema_text: str | None = None
     call_read_only: bool = False
     pure: bool = False
     model_override: str | None = None

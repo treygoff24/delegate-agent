@@ -273,6 +273,54 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             },
         )
 
+    def test_claude_workflow_schema_goes_native_through_output_schema(self) -> None:
+        dsl = self._dsl()
+        schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}},
+            "required": ["ok"],
+        }
+        # Optional field: Codex would take the prompt-only path; Claude must not.
+        self.assertIsNone(runtime._codex_native_schema(schema))
+        seen: dict[str, object] = {}
+
+        def fake_run_delegate(engine, prompt, **kwargs):
+            seen["engine"] = engine
+            seen["prompt"] = prompt
+            seen["output_schema"] = kwargs["output_schema"]
+            seen["schema_bytes"] = Path(kwargs["output_schema"]).read_text(encoding="utf-8")
+            return runtime._DelegateChildResult(
+                text='{"ok": true}',
+                run_id="del_20260901T000000Z_claude1",
+                execution_cwd="/tmp/claude-worktree",
+                session_id=None,
+            )
+
+        with (
+            mock.patch.object(dsl, "_run_delegate", side_effect=fake_run_delegate),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "judge",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="none",
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="claude-key",
+            )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(seen["engine"], "claude")
+        self.assertIsNotNone(seen["output_schema"])
+        self.assertEqual(json.loads(seen["schema_bytes"]), schema)
+        # Native enforcement means no prompt-embedded schema contract.
+        self.assertEqual(seen["prompt"], "judge")
+
     def test_structured_exhaustion_falls_back_to_child_completion_report(self) -> None:
         report_path = self.workspace / "completion-report.md"
         report_path.write_text(
