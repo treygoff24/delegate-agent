@@ -24,6 +24,10 @@ _PRIVATE_READ_REPLACED_RETRY_SLEEP_SECONDS = 0.001
 class RegistryJsonError(ValueError):
     """Raised when an existing registry JSON file cannot be trusted."""
 
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 class BoundedReadError(ValueError):
     """A record file could not be read within the bounded-trust contract.
@@ -454,7 +458,9 @@ def read_json_object(path: Path) -> JsonObject | None:
     except BoundedReadError as exc:
         if exc.reason == "not_found":
             return None
-        raise RegistryJsonError(f"could not read JSON file {path}: {exc}") from exc
+        raise RegistryJsonError(
+            f"could not read JSON file {path}: {exc}", reason=exc.reason
+        ) from exc
     try:
         data: JsonValue = json.loads(text)
     except json.JSONDecodeError as exc:

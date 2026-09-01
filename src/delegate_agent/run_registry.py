@@ -440,6 +440,8 @@ def _replay_finalize_wal_locked(registry_root: Path) -> None:
             write_snapshot(run_path, snapshot)
             wal_path.unlink(missing_ok=True)
         except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
+            if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":
+                continue
             _quarantine_finalize_wal(wal_path, str(exc))
 
 

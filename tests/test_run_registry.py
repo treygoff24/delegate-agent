@@ -189,6 +189,26 @@ class RunRegistryTests(unittest.TestCase):
 
             self.assertEqual(external_json.read_text(encoding="utf-8"), '{"keep": true}\n')
 
+    def test_read_json_object_preserves_bounded_read_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            with (
+                mock.patch.object(
+                    self.registry.private_io,
+                    "read_private_text_bounded",
+                    side_effect=self.registry.private_io.BoundedReadError(
+                        "replaced", "record file was replaced while reading"
+                    ),
+                ),
+                self.assertRaises(self.registry.RegistryJsonError) as caught,
+            ):
+                self.registry.read_json_object(path)
+
+            self.assertEqual(caught.exception.reason, "replaced")
+            self.assertIsInstance(
+                caught.exception.__cause__, self.registry.private_io.BoundedReadError
+            )
+
     def test_second_cursor_alias_is_cursor_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
@@ -660,15 +680,73 @@ class RunRegistryTests(unittest.TestCase):
             self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
 
     def test_corrupt_finalize_wal_is_quarantined_without_blocking_lock(self):
+        for contents in ("not-json", "[]"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as tmp:
+                root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+                run_id, _alias = self.registry.register_run(root, harness="cursor")
+                wal = self.registry.finalize_wal_path(root, run_id)
+                wal.write_text(contents, encoding="utf-8")
+                with self.registry.registry_lock(root, timeout_seconds=1):
+                    pass
+                self.assertFalse(wal.exists())
+                self.assertTrue(list(wal.parent.glob(wal.name + ".corrupt.*")))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file descriptors are required")
+    def test_replaced_wal_read_is_not_quarantined(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE, {"status": "running"}
+            )
+            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
+            self.registry.write_finalize_wal(
+                root,
+                run_id,
+                status="succeeded",
+                state={"status": "succeeded", "exitCode": 0},
+                snapshot={"status": "succeeded", "ok": True},
+            )
             wal = self.registry.finalize_wal_path(root, run_id)
-            wal.write_text("not-json", encoding="utf-8")
+            calls = 0
+
+            def open_unlinked(_path, flags, mode=self.registry.private_io.PRIVATE_FILE_MODE):
+                nonlocal calls
+                candidate = run_path / f".replaced-{calls}"
+                candidate.write_bytes(wal.read_bytes())
+                fd = os.open(candidate, flags, mode)
+                candidate.unlink()
+                calls += 1
+                return fd
+
+            with (
+                mock.patch.object(
+                    self.registry.private_io,
+                    "_PRIVATE_READ_REPLACED_RETRY_SECONDS",
+                    0.01,
+                ),
+                mock.patch.object(
+                    self.registry.private_io,
+                    "open_private_file",
+                    side_effect=open_unlinked,
+                ),
+                self.registry.registry_lock(root, timeout_seconds=1),
+            ):
+                pass
+
+            self.assertGreaterEqual(calls, 2)
+            self.assertTrue(wal.exists())
+            self.assertEqual(list(wal.parent.glob(wal.name + ".corrupt.*")), [])
+
             with self.registry.registry_lock(root, timeout_seconds=1):
                 pass
+
             self.assertFalse(wal.exists())
-            self.assertTrue(list(wal.parent.glob(wal.name + ".corrupt.*")))
+            self.assertEqual(
+                json.loads((run_path / self.registry.STATE_FILE).read_text())["status"],
+                self.registry.STATUS_SUCCEEDED,
+            )
 
     def test_resolve_handle_returns_suggestions_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
