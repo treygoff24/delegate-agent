@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -91,6 +92,33 @@ class MailBoundsTests(unittest.TestCase):
                 "message_too_large",
             )
         self.assertEqual(handle.read_sizes, [mail.MAIL_MAX_BODY_BYTES + 1])
+
+    def test_replaced_mail_record_surfaces_transient_error(self):
+        mail._ensure_mail_tree(self.registry_root)
+        path = mail.mail_root(self.registry_root) / mail.META_FILE_NAME
+        original_open = private_io.open_private_file
+        calls = 0
+
+        def open_replaced(open_path, flags, mode=private_io.PRIVATE_FILE_MODE):
+            nonlocal calls
+            if Path(open_path) != path:
+                return original_open(open_path, flags, mode)
+            candidate = path.parent / f".replaced-{calls}"
+            candidate.write_bytes(path.read_bytes())
+            fd = os.open(candidate, flags, mode)
+            candidate.unlink()
+            calls += 1
+            return fd
+
+        with (
+            mock.patch.object(private_io, "_PRIVATE_READ_REPLACED_RETRY_SECONDS", 0.01),
+            mock.patch.object(private_io, "open_private_file", side_effect=open_replaced),
+            self.assertRaises(DelegateError) as caught,
+        ):
+            mail._read_json(path)
+
+        self.assertEqual(caught.exception.error, "mail_record_replaced")
+        self.assertGreaterEqual(calls, 2)
 
     def test_subject_boundary_accepts_200_chars_and_rejects_one_more(self):
         result = mail.send(

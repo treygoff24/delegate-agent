@@ -483,6 +483,8 @@ def _read_json(
             raise _error(
                 "mail_record_too_large", f"Mail record exceeds its {max_bytes}-byte bound."
             ) from exc
+        if exc.reason == "replaced":
+            raise _error("mail_record_replaced", str(exc)) from exc
         raise _error("mail_unreadable", str(exc)) from exc
     try:
         value = json.loads(text)
@@ -504,6 +506,8 @@ def _load_rules(registry_root: Path) -> list[JsonObject]:
             raise _error(
                 "rules_too_large", f"rules.json exceeds {MAIL_MAX_RULES_BYTES} bytes."
             ) from exc
+        if exc.reason == "replaced":
+            raise _error("mail_record_replaced", str(exc)) from exc
         raise _error("rules_unreadable", str(exc)) from exc
     try:
         raw = json.loads(text)
@@ -615,6 +619,8 @@ def _envelope_from_message(path: Path) -> tuple[JsonObject, str]:
             raise _error(
                 "message_too_large", f"Mail message exceeds {MAIL_MAX_BODY_BYTES} bytes."
             ) from exc
+        if exc.reason == "replaced":
+            raise _error("mail_record_replaced", str(exc)) from exc
         raise _error("mail_unreadable", str(exc)) from exc
     raw = text.encode("utf-8")
     if MESSAGE_SEPARATOR not in raw:

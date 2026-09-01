@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import cli, resume_command, run_registry
+from delegate_agent import cli, private_io, resume_command, run_registry
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import ResolvedWorkspace
 
@@ -117,6 +117,41 @@ class ResumeTrustTests(unittest.TestCase):
             prompt_path.unlink()
             prompt_path.mkdir()
             self.assertEqual(self._error_for(workspace, alias), "resume_record_invalid")
+
+    def test_replaced_prompt_record_surfaces_transient_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            _root, _run_id, alias, run_path = self._seed_record(workspace)
+            prompt_path = run_path / run_registry.PROMPT_TXT_FILE
+            original_open = private_io.open_private_file
+            calls = 0
+
+            def open_replaced(path, flags, mode=private_io.PRIVATE_FILE_MODE):
+                nonlocal calls
+                if Path(path) != prompt_path:
+                    return original_open(path, flags, mode)
+                candidate = run_path / f".replaced-{calls}"
+                candidate.write_bytes(prompt_path.read_bytes())
+                fd = os.open(candidate, flags, mode)
+                candidate.unlink()
+                calls += 1
+                return fd
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(private_io, "_PRIVATE_READ_REPLACED_RETRY_SECONDS", 0.01),
+                mock.patch.object(private_io, "open_private_file", side_effect=open_replaced),
+            ):
+                code = cli.main(
+                    ["--json", "--cwd", str(workspace), "resume", alias],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(code, 2, stderr.getvalue())
+            self.assertEqual(json.loads(stdout.getvalue())["error"], "resume_record_replaced")
+            self.assertGreaterEqual(calls, 2)
 
     def test_oversize_prompt_record_has_prompt_specific_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
