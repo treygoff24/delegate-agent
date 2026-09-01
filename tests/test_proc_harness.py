@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -17,7 +18,8 @@ class ProcessHarnessTests(unittest.TestCase):
     def test_spawn_reaps_supervisor_shaped_tree(self) -> None:
         parent = (
             "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+            "start_new_session=True)\n"
             "print(child.pid, flush=True)\n"
             "time.sleep(30)\n"
         )
@@ -44,8 +46,11 @@ class ProcessHarnessTests(unittest.TestCase):
             workspace = Path(temp)
             root = workspace / ".delegate" / "workflows" / "wf_000000000001"
             root.mkdir(parents=True)
-            (root / "status.json").write_text('{"supervisorPgid": 4242}', encoding="utf-8")
+            (root / "status.json").write_text(
+                '{"supervisorPid": 4241, "supervisorPgid": 4242}', encoding="utf-8"
+            )
             with (
+                mock.patch.object(proc_harness.os, "getpgid", return_value=4242),
                 mock.patch.object(
                     proc_harness.os,
                     "killpg",
@@ -56,8 +61,58 @@ class ProcessHarnessTests(unittest.TestCase):
                 pass
             self.assertEqual(
                 killpg.call_args_list,
-                [mock.call(4242, signal.SIGTERM), mock.call(4242, signal.SIGKILL)],
+                [mock.call(4242, signal.SIGTERM), mock.call(4242, 0)],
             )
+
+    def test_workflow_reap_refuses_a_reused_supervisor_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            root = workspace / ".delegate" / "workflows" / "wf_000000000001"
+            root.mkdir(parents=True)
+            (root / "status.json").write_text(
+                '{"supervisorPid": 4241, "supervisorPgid": 4242}', encoding="utf-8"
+            )
+            with (
+                mock.patch.object(proc_harness.os, "getpgid", return_value=4243),
+                mock.patch.object(proc_harness.os, "killpg") as killpg,
+                mock.patch.object(proc_harness, "_RECORDED_PGIDS", set()) as recorded,
+            ):
+                proc_harness.reap_workflow_now(workspace, "wf_000000000001")
+            killpg.assert_not_called()
+            self.assertEqual(recorded, set())
+
+    def test_live_group_detector_sees_a_real_live_group(self) -> None:
+        with proc_harness.spawn_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"]
+        ) as process:
+            pgid = os.getpgid(process.pid)
+            self.assertTrue(proc_harness._group_has_live_members(pgid))
+
+    def test_subprocess_suite_end_hook_rejects_a_live_recorded_group(self) -> None:
+        code = (
+            "import os\n"
+            "from tests import proc_harness\n"
+            "proc_harness.register_process_tree(os.getpid(), os.getpgrp())\n"
+        )
+        env = os.environ.copy()
+        env.pop("DELEGATE_WORKFLOW_PIN", None)
+        env.pop("PYTHONPATH", None)
+        env["TMPDIR"] = "/tmp"
+        process = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+        pgid = process.pid
+        try:
+            process.wait(timeout=10)
+            self.assertNotEqual(process.returncode, 0)
+        finally:
+            proc_harness.reap_process_group(pgid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
 
     def test_suite_end_assertion_rejects_a_live_recorded_group(self) -> None:
         with (
