@@ -831,18 +831,23 @@ and never touch a workspace, an account, or a harness.
 `delegate doctor` reports the digest of the runtime that is executing the
 command, the last promotion stamp (`~/.delegate/last-promotion.json`), whether
 the two agree, and the workflow supervisors still running on launch-time
-pinned runtimes (stale entries are reconciled on read). It is read-only under
-the profile guard. It warns when the live digest differs from the stamped one
+pinned runtimes (stale entries are dropped from the view; the index file is
+not rewritten). It is read-only under the profile guard. It warns when the live digest differs from the stamped one
 -- the installed runtime changed without a `promote` -- and when no stamp
-exists at all. JSON fields: `runtimeDigest`, `promotion`,
+exists at all, and when the launcher that ran it differs from the one the
+last promotion ran through. JSON (`delegate.doctor.v1`) fields:
+`runtimeDigest`, `entrypoint`, `entrypointDigest`, `promotion`,
 `promotionMatchesRuntime`, `activeSupervisors`, `warnings`.
 
 `delegate promote` records who installed the runtime, from what source, and
 its digest (`delegate.promotion.v1`). It copies no code. Run it through the
 installed command *after* installing, so the default digest is the live one;
 pass `--runtime-digest` only to backfill a stamp for a runtime you are not
-running. The stamp also lists active supervisors that may still be on an older
-pinned runtime. `--actor` and `--source` are required.
+running. The stamp is written under a lock, records the launcher it ran
+through, and lists active supervisors that may still be on an older pinned
+runtime. `--actor` and `--source` are required. `promote` is a mutation under
+the profile guard; with `AI_PROFILE` set and its overlay missing mid-upgrade,
+run `env -u AI_PROFILE delegate promote ...`.
 
 The promotion ritual, in order: install the checkout into `~/.delegate/src`
 (rsync or tarball), run `delegate promote --actor <you> --source <commit>`

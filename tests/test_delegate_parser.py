@@ -191,6 +191,15 @@ class ParserTests(unittest.TestCase):
         trailing_json = self.delegate.parse_cli(["setup", "--json"])
         self.assertTrue(trailing_json.global_options.json_mode)
 
+    def test_parsed_command_and_promote_options_keep_dataclass_contracts(self):
+        import dataclasses
+
+        fields = {field.name for field in dataclasses.fields(self.delegate.ParsedCommand)}
+        self.assertIn("promote", fields)
+        options = self.delegate.parse_cli(["promote", "--actor", "a", "--source", "b"]).promote
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            options.actor = "c"
+
     def test_doctor_and_promote_parse_and_refuse_bad_input(self):
         parsed = self.delegate.parse_cli(["--json", "doctor"])
         self.assertEqual(parsed.subcommand, "doctor")

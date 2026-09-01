@@ -2804,7 +2804,7 @@ class WorkflowDsl:
             return None
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
-        native_schema = _codex_native_schema(schema) if engine == "codex" else None
+        native_schema = _native_schema(engine, schema)
         prior_output = ""
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
@@ -3746,6 +3746,19 @@ def _terminate_and_reap_child(process: subprocess.Popen[bytes]) -> None:
 def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
     with contextlib.suppress(OSError):
         os.killpg(os.getpgid(process.pid), sig)
+
+
+def _native_schema(engine: str, schema: JsonObject) -> JsonObject | None:
+    """Schema to hand the child as --output-schema, or None for the prompt-and-parse path.
+
+    Codex only accepts strict closed objects; Claude's --json-schema takes the
+    validated subset as-is, so it is enforced natively for every workflow schema.
+    """
+    if engine == "codex":
+        return _codex_native_schema(schema)
+    if engine == "claude":
+        return schema
+    return None
 
 
 def _codex_native_schema(schema: JsonObject) -> JsonObject | None:

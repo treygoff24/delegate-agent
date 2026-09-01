@@ -333,6 +333,36 @@ class ResumeInheritanceTests(ResumeFixture):
         self.assertIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, request.argv)
         self.assertIsNotNone(request.output_schema_text)
 
+    def test_claude_manifest_schema_is_inherited_and_inlined_on_resume(self):
+        schema_text = (
+            '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}'
+        )
+        self.write_config({})
+        _run_id, alias, _run_path = self.seed_run(
+            engine="claude",
+            mode="safe",
+            manifest={"outputSchema": schema_text, "isolationMode": "none"},
+        )
+        parsed = self.delegate.parse_cli(
+            ["--json", "--cwd", str(self.workspace), "resume", "--dry-run", alias, "next"]
+        )
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, self._config_env, clear=False):
+            plan = self.delegate.resume_command.build_resume_plan(
+                parsed,
+                self.delegate.ResolvedWorkspace(str(self.workspace), "directory"),
+                self.loaded_config(),
+                stderr=stderr,
+            )
+            request = self.delegate.request_from_parsed(
+                plan.parsed, self.loaded_config(), io.StringIO()
+            )
+        self.assertNotIn("output schema dropped", stderr.getvalue())
+        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertEqual(request.argv[request.argv.index("--json-schema") + 1], schema_text)
+        self.assertEqual(request.argv[request.argv.index("--output-format") + 1], "stream-json")
+        self.assertNotIn(schema_text, self.delegate.argv_utils.public_argv(request))
+
     def test_inherited_timeout_accepts_integral_float_and_refuses_invalid_values(self):
         self.write_config({})
         _run_id, float_alias, _run_path = self.seed_run(

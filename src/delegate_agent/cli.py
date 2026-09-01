@@ -785,6 +785,7 @@ def make_run_context(
         capability_model_source=request.capability_model_source,
         continuity_mode=request.continuity_mode,
         creation_context=creation_context,
+        structured_output=request.output_schema is not None,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,
         effective_isolation=effective_isolation,

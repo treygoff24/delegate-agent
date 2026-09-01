@@ -1621,11 +1621,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate doctor", "delegate --json doctor"),
         notes=(
             "Read-only and machine-local: reads ~/.delegate/last-promotion.json and "
-            "~/.delegate/active-supervisors.json, reconciling stale supervisor entries.",
+            "~/.delegate/active-supervisors.json; stale supervisor entries are dropped from "
+            "the view without rewriting the index.",
             "Warns when the live runtime digest differs from the stamped one -- the "
             "installed runtime changed without 'delegate promote' -- or when no stamp exists.",
-            "JSON reports runtimeDigest, promotion, promotionMatchesRuntime, activeSupervisors, "
-            "and warnings.",
+            "JSON (delegate.doctor.v1) reports runtimeDigest, entrypoint, entrypointDigest, "
+            "promotion, promotionMatchesRuntime, activeSupervisors, and warnings.",
         ),
         see_also=("promote", "workflow list", "describe"),
         unsupported_global_options=(
@@ -1660,8 +1661,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Records a stamp only; it does not copy code. Install the runtime first, then run "
             "promote through the installed command so the default digest is the live one.",
-            "Writes ~/.delegate/last-promotion.json (mode 0600) and lists active supervisors "
-            "still pinned to an older runtime.",
+            "Writes ~/.delegate/last-promotion.json (mode 0600) under a lock and lists active "
+            "supervisors still pinned to an older runtime; also records the launcher that ran it.",
+            "promote is a mutation under the profile guard; with AI_PROFILE set and its overlay "
+            "missing mid-upgrade, run 'env -u AI_PROFILE delegate promote ...'.",
             "Promotion stamps carry no authority: 'delegate doctor' is the read side.",
         ),
         see_also=("doctor", "workflow list"),
@@ -2324,7 +2327,7 @@ def render_overview_text() -> str:
         "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",

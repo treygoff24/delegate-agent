@@ -178,6 +178,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     retire_worktree_on_completion: bool = True
+    structured_output: bool = False
     retirement_ignore_globs: tuple[str, ...] = delegate_config.DEFAULT_RETIREMENT_IGNORE_GLOBS
     worktree_auto_prune_on_completion: bool = False
     worktree_auto_prune_merged_older_than_days: int = 7
@@ -1027,8 +1028,11 @@ def _classify_result_quality(
         # NOT be flagged, while a preamble-only fragment like "Performing an
         # adversarial review..." must still flag. Delegate-synthesized reports
         # are never suspect (they are structured diagnostics, not child output).
+        # A schema-bound final message is compact by construction ({"ok":true}
+        # is a complete report), so the prose-length heuristic does not apply.
         if (
             ctx.mode == "safe"
+            and not ctx.structured_output
             and report_source == COMPLETION_REPORT_SOURCE_CHILD
             and len(report_text.strip()) < 200
             and not harness_events.is_substantive_assistant_text(report_text)

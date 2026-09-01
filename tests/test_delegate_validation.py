@@ -182,6 +182,23 @@ class ValidationTests(unittest.TestCase):
                         self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(),
                         request.prompt,
                     )
+                    # The manifest carries the raw text so resume can inherit it.
+                    self.assertEqual(request.output_schema_record_text, contents)
+            # Inline text (the resume path) is passed straight through, never
+            # reopened as a path.
+            inline = self.delegate.build_request(
+                "claude",
+                "safe",
+                None,
+                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                "review",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                output_schema="<delegate-inline-output-schema>",
+                output_schema_text=contents,
+            )
+            self.assertEqual(inline.argv[inline.argv.index("--json-schema") + 1], contents)
+            self.assertEqual(inline.output_schema_record_text, contents)
             # Call mode still reads a single JSON envelope.
             call = self.delegate.build_request(
                 "claude",

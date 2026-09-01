@@ -257,6 +257,14 @@ class OverviewTests(unittest.TestCase):
         self.assertIn("codex call", self.overview)
         self.assertIn("--output-schema FILE", self.overview)
 
+    def test_overview_advertises_output_schema_on_every_claude_line(self):
+        claude_lines = [
+            line for line in self.overview.splitlines() if " claude " in line and "[--model" in line
+        ]
+        self.assertEqual(len(claude_lines), 4)
+        for line in claude_lines:
+            self.assertIn("[--output-schema FILE]", line)
+
     def test_overview_advertises_codex_fast_on_every_codex_line(self):
         codex_lines = [
             line for line in self.overview.splitlines() if " codex " in line and "[--model" in line
