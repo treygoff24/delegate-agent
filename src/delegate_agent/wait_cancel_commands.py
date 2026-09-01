@@ -10,7 +10,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, run_registry, snapshot_view
+from delegate_agent import command_errors, profiles, run_registry, snapshot_view
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
@@ -347,7 +347,7 @@ def _process_start_datetime(pid: int) -> datetime | None:
             capture_output=True,
             text=True,
             check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env=profiles.child_environment(overrides={"LC_ALL": "C"}),
             timeout=5.0,
         )
     except (OSError, subprocess.TimeoutExpired):
