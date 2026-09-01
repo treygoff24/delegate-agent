@@ -32,6 +32,8 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
         if isinstance(schema_type, list):
             if not schema_type or any(item not in allowed for item in schema_type):
                 raise SchemaError(f"{path}.type has unsupported values.")
+            if len(set(schema_type)) != len(schema_type):
+                raise SchemaError(f"{path}.type must not repeat a type.")
         elif schema_type not in allowed:
             raise SchemaError(f"{path}.type has unsupported value: {schema_type!r}.")
     required = schema.get("required")
@@ -40,6 +42,8 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
         or any(not isinstance(item, str) or not item for item in required)
     ):
         raise SchemaError(f"{path}.required must be an array of non-empty strings.")
+    if required and len(set(required)) != len(required):
+        raise SchemaError(f"{path}.required must not repeat a property.")
     properties = schema.get("properties")
     if properties is not None:
         if not isinstance(properties, dict):
@@ -52,8 +56,15 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
     if items is not None:
         validate_schema_subset(items, path=f"{path}.items")
     enum = schema.get("enum")
-    if enum is not None and not isinstance(enum, list):
-        raise SchemaError(f"{path}.enum must be an array.")
+    if enum is not None:
+        # Claude's --json-schema preflight rejects empty and duplicate enums
+        # before launch, so the subset must reject them too or a workflow that
+        # validated here fails the moment the child starts.
+        if not isinstance(enum, list) or not enum:
+            raise SchemaError(f"{path}.enum must be a non-empty array.")
+        encoded = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in enum]
+        if len(set(encoded)) != len(encoded):
+            raise SchemaError(f"{path}.enum must not repeat a value.")
     additional = schema.get("additionalProperties")
     if isinstance(additional, dict):
         validate_schema_subset(additional, path=f"{path}.additionalProperties")

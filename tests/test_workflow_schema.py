@@ -110,6 +110,30 @@ class AdditionalPropertiesSchema(unittest.TestCase):
             workflow_schema.validate_schema_subset({"type": "object", "additionalProperties": 1})
 
 
+class SchemaSubsetMatchesClaudePreflight(unittest.TestCase):
+    """Shapes Claude's --json-schema preflight refuses must fail here first."""
+
+    def test_empty_enum_rejected(self) -> None:
+        with self.assertRaises(workflow_schema.SchemaError):
+            workflow_schema.validate_schema_subset({"type": "string", "enum": []})
+
+    def test_duplicate_enum_values_rejected(self) -> None:
+        for enum in (["a", "a"], [1, 1], [{"k": 1}, {"k": 1}], [None, None]):
+            with self.subTest(enum=enum), self.assertRaises(workflow_schema.SchemaError):
+                workflow_schema.validate_schema_subset({"enum": enum})
+        workflow_schema.validate_schema_subset({"enum": ["a", "b", 1, "1", None]})
+
+    def test_duplicate_required_rejected(self) -> None:
+        schema = {"type": "object", "required": ["a", "a"], "properties": {"a": {"type": "string"}}}
+        with self.assertRaises(workflow_schema.SchemaError):
+            workflow_schema.validate_schema_subset(schema)
+
+    def test_duplicate_type_union_rejected(self) -> None:
+        with self.assertRaises(workflow_schema.SchemaError):
+            workflow_schema.validate_schema_subset({"type": ["string", "string"]})
+        workflow_schema.validate_schema_subset({"type": ["string", "null"]})
+
+
 class CodexNativeSchema(unittest.TestCase):
     def test_optional_fields_fall_back_to_prompt_path(self) -> None:
         self.assertIsNone(workflow_runtime._codex_native_schema(EXECUTE_RESULT))

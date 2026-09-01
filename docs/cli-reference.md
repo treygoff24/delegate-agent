@@ -834,8 +834,11 @@ the two agree, and the workflow supervisors still running on launch-time
 pinned runtimes (stale entries are dropped from the view; the index file is
 not rewritten). It is read-only under the profile guard. It warns when the live digest differs from the stamped one
 -- the installed runtime changed without a `promote` -- and when no stamp
-exists at all, and when the launcher that ran it differs from the one the
-last promotion ran through. JSON (`delegate.doctor.v1`) fields:
+exists at all, and when the installed launcher (`~/.delegate/bin/delegate.py`)
+differs from the one the last promotion recorded. The launcher identity is
+that fixed file, not whatever `sys.argv[0]` happens to be, so the console
+script, `python -m delegate_agent.cli`, and the profile shell shim all report
+the same thing. JSON (`delegate.doctor.v1`) fields:
 `runtimeDigest`, `entrypoint`, `entrypointDigest`, `promotion`,
 `promotionMatchesRuntime`, `activeSupervisors`, `warnings`.
 
@@ -843,9 +846,10 @@ last promotion ran through. JSON (`delegate.doctor.v1`) fields:
 its digest (`delegate.promotion.v1`). It copies no code. Run it through the
 installed command *after* installing, so the default digest is the live one;
 pass `--runtime-digest` only to backfill a stamp for a runtime you are not
-running. The stamp is written under a lock, records the launcher it ran
-through, and lists active supervisors that may still be on an older pinned
-runtime. `--actor` and `--source` are required. `promote` is a mutation under
+running. The live digest is read and the stamp written under one lock, so
+concurrent promoters cannot stamp a digest that a newer install already
+superseded; the stamp also records the installed launcher's digest and lists
+active supervisors that may still be on an older pinned runtime. `--actor` and `--source` are required. `promote` is a mutation under
 the profile guard; with `AI_PROFILE` set and its overlay missing mid-upgrade,
 run `env -u AI_PROFILE delegate promote ...`.
 

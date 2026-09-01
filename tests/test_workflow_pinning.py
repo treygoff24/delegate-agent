@@ -421,13 +421,22 @@ finally:
         self.assertTrue(report["promotionMatchesRuntime"])
         self.assertNotIn("warnings", report)
 
-    def test_doctor_never_writes_the_supervisor_index(self) -> None:
+    def _home_snapshot(self) -> dict[str, bytes | None]:
+        snapshot: dict[str, bytes | None] = {}
+        for path in sorted(self.home.rglob("*")):
+            snapshot[str(path)] = path.read_bytes() if path.is_file() else None
+        return snapshot
+
+    def test_doctor_never_writes_under_home(self) -> None:
         index_path = workflow_pinning.active_index_path(self.home)
-        self.assertFalse(index_path.exists())
+        self.home.mkdir(parents=True, exist_ok=True)
+        before = self._home_snapshot()
         workflow_pinning.doctor(home=self.home)
+        self.assertEqual(self._home_snapshot(), before, "doctor wrote into an empty home")
         self.assertFalse(index_path.exists(), "doctor created the index it claims only to read")
         # A stale entry (dead workflow root) is dropped from the view but the
-        # bytes on disk stay exactly as they were.
+        # whole home tree -- index bytes, lock files, directories -- stays
+        # exactly as it was.
         stale = json.dumps(
             {
                 "schema": workflow_pinning.ACTIVE_INDEX_SCHEMA,
@@ -439,29 +448,70 @@ finally:
         )
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(stale, encoding="utf-8")
+        before = self._home_snapshot()
         report = workflow_pinning.doctor(home=self.home)
         self.assertEqual(report["activeSupervisors"], {})
-        self.assertEqual(index_path.read_text(encoding="utf-8"), stale)
+        self.assertEqual(self._home_snapshot(), before, "doctor left new files or bytes behind")
         # The mutating reconcile still prunes, so the two paths are distinct.
         workflow_pinning.reconcile_active_supervisors(home=self.home)
         self.assertNotEqual(index_path.read_text(encoding="utf-8"), stale)
 
-    def test_doctor_warns_when_launcher_differs_from_promotion(self) -> None:
-        stamp = workflow_pinning.promote(
-            actor="test",
-            runtime_digest=workflow_pinning.live_runtime_digest(),
-            source="unit-test",
-            home=self.home,
-        )
-        self.assertEqual(stamp["entrypointDigest"], workflow_pinning.entrypoint_digest())
+    def test_launcher_identity_is_the_installed_file_not_argv(self) -> None:
+        self.assertIsNone(workflow_pinning.entrypoint_path(self.home))
+        launcher = self.home / ".delegate" / "bin" / "delegate.py"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(workflow_pinning._LAUNCHER)
+        expected = workflow_pinning.entrypoint_digest(self.home)
+        for argv0 in ("delegate", "/usr/bin/python3", str(self.root / "elsewhere.py"), ""):
+            with mock.patch.object(sys, "argv", [argv0, "doctor"]):
+                self.assertEqual(workflow_pinning.entrypoint_path(self.home), launcher)
+                self.assertEqual(workflow_pinning.entrypoint_digest(self.home), expected)
+
+    def test_doctor_warns_when_installed_launcher_changed_since_promotion(self) -> None:
+        launcher = self.home / ".delegate" / "bin" / "delegate.py"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(workflow_pinning._LAUNCHER)
+        stamp = workflow_pinning.promote(actor="test", source="unit-test", home=self.home)
+        self.assertEqual(stamp["entrypoint"], str(launcher))
+        self.assertEqual(stamp["entrypointDigest"], workflow_pinning.entrypoint_digest(self.home))
         self.assertNotIn("warnings", workflow_pinning.doctor(home=self.home))
-        path = workflow_pinning.promotion_path(self.home)
-        stamped = json.loads(path.read_text(encoding="utf-8"))
-        stamped["entrypointDigest"] = "0" * 64
-        path.write_text(json.dumps(stamped), encoding="utf-8")
+        # A launcher rewritten without a fresh promotion is the real defect
+        # this catches: the package stamp still matches, the launcher does not.
+        launcher.write_bytes(workflow_pinning._LAUNCHER + b"\n# rewritten by a later install\n")
         report = workflow_pinning.doctor(home=self.home)
         self.assertTrue(report["promotionMatchesRuntime"])
+        self.assertEqual(report["entrypoint"], str(launcher))
         self.assertTrue(any("launcher" in warning for warning in report["warnings"]))
+
+    def test_promote_reads_the_live_digest_under_the_promotion_lock(self) -> None:
+        import fcntl
+
+        from delegate_agent import run_registry
+
+        lock_path = workflow_pinning.promotion_path(self.home).with_name(
+            workflow_pinning.PROMOTION_LOCK_FILE
+        )
+        observed: list[bool] = []
+
+        def digest_while_checking_lock() -> str:
+            fd = run_registry.open_private_file(lock_path, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                observed.append(True)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                observed.append(False)
+            finally:
+                os.close(fd)
+            return "c" * 64
+
+        with mock.patch.object(
+            workflow_pinning, "live_runtime_digest", side_effect=digest_while_checking_lock
+        ):
+            stamp = workflow_pinning.promote(actor="test", source="unit-test", home=self.home)
+        self.assertEqual(observed, [True], "live digest was read outside the promotion lock")
+        self.assertEqual(stamp["runtimeDigest"], "c" * 64)
 
     def test_promote_serializes_under_the_promotion_lock(self) -> None:
         import threading

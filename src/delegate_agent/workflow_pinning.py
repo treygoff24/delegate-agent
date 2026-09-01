@@ -281,19 +281,22 @@ def live_runtime_digest() -> str:
     return _runtime_digest(_runtime_source_files())
 
 
-def entrypoint_path() -> Path | None:
-    """The script that launched this process (``~/.delegate/bin/delegate.py`` when installed)."""
-    try:
-        candidate = Path(sys.argv[0])
-    except (IndexError, TypeError):
-        return None
+def entrypoint_path(home: Path | None = None) -> Path | None:
+    """The installed launcher, ``~/.delegate/bin/delegate.py``, when present.
+
+    This is deliberately a fixed location rather than ``sys.argv[0]``: the
+    console script, ``python -m delegate_agent.cli``, and the profile shell
+    shim all reach the same runtime, and the launcher identity must not
+    change with the invocation form.
+    """
+    candidate = (home or Path.home()) / ".delegate" / "bin" / "delegate.py"
     if not candidate.is_file():
         return None
-    return candidate.resolve()
+    return candidate
 
 
-def entrypoint_digest() -> str | None:
-    path = entrypoint_path()
+def entrypoint_digest(home: Path | None = None) -> str | None:
+    path = entrypoint_path(home)
     if path is None:
         return None
     try:
@@ -596,13 +599,13 @@ def _write_active_index(path: Path, payload: JsonObject) -> None:
     path.chmod(0o600)
 
 
-def _reconcile_active_supervisors_locked(
-    *, home: Path | None = None, write: bool = True
-) -> JsonObject:
+def _reconcile_active_supervisors(*, home: Path | None = None, write: bool = True) -> JsonObject:
     """Drop missing/unlocked workflow entries and return the live index.
 
-    ``write=False`` returns the same reconciled view without touching the
-    on-disk index, for read-only surfaces such as ``doctor``.
+    Callers that pass ``write=True`` must hold the index lock. ``write=False``
+    returns the same reconciled view without touching the on-disk index and
+    needs no lock: the index is only ever replaced atomically, so an
+    unlocked read sees a whole old or new file.
     """
     path = active_index_path(home)
     payload = _read_active_index(path)
@@ -628,16 +631,17 @@ def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
     """Drop missing/unlocked workflow entries and return the live index."""
     path = active_index_path(home)
     with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
-        return _reconcile_active_supervisors_locked(home=home)
+        return _reconcile_active_supervisors(home=home)
 
 
 def active_supervisors_view(*, home: Path | None = None) -> JsonObject:
-    """Reconciled live view of the supervisor index that never writes it."""
-    path = active_index_path(home)
-    if not path.exists():
-        return {"schema": ACTIVE_INDEX_SCHEMA, "supervisors": {}}
-    with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
-        return _reconcile_active_supervisors_locked(home=home, write=False)
+    """Reconciled live view of the supervisor index that never writes anything.
+
+    No lock is taken: acquiring one would create the lock file, and ``doctor``
+    is admitted through the read-only profile guard on the promise that it
+    leaves ``~/.delegate`` untouched.
+    """
+    return _reconcile_active_supervisors(home=home, write=False)
 
 
 def register_active_supervisor(
@@ -650,7 +654,7 @@ def register_active_supervisor(
 ) -> JsonObject:
     path = active_index_path(home)
     with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
-        index = _reconcile_active_supervisors_locked(home=home)
+        index = _reconcile_active_supervisors(home=home)
         entries = index["supervisors"]
         assert isinstance(entries, dict)
         entries[workflow_id] = {
@@ -677,8 +681,8 @@ def doctor(*, home: Path | None = None) -> JsonObject:
     entries = index.get("supervisors")
     promotion = _read_promotion(home=home)
     live_digest = live_runtime_digest()
-    live_entrypoint = entrypoint_path()
-    live_entrypoint_digest = entrypoint_digest()
+    live_entrypoint = entrypoint_path(home)
+    live_entrypoint_digest = entrypoint_digest(home)
     stamped_digest = promotion.get("runtimeDigest") if promotion is not None else None
     stamped_entrypoint_digest = promotion.get("entrypointDigest") if promotion is not None else None
     matches = isinstance(stamped_digest, str) and stamped_digest == live_digest
@@ -711,8 +715,8 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         and stamped_entrypoint_digest != live_entrypoint_digest
     ):
         warnings.append(
-            f"launcher {live_entrypoint} differs from the one the last promotion ran through; "
-            "the package and its entrypoint were not installed together."
+            f"installed launcher {live_entrypoint} differs from the one recorded by the last "
+            "promotion; the package and its launcher were not promoted together."
         )
     if isinstance(entries, dict) and entries:
         warnings.append(f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes.")
@@ -733,36 +737,42 @@ def _read_promotion(*, home: Path | None = None) -> JsonObject | None:
 def promote(
     *,
     actor: str,
-    runtime_digest: str,
     source: str,
+    runtime_digest: str | None = None,
     home: Path | None = None,
 ) -> JsonObject:
     """Stamp a deploy/promotion event for the doctor surface.
 
+    ``runtime_digest=None`` records the live runtime, read under the promotion
+    lock so two promoters cannot stamp a digest that was already superseded.
+
     Actual deploy mechanics belong to hq tooling; this local seam records only
     the immutable runtime identity, actor, source, and timestamp.
     """
-    if not actor.strip() or not source.strip() or not runtime_digest.strip():
-        raise WorkflowPinError(
-            "invalid_promotion", "actor, source, and runtime digest are required"
-        )
+    if not actor.strip() or not source.strip():
+        raise WorkflowPinError("invalid_promotion", "actor and source are required")
+    if runtime_digest is not None and not runtime_digest.strip():
+        raise WorkflowPinError("invalid_promotion", "runtime digest must not be blank")
     path = promotion_path(home)
     run_registry.ensure_private_dir(path.parent)
-    # Serialize concurrent promoters: the timestamp is taken and the stamp
-    # written under one lock, so the file always names the latest promotion
+    # Serialize concurrent promoters: the live digest is read, the timestamp
+    # taken, and the stamp written under one lock, so the file always names
+    # the runtime that was installed at the moment of the latest promotion
     # rather than whichever process happened to os.replace last.
     with run_registry.file_lock(path.with_name(PROMOTION_LOCK_FILE)):
         payload: JsonObject = {
             "schema": PROMOTION_SCHEMA,
             "actor": actor,
             "source": source,
-            "runtimeDigest": runtime_digest,
+            "runtimeDigest": runtime_digest
+            if runtime_digest is not None
+            else live_runtime_digest(),
             "promotedAt": _utc_now(),
         }
-        live_entrypoint = entrypoint_path()
+        live_entrypoint = entrypoint_path(home)
         if live_entrypoint is not None:
             payload["entrypoint"] = str(live_entrypoint)
-            payload["entrypointDigest"] = entrypoint_digest()
+            payload["entrypointDigest"] = entrypoint_digest(home)
         active_index = reconcile_active_supervisors(home=home)
         active = active_index.get("supervisors")
         if isinstance(active, dict):
@@ -813,12 +823,7 @@ def emit_promote(
     stdout: TextIO,
     json_mode: bool = False,
 ) -> int:
-    payload = promote(
-        actor=actor,
-        runtime_digest=runtime_digest if runtime_digest is not None else live_runtime_digest(),
-        source=source,
-        home=home,
-    )
+    payload = promote(actor=actor, runtime_digest=runtime_digest, source=source, home=home)
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
