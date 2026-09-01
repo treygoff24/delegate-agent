@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 
 from delegate_agent.workflows import registry
-from delegate_agent.workflows.runtime import WORKFLOW_HEARTBEAT_FILE
 from tests import proc_harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,10 +51,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(
             json.dumps(
-                {
-                    "codex": {"binary": str(self.codex)},
-                    "workflows": {"watchdogTimeoutSeconds": 1.0},
-                }
+                {"codex": {"binary": str(self.codex)}}
             ),
             encoding="utf-8",
         )
@@ -68,7 +64,6 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                 "HOME": str(self.home),
                 "DELEGATE_CONFIG": str(self.config),
                 "DELEGATE_WORKFLOW_NO_DAEMON": "1",
-                "DELEGATE_WORKFLOW_WATCHDOG_TIMEOUT_SECONDS": "1",
                 "FAKE_CODEX_SLEEP": str(sleep),
             }
         )
@@ -186,31 +181,9 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         shutil.rmtree(root)
         self._wait_process_gone(pid)
 
-    def test_frozen_heartbeat_cancels_real_supervisor_and_releases_lock(self) -> None:
-        _, root = self._launch(10)
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        pid = int(status["supervisorPid"])
-        heartbeat = root / "heartbeat.json"
-        self._wait_for(lambda: heartbeat.exists())
-        heartbeat.unlink()
-        heartbeat.mkdir()
-        self._wait_process_gone(pid)
-        self.assertFalse(registry.supervisor_alive(root))
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        self.assertEqual(status.get("watchdogReason"), "heartbeat_invalid")
 
-    def test_healthy_long_child_keeps_heartbeat_and_is_not_killed(self) -> None:
-        """Keep the child-wait regression while lease coverage moves to the timer."""
+    def test_healthy_long_child_is_not_killed(self) -> None:
         _, root = self._launch(2)
-        heartbeat = root / "heartbeat.json"
-        first = self._wait_for(lambda: registry.read_json(heartbeat))
-        first_epoch = first.get("heartbeatEpoch") if isinstance(first, dict) else None
-        self.assertIsInstance(first_epoch, (int, float))
-        self._wait_for(
-            lambda: (
-                (registry.read_json(heartbeat) or {}).get("heartbeatEpoch", 0) > float(first_epoch)
-            )
-        )
         self._wait_for(
             lambda: (
                 (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
@@ -221,7 +194,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.assertNotIn("workflow_watchdog", {event.get("type") for event in events})
         self.assertFalse(registry.supervisor_alive(root))
 
-    def test_parked_script_survives_twice_stale_window_before_child_admission(self) -> None:
+    def test_journal_silent_stretch_is_not_killed(self) -> None:
         _, root = self._launch(
             0,
             "import time\n"
@@ -229,19 +202,12 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             "time.sleep(3.5)\n"
             "return agent('after parked stretch')\n",
         )
-        heartbeat = root / WORKFLOW_HEARTBEAT_FILE
-        first = self._wait_for(lambda: registry.read_json(heartbeat))
-        first_epoch = first.get("heartbeatEpoch") if isinstance(first, dict) else None
-        self.assertIsInstance(first_epoch, (int, float))
-
         time.sleep(2.2)
 
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         self.assertEqual(status.get("status"), "running")
         self.assertTrue(registry.supervisor_alive(root))
         self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), [])
-        current = registry.read_json(heartbeat) or {}
-        self.assertGreater(current.get("heartbeatEpoch", 0), float(first_epoch))
         self._wait_for(
             lambda: (
                 (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
@@ -249,69 +215,9 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             timeout=8,
         )
 
-    def test_heartbeat_writer_recovers_after_one_unwritable_iteration(self) -> None:
-        _, root = self._launch(
-            0,
-            "import time\nmeta = {'name': 'write recovery'}\ntime.sleep(4)\nreturn True\n",
-        )
-        heartbeat = root / WORKFLOW_HEARTBEAT_FILE
-        first = self._wait_for(lambda: registry.read_json(heartbeat))
-        first_epoch = first.get("heartbeatEpoch") if isinstance(first, dict) else None
-        self.assertIsInstance(first_epoch, (int, float))
 
-        original_mode = root.stat().st_mode & 0o777
-        root.chmod(0o500)
-        try:
-            time.sleep(0.45)
-        finally:
-            root.chmod(original_mode)
 
-        self._wait_for(
-            lambda: (
-                (registry.read_json(heartbeat) or {}).get("heartbeatEpoch", 0) > float(first_epoch)
-            ),
-            timeout=1.5,
-        )
-        self.assertTrue(registry.supervisor_alive(root))
-        self._wait_for(
-            lambda: (
-                (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
-            ),
-            timeout=8,
-        )
-
-    def test_one_refused_heartbeat_read_does_not_cancel_supervisor(self) -> None:
-        _, root = self._launch(
-            0,
-            "import time\n"
-            "from pathlib import Path\n"
-            "from delegate_agent.workflows import registry as workflow_registry\n"
-            "meta = {'name': 'heartbeat read retry'}\n"
-            "real_read_json = workflow_registry.read_json\n"
-            "refuse_once = [True]\n"
-            "def read_json_with_one_refusal(path):\n"
-            "    if Path(path).name == 'heartbeat.json' and refuse_once[0]:\n"
-            "        refuse_once[0] = False\n"
-            "        return None\n"
-            "    return real_read_json(path)\n"
-            "workflow_registry.read_json = read_json_with_one_refusal\n"
-            "try:\n"
-            "    time.sleep(0.7)\n"
-            "finally:\n"
-            "    workflow_registry.read_json = real_read_json\n"
-            "return agent('after refused heartbeat read')\n",
-        )
-
-        self._wait_for(
-            lambda: (
-                (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
-            ),
-            timeout=8,
-        )
-        events = registry.iter_journal(root / registry.JOURNAL_FILE)
-        self.assertNotIn("workflow_watchdog", {event.get("type") for event in events})
-
-    def test_slow_gate_and_soft_park_notifications_keep_lease_alive(self) -> None:
+    def test_slow_gate_and_soft_park_notifications_do_not_break_pause(self) -> None:
         post = self.bin_dir / "post"
         post.write_text(
             "#!/usr/bin/env python3\n"
@@ -356,16 +262,9 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                         == "paused"
                     )
                 )
-                heartbeat = root / WORKFLOW_HEARTBEAT_FILE
-                first = registry.read_json(heartbeat) or {}
-                first_epoch = first.get("heartbeatEpoch")
-                self.assertIsInstance(first_epoch, (int, float))
-
                 time.sleep(1.2)
 
                 self.assertTrue(registry.supervisor_alive(root))
-                current = registry.read_json(heartbeat) or {}
-                self.assertGreater(current.get("heartbeatEpoch", 0), float(first_epoch))
                 status = registry.read_json(root / registry.STATUS_FILE) or {}
                 self._wait_process_gone(int(status["supervisorPid"]), timeout=8)
                 self.assertEqual(

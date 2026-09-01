@@ -63,10 +63,7 @@ PERSONA_RESOLUTION_ERRORS = frozenset(
     }
 )
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
-WORKFLOW_HEARTBEAT_FILE = "heartbeat.json"
-WORKFLOW_HEARTBEAT_SCHEMA = "delegate.workflow-heartbeat.v1"
 WORKFLOW_WATCHDOG_INTERVAL_SECONDS = 0.25
-WORKFLOW_WATCHDOG_STALE_SECONDS = 5.0
 CHILD_WAIT_POLL_SECONDS = 0.25
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
@@ -615,7 +612,6 @@ class WorkflowState:
     claimed_keys: set[str] = field(default_factory=set)
     sequence: int = 0
     journal_lock: threading.Lock = field(default_factory=threading.Lock)
-    heartbeat_lock: threading.Lock = field(default_factory=threading.Lock)
     scope_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_counter: list[int] = field(default_factory=lambda: [0])
@@ -835,7 +831,6 @@ class WorkflowState:
                 )
             else:
                 self._write_status_locked(status="running", last_event=event)
-            self._touch_heartbeat_locked()
             return event
 
     def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
@@ -891,31 +886,7 @@ class WorkflowState:
                 )
             else:
                 self._write_status_locked(status="running", last_event=event)
-            self._touch_heartbeat_locked()
             return event
-
-    def _touch_heartbeat_locked(self) -> None:
-        """Serialize one lease write without taking the journal lock.
-
-        Event paths already hold ``journal_lock`` before entering this method;
-        the timer owns only ``heartbeat_lock`` so a blocked write cannot stall
-        journal or notification work.
-        """
-        with self.heartbeat_lock:
-            payload: JsonObject = {
-                "schema": WORKFLOW_HEARTBEAT_SCHEMA,
-                "wfId": self.wf_id,
-                "supervisorPid": os.getpid(),
-                "supervisorToken": self.supervisor_token,
-                "heartbeatAt": run_registry.utc_now_iso(),
-                "heartbeatEpoch": time.time(),
-            }
-            with contextlib.suppress(OSError):
-                registry.write_json(self.root / WORKFLOW_HEARTBEAT_FILE, payload)
-
-    def touch_heartbeat(self) -> None:
-        with self.journal_lock:
-            self._touch_heartbeat_locked()
 
     def _latest_gate_event_locked(
         self, gate_key: str, result_hash: str | None = None
@@ -948,7 +919,6 @@ class WorkflowState:
         if isinstance(result_hash, str):
             extra["gateResultHash"] = result_hash
         self._write_status_locked(status="paused", last_event=event, extra=extra)
-        self._touch_heartbeat_locked()
 
     def park_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
         """Durably record a gate before closing admission and draining agents.
@@ -1198,7 +1168,6 @@ class WorkflowState:
     def write_status(self, status: str, **extra: JsonValue) -> None:
         with self.journal_lock:
             self._write_status_locked(status=status, extra=extra)
-            self._touch_heartbeat_locked()
 
     def _record_watchdog_fire(self, reason: str) -> bool:
         """Persist the watchdog marker and fire event before requesting cancel."""
@@ -2161,7 +2130,6 @@ class WorkflowDsl:
             soft_park_scopes=self.state.soft_park_scopes,
         )
         child_state.journal_lock = self.state.journal_lock
-        child_state.heartbeat_lock = self.state.heartbeat_lock
         child_state.scope_lock = self.state.scope_lock
         child_state.lifetime_lock = self.state.lifetime_lock
         child_state.gate_condition = self.state.gate_condition
@@ -3693,13 +3661,10 @@ def _run_child_command_for_state(
 
     A few focused tests replace ``_run_child_command`` with a narrow
     side-effect function.  Filter only those injected callbacks while keeping
-    the real runtime on the heartbeat/cancellation path.
+    the real runtime on the cancellation path.
     """
     kwargs: dict[str, object] = {"cwd": str(state.workspace), "timeout": timeout}
-    heartbeat = getattr(state, "touch_heartbeat", None)
     cancel_event = getattr(state, "cancel_event", None)
-    if callable(heartbeat):
-        kwargs["heartbeat"] = heartbeat
     if cancel_event is not None and hasattr(cancel_event, "is_set"):
         kwargs["cancel_event"] = cancel_event
     side_effect = getattr(_run_child_command, "side_effect", None)
@@ -3719,7 +3684,6 @@ def _run_child_command(
     *,
     cwd: str,
     timeout: int | float | None,
-    heartbeat: Callable[[], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     # Row children keep DELEGATE_WORKFLOW_PIN (nested delegate invocations
@@ -3744,8 +3708,6 @@ def _run_child_command(
         try:
             stdout, stderr = process.communicate(timeout=wait_seconds)
         except subprocess.TimeoutExpired as exc:
-            if heartbeat is not None:
-                heartbeat()
             if cancel_event is not None and cancel_event.is_set():
                 _terminate_and_reap_child(process)
                 raise SupervisorWatchdogExit("child wait interrupted") from exc
@@ -4228,58 +4190,15 @@ def _held_workflow_lock(root: Path) -> Iterator[None]:
             os.close(fd)
 
 
-def _workflow_watchdog_stale_seconds(config: JsonObject) -> float:
-    raw = os.environ.get("DELEGATE_WORKFLOW_WATCHDOG_TIMEOUT_SECONDS")
-    if raw is None:
-        workflows = config.get("workflows")
-        raw = workflows.get("watchdogTimeoutSeconds") if isinstance(workflows, dict) else None
-    try:
-        value = float(raw) if raw is not None else WORKFLOW_WATCHDOG_STALE_SECONDS
-    except (TypeError, ValueError):
-        value = WORKFLOW_WATCHDOG_STALE_SECONDS
-    return value if math.isfinite(value) and value > 0 else WORKFLOW_WATCHDOG_STALE_SECONDS
-
-
-class _SupervisorHeartbeat:
-    def __init__(self, state: WorkflowState, *, interval_seconds: float) -> None:
-        self.state = state
-        self.interval_seconds = interval_seconds
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"delegate-workflow-heartbeat-{state.wf_id}",
-            daemon=True,
-        )
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread.is_alive() and self._thread is not threading.current_thread():
-            self._thread.join(timeout=max(self.interval_seconds * 4, 1.0))
-
-    def _run(self) -> None:
-        deadline = time.monotonic() + self.interval_seconds
-        while not self._stop.wait(max(deadline - time.monotonic(), 0.0)):
-            # The daemon deliberately takes no journal lock.  A failed write
-            # is only a missed lease sample; it must not kill the writer.
-            with contextlib.suppress(OSError):
-                self.state._touch_heartbeat_locked()
-            deadline += self.interval_seconds
-
-
 class _SupervisorWatchdog:
     def __init__(
         self,
         state: WorkflowState,
         *,
         interval_seconds: float,
-        stale_seconds: float,
     ) -> None:
         self.state = state
         self.interval_seconds = interval_seconds
-        self.stale_seconds = stale_seconds
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -4300,21 +4219,14 @@ class _SupervisorWatchdog:
         bad_samples = 0
         while not self._stop.wait(self.interval_seconds):
             reason = self._check()
-            if reason in {"state_missing", "heartbeat_invalid"}:
-                # Atomic replacement can briefly make a just-opened old inode
-                # unreadable.  Retry promptly, then require two bad samples.
-                if self._stop.wait(min(self.interval_seconds / 5, 0.05)):
-                    return
-                reason = self._check()
             if reason == "terminal":
                 return
             if reason is None:
                 bad_samples = 0
                 continue
-            if reason in {"state_missing", "heartbeat_invalid"}:
-                bad_samples += 1
-                if bad_samples < 2:
-                    continue
+            bad_samples += 1
+            if bad_samples < 2:
+                continue
             self.reason = reason
             record_fire = getattr(self.state, "_record_watchdog_fire", None)
             recorded = record_fire(reason) if callable(record_fire) else True
@@ -4323,31 +4235,19 @@ class _SupervisorWatchdog:
             return
 
     def _check(self) -> str | None:
-        root = self.state.root
-        status_path = root / registry.STATUS_FILE
-        if not root.exists() or not status_path.exists():
+        """Cancel only on positive evidence: a confirmed-deleted state file or a
+        terminal status. An unreadable or malformed file is no information and
+        never fires."""
+        status_path = self.state.root / registry.STATUS_FILE
+        try:
+            os.stat(status_path)
+        except FileNotFoundError:
             return "state_missing"
+        except OSError:
+            return None
         status = registry.read_json(status_path)
-        if not isinstance(status, dict):
-            return "state_missing"
-        if status.get("status") in {"succeeded", "failed", "killed"}:
+        if isinstance(status, dict) and status.get("status") in {"succeeded", "failed", "killed"}:
             return "terminal"
-        if status.get("status") == "paused":
-            if isinstance(status.get("gateKey"), str):
-                return None
-            parked_items = status.get("parkedItems")
-            if isinstance(parked_items, list) and parked_items:
-                return None
-        heartbeat = registry.read_json(root / WORKFLOW_HEARTBEAT_FILE)
-        timestamp = heartbeat.get("heartbeatEpoch") if isinstance(heartbeat, dict) else None
-        if (
-            not isinstance(timestamp, (int, float))
-            or isinstance(timestamp, bool)
-            or not math.isfinite(timestamp)
-        ):
-            return "heartbeat_invalid"
-        if time.time() - float(timestamp) > self.stale_seconds:
-            return "heartbeat_stale"
         return None
 
 
@@ -4391,17 +4291,10 @@ def run_supervisor(
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
-        stale_seconds = _workflow_watchdog_stale_seconds(config)
-        heartbeat = _SupervisorHeartbeat(
-            state,
-            interval_seconds=min(1.0, stale_seconds / 3),
-        )
         watchdog = _SupervisorWatchdog(
             state,
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
-            stale_seconds=stale_seconds,
         )
-        heartbeat.start()
         watchdog.start()
         try:
             result = execute_workflow(state)
@@ -4555,7 +4448,6 @@ def run_supervisor(
             return 0
         finally:
             watchdog.stop()
-            heartbeat.stop()
             for run_id in tuple(state.retry_worktree_runs):
                 with contextlib.suppress(Exception):
                     _release_structured_retry_worktree_for_state(state, run_id)
