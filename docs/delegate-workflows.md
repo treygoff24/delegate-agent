@@ -215,12 +215,15 @@ intentionally deferred.
 - `passthrough=True` is incompatible with `schema=` and with `mode="call"`; slash pass-through needs a work lane or an argv-enforced-safe lane.
 - Prefer `agent(phase="...")` under concurrency; global `phase()` is intentionally racy like Claude's workflow primitive.
 - Use `--budget N` for run-count control. `budget.spent()` and `budget.remaining()` are available inside scripts. Dry-runs simulate budget ticks but do not consume real budget.
-- Use `schema=` when a stage must return structured JSON. Codex uses native
+- Use `schema=` when a stage must return structured JSON. Claude receives every
+  supported schema natively through `--output-schema`. Codex uses native
   `--output-schema` only when the schema is strict-compatible (every object
   node lists all properties in `required`, `additionalProperties` absent or
-  `false`); any other schema — optional fields, typed maps — takes the same
-  prompt-and-parse path as the other engines, with validation retries. A
-  schema is never silently rewritten to satisfy strict mode.
+  `false`); any other Codex schema — optional fields, typed maps — and every
+  other engine take the prompt-and-parse path, with validation retries. A
+  schema is never silently rewritten to satisfy strict mode. The subset
+  validator rejects empty or duplicate `enum` values and repeated `required`
+  or `type` entries, which Claude's own schema preflight refuses at launch.
 
 ## Cross-family parallel review
 

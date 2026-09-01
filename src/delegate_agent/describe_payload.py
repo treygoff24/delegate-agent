@@ -1072,7 +1072,7 @@ def describe_payload(
                     "minLength",
                     "minItems",
                 ],
-                "schemaNotes": "additionalProperties may be false or a schema (typed map). Codex uses native --output-schema only for strict-compatible schemas (all properties required, no typed maps); otherwise prompt-and-parse like other engines.",
+                "schemaNotes": "additionalProperties may be false or a schema (typed map). Claude receives every supported schema natively via --output-schema. Codex uses native --output-schema only for strict-compatible schemas (all properties required, no typed maps); otherwise prompt-and-parse like other engines. enum must be non-empty with no duplicate values; required and type lists must not repeat entries.",
             },
         },
         "modeMapping": {
