@@ -3794,7 +3794,9 @@ def _send_completion_notification(run_path: Path, ctx: RunContext, status: str) 
             elapsed_sec=elapsed,
             workspace=ctx.source_cwd,
         )
-        outcome = notify.send_notification(target, message, cwd=ctx.source_cwd, env=os.environ)
+        outcome = notify.send_notification(
+            target, message, cwd=ctx.source_cwd, env=profiles.child_environment()
+        )
     except Exception as exc:
         outcome = notify.NotifyOutcome(
             ok=False,

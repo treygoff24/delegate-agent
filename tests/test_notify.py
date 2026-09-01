@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -131,6 +132,90 @@ class SendNotificationTests(unittest.TestCase):
 
 
 class RunnerHookTests(unittest.TestCase):
+    def test_hook_scrubs_workflow_pin_environment_before_spawning_post(self) -> None:
+        from delegate_agent import runner
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "home"
+            home.mkdir()
+            pin_root = home / ".delegate-workflow-pins" / "wf_0123456789ab"
+            pin_root.mkdir(parents=True)
+            pin_path = pin_root / "pin.json"
+            pin_import_root = pin_root / "runtime"
+            pin_import_root.mkdir()
+            clean_pythonpath = root / "ordinary-pythonpath"
+            clean_pythonpath.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            captured = root / "post-environment.txt"
+            post = bin_dir / "post"
+            post.write_text(
+                f"#!/bin/sh\n/usr/bin/env > {captured}\nexit 0\n",
+                encoding="utf-8",
+            )
+            post.chmod(post.stat().st_mode | stat.S_IEXEC)
+            config_path = root / "config.json"
+            config_path.write_text("{}\n", encoding="utf-8")
+            run_path = root / "registry" / "runs" / "del_test"
+            run_path.mkdir(parents=True)
+            (run_path / "manifest.json").write_text(
+                json.dumps({"runId": "del_test"}), encoding="utf-8"
+            )
+
+            ctx = mock.Mock()
+            ctx.notify = "room:r"
+            ctx.run_id = "del_test"
+            ctx.registry_root = root / "registry"
+            ctx.engine = "omp"
+            ctx.model = "glm"
+            ctx.model_resolved = None
+            ctx.started_at = "2026-08-22T00:00:00Z"
+            ctx.source_cwd = temp
+            pin_pythonpath = os.pathsep.join((str(pin_import_root), str(clean_pythonpath)))
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "HOME": str(home),
+                        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+                        "DELEGATE_CONFIG": str(config_path),
+                        "DELEGATE_WORKFLOW_PIN": str(pin_path),
+                        "DELEGATE_WORKFLOW_LOCK_FD": "123",
+                        "PYTHONPATH": pin_pythonpath,
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(
+                    runner.run_registry,
+                    "load_run_manifest_or_none",
+                    return_value={"runId": "del_test"},
+                ),
+            ):
+                runner._send_completion_notification(run_path, ctx, "succeeded")
+
+            child_env = dict(
+                line.split("=", 1)
+                for line in captured.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            self.assertNotIn("DELEGATE_WORKFLOW_PIN", child_env)
+            self.assertNotIn("DELEGATE_WORKFLOW_LOCK_FD", child_env)
+            child_pythonpath = [
+                Path(entry).resolve()
+                for entry in child_env.get("PYTHONPATH", "").split(os.pathsep)
+                if entry
+            ]
+            self.assertFalse(
+                any(
+                    path.is_relative_to(home / ".delegate-workflow-pins")
+                    for path in child_pythonpath
+                )
+            )
+            self.assertIn(str(clean_pythonpath), child_env.get("PYTHONPATH", "").split(os.pathsep))
+            self.assertEqual(child_env.get("DELEGATE_CONFIG"), str(config_path))
+            self.assertTrue(child_env.get("PATH", "").startswith(str(bin_dir)))
+
     def test_hook_writes_manifest_and_fires_once(self) -> None:
         from delegate_agent import runner
 
