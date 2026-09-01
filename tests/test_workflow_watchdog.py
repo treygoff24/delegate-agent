@@ -29,6 +29,8 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.launched_workflows: list[str] = []
+        self.captured_workflow_identities: dict[str, tuple[int, int]] = {}
+        self.captured_workflow_pgids: dict[str, set[int]] = {}
         self.addCleanup(self._cleanup_workflows)
         self.workspace = Path(self.temp.name)
         self.home = self.workspace / "home"
@@ -76,6 +78,11 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         for wf_id in reversed(self.launched_workflows):
             with proc_harness.workflow_reap(self.workspace, wf_id):
                 pass
+            identity = self.captured_workflow_identities.get(wf_id)
+            if identity is not None:
+                proc_harness.reap_process_tree(*identity)
+            for pgid in self.captured_workflow_pgids.get(wf_id, ()):
+                proc_harness.reap_process_group(pgid)
 
     def _launch(
         self,
@@ -115,9 +122,23 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         wf_id = json.loads(launched.stdout)["wfId"]
         self.launched_workflows.append(wf_id)
         root = registry.workflow_dir(self.workspace, wf_id)
-        self._wait_for(
+        supervisor_pid_value = self._wait_for(
             lambda: (registry.read_json(root / registry.STATUS_FILE) or {}).get("supervisorPid")
         )
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        self.assertIsInstance(supervisor_pid_value, int)
+        supervisor_pid = status.get("supervisorPid")
+        supervisor_pgid = status.get("supervisorPgid")
+        self.assertIsInstance(supervisor_pid, int)
+        self.assertIsInstance(supervisor_pgid, int)
+        self.assertEqual(supervisor_pid, supervisor_pid_value)
+        try:
+            captured_pgids = proc_harness.register_process_tree(supervisor_pid, supervisor_pgid)
+        except (RuntimeError, ValueError) as exc:
+            self.fail(f"failed to capture supervisor process group: {exc}")
+        self.assertIn(supervisor_pgid, captured_pgids)
+        self.captured_workflow_identities[wf_id] = (supervisor_pid, supervisor_pgid)
+        self.captured_workflow_pgids[wf_id] = captured_pgids
         return wf_id, root
 
     def _wait_for(self, predicate, timeout: float = 6.0) -> object:
