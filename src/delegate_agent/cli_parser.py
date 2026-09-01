@@ -42,6 +42,7 @@ from delegate_agent.constants import (
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
+    CONTINUITY_MODES,
     FollowupOptions,
     GlobalOptions,
     InspectionOptions,
@@ -1095,6 +1096,7 @@ def parse_modeless_engine(
     no_persona = tail.no_persona
     allow_repo_persona = tail.allow_repo_persona
     resumable = tail.resumable
+    continuity_mode = tail.continuity_mode
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
@@ -1178,6 +1180,7 @@ def parse_modeless_engine(
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
+            continuity_mode=continuity_mode,
         ),
     )
 
@@ -1250,6 +1253,7 @@ def parse_droid(
     no_persona = tail_result.no_persona
     allow_repo_persona = tail_result.allow_repo_persona
     resumable = tail_result.resumable
+    continuity_mode = tail_result.continuity_mode
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
@@ -1329,6 +1333,7 @@ def parse_droid(
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
+            continuity_mode=continuity_mode,
         ),
     )
 
@@ -1420,6 +1425,7 @@ def parse_resume(
     persona: str | None = None
     no_persona = False
     allow_repo_persona = False
+    continuity_mode: str | None = None
     handle: str | None = None
     extra_parts: list[str] = []
     i = 0
@@ -1455,6 +1461,20 @@ def parse_resume(
                     reasoning_effort = reasoning.normalize_effort(rest[i + 1])
                 except reasoning.ReasoningCapabilityError as exc:
                     raise DelegateError(exc.error, exc.message) from exc
+                i += 2
+                continue
+            if token == "--continuity-mode":
+                if continuity_mode is not None:
+                    raise DelegateError(
+                        "invalid_continuity_mode",
+                        "Only one --continuity-mode is allowed.",
+                    )
+                if i + 1 >= len(rest) or rest[i + 1] not in CONTINUITY_MODES:
+                    raise DelegateError(
+                        "invalid_continuity_mode",
+                        "--continuity-mode must be pinned, fungible, or panel.",
+                    )
+                continuity_mode = rest[i + 1]
                 i += 2
                 continue
             if token == "--fast":
@@ -1589,6 +1609,7 @@ def parse_resume(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            continuity_mode=continuity_mode,
         ),
     )
 
@@ -1699,6 +1720,7 @@ def parse_prompt_tail(
     pure = False
     timeout: int | None = None
     model: str | None = None
+    continuity_mode: str | None = None
     agent: str | None = None
     persona: str | None = None
     no_persona = False
@@ -1813,6 +1835,20 @@ def parse_prompt_tail(
                     "--model requires a non-empty value.",
                 )
             model = value
+            i += 2
+            continue
+        if token == "--continuity-mode":
+            if continuity_mode is not None:
+                raise DelegateError(
+                    "invalid_continuity_mode",
+                    "Only one --continuity-mode is allowed.",
+                )
+            if i + 1 >= len(rest) or rest[i + 1] not in CONTINUITY_MODES:
+                raise DelegateError(
+                    "invalid_continuity_mode",
+                    "--continuity-mode must be pinned, fungible, or panel.",
+                )
+            continuity_mode = rest[i + 1]
             i += 2
             continue
         if token == "--agent":
@@ -2029,6 +2065,7 @@ def parse_prompt_tail(
         no_persona,
         allow_repo_persona,
         resumable,
+        continuity_mode,
     )
 
 

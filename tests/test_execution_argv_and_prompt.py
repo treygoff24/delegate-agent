@@ -133,6 +133,53 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(stdout.getvalue(), "")
 
+    def test_continuity_mode_reaches_request_dry_run_and_run_context(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        parsed = self.delegate.parse_cli(
+            [
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "codex",
+                "work",
+                "--continuity-mode",
+                "pinned",
+                "x",
+            ]
+        )
+        request = self.delegate.request_from_parsed(
+            parsed,
+            self.delegate.DEFAULT_CONFIG,
+            io.StringIO(""),
+        )
+
+        self.assertEqual(request.continuity_mode, "pinned")
+        self.assertEqual(self.delegate.dry_run_payload(request)["continuityMode"], "pinned")
+
+        default_request = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["--cwd", repo.name, "dry-run", "codex", "work", "x"]),
+            self.delegate.DEFAULT_CONFIG,
+            io.StringIO(""),
+        )
+        self.assertEqual(default_request.continuity_mode, "fungible")
+        self.assertEqual(
+            self.delegate.dry_run_payload(default_request)["continuityMode"], "fungible"
+        )
+
+        registry_root = self.delegate.run_registry.ensure_registry(
+            Path(repo.name), workspace_kind="git"
+        )
+        with mock.patch.object(self.delegate.delegate_runner, "RunContext") as constructor:
+            self.delegate.make_run_context(
+                registry_root,
+                request,
+                run_id="del_20260901T000000Z_abcdef",
+                alias="codex-1",
+                source_workspace=self.delegate.resolve_workspace(repo.name),
+            )
+        self.assertEqual(constructor.call_args.kwargs["continuity_mode"], "pinned")
+
     def assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
         self,
         payload: dict,
