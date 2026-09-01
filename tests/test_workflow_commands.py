@@ -729,6 +729,54 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("effort", payload["message"])
         self.assertIn("low", payload["message"])
 
+    def test_script_size_limit_admits_planc_scale_scripts(self) -> None:
+        # planc-compiled workflows embed their engine and measure ~530 KiB at
+        # near-limit plan scale; the cap must admit them and still refuse
+        # unbounded input.
+        from delegate_agent.workflows import script as workflow_script
+
+        self.assertEqual(workflow_script.SCRIPT_SIZE_LIMIT, 1024 * 1024)
+        padding = "# " + "x" * 76 + "\n"
+        body = 'meta = {"name": "big"}\n' + padding * 7000
+        big = self.workspace / "big_wf.py"
+        big.write_text(body, encoding="utf-8")
+        self.assertGreater(big.stat().st_size, 512 * 1024)
+        self.assertEqual(workflow_script.read_script(big), body)
+
+        over = self.workspace / "over_wf.py"
+        over.write_bytes(body.encode() + b"#" * (1024 * 1024))
+        with self.assertRaises(workflow_script.WorkflowScriptError) as ctx:
+            workflow_script.read_script(over)
+        self.assertIn("1 MiB", str(ctx.exception))
+
+    def test_row_children_drop_lock_fd_env_but_keep_pin(self) -> None:
+        # wp-ptw: rows spawned under a live supervisor inherit env with
+        # close_fds, so the lock-fd number is dead; the pin must survive so
+        # nested delegate invocations stay on the pinned runtime.
+        import sys
+        from unittest import mock
+
+        from delegate_agent.workflows import runtime as workflow_runtime
+
+        seeded = {
+            workflow_runtime.WORKFLOW_LOCK_FD_ENV: "7",
+            "DELEGATE_WORKFLOW_PIN": "/tmp/pin",
+            "DELEGATE_TEST_UNRELATED": "kept",
+        }
+        probe = (
+            "import json, os; print(json.dumps({k: os.environ.get(k) for k in "
+            f"{sorted(seeded)!r}}}))"
+        )
+        with mock.patch.dict(os.environ, seeded):
+            completed = workflow_runtime._run_child_command(
+                [sys.executable, "-c", probe], cwd=str(self.workspace), timeout=30
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        child = json.loads(completed.stdout)
+        self.assertIsNone(child[workflow_runtime.WORKFLOW_LOCK_FD_ENV])
+        self.assertEqual(child["DELEGATE_WORKFLOW_PIN"], "/tmp/pin")
+        self.assertEqual(child["DELEGATE_TEST_UNRELATED"], "kept")
+
     def test_run_journal_result_group_and_resume_cache(self) -> None:
         script = self.write_workflow(
             """

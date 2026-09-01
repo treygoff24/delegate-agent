@@ -21,7 +21,10 @@ from delegate_agent.workflows import schema as workflow_schema
 # consumers honest (they must isinstance-narrow before use).
 WorkflowMeta = dict[str, object]
 
-SCRIPT_SIZE_LIMIT = 512 * 1024
+# Sanity bound, not a resource limit. planc-compiled workflows embed their
+# engine and grew past 512 KiB when the 2026-09 close/replay safety contracts
+# landed; near-limit plans must still load.
+SCRIPT_SIZE_LIMIT = 1024 * 1024
 ITEM_LIMIT = 4096
 LIFETIME_AGENT_LIMIT = 1000
 
@@ -39,7 +42,7 @@ class WorkflowScriptError(ValueError):
 def read_script(path: Path) -> str:
     data = path.read_bytes()
     if len(data) > SCRIPT_SIZE_LIMIT:
-        raise WorkflowScriptError("workflow script exceeds 512 KiB limit")
+        raise WorkflowScriptError("workflow script exceeds 1 MiB limit")
     return data.decode("utf-8")
 
 

@@ -825,6 +825,6 @@ Controls the local workflow supervisor. See
 - `structuredOutputRetries`: non-negative retry count for `agent(schema=...)`
   validation failures. The embedded default is `2`.
 
-Workflow hard caps are not configurable in v1: scripts are limited to 512 KiB,
+Workflow hard caps are not configurable in v1: scripts are limited to 1 MiB,
 nested `workflow()` calls to depth 3, lifetime `agent()` calls to 1000, and
 `pipeline()`/`parallel()` inputs to 4096 items.

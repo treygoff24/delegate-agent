@@ -3722,12 +3722,19 @@ def _run_child_command(
     heartbeat: Callable[[], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    # Row children keep DELEGATE_WORKFLOW_PIN (nested delegate invocations
+    # must run the pinned runtime) but never the lock-fd var: close_fds means
+    # the fd is not inherited, so the number is at best EBADF and at worst an
+    # unrelated file (wp-ptw, observed live 2026-08-31 as suite-wide EBADF in
+    # rows entering _held_workflow_lock).
+    child_env = {key: value for key, value in os.environ.items() if key != WORKFLOW_LOCK_FD_ENV}
     process = subprocess.Popen(  # nosec B603 - argv is Delegate's own validated CLI.
         argv,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        env=child_env,
     )
     deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
