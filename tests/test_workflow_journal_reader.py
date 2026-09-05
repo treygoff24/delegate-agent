@@ -51,6 +51,20 @@ class WorkflowJournalReaderTests(unittest.TestCase):
             )
         self.assertEqual(json.loads(out.getvalue())["events"], [{"seq": 1}])
 
+    def test_truncated_utf8_tail_is_ignored_only_when_writer_is_settled(self) -> None:
+        self.path.write_bytes(b'{"seq":1}\n{"seq":2,"text":"\xc3')
+        reader = registry.JournalReader(self.path)
+        self.assertEqual(list(reader.read_events()), [{"seq": 1}])
+        with self.assertWarnsRegex(RuntimeWarning, "truncated final workflow journal"):
+            self.assertEqual(list(reader.read_events(final=True)), [])
+        with self.assertWarnsRegex(RuntimeWarning, "truncated final workflow journal"):
+            self.assertEqual(registry.iter_journal(self.path), [{"seq": 1}])
+        self.path.write_bytes(b'{"seq":1}\n{"seq":2,"text":"\xff"}\n')
+        with self.assertRaises(UnicodeDecodeError):
+            registry.iter_journal(self.path)
+        with self.assertRaises(UnicodeDecodeError):
+            list(registry.JournalReader(self.path).read_events(final=True))
+
     def test_liveness_probe_is_read_only_for_unheld_and_held_locks(self) -> None:
         lock = self.root / registry.LOCK_FILE
         lock.write_bytes(b"")
