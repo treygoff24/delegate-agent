@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 # Re-export isolation constants from config for convenience
-from delegate_agent.config import (  # noqa: F401  # re-exported
+from delegate_agent.config import (
     ISOLATION_AUTO,
     ISOLATION_NONE,
     ISOLATION_WORKTREE,
@@ -35,6 +35,7 @@ from delegate_agent.git_utils import (
 )
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
+from delegate_agent.sandbox_bwrap import SandboxPlan
 
 
 @dataclass(frozen=True)
@@ -59,10 +60,77 @@ class IsolationContext:
     # Populated only for lifecycle "attached" (resume into a live persistent
     # worktree): {"sourceRunId", "sourceAlias", "path"}.
     attachment: JsonObject | None = None
-    # bwrap safe backend only: {"backend": "bwrap", "masks": [{"path", "kind"}, ...],
-    # "binds": [{"path", "mode"}, ...]} (binds = resolved isolation.bwrapBinds);
-    # None for the copy/worktree path.
-    sandbox: JsonObject | None = None
+    sandbox: SandboxPlan | None = None
+
+    @classmethod
+    def unisolated(cls, source_workspace: str) -> IsolationContext:
+        return cls(source_workspace, "none", "none", "none", False)
+
+    @classmethod
+    def temporary(
+        cls,
+        source_workspace: str,
+        *,
+        isolation_mode: str,
+        source_git_root: str | None = None,
+        source_git_common_dir: str | None = None,
+        safe_workspace_method: str | None = None,
+        warnings: tuple[str, ...] = (),
+        sandbox: SandboxPlan | None = None,
+    ) -> IsolationContext:
+        if isolation_mode not in VALID_ISOLATION_VALUES:
+            raise IsolationExecutionError(
+                "invalid_isolation", "Temporary isolation requires a valid isolation mode."
+            )
+        if sandbox is not None and not isinstance(sandbox, SandboxPlan):
+            raise IsolationExecutionError(
+                "invalid_bwrap_plan", "Temporary isolation requires a typed sandbox plan."
+            )
+        return cls(
+            source_workspace,
+            "worktree",
+            isolation_mode,
+            "temporary",
+            False,
+            source_git_root=source_git_root,
+            source_git_common_dir=source_git_common_dir,
+            safe_workspace_method=safe_workspace_method,
+            warnings=warnings,
+            sandbox=sandbox,
+        )
+
+    @classmethod
+    def attached(
+        cls,
+        source_workspace: str,
+        *,
+        branch: str,
+        execution_cwd: str,
+        source_git_root: str | None,
+        attachment: JsonObject,
+    ) -> IsolationContext:
+        if (
+            not isinstance(branch, str)
+            or not branch
+            or not isinstance(execution_cwd, str)
+            or not execution_cwd
+            or attachment.get("path") != execution_cwd
+        ):
+            raise IsolationExecutionError(
+                "invalid_isolation_attachment",
+                "Attached isolation requires a non-empty branch and a matching execution path.",
+            )
+        return cls(
+            source_workspace,
+            "worktree",
+            "worktree",
+            "attached",
+            False,
+            planned_branch=branch,
+            planned_execution_cwd=execution_cwd,
+            source_git_root=source_git_root,
+            attachment=attachment,
+        )
 
 
 def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:

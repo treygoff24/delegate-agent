@@ -168,6 +168,7 @@ def add_model_payload_fields(payload: JsonObject, carrier: ModelMetadataCarrier)
 
 if TYPE_CHECKING:
     from delegate_agent.reasoning import ReasoningPayloadCarrier
+    from delegate_agent.sandbox_bwrap import SandboxPlan
 
     class SelectionMetadataCarrier(
         ModelMetadataCarrier, SpeedMetadataCarrier, ReasoningPayloadCarrier, Protocol
@@ -220,7 +221,7 @@ class RunMetadataCarrier(Protocol):
     creation_context: JsonObject | None
     worktree_status: str | None
     safe_workspace_method: str | None
-    sandbox: JsonObject | None
+    sandbox: SandboxPlan | None
     warnings: tuple[str, ...]
     process_group_termination_grace_sec: float
 
@@ -232,7 +233,9 @@ def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCar
     payload["isolationLifecycle"] = carrier.isolation_lifecycle
     payload["preservedWorkspace"] = carrier.preserved_workspace
     sandbox = getattr(carrier, "sandbox", None)
-    sandbox_backend = sandbox.get("backend") if isinstance(sandbox, dict) else None
+    sandbox_backend = (
+        sandbox.get("backend") if isinstance(sandbox, dict) else getattr(sandbox, "backend", None)
+    )
     if sandbox_backend in {"bwrap", "copy"}:
         payload["isolationBackend"] = sandbox_backend
     elif carrier.effective_isolation == "worktree" and carrier.isolation_lifecycle == "temporary":
@@ -251,5 +254,8 @@ def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCar
     grace = getattr(carrier, "process_group_termination_grace_sec", None)
     if isinstance(grace, (int, float)) and not isinstance(grace, bool):
         payload["processGroupTerminationGraceSec"] = grace
+    scratch_permissions = getattr(carrier, "scratch_permissions", None)
+    if scratch_permissions is not None:
+        payload["scratchPermissions"] = scratch_permissions
     if carrier.warnings:
         payload["warnings"] = list(carrier.warnings)

@@ -426,14 +426,10 @@ def apply_followup_to_request(request: Request, plan: FollowupPlan) -> Request:
         source_git_root = attach.get("sourceGitRoot")
         updated = replace(
             updated,
-            isolation_context=IsolationContext(
-                source_workspace=request.workspace,
-                effective_isolation="worktree",
-                isolation_mode="worktree",
-                isolation_lifecycle="attached",
-                preserved_workspace=False,
-                planned_branch=str(attach.get("branch") or "") or None,
-                planned_execution_cwd=str(attach.get("path") or "") or None,
+            isolation_context=IsolationContext.attached(
+                request.workspace,
+                branch=str(attach.get("branch") or ""),
+                execution_cwd=str(attach.get("path") or ""),
                 source_git_root=str(source_git_root) if isinstance(source_git_root, str) else None,
                 attachment={
                     "sourceRunId": attach.get("sourceRunId"),
