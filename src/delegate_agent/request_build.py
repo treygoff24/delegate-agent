@@ -1539,6 +1539,16 @@ def _build_normalized_launch(
     completion_mode = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
     if call:
         prompt = validate_prompt(spec.prompt)
+        if (
+            spec.origin == "input-json"
+            and spec.instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH
+            and launch.read_only
+        ):
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                "call --read-only wraps the prompt in the read-only contract; "
+                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+            )
         # CLI calls historically record wrapped mode (call framing is otherwise
         # a no-op); JSON may explicitly select or infer slash passthrough.
         instruction_mode = (
@@ -2127,12 +2137,6 @@ def request_from_input_json(
             raw_forbid_commit=raw_forbid_commit,
             raw_include_dirty=raw_include_dirty,
         )
-        if raw_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH and raw_read_only:
-            raise DelegateError(
-                "slash_passthrough_unsupported",
-                "call --read-only wraps the prompt in the read-only contract; "
-                "slash-command prompts cannot run verbatim there. Use plain call mode.",
-            )
         return _build_normalized_launch(spec, config, stderr=stderr)
 
     # Preserve JSON-specific absence/null semantics before common planning.
