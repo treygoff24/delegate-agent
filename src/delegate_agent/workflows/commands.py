@@ -354,9 +354,7 @@ def emit_run(
             pin = workflow_pinning.create_pin(
                 wf_id,
                 workspace=workspace,
-                config=delegate_config.merge_config_layer(
-                    delegate_config.embedded_default_config(), config
-                ),
+                config=config,
                 data_home=worktrees_data_home(config),
             )
             if not command.dry_run:

@@ -302,6 +302,73 @@ class WorkflowAttemptTests(unittest.TestCase):
         self.assertIsNone(loaded["codex"]["defaultModel"])
         self.assertFalse((self.home / ".delegate" / "config.json").exists())
 
+    def test_new_empty_and_partial_pins_freeze_complete_defaults_once(self):
+        for number, raw in enumerate(
+            (
+                {},
+                {"codex": {"defaultModel": None}, "workflows": {"itemThreads": 3}},
+                {"workflows": None, "tracking": None},
+            )
+        ):
+            with self.subTest(raw=raw):
+                pin = workflow_pinning.create_pin(
+                    f"wf_123456abcd{number:02x}",
+                    workspace=self.workspace,
+                    config=raw,
+                )
+                before = pin.config_path.read_bytes()
+                initial = workflow_attempts.create(
+                    pin, workflow_attempts.prepare(pin, {}, "defaults")
+                )
+                self.assertEqual(pin.attempt_config_version, 1)
+                self.assertEqual(initial.config["cursor"], pin.config["cursor"])
+                changed_defaults = config.embedded_default_config()
+                changed_defaults["cursor"]["defaultModel"] = "later-default"
+                changed_defaults["codex"]["defaultModel"] = "later-codex"
+                changed_defaults["policy"]["work"]["networkAccess"] = False
+                changed_defaults["workflows"]["itemThreads"] = 8
+                with mock.patch.object(
+                    config, "embedded_default_config", return_value=changed_defaults
+                ):
+                    later = workflow_attempts.create(
+                        pin, workflow_attempts.prepare(pin, {}, "later-defaults")
+                    )
+                    verified = workflow_pinning.create_pin(
+                        pin.workflow_id, workspace=self.workspace, config=raw
+                    )
+                self.assertEqual(later.config["cursor"], pin.config["cursor"])
+                self.assertEqual(later.config["policy"], pin.config["policy"])
+                self.assertIsNone(later.config["codex"]["defaultModel"])
+                self.assertEqual(later.config["workflows"]["itemThreads"], 8)
+                self.assertEqual(pin.config_path.read_bytes(), before)
+                self.assertEqual(verified, pin)
+
+    def test_legacy_partial_pin_is_loaded_without_refilling_or_recreating_it(self):
+        pin = self.pin
+        payload = json.loads(pin.path.read_text())
+        payload["runtime"].pop("attemptConfigVersion")
+        payload["config"] = {}
+        payload["configDigest"] = workflow_pinning._json_digest({})
+        for path, value in ((pin.path, payload), (pin.config_path, {})):
+            path.chmod(0o600)
+            path.write_text(json.dumps(value))
+            path.chmod(0o400)
+        before = (
+            pin.path.read_bytes(),
+            pin.config_path.read_bytes(),
+            pin.path.parent.stat().st_mode,
+        )
+        loaded = workflow_pinning.load_pin(pin.workflow_id)
+        self.assertEqual(loaded.config, {})
+        self.assertEqual(loaded.attempt_config_version, 0)
+        with self.assertRaises(workflow_pinning.WorkflowPinError) as raised:
+            workflow_pinning.create_pin(pin.workflow_id, workspace=self.workspace, config={})
+        self.assertEqual(raised.exception.error, "pin_collision")
+        self.assertEqual(
+            (pin.path.read_bytes(), pin.config_path.read_bytes(), pin.path.parent.stat().st_mode),
+            before,
+        )
+
     def test_real_supervisor_and_fake_child_use_new_ops_after_approve(self):
         live_path = self.root / "live.json"
         live = copy.deepcopy(self.base)
