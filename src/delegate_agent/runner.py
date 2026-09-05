@@ -209,7 +209,8 @@ class RunContext:
     structured_retry: bool = False
     harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
-    sandbox: JsonObject | None = None
+    sandbox: sandbox_bwrap.SandboxPlan | None = None
+    scratch_permissions: JsonObject | None = None
     # Bounded wait for registry mutations. Finalization writes a WAL when this
     # budget expires; launch admission fails before spawning a child.
     registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
@@ -1973,48 +1974,33 @@ def _env_overrides_with_scratch(
     }
 
 
-def _codex_argv_with_scratch(argv: list[str], scratch_dir: Path | None) -> list[str]:
+def _codex_argv_with_scratch(
+    argv: list[str], scratch_dir: Path | None, *, permission_profile: str | None = None
+) -> list[str]:
     if scratch_dir is None or "--sandbox" not in argv:
         return list(argv)
     sandbox_index = argv.index("--sandbox")
     if sandbox_index + 1 >= len(argv) or argv[sandbox_index + 1] != "read-only":
         return list(argv)
+    if scratch_dir.is_symlink() or not scratch_dir.is_dir():
+        raise RunnerLaunchError(
+            "invalid_scratch_directory", "Codex scratch must be an existing non-symlink directory."
+        )
+    scratch = str(scratch_dir.resolve(strict=True))
+    # Profile tables merge with lower config layers. An unpredictable name
+    # prevents a pre-existing same-name profile from adding writable roots.
+    name = permission_profile or f"delegate_safe_{os.urandom(16).hex()}"
+    definition = (
+        f'permissions.{name}={{extends=":read-only",filesystem={{'
+        f'{json.dumps(scratch, ensure_ascii=False)}="write"}}}}'
+    )
     updated = list(argv)
-    insert_at = max(len(updated) - 1, 0)
-    updated[insert_at:insert_at] = ["--add-dir", str(scratch_dir)]
+    del updated[sandbox_index : sandbox_index + 2]
+    # Never allow an older Codex to silently ignore named permission settings:
+    # unknown flags/fields fail before a turn rather than selecting a default
+    # writable workspace. All model, cwd, session and approval flags stay put.
+    updated[1:1] = ["--strict-config", "-c", f'default_permissions="{name}"', "-c", definition]
     return updated
-
-
-def _masks_from_sandbox(payload: JsonObject | None) -> tuple[sandbox_bwrap.Mask, ...]:
-    if not payload:
-        return ()
-    entries = payload.get("masks")
-    if not isinstance(entries, list):
-        return ()
-    masks: list[sandbox_bwrap.Mask] = []
-    for entry in entries:
-        if (
-            isinstance(entry, dict)
-            and isinstance(entry.get("path"), str)
-            and isinstance(entry.get("kind"), str)
-        ):
-            masks.append(sandbox_bwrap.Mask(path=entry["path"], kind=entry["kind"]))
-    return tuple(masks)
-
-
-def _binds_from_sandbox(payload: JsonObject | None, mode: str) -> list[str]:
-    if not payload:
-        return []
-    entries = payload.get("binds")
-    if not isinstance(entries, list):
-        return []
-    return [
-        entry["path"]
-        for entry in entries
-        if isinstance(entry, dict)
-        and entry.get("mode") == mode
-        and isinstance(entry.get("path"), str)
-    ]
 
 
 def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
@@ -2040,7 +2026,7 @@ def _launch_tracked_process(
     env_overrides: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
-    sandbox: JsonObject | None = None,
+    sandbox: sandbox_bwrap.SandboxPlan | None = None,
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
 ) -> subprocess.Popen[bytes]:
@@ -2049,7 +2035,11 @@ def _launch_tracked_process(
     )
     for key in drop_env:
         env.pop(key, None)
-    if sandbox:
+    if sandbox is not None:
+        if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
+            raise DelegateError(
+                "invalid_bwrap_plan", "Tracked sandbox requires a validated SandboxPlan."
+            )
         # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
         # resolved), mirroring where the codex-pure seatbelt prefix is applied.
         # Boundary construction and the preflight of the final plan raise
@@ -2060,12 +2050,13 @@ def _launch_tracked_process(
             env=env,
             engine=engine,
             scratch_dir=str(scratch_dir) if scratch_dir is not None else None,
-            masks=_masks_from_sandbox(sandbox),
-            extra_rw_roots=[*_binds_from_sandbox(sandbox, "rw"), *(extra_rw_roots or [])],
-            extra_ro_roots=_binds_from_sandbox(sandbox, "ro"),
-            bwrap_path=sandbox.get("bwrapPath")
-            if isinstance(sandbox.get("bwrapPath"), str)
-            else None,
+            masks=sandbox.masks,
+            extra_rw_roots=[
+                *[bind.path for bind in sandbox.binds if bind.mode == "rw"],
+                *(extra_rw_roots or []),
+            ],
+            extra_ro_roots=[bind.path for bind in sandbox.binds if bind.mode == "ro"],
+            bwrap_path=sandbox.bwrap_path,
         )
         sandbox_bwrap.preflight_plan(argv)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
@@ -3687,14 +3678,34 @@ def _execute_tracked(
         _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)
     started = time.monotonic()
     deadline = None if timeout is None else started + timeout
-    run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
+    scratch_profile = (
+        f"delegate_safe_{os.urandom(16).hex()}"
+        if ctx.engine == "codex" and files.scratch_dir is not None
+        else None
+    )
+    run_argv = (
+        _codex_argv_with_scratch(argv, files.scratch_dir, permission_profile=scratch_profile)
+        if ctx.engine == "codex"
+        else argv
+    )
+    scratch_permissions: JsonObject | None = None
+    if ctx.engine == "codex" and run_argv != argv:
+        scratch_permissions = {
+            "profile": scratch_profile,
+            "base": ":read-only",
+            "writableRoots": [str(files.scratch_dir.resolve(strict=True))],
+        }
+        ctx = replace(ctx, scratch_permissions=scratch_permissions)
     run_manifest_argv = (
-        _codex_argv_with_scratch(manifest_argv, files.scratch_dir)
+        _codex_argv_with_scratch(
+            manifest_argv, files.scratch_dir, permission_profile=scratch_profile
+        )
         if ctx.engine == "codex" and manifest_argv is not None
         else manifest_argv
     )
     if ctx.engine == "codex" and files.scratch_dir is not None:
-        write_manifest(files.run_path, build_manifest(ctx, run_manifest_argv or run_argv))
+        manifest = build_manifest(ctx, run_manifest_argv or run_argv)
+        write_manifest(files.run_path, manifest)
     sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         run_argv,
@@ -4095,6 +4106,26 @@ def _execute_tracked(
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
+    if scratch_permissions is not None:
+        final_extra["scratchPermissions"] = scratch_permissions
+        diagnostic = profiles.read_bounded_stderr_tail(files.stderr_log).lower()
+        if capture.exit_code != 0 and any(
+            token in diagnostic
+            for token in (
+                "--strict-config",
+                "unknown configuration field",
+                "default_permissions",
+                "permission profile",
+            )
+        ):
+            final_extra.update(
+                error="codex_scratch_permissions_unavailable",
+                message="Codex refused the read-only scratch permissions. Use Codex 0.153.4 or later and fix unsupported config fields; no permissive fallback was used.",
+                nextActions=[
+                    "codex --version",
+                    "Check Codex config compatibility with --strict-config.",
+                ],
+            )
     if capture.stdout_capture is not None:
         final_extra["stdoutCapture"] = capture.stdout_capture
         capture_warning = stream_capture.capture_warning(capture.stdout_capture)

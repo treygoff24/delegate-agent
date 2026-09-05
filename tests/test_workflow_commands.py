@@ -4563,11 +4563,8 @@ class WorkflowCommandTests(unittest.TestCase):
 
         self.assertEqual(retry_sandbox, initial_sandbox)
         self.assertIsNotNone(retry_sandbox)
-        masks = tuple(
-            sandbox_bwrap.Mask(path=item["path"], kind=item["kind"])
-            for item in retry_sandbox["masks"]
-        )
-        ro_binds = [item["path"] for item in retry_sandbox["binds"] if item["mode"] == "ro"]
+        masks = retry_sandbox.masks
+        ro_binds = [bind.path for bind in retry_sandbox.binds if bind.mode == "ro"]
         sandbox_argv = sandbox_bwrap.wrap_engine_argv(
             engine_argv=["/bin/true"],
             cwd=str(source),

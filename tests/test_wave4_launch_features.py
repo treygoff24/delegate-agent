@@ -312,7 +312,7 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         self.assertIn(f"TEMP={expected_scratch}", stdout_log)
         self.assertNotIn("/profile/tmp", stdout_log)
 
-    def test_codex_safe_run_manifest_adds_scratch_dir_to_read_only_sandbox(self):
+    def test_codex_safe_run_manifest_records_read_only_scratch_profile(self):
         repo, _git_cd = self._make_git_repo_with_commit()
         codex = self.write_executable("codex", "exit 0\n")
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -332,10 +332,14 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
         manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
         argv = manifest["argv"]
-        self.assertIn("--sandbox", argv)
-        self.assertIn("read-only", argv)
-        add_dir_index = argv.index("--add-dir")
-        self.assertEqual(Path(argv[add_dir_index + 1]).resolve(), (run_path / "scratch").resolve())
+        self.assertNotIn("--sandbox", argv)
+        self.assertNotIn("--add-dir", argv)
+        self.assertIn("--strict-config", argv)
+        permissions = manifest["scratchPermissions"]
+        self.assertEqual(permissions["base"], ":read-only")
+        self.assertEqual(permissions["writableRoots"], [str((run_path / "scratch").resolve())])
+        self.assertIn(f'default_permissions="{permissions["profile"]}"', argv)
+        self.assertEqual(payload["scratchPermissions"], permissions)
 
     def test_droid_call_invalid_alias_does_not_leave_call_temp_dir(self):
         before = set(Path(tempfile.gettempdir()).glob("delegate-call-*"))

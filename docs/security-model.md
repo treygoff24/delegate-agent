@@ -109,7 +109,9 @@ Safe mode is for review and investigation.
 
 - Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
-- Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
+- Codex safe keeps `--ask-for-approval never`. A unique permissions profile
+  extends `:read-only` and grants writes only to tracked scratch, replacing the
+  legacy sandbox flag.
 - Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
 - Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
@@ -124,6 +126,44 @@ Safe mode is not a proof of zero side effects. Treat it as a defensive default p
 
 OpenCode can silently degrade a denied tool request to a text response and still exit `0`.
 A successful process exit does not prove that the requested inspection ran.
+
+#### Codex writable scratch
+
+Tracked Codex read-only launches grant writes only to
+`.delegate/runs/<runId>/scratch`. `TMPDIR`, `TMP`, and `TEMP` point there. The
+review workspace, source files, registry metadata siblings, and symlink targets
+outside scratch remain read-only. Cwd, session arguments, AGENTS discovery, and
+Delegate's safe prompt framing are unchanged.
+Tool-network access remains restricted, even when an ambient default profile
+allows it; the offline probe verifies this against a local loopback listener.
+
+The native permissions profile extends `:read-only` and adds one filesystem
+write root. Its high-entropy per-launch name prevents a pre-existing profile
+from merging in unrelated write grants. Manifest and result `scratchPermissions`
+record the exact profile, base, and writable roots. See the official
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+for named filesystem permissions; legacy `sandbox_workspace_write.writable_roots`
+does not grant writes under a read-only sandbox.
+
+This requires named permission profiles and `--strict-config`, verified offline
+with Codex 0.153.4. Unsupported flags or configuration fields fail closed with
+`codex_scratch_permissions_unavailable`; upgrade Codex or fix incompatible
+configuration rather than dropping enforcement. There is no workspace-write or
+bypass fallback. Formerly ignored config keys can now stop a safe launch.
+Codex may describe a custom scratch-only profile as
+`sandbox_mode=workspace-write` in generic model-visible prose; the actual ACL,
+not that label, defines the write boundary.
+
+Run `python3 -m tests.codex_scratch_probe /path/to/codex` for the explicit offline
+check. It first proves the temporary sentinel files are writable without a
+sandbox, then checks scratch success, source/copy/metadata denials, symlink/hardlink
+escape denial, legacy read-only scratch denial, and strict-config rejection.
+It runs no model turn and uses neither credentials nor live user config.
+
+Internally, bwrap uses a typed `SandboxPlan` with immutable `Mask` and `Bind`
+tuples. Invalid entries are refused instead of silently dropped while decoding
+a dictionary. Live path checks, workspace-intersection checks, mount order,
+submodule refusal, and final-plan preflight remain in force.
 
 #### What safe review can and cannot see
 

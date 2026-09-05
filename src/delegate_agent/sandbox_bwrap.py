@@ -24,6 +24,7 @@ import shutil
 import subprocess  # nosec B404 - Delegate launches a fixed bwrap probe argv with shell=False.
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -32,6 +33,7 @@ from delegate_agent.config import (
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git_bytes
+from delegate_agent.json_types import JsonObject
 
 SAFE_BACKEND_ENV = "DELEGATE_SAFE_BACKEND"
 SAFE_BACKEND_COPY = "copy"
@@ -81,6 +83,67 @@ class Bind(NamedTuple):
 
 
 BIND_MODES = ("ro", "rw")
+
+
+@dataclass(frozen=True)
+class SandboxPlan:
+    """Validated in-memory bwrap inputs; serialize only for public metadata."""
+
+    bwrap_path: str | None
+    masks: tuple[Mask, ...] = ()
+    binds: tuple[Bind, ...] = ()
+
+    @property
+    def backend(self) -> str:
+        return "bwrap"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.masks, tuple) or not isinstance(self.binds, tuple):
+            raise DelegateError(
+                "invalid_bwrap_plan", "Sandbox masks and binds must be immutable tuples."
+            )
+        if self.bwrap_path is not None and (
+            not isinstance(self.bwrap_path, str)
+            or not os.path.isabs(self.bwrap_path)
+            or "\0" in self.bwrap_path
+        ):
+            raise DelegateError("invalid_bwrap_plan", "bwrap executable must be an absolute path.")
+        if len(self.masks) > MASK_OVERFLOW_LIMIT:
+            raise DelegateError("bwrap_mask_overflow", "Sandbox plan has too many parity masks.")
+        for mask in self.masks:
+            if (
+                not isinstance(mask, Mask)
+                or not isinstance(mask.kind, str)
+                or mask.kind not in {MASK_KIND_TMPFS, MASK_KIND_DEVNULL}
+                or not isinstance(mask.path, str)
+                or not mask.path
+                or "\0" in mask.path
+                or os.path.isabs(mask.path)
+                or any(part in {"", ".", ".."} for part in mask.path.split("/"))
+            ):
+                raise DelegateError(
+                    "invalid_bwrap_plan", "Sandbox mask must stay inside its workspace."
+                )
+        for bind in self.binds:
+            if (
+                not isinstance(bind, Bind)
+                or not isinstance(bind.mode, str)
+                or bind.mode not in BIND_MODES
+                or not isinstance(bind.path, str)
+                or not os.path.isabs(bind.path)
+                or "\0" in bind.path
+            ):
+                raise DelegateError(
+                    "invalid_bwrap_plan", "Sandbox bind must have an absolute path and ro/rw mode."
+                )
+
+    def payload(self) -> JsonObject:
+        return {
+            "backend": self.backend,
+            "bwrapPath": self.bwrap_path,
+            "masks": [{"path": mask.path, "kind": mask.kind} for mask in self.masks],
+            "binds": [{"path": bind.path, "mode": bind.mode} for bind in self.binds],
+        }
 
 
 class BwrapMaskOverflow(Exception):
