@@ -447,14 +447,30 @@ delegate run-output <alias-or-runId> --stdout --tail 80 --max-chars 20000
 ```
 
 Non-raw stdout/stderr output is bounded by both line tail and character cap.
-Use `--raw` only when you intentionally need the full stream; it is incompatible
+Use `--raw` only when you intentionally need the full retained stream; it is incompatible
 with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
+### OMP thinking compaction and output limits
+
+Long OMP thinking streams no longer consume the entire retained-output budget.
+Delegate keeps the first 64 KiB of recognized stripped `thinking_delta` records,
+then omits only that diagnostic shape. A `delegate.capture` line in raw stdout
+and a result warning disclose the omission; `stdoutCapture` in the result or
+snapshot reports byte counts, omitted records, limits, and a transport digest.
+These counters cover the final attempt, not all retries combined.
+
+The limits remain finite: 16 MiB retained stdout, 16 MiB per record, and 256 MiB
+total OMP stdout transport per attempt. Stderr stays capped at 16 MiB. Unknown
+records, malformed JSON, useful output, and metadata-bearing events still count
+against the retained cap. Check `stdoutCapture.limitKind` to distinguish a
+retained-output, record, or transport limit; an endlessly verbose child still
+fails and is terminated. `--raw` cannot recover omitted thinking diagnostics.
+
 ## Parsing `events.jsonl` nested JSON
 
-Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.jsonl`
+Tracked Runs mirror retained child stdout lines into `.delegate/runs/<runId>/events.jsonl`
 as `stream.line` records, up to 500 lines followed by a
 `stream.lines_truncated` marker. Lines longer than 500 characters are clipped
 with a `…` sentinel and marked `truncated: true` /
