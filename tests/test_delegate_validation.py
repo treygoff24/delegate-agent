@@ -12,6 +12,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import errors as error_types
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
@@ -82,7 +87,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_non_git_temp_directory_resolves_as_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = self.delegate.resolve_workspace(tmp)
+            workspace = request_api.resolve_workspace(tmp)
             self.assertEqual(Path(workspace.path).resolve(), Path(tmp).resolve())
             self.assertEqual(workspace.kind, "directory")
 
@@ -91,7 +96,7 @@ class ValidationTests(unittest.TestCase):
         self.addCleanup(repo.cleanup)
         nested = Path(repo.name) / "a" / "b"
         nested.mkdir(parents=True)
-        workspace = self.delegate.resolve_workspace(str(nested))
+        workspace = request_api.resolve_workspace(str(nested))
         self.assertEqual(Path(workspace.path).resolve(), Path(repo.name).resolve())
         self.assertEqual(workspace.kind, "git")
 
@@ -100,11 +105,11 @@ class ValidationTests(unittest.TestCase):
             f.write("from file")
             path = f.name
         self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
-        self.assertEqual(self.delegate.resolve_prompt([], path, TtyStdin()), "from file")
+        self.assertEqual(request_api.resolve_prompt([], path, TtyStdin()), "from file")
 
     def test_output_schema_missing_file_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "--cwd",
                     tmp,
@@ -115,8 +120,8 @@ class ValidationTests(unittest.TestCase):
                     "review",
                 ]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(
                     parsed,
                     self.delegate.DEFAULT_CONFIG,
                     TtyStdin(),
@@ -125,11 +130,11 @@ class ValidationTests(unittest.TestCase):
 
     def test_output_schema_directory_is_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--output-schema", tmp, "review"]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(
                     parsed,
                     self.delegate.DEFAULT_CONFIG,
                     TtyStdin(),
@@ -146,9 +151,9 @@ class ValidationTests(unittest.TestCase):
             )
             for argv in cases:
                 with self.subTest(argv=argv):
-                    parsed = self.delegate.parse_cli(["--cwd", tmp, *argv])
-                    with self.assertRaises(self.delegate.DelegateError) as ctx:
-                        self.delegate.request_from_parsed(
+                    parsed = parser_api.parse_cli(["--cwd", tmp, *argv])
+                    with self.assertRaises(error_types.DelegateError) as ctx:
+                        request_api.request_from_parsed(
                             parsed,
                             self.delegate.DEFAULT_CONFIG,
                             TtyStdin(),
@@ -165,10 +170,10 @@ class ValidationTests(unittest.TestCase):
             schema.write_text(contents, encoding="utf-8")
             for mode in ("safe", "work"):
                 with self.subTest(mode=mode):
-                    parsed = self.delegate.parse_cli(
+                    parsed = parser_api.parse_cli(
                         ["--cwd", tmp, "claude", mode, "--output-schema", str(schema), "review"]
                     )
-                    request = self.delegate.request_from_parsed(
+                    request = request_api.request_from_parsed(
                         parsed,
                         self.delegate.DEFAULT_CONFIG,
                         TtyStdin(),
@@ -186,11 +191,11 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(request.output_schema_record_text, contents)
             # Inline text (the resume path) is passed straight through, never
             # reopened as a path.
-            inline = self.delegate.build_request(
+            inline = request_api.build_request(
                 "claude",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
                 self.delegate.DEFAULT_CONFIG,
                 True,
@@ -200,11 +205,11 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(inline.argv[inline.argv.index("--json-schema") + 1], contents)
             self.assertEqual(inline.output_schema_record_text, contents)
             # Call mode still reads a single JSON envelope.
-            call = self.delegate.build_request(
+            call = request_api.build_request(
                 "claude",
                 "call",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "answer",
                 self.delegate.DEFAULT_CONFIG,
                 True,
@@ -216,10 +221,10 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
             schema.write_text("{}", encoding="utf-8")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed,
                 self.delegate.DEFAULT_CONFIG,
                 TtyStdin(),
@@ -238,11 +243,11 @@ class ValidationTests(unittest.TestCase):
                 "required": ["name"],
             }
             schema.write_text(json.dumps(original), encoding="utf-8")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
             )
 
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
             )
             self.assertEqual(json.loads(schema.read_text()), original)
@@ -262,11 +267,11 @@ class ValidationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
 
         self.assertEqual(ctx.exception.error, "invalid_output_schema")
         self.assertIn("schema.required", ctx.exception.message)
@@ -275,22 +280,22 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
             schema.write_bytes(b"\xff")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["claude", "call", "--output-schema", str(schema), "return json"]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
             self.assertEqual(ctx.exception.error, "invalid_output_schema")
 
             schema.write_text('{"type":"object"}', encoding="utf-8")
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
             )
             self.assertIsNone(request.output_schema_record_text)
 
     def test_stdin_works(self):
         self.assertEqual(
-            self.delegate.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"
+            request_api.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"
         )
 
     def test_delayed_stdin_pipe_works(self):
@@ -302,7 +307,7 @@ class ValidationTests(unittest.TestCase):
             with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
                 reader_ready.set()
                 try:
-                    result["prompt"] = self.delegate.resolve_prompt([], None, reader)
+                    result["prompt"] = request_api.resolve_prompt([], None, reader)
                 except Exception as exc:  # pragma: no cover - re-raised in main thread
                     result["error"] = exc
 
@@ -323,13 +328,13 @@ class ValidationTests(unittest.TestCase):
             thread.join(timeout=5)
 
     def test_direct_plus_prompt_file_fails(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt(["direct"], "/tmp/task.md", TtyStdin())
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt(["direct"], "/tmp/task.md", TtyStdin())
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
 
     def test_direct_plus_stdin_fails(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt(["direct"], None, NonTtyStdin("from stdin"))
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt(["direct"], None, NonTtyStdin("from stdin"))
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
 
     def test_prompt_file_plus_stdin_fails(self):
@@ -337,41 +342,41 @@ class ValidationTests(unittest.TestCase):
             f.write("from file")
             path = f.name
         self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt([], path, NonTtyStdin("from stdin"))
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt([], path, NonTtyStdin("from stdin"))
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
 
     def test_dev_stdin_prompt_file_is_the_stdin_source_and_reads_once(self):
         stdin = CountingNonTtyStdin("from stdin")
 
-        prompt = self.delegate.resolve_prompt([], "/dev/stdin", stdin)
+        prompt = request_api.resolve_prompt([], "/dev/stdin", stdin)
 
         self.assertEqual(prompt, "from stdin")
         self.assertEqual(stdin.read_count, 1)
 
     def test_direct_plus_dev_stdin_names_the_conflicting_sources(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt(["direct"], "/dev/stdin", NonTtyStdin("piped"))
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt(["direct"], "/dev/stdin", NonTtyStdin("piped"))
 
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
         self.assertIn("direct prompt arguments", ctx.exception.message)
         self.assertIn("--prompt-file /dev/stdin", ctx.exception.message)
 
     def test_no_prompt_with_tty_fails_without_blocking(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt([], None, TtyStdin())
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt([], None, TtyStdin())
         self.assertEqual(ctx.exception.error, "missing_prompt")
 
     def test_closed_stdin_fails_as_missing_prompt(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.resolve_prompt([], None, None)
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.resolve_prompt([], None, None)
         self.assertEqual(ctx.exception.error, "missing_prompt")
 
     def test_control_characters_are_sanitized(self):
-        self.assertEqual(self.delegate.validate_prompt("he\x00llo\x01"), "hello")
-        self.assertEqual(self.delegate.validate_prompt("a\nb\tc\rd"), "a\nb\tc\rd")
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.validate_prompt("\x00\x01")
+        self.assertEqual(request_api.validate_prompt("he\x00llo\x01"), "hello")
+        self.assertEqual(request_api.validate_prompt("a\nb\tc\rd"), "a\nb\tc\rd")
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.validate_prompt("\x00\x01")
         self.assertEqual(ctx.exception.error, "empty_prompt")
 
     def test_run_input_json_cwd_same_workspace_succeeds(self):
@@ -391,12 +396,12 @@ class ValidationTests(unittest.TestCase):
                 }
             )
         )
-        parsed = self.delegate.ParsedCommand(
+        parsed = request_types.ParsedCommand(
             "run",
-            global_options=self.delegate.GlobalOptions(json_mode=True, cwd=str(nested)),
-            run_json=self.delegate.RunJsonOptions(str(task)),
+            global_options=request_types.GlobalOptions(json_mode=True, cwd=str(nested)),
+            run_json=request_types.RunJsonOptions(str(task)),
         )
-        request = self.delegate.request_from_input_json(parsed, droid_test_config(self.delegate))
+        request = request_api.request_from_input_json(parsed, droid_test_config(self.delegate))
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
         self.assertEqual(request.workspace_kind, "git")
         self.assertTrue(
@@ -417,14 +422,12 @@ class ValidationTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(
-                parsed, droid_test_config(self.delegate)
-            )
+            request = request_api.request_from_input_json(parsed, droid_test_config(self.delegate))
             self.assertEqual(Path(request.workspace).resolve(), Path(tmp).resolve())
             self.assertEqual(request.workspace_kind, "directory")
 
@@ -445,13 +448,13 @@ class ValidationTests(unittest.TestCase):
                 }
             )
         )
-        parsed = self.delegate.ParsedCommand(
+        parsed = request_types.ParsedCommand(
             "run",
-            global_options=self.delegate.GlobalOptions(json_mode=True, cwd=repo2.name),
-            run_json=self.delegate.RunJsonOptions(str(task)),
+            global_options=request_types.GlobalOptions(json_mode=True, cwd=repo2.name),
+            run_json=request_types.RunJsonOptions(str(task)),
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
     def test_workspace_local_config_cannot_override_global(self):
@@ -777,9 +780,9 @@ class ValidationTests(unittest.TestCase):
             (delegate_dir / "config.json").write_text(
                 json.dumps({"cursor": {"defaultModel": "from-workspace"}})
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "models",
-                global_options=self.delegate.GlobalOptions(cwd=tmp),
+                global_options=request_types.GlobalOptions(cwd=tmp),
             )
             with (
                 mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"),
@@ -788,7 +791,7 @@ class ValidationTests(unittest.TestCase):
                 ),
                 mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
             ):
-                config, _source = self.delegate.load_config(
+                config, _source = request_api.load_config(
                     workspace=self.delegate.workspace_path_for_config(parsed.global_options.cwd)
                 )
             self.assertEqual(config["cursor"]["defaultModel"], "composer-2.5")
@@ -1321,8 +1324,8 @@ class ValidationTests(unittest.TestCase):
     def test_request_carries_configured_process_group_grace(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["tracking"]["processGroupTerminationGraceSec"] = 0.25
-        parsed = self.delegate.parse_cli(["codex", "safe", "review"])
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = parser_api.parse_cli(["codex", "safe", "review"])
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.process_group_termination_grace_sec, 0.25)
 
     def test_tracking_process_group_grace_rejects_negative_or_non_numeric(self):
@@ -1676,8 +1679,8 @@ class DryRunHintScopeTests(unittest.TestCase):
         self.delegate = load_delegate()
 
     def _message(self, argv):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(argv)
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(argv)
         return ctx.exception.message
 
     def test_a_launch_error_names_dry_run(self):
@@ -1700,7 +1703,7 @@ class DryRunHintScopeTests(unittest.TestCase):
         self.assertIn(" dry-run ", f" {corrected} ")
         argv = corrected.split()
         self.assertEqual(argv[0], "delegate")
-        reparsed = self.delegate.parse_cli(argv[1:])
+        reparsed = parser_api.parse_cli(argv[1:])
         self.assertEqual(reparsed.subcommand, "codex")
         self.assertTrue(reparsed.launch.dry_run)
 

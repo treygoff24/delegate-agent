@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import argv_builders as argv_api
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import describe_payload as describe_api
+from delegate_agent import errors as error_types
 from delegate_agent import prompt_instructions, request_build
+from delegate_agent import prompt_transport as transport_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 from tests.discovery_fakes import write_version_harness
 
@@ -70,7 +77,7 @@ class EngineArgvTests(CommandTestBase):
             ],
         )
         self.assertTrue(argv[10].startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
-        self.assertIn(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], argv[10])
+        self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], argv[10])
         self.assertIn("hello", argv[10])
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
@@ -123,7 +130,7 @@ class EngineArgvTests(CommandTestBase):
             request,
             run_id="run-test",
             alias="quiet-otter",
-            source_workspace=self.delegate.ResolvedWorkspace("/repo", "git"),
+            source_workspace=request_types.ResolvedWorkspace("/repo", "git"),
         )
         manifest = self.delegate.delegate_runner.build_manifest(context, request.argv)
         self.assertEqual(manifest["modelRequested"], None)
@@ -199,7 +206,7 @@ class EngineArgvTests(CommandTestBase):
                 return_value=True,
             ) as drifted,
             mock.patch.object(self.delegate.harness_discovery, "probe_harness") as probe,
-            self.assertRaises(self.delegate.DelegateError),
+            self.assertRaises(error_types.DelegateError),
         ):
             self.build_git_request(
                 "codex",
@@ -374,7 +381,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_a_probe_finding_no_drift_leaves_the_refusal_standing(self):
         """A current cache that refuses is a real answer, not a stale one."""
-        with self.assertRaises(self.delegate.DelegateError) as caught:
+        with self.assertRaises(error_types.DelegateError) as caught:
             self._build_against_cache(cached_supported=["low"], effort="max", version_drifted=False)
         self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
 
@@ -443,7 +450,7 @@ class EngineArgvTests(CommandTestBase):
                 execute_call=mock.DEFAULT,
                 execute_passthrough=mock.DEFAULT,
             ) as runners,
-            self.assertRaises(self.delegate.DelegateError) as caught,
+            self.assertRaises(error_types.DelegateError) as caught,
         ):
             self.build_git_request(
                 "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
@@ -525,7 +532,7 @@ class EngineArgvTests(CommandTestBase):
                     "codex", "grok", tuple(discovery["harnesses"]["codex"]["selector"])
                 ),
             ),
-            self.assertRaises(self.delegate.DelegateError) as caught,
+            self.assertRaises(error_types.DelegateError) as caught,
         ):
             self.build_git_request(
                 "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
@@ -580,7 +587,7 @@ class EngineArgvTests(CommandTestBase):
                     "codex", "grok", selector
                 ),
             ),
-            self.assertRaises(self.delegate.DelegateError) as caught,
+            self.assertRaises(error_types.DelegateError) as caught,
         ):
             self.build_git_request(
                 "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
@@ -659,7 +666,7 @@ class EngineArgvTests(CommandTestBase):
                 "cached_version_has_drifted",
                 side_effect=AssertionError("a drifted selector must not spawn a version probe"),
             ),
-            self.assertRaises(self.delegate.DelegateError),
+            self.assertRaises(error_types.DelegateError),
         ):
             self.build_git_request(
                 "codex",
@@ -707,7 +714,7 @@ class EngineArgvTests(CommandTestBase):
                 "load_discovery_cache",
                 return_value=discovery,
             ),
-            self.assertRaises(self.delegate.DelegateError),
+            self.assertRaises(error_types.DelegateError),
         ):
             self.build_git_request(
                 "opencode",
@@ -846,7 +853,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(work.capability_model, "work-model")
 
     def test_safe_review_prefix_is_read_only_text_only(self):
-        for engine, prefix in self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE.items():
+        for engine, prefix in argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE.items():
             with self.subTest(engine=engine):
                 lowered = prefix.lower()
                 self.assertIn("read-only review/investigation", lowered)
@@ -857,7 +864,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertNotIn("implement the change", lowered)
 
     def test_cursor_work_argv_cursor_agent_prefix(self):
-        argv = self.delegate.build_cursor_argv(
+        argv = argv_api.build_cursor_argv(
             ["cursor", "agent"], "work", "/repo", "composer-2.5", "hello"
         )
         self.assertEqual(
@@ -884,7 +891,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--mode=ask", argv)
 
     def test_structured_retry_native_resume_argv(self):
-        cursor = self.delegate.build_cursor_argv(
+        cursor = argv_api.build_cursor_argv(
             ["cursor-agent"],
             "safe",
             "/repo",
@@ -894,7 +901,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertEqual(cursor[cursor.index("--resume") + 1], "cursor-session")
 
-        claude = self.delegate.build_claude_argv(
+        claude = argv_api.build_claude_argv(
             self.delegate.DEFAULT_CONFIG["claude"],
             "safe",
             None,
@@ -907,7 +914,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(claude[claude.index("--resume") + 1], "claude-session")
         self.assertNotIn("--no-session-persistence", claude)
 
-        omp = self.delegate.build_omp_argv(
+        omp = argv_api.build_omp_argv(
             self.delegate.DEFAULT_CONFIG["omp"],
             "safe",
             None,
@@ -919,7 +926,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--resume=omp-session", omp)
         self.assertNotIn("--no-session", omp)
 
-        codex = self.delegate.build_codex_argv(
+        codex = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "safe",
             "/repo",
@@ -929,7 +936,7 @@ class EngineArgvTests(CommandTestBase):
                 self.delegate.DEFAULT_CONFIG, engine="codex", mode="safe"
             ),
             workspace_kind="git",
-            prompt_transport=self.delegate.PROMPT_TRANSPORT_STDIN,
+            prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
             output_schema="/tmp/schema.json",
             persist_session=True,
             resume_session_id="codex-thread",
@@ -955,7 +962,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--cd", codex)
 
     def test_droid_safe_argv(self):
-        argv = self.delegate.build_droid_argv("droid", "safe", "/repo", "model-id", "hello")
+        argv = argv_api.build_droid_argv("droid", "safe", "/repo", "model-id", "hello")
         self.assertEqual(
             argv[:-1],
             [
@@ -975,7 +982,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--skip-permissions-unsafe", argv)
 
     def test_droid_work_argv(self):
-        argv = self.delegate.build_droid_argv("droid", "work", "/repo", "model-id", "hello")
+        argv = argv_api.build_droid_argv("droid", "work", "/repo", "model-id", "hello")
         self.assertEqual(
             argv,
             [
@@ -993,19 +1000,19 @@ class EngineArgvTests(CommandTestBase):
         )
 
     def test_pass_through_restores_text_argv(self):
-        cursor = self.delegate.build_cursor_argv(
+        cursor = argv_api.build_cursor_argv(
             ["agent"], "work", "/repo", "composer-2.5", "hello", stream_capture=False
         )
         self.assertIn("--output-format", cursor)
         self.assertIn("text", cursor)
         self.assertNotIn("--print", cursor)
-        droid = self.delegate.build_droid_argv(
+        droid = argv_api.build_droid_argv(
             "droid", "safe", "/repo", "model-id", "hello", stream_capture=False
         )
         self.assertNotIn("--output-format", droid)
 
     def test_invalid_alias_rejected_before_argv(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
             )
@@ -1013,7 +1020,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_build_request_requires_resolved_workspace_boundary(self):
         with self.assertRaisesRegex(TypeError, "build_request requires a ResolvedWorkspace"):
-            self.delegate.build_request(  # type: ignore[arg-type]
+            request_api.build_request(  # type: ignore[arg-type]
                 "cursor",
                 "safe",
                 None,
@@ -1026,13 +1033,13 @@ class EngineArgvTests(CommandTestBase):
     def test_placeholder_droid_model_rejected_before_argv(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"my-model": "replace-with-your-droid-model-id"}
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request("droid", "safe", "my-model", "/repo", "hello", config, True)
         self.assertEqual(ctx.exception.error, "unconfigured_model")
         self.assertIn("placeholder", ctx.exception.message)
 
         config["droid"]["models"] = {"my-model": "your-droid-model-id"}
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request("droid", "safe", "my-model", "/repo", "hello", config, True)
         self.assertEqual(ctx.exception.error, "unconfigured_model")
 
@@ -1042,7 +1049,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1074,7 +1081,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             config["codex"],
             "work",
             "/repo",
@@ -1099,7 +1106,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             config["codex"],
             "work",
             "/repo",
@@ -1116,7 +1123,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1133,7 +1140,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="safe",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "safe",
             "/repo",
@@ -1154,7 +1161,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        default_argv = self.delegate.build_codex_argv(
+        default_argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1165,7 +1172,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("--ephemeral", default_argv)
 
-        resumable_argv = self.delegate.build_codex_argv(
+        resumable_argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1183,7 +1190,7 @@ class EngineArgvTests(CommandTestBase):
             engine="claude",
             mode="work",
         )
-        default_argv = self.delegate.build_claude_argv(
+        default_argv = argv_api.build_claude_argv(
             self.delegate.DEFAULT_CONFIG["claude"],
             "work",
             None,
@@ -1191,7 +1198,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("--no-session-persistence", default_argv)
 
-        resumable_argv = self.delegate.build_claude_argv(
+        resumable_argv = argv_api.build_claude_argv(
             self.delegate.DEFAULT_CONFIG["claude"],
             "work",
             None,
@@ -1207,7 +1214,7 @@ class EngineArgvTests(CommandTestBase):
             mode="work",
         )
         session_id = "th_0123456789abcdef"
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1255,7 +1262,7 @@ class EngineArgvTests(CommandTestBase):
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["cursor"]["defaultModel"] = fixed_model
             with self.subTest(model=fixed_model, effort=fixed_effort):
-                with self.assertRaises(self.delegate.DelegateError) as matching:
+                with self.assertRaises(error_types.DelegateError) as matching:
                     self.build_git_request(
                         "cursor",
                         "safe",
@@ -1275,7 +1282,7 @@ class EngineArgvTests(CommandTestBase):
         fixed_model = "cursor-grok-4.6-xhigh-fast"
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["defaultModel"] = fixed_model
-        with self.assertRaises(self.delegate.DelegateError) as mismatched:
+        with self.assertRaises(error_types.DelegateError) as mismatched:
             self.build_git_request(
                 "cursor",
                 "safe",
@@ -1305,7 +1312,7 @@ class EngineArgvTests(CommandTestBase):
         )
 
         config["cursor"]["defaultModel"] = "composer-2.5"
-        with self.assertRaises(self.delegate.DelegateError) as non_fixed:
+        with self.assertRaises(error_types.DelegateError) as non_fixed:
             self.build_git_request(
                 "cursor",
                 "safe",
@@ -1321,7 +1328,7 @@ class EngineArgvTests(CommandTestBase):
     def test_cursor_fixed_effort_capability_helper_has_same_typed_outcome(self):
         cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
         cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
-        with self.assertRaises(self.delegate.DelegateError) as caught:
+        with self.assertRaises(error_types.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
 
@@ -1329,7 +1336,7 @@ class EngineArgvTests(CommandTestBase):
         cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
         cursor.pop("reasoningEffortModels")
         cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
-        with self.assertRaises(self.delegate.DelegateError) as caught:
+        with self.assertRaises(error_types.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
 
@@ -1343,7 +1350,7 @@ class EngineArgvTests(CommandTestBase):
             engine="codex",
             mode="work",
         )
-        argv = self.delegate.build_codex_argv(
+        argv = argv_api.build_codex_argv(
             self.delegate.DEFAULT_CONFIG["codex"],
             "work",
             "/repo",
@@ -1367,7 +1374,7 @@ class EngineArgvTests(CommandTestBase):
             mode="work",
         )
         session_id = "550e8400-e29b-41d4-a716-446655440000"
-        argv = self.delegate.build_claude_argv(
+        argv = argv_api.build_claude_argv(
             self.delegate.DEFAULT_CONFIG["claude"],
             "work",
             "claude-3-7-sonnet",
@@ -1474,7 +1481,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "harness-default")
 
     def test_codex_max_reasoning_effort_without_model_fails_closed(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "codex",
                 "safe",
@@ -1542,15 +1549,15 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(droid.prompt_transport, "file")
         self.assertIsNone(droid.stdin_text)
         self.assertIsNotNone(droid.prompt_file_text)
-        self.assertIn(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"], droid.prompt_file_text)
+        self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"], droid.prompt_file_text)
         self.assertIn(secret_prompt, droid.prompt_file_text)
         self.assertIn("--file", droid.argv)
-        self.assertIn(self.delegate.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
+        self.assertIn(transport_api.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
         self.assertNotIn(secret_prompt, json.dumps(droid.argv))
         droid_payload = self.delegate.dry_run_payload(droid)
         self.assertEqual(droid_payload["promptTransport"], "file")
         self.assertIn("--file", droid_payload["argv"])
-        self.assertIn(self.delegate.DROID_PROMPT_FILE_DISPLAY, droid_payload["argv"])
+        self.assertIn(transport_api.DROID_PROMPT_FILE_DISPLAY, droid_payload["argv"])
         self.assertNotIn(secret_prompt, json.dumps(droid_payload["argv"]))
 
     def test_droid_safe_request_injects_safe_prefix_once_after_skill_prompt(self):
@@ -1558,10 +1565,10 @@ class EngineArgvTests(CommandTestBase):
         self.addCleanup(repo.cleanup)
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-        parsed = self.delegate.ParsedCommand(
+        parsed = request_types.ParsedCommand(
             "droid",
-            global_options=self.delegate.GlobalOptions(cwd=repo.name),
-            launch=self.delegate.LaunchOptions(
+            global_options=request_types.GlobalOptions(cwd=repo.name),
+            launch=request_types.LaunchOptions(
                 "droid",
                 "safe",
                 model_alias="reviewer",
@@ -1569,15 +1576,15 @@ class EngineArgvTests(CommandTestBase):
             ),
         )
 
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
 
         prompt = request.prompt_file_text
         self.assertIsNotNone(prompt)
         assert prompt is not None
         self.assertTrue(prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
-        self.assertEqual(prompt.count(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]), 1)
+        self.assertEqual(prompt.count(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]), 1)
         self.assertGreater(
-            prompt.find(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]),
+            prompt.find(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]),
             prompt.find("Delegate sub-agent skill review"),
         )
         self.assertIn("review the diff", prompt)
@@ -1599,7 +1606,7 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
 
         self.assertEqual(payload["promptTransport"], "argv")
-        self.assertEqual(payload["argv"][-1], self.delegate.CURSOR_PROMPT_REDACTION)
+        self.assertEqual(payload["argv"][-1], transport_api.CURSOR_PROMPT_REDACTION)
         self.assertNotIn(secret_prompt, json.dumps(payload["argv"]))
 
     def test_build_request_uses_cache_declared_custom_model_capability(self):
@@ -1640,7 +1647,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "cache")
 
     def test_cursor_reasoning_effort_requires_mapping(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "cursor",
                 "safe",
@@ -1811,10 +1818,10 @@ class EngineArgvTests(CommandTestBase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultModel"] = "gpt-5.5"
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--reasoning-effort", "high", "review"]
             )
-            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
             payload = self.delegate.dry_run_payload(request)
         self.assertEqual(payload["requestedReasoningEffort"], "high")
         self.assertEqual(payload["reasoningEffortSource"], "cli")
@@ -1837,12 +1844,12 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
         self.assertEqual(request.reasoning_effort_source, "input-json")
         self.assertIn('model_reasoning_effort="high"', request.argv)
 
@@ -1863,12 +1870,12 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(request.output_schema, str(schema.resolve()))
         schema_index = request.argv.index("--output-schema")
         self.assertEqual(request.argv[schema_index + 1], str(schema.resolve()))
@@ -1908,12 +1915,12 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         assert request.output_schema_text is not None
         emitted = json.loads(request.output_schema_text)
         self.assertEqual(list(emitted["properties"]), ["reasoning", "answer"])
@@ -1935,13 +1942,13 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "unsupported_output_schema")
 
     def test_input_json_effort_overrides_provider_default(self):
@@ -1962,12 +1969,12 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertNotIn('model_reasoning_effort="medium"', request.argv)
 
@@ -1976,10 +1983,10 @@ class EngineArgvTests(CommandTestBase):
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["codex"]["defaultReasoningEffort"] = "medium"
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--reasoning-effort", "high", "review"]
             )
-            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertNotIn('model_reasoning_effort="medium"', request.argv)
 
@@ -2330,12 +2337,12 @@ class EngineArgvTests(CommandTestBase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertIsNone(request.model)
             self.assertNotIn("--model", request.argv)
 
@@ -2353,13 +2360,13 @@ class EngineArgvTests(CommandTestBase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_input_key")
             self.assertIn("profile", ctx.exception.message)
 
@@ -2369,7 +2376,7 @@ class EngineArgvTests(CommandTestBase):
         config["pi"]["defaultReasoningEffort"] = "high"
         config["omp"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
         config["omp"]["defaultReasoningEffort"] = "high"
-        payload = self.delegate.describe_payload(config, "embedded-default")
+        payload = describe_api.describe_payload(config, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
         self.assertTrue(payload["engineCapabilities"]["claude"]["outputSchema"])
@@ -2400,7 +2407,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(payload["promptTransports"]["droid"], "file")
         self.assertIn("--file", payload["modeMapping"]["droid"]["safe"])
         self.assertIn(
-            self.delegate.DROID_PROMPT_FILE_DISPLAY, payload["modeMapping"]["droid"]["safe"]
+            transport_api.DROID_PROMPT_FILE_DISPLAY, payload["modeMapping"]["droid"]["safe"]
         )
         self.assertIn("<isolated-workspace>", payload["modeMapping"]["droid"]["safe"])
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["droid"])
@@ -2465,7 +2472,7 @@ class EngineArgvTests(CommandTestBase):
     def test_describe_kimi_argv_includes_pinned_default_model(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["kimi"]["defaultModel"] = "kimi-code/pinned-model"
-        payload = self.delegate.describe_payload(config, "test")
+        payload = describe_api.describe_payload(config, "test")
 
         for mode in ("safe", "work"):
             with self.subTest(mode=mode):
@@ -2476,17 +2483,17 @@ class EngineArgvTests(CommandTestBase):
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        prompt = self.delegate.effective_prompt(
+        prompt = request_api.effective_prompt(
             "review task",
             engine="grok",
             mode="safe",
             completion_report_mode="none",
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "grok",
             "safe",
             None,
-            self.delegate.ResolvedWorkspace("/repo", "git"),
+            request_types.ResolvedWorkspace("/repo", "git"),
             prompt,
             config,
             dry_run=True,
@@ -2501,7 +2508,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--sandbox", request.argv)
         self.assertIn("read-only", request.argv)
         self.assertIn("--disable-web-search", request.argv)
-        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, request.display_argv or [])
+        self.assertIn(transport_api.PROMPT_FILE_DISPLAY, request.display_argv or [])
         self.assertNotIn("review task", request.display_argv or [])
 
     def test_grok_reasoning_effort_reports_static_capability_source(self):
@@ -2564,22 +2571,22 @@ class EngineArgvTests(CommandTestBase):
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["policy"]["profile"] = "external-sandbox"
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "grok",
             "work",
             None,
-            self.delegate.ResolvedWorkspace("/repo", "git"),
+            request_types.ResolvedWorkspace("/repo", "git"),
             "implement",
             config,
             dry_run=True,
         )
         self.assertNotIn("bypassPermissions", request.argv)
         config["policy"]["harness"] = {"grok": {"work": {"bypassApprovalsAndSandbox": True}}}
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "grok",
             "work",
             None,
-            self.delegate.ResolvedWorkspace("/repo", "git"),
+            request_types.ResolvedWorkspace("/repo", "git"),
             "implement",
             config,
             dry_run=True,
@@ -2589,7 +2596,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_grok_work_bypass_also_requires_effective_policy_true(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        argv = self.delegate.build_grok_argv(
+        argv = argv_api.build_grok_argv(
             config["grok"],
             "work",
             "/repo",
@@ -2604,11 +2611,11 @@ class EngineArgvTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
             schema.write_text("{}", encoding="utf-8")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "grok", "work", "--output-schema", str(schema), "task"],
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(
                     parsed,
                     self.delegate.DEFAULT_CONFIG,
                     io.StringIO(""),
@@ -2617,7 +2624,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("grok", ctx.exception.message.lower())
 
     def test_devin_safe_fails_preflight_as_unsupported(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "devin",
                 "safe",
@@ -2632,15 +2639,15 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("another harness", ctx.exception.message)
 
     def test_devin_unknown_mode_fails_closed(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_devin_argv(self.delegate.DEFAULT_CONFIG["devin"], "bogus", None)
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            argv_api.build_devin_argv(self.delegate.DEFAULT_CONFIG["devin"], "bogus", None)
         self.assertEqual(ctx.exception.error, "invalid_mode")
 
     def test_devin_safe_cli_fails_before_binary_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, err = self.run_main(["--cwd", tmp, "--json", "devin", "safe", "review task"])
             self.assertFalse((Path(tmp) / ".delegate").exists())
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, error_types.EXIT_USAGE)
         self.assertEqual(err, "")
         payload = json.loads(out)
         self.assertEqual(payload["error"], "unsupported_mode")
@@ -2659,13 +2666,13 @@ class EngineArgvTests(CommandTestBase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "unsupported_mode")
 
     def test_devin_work_uses_dangerous_permission_without_agent_config(self):
@@ -2690,8 +2697,8 @@ class EngineArgvTests(CommandTestBase):
 
     def test_devin_call_default_vs_read_only_permissions(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        default_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["devin", "call", "answer"]),
+        default_req = request_api.request_from_parsed(
+            parser_api.parse_cli(["devin", "call", "answer"]),
             config,
             io.StringIO(""),
         )
@@ -2700,8 +2707,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--respect-workspace-trust", default_req.argv)
         self.assertIsNone(default_req.agent_config_text)
 
-        ro_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["devin", "call", "--read-only", "score"]),
+        ro_req = request_api.request_from_parsed(
+            parser_api.parse_cli(["devin", "call", "--read-only", "score"]),
             config,
             io.StringIO(""),
         )
@@ -2726,12 +2733,12 @@ class EngineArgvTests(CommandTestBase):
             self.delegate.validate_devin_read_only_transport([str(binary)])
             binary.write_text("#!/bin/sh\necho 'devin 3000.3.27'\n", encoding="utf-8")
             binary.chmod(0o755)
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
+            with self.assertRaises(error_types.DelegateError) as ctx:
                 self.delegate.validate_devin_read_only_transport([str(binary)])
         self.assertEqual(ctx.exception.error, "devin_read_only_transport_unverified")
 
     def test_devin_reasoning_effort_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "devin",
                 "safe",
@@ -2754,7 +2761,7 @@ class EngineArgvTests(CommandTestBase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
         self.assertEqual(request.stdin_text, "review task")
         self.assertEqual(
             request.argv,
@@ -2822,8 +2829,8 @@ class EngineArgvTests(CommandTestBase):
 
     def test_opencode_call_default_vs_read_only_env(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        default_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["opencode", "call", "answer"]),
+        default_req = request_api.request_from_parsed(
+            parser_api.parse_cli(["opencode", "call", "answer"]),
             config,
             io.StringIO(""),
         )
@@ -2832,8 +2839,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--pure", default_req.argv)
         self.assertEqual(default_req.env_overrides, {"OPENCODE_DISABLE_AUTOUPDATE": "1"})
 
-        ro_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["opencode", "call", "--read-only", "score"]),
+        ro_req = request_api.request_from_parsed(
+            parser_api.parse_cli(["opencode", "call", "--read-only", "score"]),
             config,
             io.StringIO(""),
         )
@@ -2854,7 +2861,7 @@ class EngineArgvTests(CommandTestBase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
         self.assertEqual(request.stdin_text, "review task")
         self.assertEqual(
             request.argv,
@@ -2885,7 +2892,7 @@ class EngineArgvTests(CommandTestBase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_ARGV)
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_ARGV)
         self.assertIsNone(request.stdin_text)
         self.assertEqual(request.display_argv[-1], "<prompt redacted: omp argv transport>")
         self.assertEqual(
@@ -2940,14 +2947,14 @@ class EngineArgvTests(CommandTestBase):
         # preamble is prepended upstream; this guards plain work/call.
         for bad in ("--auto-approve", "@/etc/hostname", "-x"):
             with self.subTest(prompt=bad):
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.build_omp_argv(
+                with self.assertRaises(error_types.DelegateError) as ctx:
+                    argv_api.build_omp_argv(
                         self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, bad
                     )
                 self.assertEqual(ctx.exception.error, "pi_family_prompt_flag_like")
         # A normal prompt still builds, and safe-mode omp (prefix prepended upstream)
         # is never flag-shaped, so the guard does not false-positive on real prompts.
-        ok = self.delegate.build_omp_argv(
+        ok = argv_api.build_omp_argv(
             self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, "do the task"
         )
         self.assertEqual(ok[-1], "do the task")
@@ -2973,8 +2980,8 @@ class EngineArgvTests(CommandTestBase):
             mock.patch("delegate_agent.request_build.tempfile.mkdtemp", return_value=temp_cwd),
         ):
             requests.append(
-                self.delegate.request_from_parsed(
-                    self.delegate.parse_cli(["omp", "call", "--model", "builder", "task"]),
+                request_api.request_from_parsed(
+                    parser_api.parse_cli(["omp", "call", "--model", "builder", "task"]),
                     config,
                     io.StringIO(""),
                 )
@@ -2988,7 +2995,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertNotIn("private/default", request.argv)
                 self.assertNotIn("private/smol", request.argv)
                 self.assertNotIn("private/plan", request.argv)
-        self.assertNotIn("private/", json.dumps(self.delegate.describe_payload(config, "test")))
+        self.assertNotIn("private/", json.dumps(describe_api.describe_payload(config, "test")))
 
     def test_omp_work_resolves_structured_alias_and_cli_thinking(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -3087,7 +3094,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "alias")
 
     def test_pi_raw_model_rejects_thinking_suffix(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
                 "pi",
                 "work",
@@ -3107,8 +3114,8 @@ class EngineArgvTests(CommandTestBase):
             tempfile.TemporaryDirectory() as temp_cwd,
             mock.patch("delegate_agent.request_build.tempfile.mkdtemp", return_value=temp_cwd),
         ):
-            request = self.delegate.request_from_parsed(
-                self.delegate.parse_cli(["pi", "call", "--read-only", "--timeout", "17", "score"]),
+            request = request_api.request_from_parsed(
+                parser_api.parse_cli(["pi", "call", "--read-only", "--timeout", "17", "score"]),
                 self.delegate.DEFAULT_CONFIG,
                 io.StringIO(""),
             )
@@ -3286,12 +3293,12 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertIn("--agent", request.argv)
             self.assertEqual(request.argv[request.argv.index("--agent") + 1], "reviewer")
 
@@ -3307,17 +3314,17 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "unsupported_agent")
 
     def test_opencode_input_json_rejects_leading_dash_agent_and_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                run_json=request_types.RunJsonOptions(str(task)),
             )
             cases = (
                 ({"agent": "--auto"}, "invalid_agent"),
@@ -3334,19 +3341,19 @@ class EngineArgvTests(CommandTestBase):
                         **override,
                     }
                     task.write_text(json.dumps(payload), encoding="utf-8")
-                    with self.assertRaises(self.delegate.DelegateError) as ctx:
-                        self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                    with self.assertRaises(error_types.DelegateError) as ctx:
+                        request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
                     self.assertEqual(ctx.exception.error, error)
                     self.assertIn("does not start with '-'", ctx.exception.message)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")
-        describe = self.delegate.describe_payload(
+        describe = describe_api.describe_payload(
             self.delegate.DEFAULT_CONFIG,
             "embedded-default",
             workspace,
         )
-        models = self.delegate.models_payload(
+        models = describe_api.models_payload(
             self.delegate.DEFAULT_CONFIG,
             "embedded-default",
             workspace,
@@ -3367,7 +3374,7 @@ class EngineArgvTests(CommandTestBase):
             self.delegate.DEFAULT_CONFIG,
             {"policy": {"work": {"networkAccess": False}}},
         )
-        payload = self.delegate.describe_payload(config, "test-config")
+        payload = describe_api.describe_payload(config, "test-config")
         codex_work = payload["modeMapping"]["codex"]["work"]
         self.assertEqual(payload["effectivePolicy"]["codex"]["work"]["networkAccess"], False)
         self.assertNotIn("sandbox_workspace_write.network_access=true", codex_work)
@@ -3377,7 +3384,7 @@ class EngineArgvTests(CommandTestBase):
         self.addCleanup(repo.cleanup)
         stdout = io.StringIO()
         code = self.delegate.main(["--cwd", str(repo.name), "runs"], stdout=stdout)
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertFalse((Path(repo.name) / ".delegate").exists())
         output = stdout.getvalue()
         self.assertIn("mode: recent", output)
