@@ -492,6 +492,20 @@ def _write_persona_snapshots(root: Path, records: JsonObject) -> None:
         target_root.chmod(0o500)
 
 
+def _complete_pin_config(defaults: JsonObject, config: JsonObject) -> JsonObject:
+    from delegate_agent import config as delegate_config
+
+    merged = delegate_config.merge_config_layer(defaults, config)
+    # Null optional operational sections mean defaults, not an absent mapping.
+    # Scalar nulls (including explicit model defaults) remain untouched.
+    for section in ("workflows", "tracking", "progress", "worktrees"):
+        if merged.get(section) is None and isinstance(defaults.get(section), dict):
+            merged[section] = defaults[section]
+    cleaned = _non_secret_config(merged)
+    assert isinstance(cleaned, dict)
+    return cleaned
+
+
 def create_pin(
     workflow_id: str,
     *,
@@ -501,6 +515,8 @@ def create_pin(
     home: Path | None = None,
 ) -> WorkflowPin:
     """Create (or verify) the immutable pin for a new workflow."""
+    from delegate_agent import config as delegate_config
+
     _validate_workflow_id(workflow_id)
     root = pin_directory(workflow_id, home=home)
     configured_pool = (
@@ -511,13 +527,28 @@ def create_pin(
             "pin_root_inside_worktree_pool",
             "workflow pin root must be outside worktrees.dataHome",
         )
+    existing_pin = load_pin(workflow_id, home=home)
+    if existing_pin is not None:
+        if existing_pin.attempt_config_version == 0:
+            raise WorkflowPinError("pin_collision", "legacy pins cannot be upgraded implicitly")
+        requested = _complete_pin_config(existing_pin.config, config)
+        if (
+            requested != existing_pin.config
+            or live_runtime_digest() != existing_pin.runtime_digest
+            or sys.executable != existing_pin.python_executable
+            or _persona_records(workspace) != existing_pin.personas
+        ):
+            raise WorkflowPinError(
+                "pin_collision", "existing pin differs from the requested inputs"
+            )
+        return existing_pin
+    # Raw partial input is supported by this internal entry point too. Freeze
+    # defaults only on creation, never during verification or attempt loading.
+    cleaned_config = _complete_pin_config(delegate_config.embedded_default_config(), config)
     run_registry.ensure_private_dir(root.parent)
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
     digest, runtime_root, import_root, entrypoint = _write_runtime_snapshot(root, home=home)
-    cleaned_config = _non_secret_config(config)
-    if not isinstance(cleaned_config, dict):
-        cleaned_config = {}
     config_path = root / PIN_CONFIG_FILE
     if config_path.exists():
         existing_config = json.loads(config_path.read_text(encoding="utf-8"))
