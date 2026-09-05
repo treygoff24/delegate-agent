@@ -121,6 +121,7 @@ class InspectionOptions:
     summary: bool = False
     engine: str | None = None
     live: bool = False
+    overview: bool = False
 
 
 @dataclass(frozen=True)
