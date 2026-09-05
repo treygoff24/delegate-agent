@@ -95,9 +95,32 @@ tempfile.tempdir = None
 # milliseconds and reads as a dead lane.
 ORIGINAL_HOME = os.environ.get("HOME")
 
-_TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="dt-"))
+_TEST_HOME = str(_TEST_ROOT / "home")
+_TEST_TEMP = str(_TEST_ROOT / "tmp")
+Path(_TEST_HOME).mkdir()
+Path(_TEST_TEMP).mkdir()
 os.environ["HOME"] = _TEST_HOME
-atexit.register(shutil.rmtree, _TEST_HOME, True)
+for _name in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_name] = _TEST_TEMP
+tempfile.tempdir = _TEST_TEMP
+
+
+def _finish_test_environment() -> None:
+    # Both runners use the same ownership guard. Pytest also invokes it for
+    # each test; unittest gets this suite-level backstop before temp cleanup.
+    from tests.process_guard import reap_delegate_processes
+
+    try:
+        reap_delegate_processes(_TEST_ROOT)
+    except Exception as exc:
+        os.write(2, f"test process cleanup failed; retaining {_TEST_ROOT}: {exc}\n".encode())
+        # atexit exceptions otherwise do not make the authoritative gate fail.
+        os._exit(1)
+    shutil.rmtree(_TEST_ROOT, ignore_errors=True)
+
+
+atexit.register(_finish_test_environment)
 
 # unittest, which is the CI gate, never imports pytest's conftest.py.  Start
 # the linked-worktree flock watcher at package import so both runners observe
