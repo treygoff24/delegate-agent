@@ -32,6 +32,7 @@ from delegate_agent import (
     reasoning,
     redaction,
     resume_command,
+    run_context,
     run_metadata,
     run_output_commands,
     run_registry,
@@ -434,9 +435,7 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         }
         if mail.mail_push_adapter(request.engine) != "verified":
             payload.setdefault("warnings", []).append(mail.mail_push_warning(request.engine))
-    run_metadata.add_model_payload_fields(payload, request)
-    reasoning.add_reasoning_payload_fields(payload, request)
-    run_metadata.add_speed_payload_fields(payload, request)
+    run_metadata.add_selection_payload_fields(payload, request)
     if request.output_schema_text is not None:
         payload["outputSchemaInline"] = True
         payload["argv"] = [
@@ -467,12 +466,7 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         }
     if request.agent is not None:
         payload["agent"] = request.agent
-    if request.persona_name is not None:
-        payload["personaName"] = request.persona_name
-        payload["personaSource"] = request.persona_source
-        payload["personaTransport"] = request.persona_transport
-        payload["personaDigest"] = request.persona_digest
-        payload["personaFile"] = request.persona_file
+    run_metadata.add_persona_payload_fields(payload, request)
     if request.resumed_from is not None:
         payload["resumedFrom"] = request.resumed_from
     if request.followup_of is not None:
@@ -766,27 +760,16 @@ def make_run_context(
                 "sourceHeadRef": head_ref,
             }
 
-    return delegate_runner.RunContext(
+    return run_context.from_request(
+        request,
         registry_root=registry_root,
         run_id=run_id,
         alias=alias,
-        harness=request.engine,
-        engine=request.engine,
-        mode=request.mode,
-        model=request.model,
         source_cwd=source_cwd,
         execution_cwd=execution_cwd,
         workspace_kind=source_workspace.kind,
         isolated_workspace=isolated_workspace,
-        started_at=run_registry.utc_now_iso(),
-        model_alias=request.model_alias,
-        model_resolved=request.model,
-        model_requested=request.model_requested,
-        capability_model=request.capability_model,
-        capability_model_source=request.capability_model_source,
-        continuity_mode=request.continuity_mode,
         creation_context=creation_context,
-        structured_output=request.output_schema is not None,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,
         effective_isolation=effective_isolation,
@@ -796,54 +779,7 @@ def make_run_context(
         safe_workspace_method=safe_workspace_method,
         sandbox=sandbox,
         warnings=(*warnings, *request.warnings),
-        reasoning_effort=request.reasoning_effort,
-        requested_reasoning_effort=request.requested_reasoning_effort,
-        reasoning_effort_source=request.reasoning_effort_source,
-        reasoning_capability_source=request.reasoning_capability_source,
-        reasoning_capability_evidence=request.reasoning_capability_evidence,
-        reasoning_transport=request.reasoning_transport,
-        fast=request.fast,
-        prompt_transport=request.prompt_transport,
-        forbid_commit=request.forbid_commit,
-        progress_initial_delay_sec=request.progress_initial_delay_sec,
-        progress_interval_sec=request.progress_interval_sec,
-        stall_seconds=request.stall_seconds,
-        process_group_termination_grace_sec=request.process_group_termination_grace_sec,
-        registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
-        env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
-            request.profile_resolution,
-            request.env_overrides,
-        ),
-        auth_profile=request.auth_profile,
-        fallback_auth_profile=request.fallback_auth_profile,
-        codex_failover_identity=request.codex_failover_identity,
-        codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=request.include_dirty,
-        mail_push=request.mail_push,
-        resumable=request.resumable,
-        followup_of=request.followup_of,
-        resume_session_id=request.resume_session_id,
-        structured_retry=request.structured_retry,
-        group=request.group,
-        notify=request.notify,
-        workflow_agent_key=request.workflow_agent_key,
-        call_read_only=request.call_read_only or request.pure,
-        pure=request.pure,
-        prompt_instruction_mode=request.prompt_instruction_mode,
-        source_prompt=request.source_prompt,
-        progress_requested=request.progress_requested,
-        timeout_seconds=request.timeout,
-        output_schema_text=request.output_schema_record_text,
-        agent=request.agent,
-        resumed_from=request.resumed_from,
-        persona_name=request.persona_name,
-        persona_source=request.persona_source,
-        persona_transport=request.persona_transport,
-        persona_digest=request.persona_digest,
-        persona_file=request.persona_file,
-        persona_text=request.persona_text,
-        account_binding_command=request.account_binding_command,
         temporary_workspace_cleanup=request.temporary_workspace_cleanup,
     )
 
