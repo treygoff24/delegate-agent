@@ -291,6 +291,7 @@ def _build_persistent_worktree_run_context(
         model_alias=request.model_alias,
         model_resolved=request.model,
         model_requested=request.model_requested,
+        continuity_mode=request.continuity_mode,
         capability_model=request.capability_model,
         capability_model_source=request.capability_model_source,
         creation_context=creation_context,
@@ -315,6 +316,7 @@ def _build_persistent_worktree_run_context(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         stall_seconds=request.stall_seconds,
+        process_group_termination_grace_sec=request.process_group_termination_grace_sec,
         env_overrides={
             **(request.env_overrides or {}),
             "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
