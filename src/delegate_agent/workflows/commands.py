@@ -51,6 +51,7 @@ class WorkflowCommand:
     timeout: int | None = None
     result_field: str | None = None
     json_mode: bool = False
+    jsonl: bool = False
     notify: str | None = None
 
 
@@ -146,6 +147,7 @@ def emit_run(
     config: JsonObject,
     stdout: TextIO,
     stderr: TextIO,
+    approve_gate: bool = False,
 ) -> int:
     warnings: list[str] = []
     lock_fd: int | None = None
@@ -170,6 +172,21 @@ def emit_run(
         try:
             status = registry.read_json(root / registry.STATUS_FILE) or {}
             previous_status = dict(status)
+            if approve_gate:
+                # Recover gate evidence only after acquiring the supervisor
+                # lock; an approval racing a draining supervisor must not
+                # publish a paused projection before its resume is admitted.
+                recovered = _latest_unapproved_gate_event(root)
+                gate_key = recovered.get("key") if recovered else status.get("gateKey")
+                if not isinstance(gate_key, str):
+                    raise DelegateError(
+                        "workflow_not_gated", f"Workflow is not waiting on a gate: {wf_id}"
+                    )
+                status = dict(status)
+                status.update({"status": "paused", "gateKey": gate_key})
+                if recovered:
+                    status["gateResult"] = recovered.get("result")
+                    status["gateResultHash"] = recovered.get("gateResultHash")
             result_path = root / registry.RESULT_FILE
             try:
                 previous_result = result_path.read_bytes()
@@ -524,26 +541,49 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
     since = command.since
     collected: list[JsonObject] = []
     stalled = False
+    reader = registry.JournalReader(root / registry.JOURNAL_FILE)
     while True:
-        events = [
-            event
-            for event in registry.iter_journal(root / registry.JOURNAL_FILE)
-            if event.get("seq", 0) > since
-        ]
-        for event in events:
+        # Observe terminal status before the final drain so a completion event
+        # appended just before that projection is not lost at watch shutdown.
+        status = _status_view(root, registry.read_json(root / registry.STATUS_FILE) or {})
+        poll_since = since
+        for event in reader.read_events():
+            if event.get("seq", 0) <= poll_since:
+                continue
             seq = event.get("seq")
             if isinstance(seq, int):
                 since = max(since, seq)
-            if command.json_mode:
+            if command.jsonl:
+                print(
+                    json.dumps(
+                        {"type": "event", "schema": WORKFLOW_COMMAND_SCHEMA, "event": event}
+                    ),
+                    file=stdout,
+                    flush=True,
+                )
+            elif command.json_mode:
                 collected.append(event)
             else:
                 print(json.dumps(event, sort_keys=True), file=stdout, flush=True)
-        status = _status_view(root, registry.read_json(root / registry.STATUS_FILE) or {})
         if status.get("status") in WAIT_DONE_WORKFLOW_STATUSES:
             stalled = status.get("status") == "stalled"
             break
         time.sleep(1)
-    if command.json_mode:
+    if command.jsonl:
+        print(
+            json.dumps(
+                {
+                    "type": "final",
+                    "schema": WORKFLOW_COMMAND_SCHEMA,
+                    "ok": not stalled,
+                    "lastSeq": since,
+                    "workflow": status,
+                }
+            ),
+            file=stdout,
+            flush=True,
+        )
+    elif command.json_mode:
         rendering.print_json(
             {
                 "ok": not stalled,
@@ -653,44 +693,10 @@ def emit_approve(
     stdout: TextIO,
 ) -> int:
     root = _workflow_dir_for_command(command, workspace)
-    status = registry.read_json(root / registry.STATUS_FILE) or {}
-    # status.json is a projection and may have been lost or clobbered while a
-    # supervisor drained a gate.  The durable journal is authoritative: choose
-    # the newest gate event whose key has not already been approved.
-    recovered_gate = _latest_unapproved_gate_event(root)
-    gate_key = recovered_gate.get("key") if recovered_gate is not None else status.get("gateKey")
-    if not isinstance(gate_key, str):
-        raise DelegateError(
-            "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
-        )
-    recovered_result_hash = (
-        recovered_gate.get("gateResultHash")
-        if recovered_gate is not None and isinstance(recovered_gate.get("gateResultHash"), str)
-        else None
-    )
-    if recovered_gate is not None and (
-        status.get("status") != "paused"
-        or status.get("gateKey") != gate_key
-        or status.get("gateResultHash") != recovered_result_hash
-    ):
-        projected = dict(status)
-        projected.update(
-            {
-                "status": "paused",
-                "ok": True,
-                "gateKey": gate_key,
-                "gateResult": recovered_gate.get("result"),
-                "updatedAt": run_registry.utc_now_iso(),
-            }
-        )
-        if recovered_result_hash is not None:
-            projected["gateResultHash"] = recovered_result_hash
-        else:
-            projected.pop("gateResultHash", None)
-        registry.write_status(root, projected)
-    # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
-    result = emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+    result = emit_run(
+        resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout, approve_gate=True
+    )
     # Approval is an operator-facing transition: wait for the detached
     # trampoline to publish a terminal projection when the child is already
     # ready.  This removes a misleading transient ``starting`` read without
@@ -867,7 +873,11 @@ def emit_list(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
             if child.is_dir() and registry.WORKFLOW_ID_RE.fullmatch(child.name):
                 status = registry.read_json(child / registry.STATUS_FILE) or {}
                 view = _status_view(child, status)
-                entry: JsonObject = {"wfId": child.name, "status": view.get("status")}
+                entry: JsonObject = {
+                    "wfId": child.name,
+                    "status": view.get("status"),
+                    "decision": view["decision"],
+                }
                 if "statusOnDisk" in view:
                     entry["statusOnDisk"] = view["statusOnDisk"]
                 workflows.append(entry)
@@ -1050,14 +1060,31 @@ def _acquire_workflow_lock(root: Path, wf_id: str) -> int:
 def _status_view(root: Path, payload: JsonObject) -> JsonObject:
     """Overlay stalled detection onto a status payload without mutating disk."""
     on_disk = payload.get("status")
-    if on_disk not in LIVE_WORKFLOW_STATUSES:
-        return payload
-    if registry.supervisor_alive(root):
-        return payload
     view = dict(payload)
-    view["status"] = "stalled"
-    view["statusOnDisk"] = on_disk
-    view["ok"] = False
+    if on_disk in LIVE_WORKFLOW_STATUSES and not registry.supervisor_alive(root):
+        view["status"] = "stalled"
+        view["statusOnDisk"] = on_disk
+        view["ok"] = False
+    status = view.get("status")
+    wf_id = view.get("wfId") or root.name
+    actions: list[str] = []
+    if status == "paused" and isinstance(view.get("gateKey"), str):
+        actions = [f"workflow approve {wf_id}", f"workflow events {wf_id}"]
+    elif status in {"stalled", "failed", "killed", "paused"}:
+        actions = [f"workflow events {wf_id}", f"workflow run --resume {wf_id}"]
+    elif status in LIVE_WORKFLOW_STATUSES:
+        actions = [f"workflow wait {wf_id}"]
+    elif status in {"succeeded", "dry_run"}:
+        actions = [f"workflow result {wf_id}"]
+    view["decision"] = {
+        "status": status,
+        "gate": {"key": view.get("gateKey"), "resultHash": view.get("gateResultHash")}
+        if isinstance(view.get("gateKey"), str)
+        else None,
+        "error": view.get("error"),
+        "budget": view.get("budget"),
+        "nextActions": actions,
+    }
     return view
 
 
