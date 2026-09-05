@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removal target, and limited run listings avoid probing logs for excluded rows.
 
 ### Changed
+- CLI and input JSON normalize into one launch builder for tracked and call
+  modes, retaining input-specific validation and workflow-session checks.
+  Invalid JSON instruction modes return usage errors; Droid raw model IDs no
+  longer become spurious worktree-planning aliases.
 - Shared metadata projections, typed isolation plans and retirement inputs, and
   a read-only record module reduce duplicated policy and circular imports.
 - Unit tests use owning modules while CLI contracts retain entrypoint coverage.
