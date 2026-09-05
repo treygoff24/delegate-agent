@@ -91,7 +91,14 @@ class ResumeRefusalTests(unittest.TestCase):
         )
         self.assertEqual(code, 2, stderr.getvalue())
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(set(payload), {"ok", "error", "message", "exitCode"})
+        self.assertEqual(
+            set(payload),
+            {"ok", "error", "message", "exitCode", "schema", "command", "helpTopic", "nextActions"},
+        )
+        self.assertEqual(payload["schema"], "delegate.error.v1")
+        self.assertEqual(payload["command"], "resume")
+        self.assertEqual(payload["helpTopic"], "resume")
+        self.assertEqual(payload["nextActions"], ["delegate help resume"])
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], expected)
         self.assertEqual(payload["exitCode"], 2)
