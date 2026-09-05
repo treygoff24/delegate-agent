@@ -2296,6 +2296,10 @@ def _capture_tracked_process(
                 watchdog.observe_line(line, now=time.monotonic())
                 if accumulator.terminal_status is not None:
                     terminal_signal.set()
+                elif accumulator.harness in {"pi", "omp"}:
+                    # A harness-owned retry/new turn supersedes its preceding
+                    # terminal receipt, including a provider backoff interval.
+                    terminal_signal.clear()
                 progress_dirty = True
                 if append_stdout_line_event(line):
                     lines_since_persist += 1
@@ -2435,6 +2439,8 @@ def _capture_tracked_process(
                         stopped_after_completion = True
                     exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
                     break
+            else:
+                terminal_seen_at = None
             if deadline is not None and now >= deadline and not terminal_signal.is_set():
                 _terminate_call_process(
                     process,
@@ -2513,6 +2519,7 @@ def _capture_tracked_process(
             # so the raw event log matches what the accumulator saw.
             accumulator.ingest_line(line_buffer)
             append_stdout_line_event(line_buffer)
+        accumulator.finish_stream()
         error: str | None = None
         message: str | None = None
         if stall_detail is not None:
@@ -2848,6 +2855,8 @@ def _finalize_tracked_run(
         signal_text=signal_text,
         extra=merged_extra,
     )
+    if failure is not None and failure.code == "child_failed":
+        failure = _unclassified_provider_failure(capture.accumulator) or failure
     if ctx.followup_of is not None:
         session_failure = child_failures.classify_followup_session_failure(signal_text, ctx.engine)
         if session_failure is not None:
@@ -3079,6 +3088,13 @@ def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulat
     # Redacted here rather than at each call site: this is the only classifier
     # input that is not already scrubbed, and the classified message reaches
     # state.json, the snapshot, and the completion report.
+    terminal = accumulator.terminal_event or {}
+    if accumulator.harness in {"pi", "omp"} and terminal.get("status") == "failed":
+        reason = terminal.get("reason")
+        if isinstance(reason, str) and reason:
+            # Retried turns remain in the diagnostic event history, but an
+            # earlier auth/quota error must not classify a different final failure.
+            return redaction.redact_string(reason)
     events = list(accumulator.events)
     for kind in ("error", "run.completed"):
         latest = accumulator.events.last_by_kind.get(kind)
@@ -4524,6 +4540,17 @@ def _parse_claude_call_json(
     )
 
 
+def _unclassified_provider_failure(
+    accumulator: harness_events.StreamAccumulator,
+) -> child_failures.ChildFailure | None:
+    if accumulator.harness not in {"pi", "omp"} or accumulator.terminal_status != "failed":
+        return None
+    reason = (accumulator.terminal_event or {}).get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return child_failures.ChildFailure("provider_error", redaction.redact_string(reason))
+
+
 def _call_failure_details(
     exit_code: int,
     signal_text: str,
@@ -4728,6 +4755,7 @@ def _execute_call_once(
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
+    accumulator.finish_stream()
     if harness == "codex" and structured_output and accumulator.completion_text:
         raw_text = accumulator.completion_text
         text = _bounded_call_fallback_text(raw_text)
@@ -4754,15 +4782,23 @@ def _execute_call_once(
         text = _bounded_call_fallback_text(raw)
         text_chars = len(raw)
         text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
+    result_exit_code = process.returncode
+    if result_exit_code == 0 and (
+        accumulator.terminal_status in {"failed", "cancelled"}
+        or accumulator.provider_terminal_state is not None
+    ):
+        result_exit_code = 1
     error, message = _call_failure_details(
-        process.returncode,
+        result_exit_code,
         "\n".join(
             part for part in (stderr_tail, _accumulator_failure_signal_text(accumulator)) if part
         ),
     )
+    if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
+        error, message = failure.code, failure.message
     return CallResult(
         text=text,
-        exit_code=process.returncode,
+        exit_code=result_exit_code,
         duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,
