@@ -199,12 +199,14 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             "time.sleep(3.5)\n"
             "return agent('after parked stretch')\n",
         )
+        initial_journal = registry.iter_journal(root / registry.JOURNAL_FILE)
+        self.assertEqual([event.get("type") for event in initial_journal], ["attempt_config"])
         time.sleep(2.2)
 
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         self.assertEqual(status.get("status"), "running")
         self.assertTrue(registry.supervisor_alive(root))
-        self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), [])
+        self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), initial_journal)
         self._wait_for(
             lambda: (
                 (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"

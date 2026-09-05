@@ -15,6 +15,42 @@ from delegate_agent.workflows import commands, registry, runtime
 
 
 class WorkflowJournalReaderTests(unittest.TestCase):
+    def test_terminal_watch_keeps_a_valid_final_record_without_newline(self) -> None:
+        self.path.write_bytes(b'{"seq":1,"type":"workflow_completed"}')
+        self.status("succeeded")
+        expected = registry.iter_journal(self.path)
+        for jsonl in (False, True):
+            with self.subTest(jsonl=jsonl):
+                out = io.StringIO()
+                commands.emit_watch(
+                    commands.WorkflowCommand(
+                        "watch", wf_id=self.wf_id, json_mode=True, jsonl=jsonl
+                    ),
+                    workspace=self.workspace,
+                    stdout=out,
+                )
+                if jsonl:
+                    records = [json.loads(line) for line in out.getvalue().splitlines()]
+                    actual = [record["event"] for record in records if record["type"] == "event"]
+                    self.assertEqual(records[-1]["lastSeq"], 1)
+                else:
+                    payload = json.loads(out.getvalue())
+                    actual = payload["events"]
+                    self.assertEqual(payload["lastSeq"], 1)
+                self.assertEqual(actual, expected)
+
+    def test_terminal_watch_warns_and_ignores_an_incomplete_final_record(self) -> None:
+        self.path.write_bytes(b'{"seq":1}\n{"seq":')
+        self.status("stalled")
+        out = io.StringIO()
+        with self.assertWarnsRegex(RuntimeWarning, "truncated final workflow journal"):
+            commands.emit_watch(
+                commands.WorkflowCommand("watch", wf_id=self.wf_id, json_mode=True),
+                workspace=self.workspace,
+                stdout=out,
+            )
+        self.assertEqual(json.loads(out.getvalue())["events"], [{"seq": 1}])
+
     def test_liveness_probe_is_read_only_for_unheld_and_held_locks(self) -> None:
         lock = self.root / registry.LOCK_FILE
         lock.write_bytes(b"")
