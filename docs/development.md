@@ -24,6 +24,10 @@ live under `src/delegate_agent/`:
 
 Unit tests should call the module that owns the behavior. Keep CLI tests for
 parsing/dispatch/output contracts and subprocess fixtures for launch boundaries.
+Write application tests as `unittest.TestCase` methods. Module-level `test_*`
+functions run under pytest but are silently absent from the authoritative
+unittest gate. `scripts/test-parity.sh` checks runner counts and retains both
+complete logs, including failures, under the receipt directory it prints.
 Adding a request field needs non-default propagation checks across ordinary,
 temporary, persistent, attached, and grouped-call paths, not another copied
 constructor block.
