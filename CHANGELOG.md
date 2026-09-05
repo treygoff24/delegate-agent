@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `describe --overview` provides a compact command index without expanded option
+  prose. Existing full and summary discovery remain available.
+- `workflow resume` aliases `workflow run --resume`; focused reject help,
+  workflow typo suggestions, and additive error recovery fields reduce guesswork.
+  `workflow watch --jsonl` streams events without retaining the full response.
+- Capable workflow pins use immutable per-attempt operational settings with
+  effective values, origins, and digests. New pins bind the selected profile and
+  credential namespaces; older pins retain their behavior with explicit warnings.
+
+### Fixed
+- Persistent-worktree launches preserve requested continuity and process-group
+  termination grace through the shared request-to-run mapping.
+- Doctor distinguishes executing, installed, and last-promoted artifacts and
+  verifies the outer launcher chain instead of equating matching version strings.
+- PI/OMP failed, aborted, and exhausted turns no longer become successful merely
+  because the process exits zero. Later retry/compaction recovery remains supported.
+- Noisy OMP thinking deltas use bounded diagnostic sampling with explicit capture
+  receipts. Useful output, individual records, and total ingress retain finite caps.
+- Safe Codex runs can write their designated scratch directory without granting
+  source or metadata write access. Unsupported native permission configuration
+  fails closed rather than falling back to broader workspace permissions.
+- Workflow replay reads the journal once; watch tails new bytes and handles
+  interrupted final records. Approval/resume handles draining supervisors and
+  rolls back approval when launch publication fails.
+- Attempt publication atomically refuses an existing destination, including empty
+  directories. Conflicting worktree identity retains files instead of guessing a
+  removal target, and limited run listings avoid probing logs for excluded rows.
+
+### Changed
+- Shared metadata projections, typed isolation plans and retirement inputs, and
+  a read-only record module reduce duplicated policy and circular imports.
+- Unit tests use owning modules while CLI contracts retain entrypoint coverage.
+  Acceptance selects the pinned Ruff toolchain; both test runners share private
+  temporary state and ownership-checked process cleanup.
+
 ### Fixed
 - Claude `--output-schema` is accepted in tracked `safe`/`work` modes, not only
   `call`, and is passed natively as `--json-schema`, recorded in the manifest,
