@@ -53,6 +53,24 @@ class CommandSpec:
     internal: bool = False
 
 
+# Public parser shapes; internal supervisor entrypoints stay out of discovery.
+WORKFLOW_ACTION_KINDS = {
+    "run": "path",
+    "resume": "resume",
+    "check": "path",
+    "save": "path",
+    "status": "id",
+    "events": "id",
+    "watch": "id",
+    "result": "id",
+    "wait": "id",
+    "approve": "id",
+    "reject": "id",
+    "kill": "id",
+    "list": "list",
+}
+
+
 SAFE_WORKSPACE_SYNC_NOTE = (
     "Safe mode reviews your **current working tree** — uncommitted tracked edits "
     "and untracked, non-ignored files are mirrored into an isolated throwaway copy "
@@ -1358,9 +1376,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]",
             "delegate [--json] workflow run --resume <wfId> [--budget N]",
+            "delegate [--json] workflow resume <wfId> [--budget N]",
             "delegate [--json] workflow run --name <saved-name> [--args JSON] [--budget N]",
             "delegate [--json] workflow check <script.py>",
             "delegate [--json] workflow status|events|approve|kill <wfId>",
+            "delegate [--json] workflow watch <wfId> [--since SEQ]",
+            "delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT",
             "delegate [--json] workflow wait [<wfId>] [--timeout SEC]",
             "delegate [--json] workflow result [<wfId>] [--field KEY]",
             "delegate [--json] workflow list",
@@ -1371,6 +1392,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--budget", "N", "Maximum number of live agent() runs."),
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
+            OptionSpec("--reason", "TEXT", "Non-empty reason for rejecting an agent result."),
             OptionSpec("--name", "NAME", "Use or save a user-level workflow name."),
             OptionSpec("--since", "SEQ", "For events/watch, emit events after sequence number."),
             OptionSpec("--timeout", "SEC", "For wait, maximum seconds to wait."),
@@ -1409,6 +1431,20 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--name", "NAME", "Resolve a saved user-level workflow name."),
         ),
         see_also=("workflow status", "workflow events", "workflow wait"),
+    ),
+    "workflow resume": CommandSpec(
+        name="workflow resume",
+        summary="Resume a workflow using the existing run --resume path.",
+        usage=("delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]",),
+        arguments=(ArgSpec("wfId", True, "Workflow ID to resume."),),
+        options=(
+            OptionSpec("--budget", "N", "Maximum real delegate.run calls."),
+            OptionSpec("--dry-run", None, "Replay using planned stubs without launching agents."),
+        ),
+        notes=(
+            "Alias for workflow run --resume <wfId>; pinned args and resume checks are unchanged.",
+        ),
+        see_also=("workflow run", "workflow approve"),
     ),
     "workflow check": CommandSpec(
         name="workflow check",
@@ -1458,7 +1494,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "workflow wait": CommandSpec(
         name="workflow wait",
-        summary="Wait for a workflow to reach a terminal status.",
+        summary="Wait for completion or an attention-required paused/stalled workflow.",
         usage=("delegate [--json] workflow wait [<wfId>] [--timeout SEC]",),
         arguments=(
             ArgSpec("wfId", False, "Workflow ID; omit to select the latest eligible workflow."),
@@ -1470,6 +1506,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
+            "Returns at completion, paused, or stalled; a pause is not proof of completed work.",
+            "An explicit wfId may return a completed dry-run. Implicit latest selection excludes dry-runs.",
         ),
         see_also=("workflow status", "workflow result"),
     ),
@@ -1478,6 +1516,21 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Approve a paused gate and relaunch the supervisor.",
         usage=("delegate [--json] workflow approve <wfId>",),
         see_also=("workflow run",),
+    ),
+    "workflow reject": CommandSpec(
+        name="workflow reject",
+        summary="Invalidate a recorded agent result by structural key or label.",
+        usage=("delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT",),
+        arguments=(
+            ArgSpec("wfId", True, "Workflow ID containing the result."),
+            ArgSpec("key-or-label", True, "Agent structural key or unambiguous label."),
+        ),
+        options=(OptionSpec("--reason", "TEXT", "Non-empty reason recorded in the journal."),),
+        notes=(
+            "Refuses a live supervisor; use the script's reject() while it is running.",
+            "Records rejection without relaunching; resume separately when ready.",
+        ),
+        see_also=("workflow resume", "workflow events"),
     ),
     "workflow kill": CommandSpec(
         name="workflow kill",
@@ -2019,8 +2072,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "describe": CommandSpec(
         name="describe",
         summary="Print a machine-readable inventory of engines, modes, argv shapes, and policy.",
-        usage=("delegate [--json] describe [--summary]",),
-        options=(OptionSpec("--summary", None, "Emit a compact command/config surface summary."),),
+        usage=("delegate [--json] describe [--overview|--summary]",),
+        options=(
+            OptionSpec(
+                "--overview", None, "Command index and focused-help topics; no config bodies."
+            ),
+            OptionSpec("--summary", None, "Emit a compact command/config surface summary."),
+        ),
         examples=(
             "delegate describe",
             "delegate --json describe",
@@ -2029,7 +2087,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "--json describe is the full detailed surface.",
             "Discovery output applies best-effort credential scrubbing.",
-            "Agent discovery should start with --summary, then use raw describe only when needed.",
+            "Start discovery with --overview, then focused help; summary and full views retain their details.",
         ),
         see_also=("models", "agent-help", "help"),
         unsupported_global_options=("--auth-profile",),
@@ -2372,18 +2430,21 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] workflow run <script.py> "
         "[--args JSON] [--budget N] [--dry-run]",
         "delegate [--cwd PATH] [--json] workflow run --resume <wfId>",
+        "delegate [--cwd PATH] [--json] workflow resume <wfId>",
         "delegate [--cwd PATH] [--json] workflow status|events|approve|kill <wfId>",
+        "delegate [--cwd PATH] [--json] workflow reject <wfId> <key-or-label> --reason TEXT",
         "delegate [--cwd PATH] [--json] workflow wait [<wfId>] [--timeout SEC]",
         "delegate [--cwd PATH] [--json] workflow result [<wfId>] [--field KEY]",
         "delegate [--cwd PATH] [--json] workflow list",
         "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
         "delegate [--json] [--auth-profile NAME] setup",
+        "delegate [--json] config init|sync-profiles",
         "delegate [--json] doctor",
         "delegate [--json] promote --actor WHO --source TEXT [--runtime-digest HEX]",
         "delegate [--json] [--auth-profile NAME] models [--summary]",
         "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
         "delegate [--json] [--auth-profile NAME] capabilities [refresh [<engine> ...]]",
-        "delegate [--json] describe [--summary]",
+        "delegate [--json] describe [--overview|--summary]",
         "delegate [--cwd PATH] [--json] personas",
         "delegate agent-help",
         "delegate help [<command> [<subcommand>]]",
@@ -2414,7 +2475,7 @@ def render_overview_text() -> str:
     )
     lines.append("  delegate help <command>        Focused help for any command path.")
     lines.append("  delegate --json <command> --help   Machine-readable spec for an agent.")
-    lines.append("  delegate --json describe --summary  Compact command/config surface inventory.")
+    lines.append("  delegate --json describe --overview  Command index with focused-help topics.")
     lines.append("  delegate --json models --summary    Compact model inventory.")
     lines.append("  delegate agent-help             Full agent guidance.")
 

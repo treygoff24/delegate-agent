@@ -1275,6 +1275,41 @@ def describe_payload(
     }
 
 
+def describe_overview_payload() -> JsonObject:
+    """Configuration-free discovery; detailed contracts remain in focused help."""
+    return {
+        "ok": True,
+        "overview": True,
+        "version": VERSION,
+        "engines": list(KNOWN_ENGINES),
+        "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
+        "commands": [
+            {"command": spec.name, "helpTopic": spec.name}
+            for spec in command_help.COMMAND_SPECS.values()
+            if not spec.internal
+        ],
+        "recommendedDiscovery": [
+            "delegate --json help <command>",
+            "delegate --json describe --summary",
+            "delegate --json describe",
+        ],
+    }
+
+
+def emit_describe_overview(json_mode: bool, stdout: TextIO) -> int:
+    payload = describe_overview_payload()
+    if json_mode:
+        delegate_rendering.print_json(payload, stdout)
+    else:
+        print(f"delegate {VERSION} overview", file=stdout)
+        print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
+        print(f"modes: {MODE_SAFE}, {MODE_WORK}, {MODE_CALL}", file=stdout)
+        print("Focused help: delegate help <command>", file=stdout)
+        for row in payload["commands"]:
+            print(f"  {row['command']}", file=stdout)
+    return EXIT_OK
+
+
 def describe_summary_payload(
     config: JsonObject,
     config_source: str,
@@ -1679,6 +1714,8 @@ Prefer:
   delegate run-output cursor-1 --completion-report
 
 Discovery:
+  delegate --json describe --overview
+  delegate --json help <command>
   delegate --json models --summary
   delegate --json describe --summary
   delegate --json models        # full/raw details when needed

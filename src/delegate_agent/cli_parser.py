@@ -9,7 +9,6 @@ builders, not here.
 
 from __future__ import annotations
 
-import difflib
 import re
 import shlex
 
@@ -40,7 +39,7 @@ from delegate_agent.constants import (
     validate_mode,
     validate_pure_call,
 )
-from delegate_agent.errors import DelegateError
+from delegate_agent.errors import DelegateError, command_suggestions
 from delegate_agent.request_models import (
     CONTINUITY_MODES,
     FollowupOptions,
@@ -230,12 +229,16 @@ def parse_simple_inspection_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
     summary = False
+    overview = False
     engine: str | None = None
     live = False
     if name in INSPECTION_OPTION_SUBCOMMANDS:
         for token in rest:
             if token == "--summary":
                 summary = True
+                continue
+            if name == "describe" and token == "--overview":
+                overview = True
                 continue
             if name == "models" and token == "--live":
                 live = True
@@ -246,6 +249,10 @@ def parse_simple_inspection_subcommand(
                 engine = token
                 continue
             require_no_extra([token], name)
+        if overview and summary:
+            raise DelegateError(
+                "invalid_option_combination", "Choose --overview or --summary, not both."
+            )
         if live and engine is None:
             raise DelegateError(
                 "invalid_option_combination",
@@ -273,7 +280,7 @@ def parse_simple_inspection_subcommand(
             isolation=isolation,
             auth_profile=auth_profile,
         ),
-        inspection=InspectionOptions(summary=summary, engine=engine, live=live),
+        inspection=InspectionOptions(summary=summary, engine=engine, live=live, overview=overview),
     )
 
 
@@ -348,7 +355,7 @@ def parse_config_subcommand(
         )
     action = rest[0]
     if action not in {"init", "sync-profiles"}:
-        raise DelegateError("unknown_config_action", f"Unknown config action: {action}")
+        raise unknown_action_error("config", action)
     force = False
     if action == "sync-profiles":
         for token in rest[1:]:
@@ -811,8 +818,11 @@ def unknown_subcommand_message(subcommand: str) -> str:
     if subcommand.startswith("droid-"):
         model = subcommand.removeprefix("droid-")
         suggestion_only[subcommand] = f"use: delegate droid {model} ..."
-    candidates = sorted(set(command_help.COMMAND_SPECS) | set(KNOWN_ENGINES))
-    matches = difflib.get_close_matches(subcommand, candidates, n=3)
+    candidates = sorted(
+        {name for name, spec in command_help.COMMAND_SPECS.items() if not spec.internal}
+        | set(KNOWN_ENGINES)
+    )
+    matches = command_suggestions(subcommand, candidates)
     parts = [f"Unknown subcommand: {subcommand}"]
     if subcommand in suggestion_only:
         parts.append(suggestion_only[subcommand])
@@ -824,13 +834,31 @@ def unknown_subcommand_message(subcommand: str) -> str:
     return " ".join(parts)
 
 
+def unknown_action_error(parent: str, action: str) -> DelegateError:
+    candidates = [
+        name.split()[1]
+        for name, spec in command_help.COMMAND_SPECS.items()
+        if name.startswith(f"{parent} ") and len(name.split()) == 2 and not spec.internal
+    ]
+    matches = command_suggestions(action, candidates)
+    suffix = f" Did you mean: {', '.join(matches)}?" if matches else ""
+    return DelegateError(
+        f"unknown_{parent}_action",
+        f"Unknown {parent} action: {action}.{suffix}",
+        command=parent,
+        help_topic=parent,
+        next_actions=[f"delegate help {parent} {match}" for match in matches]
+        or [f"delegate help {parent}"],
+    )
+
+
 def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "mail")
     action = rest[0]
     if action not in {"send", "inbox", "read", "status", "watch", "prune", "hook-pump"}:
-        raise DelegateError("unknown_mail_action", f"Unknown mail action: {action}.")
+        raise unknown_action_error("mail", action)
     args = rest[1:]
     if any(command_help.is_help_token(token) for token in args):
         return help_command(json_mode, f"mail {action}")
@@ -1068,7 +1096,7 @@ def corrected_command_suffix(argv: list[str]) -> str:
 def unknown_option_message(command: str, option: str) -> str:
     spec = command_help.COMMAND_SPECS.get(command)
     candidates = [opt.flag for opt in spec.options] if spec is not None else []
-    matches = difflib.get_close_matches(option, candidates, n=3)
+    matches = command_suggestions(option, candidates)
     if command == "run-output" and option == "--full":
         matches = ["--raw", *[match for match in matches if match != "--raw"]]
     suffix = f" Did you mean: {', '.join(matches)}?" if matches else ""
@@ -2585,6 +2613,19 @@ def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCom
 def parse_workflow(
     rest: list[str], json_mode: bool, cwd: str | None, notify: str | None = None
 ) -> ParsedCommand:
+    try:
+        return _parse_workflow(rest, json_mode, cwd, notify)
+    except DelegateError as exc:
+        action = next((token for token in rest if token != "--json"), "")
+        topic = f"workflow {action}" if action in command_help.WORKFLOW_ACTION_KINDS else "workflow"
+        exc.command = exc.command or topic
+        exc.help_topic = exc.help_topic or topic
+        raise
+
+
+def _parse_workflow(
+    rest: list[str], json_mode: bool, cwd: str | None, notify: str | None = None
+) -> ParsedCommand:
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "workflow")
@@ -2602,18 +2643,23 @@ def parse_workflow(
         )
     if any(command_help.is_help_token(token) for token in args):
         return help_command(json_mode, f"workflow {action}")
-    if action in {"run", "check", "save"}:
+    kind = command_help.WORKFLOW_ACTION_KINDS.get(action)
+    if kind == "resume":
+        if not args or args[0].startswith("-"):
+            raise DelegateError("missing_workflow", "workflow resume requires <wfId>.")
+        return _parse_workflow_path_action("run", ["--resume", *args], json_mode, cwd, notify)
+    if kind == "path":
         return _parse_workflow_path_action(action, args, json_mode, cwd, notify)
-    if action in {"status", "watch", "events", "result", "wait", "approve", "reject", "kill"}:
+    if kind == "id":
         return _parse_workflow_id_action(action, args, json_mode, cwd)
-    if action == "list":
+    if kind == "list":
         require_no_extra(args, "workflow list")
         return ParsedCommand(
             "workflow",
             global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
             workflow_command=workflow_commands.WorkflowCommand("list", json_mode=json_mode),
         )
-    raise DelegateError("unknown_workflow_action", f"Unknown workflow action: {action}")
+    raise unknown_action_error("workflow", action)
 
 
 def _parse_workflow_path_action(
@@ -2976,7 +3022,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         topic = f"worktree {action}" if action in WORKTREE_OPTION_SPECS else "worktree"
         return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
-        raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
+        raise unknown_action_error("worktree", action)
     options: dict[str, WorktreeOptionValue] = {}
     positional: list[str] = []
     i = 0

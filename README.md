@@ -128,6 +128,7 @@ Inspect what Delegate sees:
 ```bash
 delegate --version       # installed version — include this in bug reports
 delegate --json setup
+delegate --json describe --overview   # start here: command index and help topics
 delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
@@ -142,7 +143,7 @@ delegate --json capabilities
 delegate --json capabilities refresh   # refresh the active profile's discovery cache
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. Global options may appear anywhere before `--`; tokens after `--` are literal prompt text. `delegate --json describe` includes a `commands` catalog of the whole surface. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` performs a one-off probe without updating the cache; rerun `delegate setup` or `delegate capabilities refresh` when ordinary launches should consume newly discovered models or effort levels.
+Start with `delegate --json describe --overview` for a compact, configuration-free command index. Then `delegate <command> --help` prints focused help, and `delegate --json <command> --help` returns its usage, arguments, and options. Global options may appear anywhere before `--`; tokens after `--` are literal prompt text. `delegate --json describe` retains the full command/config catalog. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` performs a one-off probe without updating the cache; rerun `delegate setup` or `delegate capabilities refresh` when ordinary launches should consume newly discovered models or effort levels.
 
 Codex tracked runs can opt into a one-run quota fallback with `codex.fallbackProfile`; hashed credential namespace is canonical, while default work/personal credential homes also mirror compatible legacy alias keys so existing launchers share blocks. Remapped aliases remain isolated. See [Configuration](docs/configuration.md).
 

@@ -2,6 +2,16 @@
 
 Use `delegate --help` for the exact command list from the installed version. Global options may appear anywhere before `--`. Tokens after `--` remain literal child-prompt text.
 
+Start agent discovery with `delegate --json describe --overview`, then use
+`delegate --json help <command>` for the arguments and options you need.
+
+Errors rendered by the shared CLI error handler retain `ok`, `error`, `message`,
+and `exitCode`. JSON adds `schema: "delegate.error.v1"`, `command`, `helpTopic`,
+and `nextActions`. Command/help topics are null when no command was resolved;
+the fallback action is `delegate help`. Existing diagnostics and recovery actions
+remain available. Typo suggestions are advisory: Delegate never executes a
+suggested correction.
+
 ## Global options
 
 ```text
@@ -529,12 +539,14 @@ Usage:
 delegate [--json] workflow check <script.py>
 delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]
 delegate [--json] workflow run --resume <wfId> [--budget N]
+delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
 delegate [--json] workflow watch <wfId> [--since SEQ]
 delegate [--json] workflow wait [<wfId>] [--timeout SEC]
 delegate [--json] workflow result [<wfId>] [--field KEY]
 delegate [--json] workflow approve <wfId>
+delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
 delegate [--json] workflow save <script.py> --name NAME
@@ -551,6 +563,8 @@ delegate [--json] workflow save <script.py> --name NAME
   key, and continues from missing work. Resuming a completed `--dry-run` starts
   its planned agents live under the same workflow ID; simulated journal events
   remain visible for audit but are excluded from replay and live budget.
+  `workflow resume <wfId>` is an alias for `workflow run --resume <wfId>`;
+  it uses the same pinned arguments and validation.
 - `events` returns the public workflow journal. For each tracked child launch,
   an `agent_child` event binds `runId` to the structural `key` (also emitted as
   `workflowAgentKey`) and includes `label` when the `agent()` call supplied one;
@@ -558,6 +572,9 @@ delegate [--json] workflow save <script.py> --name NAME
 - `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
   the latest eligible workflow. JSON output for implicit selection includes the
   selected `wfId` and `resolutionKind: "latest"`.
+- `wait` returns at completion or an attention-required pause/stall. An explicit
+  ID can select a completed dry-run; implicit latest selection excludes dry-runs.
+  Returning from wait does not by itself prove that the requested work completed.
 - `result --field KEY` extracts a top-level field from an object result. Text
   mode prints strings directly and JSON-encodes other values; JSON mode returns
   a field/value envelope.
@@ -565,6 +582,9 @@ delegate [--json] workflow save <script.py> --name NAME
   `run --resume` for the same gate — approve already is that resume. `kill`
   validates the supervisor process group before signaling and always attempts
   child fan-out cancellation.
+- `reject` records an agent-result rejection by structural key or unambiguous
+  label, with a non-empty reason. It refuses a live supervisor; use the script's
+  `reject()` in that case. It does not relaunch the workflow automatically.
 - JSON-capable workflow commands return the normal `{ok: ...}` envelope. Invalid
   scripts fail with `invalid_workflow_script`.
 
@@ -580,6 +600,9 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `invalid_workflow_script` | Script failed `check` / load validation. |
 | `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
 | `missing_workflow_result_field` | `result --field` was invoked without a key. |
+| `missing_workflow_reject_args` | Rejection is missing a workflow ID or target. |
+| `missing_workflow_reject_target` | `reject` needs a structural key or label. |
+| `missing_workflow_reject_reason` | `reject` needs a non-empty `--reason`. |
 | `missing_workflow_save_args` | `save` needs both `<script.py>` and `--name`. |
 | `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
@@ -587,6 +610,8 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `workflow_locked` | Another supervisor already holds the workflow flock. |
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
+| `workflow_reject_unresolved` | Rejection target does not resolve to one agent key. |
+| `workflow_running` | Rejection was refused because the supervisor is running or locked. |
 | `workflow_result_missing` | `result` before `result.json` exists. |
 | `workflow_result_field_missing` | The requested top-level result field does not exist. |
 | `workflow_result_not_object` | `--field` was requested for a non-object result. |
@@ -912,6 +937,7 @@ override ambient profile detection for that run.
 
 ```bash
 delegate --json setup
+delegate --json describe --overview
 delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
@@ -923,6 +949,10 @@ delegate --json capabilities refresh
 delegate --json capabilities refresh <engine> [...]
 delegate agent-help
 ```
+
+`describe --overview` is a configuration-free command index with version,
+engines, modes, and focused `helpTopic` pointers. It omits internal commands,
+option descriptions, and config bodies. It cannot be combined with `--summary`.
 
 `describe` reports version, engines, modes, supported isolation values, prompt
 transforms, effective policy, top-level profile config metadata, representative

@@ -19,7 +19,7 @@ from delegate_agent import (
     argv_utils,
     capability_commands,
     command_errors,
-    command_help,  # noqa: F401  # re-exported for tests / back-compat
+    command_help,
     config_commands,
     followup_command,
     harness_discovery,
@@ -84,6 +84,7 @@ from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for t
     emit_agent_help,
     emit_command_help,
     emit_describe,
+    emit_describe_overview,
     emit_models,
     models_payload,
 )
@@ -1720,13 +1721,26 @@ def pre_read_run_json_for_config(
     return workspace, config, source
 
 
-def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: TextIO) -> int:
+def emit_error(
+    error: DelegateError,
+    json_mode: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+    *,
+    command: str | None = None,
+) -> int:
+    command = error.command or command
+    help_topic = error.help_topic or command
+    help_action = f"delegate help {help_topic}" if help_topic else "delegate help"
     if json_mode:
         payload: JsonObject = {
             "ok": False,
+            "schema": "delegate.error.v1",
             "error": error.error,
             "message": error.message,
             "exitCode": error.exit_code,
+            "command": command,
+            "helpTopic": help_topic,
         }
         if error.diagnostics is not None:
             payload["diagnostics"] = error.diagnostics
@@ -1735,12 +1749,14 @@ def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: Te
                     payload[key] = value
         if error.next_actions:
             payload["nextActions"] = error.next_actions
+        payload.setdefault("nextActions", [help_action])
         delegate_rendering.print_json(
             payload,
             stdout,
         )
     else:
         print(f"{error.error}: {error.message}", file=stderr)
+        print(f"Help: {help_action}", file=stderr)
     return error.exit_code
 
 
@@ -1755,8 +1771,14 @@ def main(
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     json_mode = infer_global_json(argv)
+    error_command: str | None = None
     try:
         parsed = parse_cli(argv)
+        error_command = parsed.subcommand
+        if parsed.workflow_command is not None:
+            action = parsed.workflow_command.action
+            if action in command_help.WORKFLOW_ACTION_KINDS:
+                error_command = f"workflow {action}"
         global_options = parsed.global_options
         workspace_origin = _workspace_origin(parsed, global_options)
         workspace: ResolvedWorkspace | None = None
@@ -1767,6 +1789,8 @@ def main(
         if parsed.subcommand == "version":
             print(VERSION, file=stdout)
             return EXIT_OK
+        if parsed.subcommand == "describe" and parsed.inspection and parsed.inspection.overview:
+            return emit_describe_overview(global_options.json_mode, stdout)
         if parsed.subcommand == "config":
             return emit_config_command(parsed, stdout)
         if parsed.subcommand == "setup":
@@ -2028,6 +2052,7 @@ def main(
             json_mode,
             stdout,
             stderr,
+            command=error_command,
         )
     except command_errors.CommandError as exc:
         return emit_error(
@@ -2040,9 +2065,10 @@ def main(
             json_mode,
             stdout,
             stderr,
+            command=error_command,
         )
     except DelegateError as exc:
-        return emit_error(exc, json_mode, stdout, stderr)
+        return emit_error(exc, json_mode, stdout, stderr, command=error_command)
 
 
 if __name__ == "__main__":
