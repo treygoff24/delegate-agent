@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import rendering, run_registry, workflow_attempts, workflow_pinning
+from delegate_agent import private_io, rendering, run_registry, workflow_attempts, workflow_pinning
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -181,6 +181,20 @@ def emit_run(
     previous_status: JsonObject | None = None
     previous_result: bytes | None = None
     previous_result_exists = False
+    previous_approval: str | None = None
+    approval_changed = False
+
+    def restore_approval() -> None:
+        if not approval_changed:
+            return
+        # Both call sites still hold the workflow lock. Restore exact prior
+        # bytes, not a reserialized approval with different evidence or format.
+        path = root / registry.APPROVAL_FILE
+        if previous_approval is None:
+            path.unlink(missing_ok=True)
+        else:
+            run_registry.write_private_text_atomic(path, previous_approval)
+
     pin: workflow_pinning.WorkflowPin | None = None
     attempt: workflow_attempts.WorkflowAttempt | None = None
     source_script: str | None = None
@@ -239,6 +253,15 @@ def emit_run(
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 gate_result_hash = status.get("gateResultHash")
+                try:
+                    previous_approval = private_io.read_private_text_bounded(
+                        root / registry.APPROVAL_FILE,
+                        max_bytes=private_io.PRIVATE_RECORD_READ_MAX_BYTES,
+                    )
+                except private_io.BoundedReadError as exc:
+                    if exc.reason != "not_found":
+                        raise DelegateError("invalid_workflow_approval", str(exc)) from exc
+                approval_changed = True
                 registry.record_approval(
                     root,
                     gate_key,
@@ -278,8 +301,11 @@ def emit_run(
                 }
                 registry.write_status(root, status)
         except BaseException:
-            with contextlib.suppress(OSError):
-                os.close(lock_fd)
+            try:
+                restore_approval()
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(lock_fd)
             raise
     else:
         if not command.dry_run:
@@ -440,6 +466,7 @@ def emit_run(
             if previous_environment:
                 workflow_pinning.restore_environment(previous_environment)
     except BaseException:
+        restore_approval()
         if previous_status is not None:
             registry.write_json(root / registry.STATUS_FILE, previous_status)
             if previous_result_exists and previous_result is not None:
