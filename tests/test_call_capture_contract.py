@@ -26,9 +26,7 @@ class CallCaptureContractTests(unittest.TestCase):
             cfg["omp"]["binary"] = str(executable)
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.object(cli, "load_config", return_value=(cfg, "fixture")):
-                code = cli.main(
-                    ["--json", "omp", "call", "Fixture prompt"], stdout=out, stderr=err
-                )
+                code = cli.main(["--json", "omp", "call", "Fixture prompt"], stdout=out, stderr=err)
             self.assertEqual(code, 0, err.getvalue())
             payload = json.loads(out.getvalue())
             self.assertEqual(payload["text"], "completed after bounded telemetry")
