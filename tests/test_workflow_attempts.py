@@ -72,6 +72,124 @@ class WorkflowAttemptTests(unittest.TestCase):
             with self.assertRaises(config.ConfigError):
                 config.load_config()
 
+    def test_legacy_registry_timeout_alias_survives_default_merge(self):
+        values = workflow_attempts.operational_values(
+            {"tracking": {"registryLockTimeoutSeconds": 7}}
+        )
+        self.assertEqual(values["tracking.registryLockTimeoutSec"], 7)
+        values = workflow_attempts.operational_values(
+            {"tracking": {"registryLockTimeoutSec": 9, "registryLockTimeoutSeconds": 7}}
+        )
+        self.assertEqual(values["tracking.registryLockTimeoutSec"], 9)
+        loaded = config.merge_config_layer(
+            self.base, {"tracking": {"registryLockTimeoutSeconds": 7}}
+        )
+        self.assertEqual(
+            workflow_attempts.operational_values(loaded)["tracking.registryLockTimeoutSec"], 7
+        )
+        self.assertEqual(self.base["tracking"]["registryLockTimeoutSec"], 120)
+
+    def test_failed_attempt_write_does_not_poison_identical_retry(self):
+        metadata = workflow_attempts.prepare(self.pin, self.base, "test")
+        writer = workflow_attempts.run_registry.write_json_atomic
+
+        def fail_manifest(path, value):
+            if path.name == "attempt.json":
+                raise OSError("injected manifest write failure")
+            return writer(path, value)
+
+        with (
+            mock.patch.object(
+                workflow_attempts.run_registry, "write_json_atomic", side_effect=fail_manifest
+            ),
+            self.assertRaises(OSError),
+        ):
+            workflow_attempts.create(self.pin, metadata)
+        destination = (
+            self.pin.path.parent.parent
+            / "attempts"
+            / self.pin.workflow_id
+            / workflow_pinning._json_digest(metadata)
+        )
+        self.assertFalse(destination.exists())
+        result = workflow_attempts.create(self.pin, metadata)
+        self.assertEqual(result.metadata, metadata)
+        self.assertEqual(workflow_attempts.load(result.path, pin=self.pin).config, result.config)
+
+    def test_duplicate_attempt_publication_is_validated_and_partial_collision_retained(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(lambda _index: self.attempt(), range(2)))
+        self.assertEqual(first.path, second.path)
+        metadata = workflow_attempts.prepare(self.pin, self.base, "different-source")
+        target = first.path.parent.parent / workflow_pinning._json_digest(metadata)
+        target.mkdir()
+        (target / "foreign.txt").write_bytes(b"retain this partial artifact")
+        with self.assertRaises(workflow_pinning.WorkflowPinError):
+            workflow_attempts.create(self.pin, metadata)
+        self.assertEqual((target / "foreign.txt").read_bytes(), b"retain this partial artifact")
+        self.assertEqual(list(target.iterdir()), [target / "foreign.txt"])
+
+    def test_empty_collision_during_staging_is_not_replaced(self):
+        metadata = workflow_attempts.prepare(self.pin, self.base, "collision-test")
+        destination = (
+            self.pin.path.parent.parent
+            / "attempts"
+            / self.pin.workflow_id
+            / workflow_pinning._json_digest(metadata)
+        )
+        writer = workflow_attempts.run_registry.write_json_atomic
+        collision_inode = []
+
+        def publish_collision(path, value):
+            writer(path, value)
+            if path.name == "attempt.json":
+                destination.mkdir()
+                collision_inode.append(destination.stat().st_ino)
+
+        with (
+            mock.patch.object(
+                workflow_attempts.run_registry, "write_json_atomic", side_effect=publish_collision
+            ),
+            self.assertRaises(workflow_pinning.WorkflowPinError),
+        ):
+            workflow_attempts.create(self.pin, metadata)
+        self.assertEqual(destination.stat().st_ino, collision_inode[0])
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_failed_resume_restores_exact_prior_approval(self):
+        root = registry.ensure_workflow_dir(self.workspace, self.pin.workflow_id)
+        (root / registry.SCRIPT_FILE).write_text("return True\n")
+        approval_path = root / registry.APPROVAL_FILE
+        for prior in (None, b'{ "approvedResults": [{"key":"earlier","resultHash":"old"}] }\n'):
+            for seam in ("journal", "detach"):
+                with self.subTest(prior=prior, seam=seam):
+                    registry.write_json(
+                        root / registry.STATUS_FILE,
+                        {"status": "paused", "gateKey": "gate", "gateResultHash": "result"},
+                    )
+                    if prior is None:
+                        approval_path.unlink(missing_ok=True)
+                    else:
+                        approval_path.write_bytes(prior)
+                    target = commands if seam == "journal" else runtime
+                    name = "_append_command_event" if seam == "journal" else "detach_supervisor"
+                    with (
+                        mock.patch.object(
+                            target, name, side_effect=OSError("injected launch failure")
+                        ),
+                        self.assertRaises(OSError),
+                    ):
+                        commands.emit_run(
+                            commands.WorkflowCommand("run", resume=self.pin.workflow_id),
+                            workspace=self.workspace,
+                            config=self.base,
+                            stdout=io.StringIO(),
+                            stderr=io.StringIO(),
+                        )
+                    self.assertEqual(
+                        approval_path.read_bytes() if approval_path.exists() else None, prior
+                    )
+
     def test_corrupt_and_injected_attempts_fail_closed(self):
         attempt = self.attempt()
         foreign = self.root / "attempt.json"

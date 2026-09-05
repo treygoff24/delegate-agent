@@ -838,6 +838,11 @@ The content-addressed artifact lives under
 Identical snapshots may be reused; different concurrent attempts cannot overwrite
 each other's settings. No user config file is required when embedded defaults
 are sufficient. An explicitly selected missing config remains an error.
+Artifacts are staged privately and published only after both files are complete.
+A failed staging write does not poison an identical retry; leftover staging
+directories and pre-existing partial destinations are retained, never silently
+replaced or deleted. A failed resume/approval launch restores the prior approval
+bytes (or absence) under the workflow lock, including when detachment fails.
 
 Launch responses, journal `attempt_config` events, and supervisor status expose
 `attemptConfig`: `effectiveConfigDigest`, base digests, `opsSource`,

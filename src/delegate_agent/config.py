@@ -1379,6 +1379,17 @@ def merge_config_layer(base: JsonObject, override: JsonObject) -> JsonObject:
     cannot inherit stale ``env`` keys from lower layers.
     """
     merged = deep_merge(base, override)
+    tracking_override = override.get("tracking")
+    if (
+        isinstance(tracking_override, dict)
+        and "registryLockTimeoutSeconds" in tracking_override
+        and "registryLockTimeoutSec" not in tracking_override
+    ):
+        # Both spellings identify one setting. A higher layer's legacy name
+        # must override a canonical value inherited from a lower/default layer.
+        merged["tracking"]["registryLockTimeoutSec"] = tracking_override[
+            "registryLockTimeoutSeconds"
+        ]
     _replace_profile_definitions(merged, override)
     return merged
 
