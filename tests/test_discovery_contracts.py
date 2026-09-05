@@ -24,7 +24,8 @@ class DiscoveryContractsTests(HelpCliTestBase):
             {name for name, spec in specs.items() if not spec.internal},
         )
         for row in overview["commands"]:
-            self.assertEqual(set(row), {"command", "helpTopic"})
+            self.assertEqual(set(row), {"command", "summary", "helpTopic"})
+            self.assertEqual(row["summary"], specs[row["command"]].summary)
             self.assertEqual(row["helpTopic"], row["command"])
         self.assertNotIn("_supervise", out)
         self.assertIn("delegate --json help <command>", overview["recommendedDiscovery"])
@@ -36,6 +37,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         code, out, err = self.run_main(["describe", "--overview"])
         self.assertEqual(code, 0, err)
         self.assertIn("workflow reject", out)
+        self.assertIn("Invalidate a recorded agent result", out)
         self.assertIn("delegate help", out)
         for argv in (["describe", "--overview", "--summary"], ["models", "--overview"]):
             with self.subTest(argv=argv):

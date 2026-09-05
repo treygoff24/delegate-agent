@@ -1284,7 +1284,7 @@ def describe_overview_payload() -> JsonObject:
         "engines": list(KNOWN_ENGINES),
         "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "commands": [
-            {"command": spec.name, "helpTopic": spec.name}
+            {"command": spec.name, "summary": spec.summary, "helpTopic": spec.name}
             for spec in command_help.COMMAND_SPECS.values()
             if not spec.internal
         ],
@@ -1306,7 +1306,7 @@ def emit_describe_overview(json_mode: bool, stdout: TextIO) -> int:
         print(f"modes: {MODE_SAFE}, {MODE_WORK}, {MODE_CALL}", file=stdout)
         print("Focused help: delegate help <command>", file=stdout)
         for row in payload["commands"]:
-            print(f"  {row['command']}", file=stdout)
+            print(f"  {row['command']}: {row['summary']}", file=stdout)
     return EXIT_OK
 
 
