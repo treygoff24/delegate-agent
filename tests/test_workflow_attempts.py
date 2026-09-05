@@ -399,6 +399,8 @@ class WorkflowAttemptTests(unittest.TestCase):
         pin = self.pin
         payload = json.loads(pin.path.read_text())
         payload["runtime"].pop("attemptConfigVersion")
+        payload.pop("profileIdentity", None)
+        payload.pop("profileIdentityDigest", None)
         payload["config"] = {}
         payload["configDigest"] = workflow_pinning._json_digest({})
         for path, value in ((pin.path, payload), (pin.config_path, {})):
