@@ -12,6 +12,42 @@ from pathlib import Path
 
 from delegate_agent.json_types import JsonObject, JsonValue
 
+
+def rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing any destination inode.
+
+    Linux renameat2(RENAME_NOREPLACE=1), documented by rename(2), and Darwin
+    renamex_np(RENAME_EXCL=4), declared in XNU bsd/sys/stdio.h. Unsupported
+    kernels/filesystems/libcs fail closed; ordinary rename is not a fallback.
+    """
+    import ctypes
+    import sys
+
+    old, new = os.fsencode(source), os.fsencode(destination)
+    if b"\0" in old or b"\0" in new:
+        raise ValueError("directory publication paths must not contain NUL")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
+        name = "renameat2"
+        types = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        arguments = (-100, old, -100, new, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        name = "renamex_np"
+        types = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        arguments = (old, new, 4)  # RENAME_EXCL
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace directory publication is unavailable")
+    try:
+        rename = getattr(libc, name)
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, f"{name} is unavailable; refusing ordinary rename") from exc
+    rename.argtypes = types
+    rename.restype = ctypes.c_int
+    if rename(*arguments) != 0:
+        error = ctypes.get_errno() or errno.EIO
+        raise OSError(error, os.strerror(error), os.fspath(destination))
+
+
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
