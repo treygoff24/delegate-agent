@@ -1305,14 +1305,34 @@ Run-output JSON uses schema `delegate.run-output.v1` and returns selected comple
 
 Tracked stdout and stderr logs are capped independently at 16 MiB. Exceeding a
 cap terminates the child and records `output_limit_exceeded` plus an
-`outputLimit` object naming the stream and byte limit. After an explicit
+`outputLimit` object naming the stream and byte limit.
+
+OMP stdout has a separate, finite transport budget: 256 MiB received per attempt,
+16 MiB per JSON record, and the same 16 MiB retained-output cap. Delegate retains
+up to 64 KiB of the known stripped `message_update` / `thinking_delta` diagnostic
+shape, then omits further records of exactly that shape. Other fields, malformed
+JSON, text, errors, models, usage, and tool records are never discounted.
+The same OMP policy applies to call mode; other engines and stderr retain their
+existing raw-byte limits. An over-limit read can observe at most one extra
+64 KiB chunk before termination.
+
+OMP results disclose `stdoutCapture`: transport/captured byte counts, omitted
+thinking bytes and records, limits, `limitKind`, `truncated`, and a streaming
+`transportSha256` of observed child bytes. These counters describe the final
+attempt; existing top-level byte counts may combine retries. Compaction adds a
+warning and one `delegate.capture` marker to retained stdout. `--raw` returns
+that retained stream, not omitted thinking. Captured bytes include the marker;
+the transport digest does not. Compaction preserves the existing stall detector,
+timeouts, terminal handling, and process-group cleanup.
+
+After an explicit
 terminal-success event, Delegate gives the harness one second to exit and then
 stops a lingering process; successful envelopes disclose this as
 `stoppedAfterCompletion: true`. Harnesses must emit that terminal event only
 after flushing their final payload.
 
-Each tracked Run also keeps `events.jsonl`, an append-only raw diagnostic mirror
-of child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
+Each tracked Run also keeps `events.jsonl`, an append-only diagnostic mirror
+of retained child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
 records (including a final unterminated line when the child exits mid-line).
 The mirror retains at most 500 stdout-line records, followed by one
 `stream.lines_truncated` marker when additional lines are omitted. Normalized

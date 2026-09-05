@@ -40,6 +40,7 @@ from delegate_agent import (
     sandbox_bwrap,
     seatbelt,
     stall_watchdog,
+    stream_capture,
     terminal_states,
     worktree_summary,
 )
@@ -1401,26 +1402,34 @@ def _drain_stream(
     max_bytes: int,
     limit_signal: StreamLimitSignal,
     stream: str,
+    capture_info: JsonObject | None = None,
+    on_omitted: Callable[[str], None] | None = None,
 ) -> None:
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
     with log_path.open("ab") as log_handle:
-        captured_bytes = log_handle.tell()
-        while True:
-            chunk = pipe.readline(STREAM_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            remaining = max(max_bytes - captured_bytes, 0)
-            captured = chunk[:remaining]
-            if captured:
-                log_handle.write(captured)
-                captured_bytes += len(captured)
-                byte_counter.total += len(captured)
-                if on_line is not None and decoder is not None:
-                    decoded = decoder.decode(captured, final=False)
-                    if decoded:
-                        on_line(decoded)
-            if len(captured) < len(chunk):
-                limit_signal.trip(stream)
+
+        def write(captured: bytes) -> None:
+            log_handle.write(captured)
+            byte_counter.total += len(captured)
+            if on_line is not None and decoder is not None:
+                decoded = decoder.decode(captured, final=False)
+                if decoded:
+                    on_line(decoded)
+
+        capture = stream_capture.BoundedCapture(
+            write,
+            max_bytes,
+            initial_bytes=log_handle.tell(),
+            compact_omp=capture_info is not None,
+            on_omitted=on_omitted,
+        )
+        try:
+            stream_capture.drain_bounded(lambda: pipe.readline(STREAM_READ_CHUNK_BYTES), capture)
+        except stream_capture.CaptureLimit as exc:
+            limit_signal.trip(stream, limit=exc.limit)
+        finally:
+            if capture_info is not None:
+                capture_info.update(capture.payload())
         if on_line is not None and decoder is not None:
             decoded = decoder.decode(b"", final=True)
             if decoded:
@@ -1597,6 +1606,7 @@ class TrackedCaptureResult:
     stall: JsonObject | None = None
     process_group_survived: bool = False
     zero_commit_health: JsonObject | None = None
+    stdout_capture: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1618,6 +1628,7 @@ class CallResult:
     empty_retry_attempted: bool = False
     empty_retry_resolved: bool = False
     codex_thread_fallback: JsonObject | None = None
+    stdout_capture: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1750,12 +1761,14 @@ class ByteCounter:
 class StreamLimitSignal:
     event: threading.Event = field(default_factory=threading.Event)
     stream: str | None = None
+    limit: int | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def trip(self, stream: str) -> None:
+    def trip(self, stream: str, *, limit: int | None = None) -> None:
         with self._lock:
             if self.stream is None:
                 self.stream = stream
+                self.limit = limit
             self.event.set()
 
 
@@ -2203,6 +2216,7 @@ def _capture_tracked_process(
 
     line_buffer = ""
     stdout_bytes_counter = ByteCounter()
+    stdout_capture: JsonObject | None = {} if ctx.harness == "omp" else None
     stderr_bytes_counter = ByteCounter()
     lines_since_persist = 0
     last_persist_at = time.monotonic()
@@ -2308,6 +2322,15 @@ def _capture_tracked_process(
                 current_reason=mail_push_failure_reason,
             )
 
+        def observe_omitted_thinking(line: str) -> None:
+            # Compaction must not disable the existing new-content stall detector.
+            nonlocal progress_dirty
+            watchdog.observe_line(line, now=time.monotonic())
+            progress_dirty = True
+            if time.monotonic() - last_persist_at >= PROGRESS_PERSIST_TIME_INTERVAL_SEC:
+                events_handle.flush()
+                maybe_persist_running()
+
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
@@ -2316,6 +2339,8 @@ def _capture_tracked_process(
                 "max_bytes": TRACKED_STREAM_MAX_BYTES,
                 "limit_signal": limit_signal,
                 "stream": "stdout",
+                "capture_info": stdout_capture,
+                "on_omitted": observe_omitted_thinking,
             },
             daemon=True,
         )
@@ -2522,7 +2547,7 @@ def _capture_tracked_process(
             error = "output_limit_exceeded"
             message = (
                 f"Child {limit_signal.stream or 'output'} exceeded the tracked output limit "
-                f"of {TRACKED_STREAM_MAX_BYTES} bytes."
+                f"of {limit_signal.limit or TRACKED_STREAM_MAX_BYTES} bytes."
             )
     return TrackedCaptureResult(
         accumulator=accumulator,
@@ -2537,10 +2562,13 @@ def _capture_tracked_process(
         error=error,
         message=message,
         output_limit_stream=limit_signal.stream if output_limited else None,
-        output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
+        output_limit_bytes=(limit_signal.limit or TRACKED_STREAM_MAX_BYTES)
+        if output_limited
+        else None,
         stopped_after_completion=stopped_after_completion,
         stall=stall_detail,
         zero_commit_health=zero_commit_health,
+        stdout_capture=stdout_capture,
     )
 
 
@@ -4067,6 +4095,11 @@ def _execute_tracked(
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
+    if capture.stdout_capture is not None:
+        final_extra["stdoutCapture"] = capture.stdout_capture
+        capture_warning = stream_capture.capture_warning(capture.stdout_capture)
+        if capture_warning is not None:
+            _append_unique(final_warnings, capture_warning)
     if final_warnings:
         final_extra["warnings"] = final_warnings
     if capture.output_limit_stream is not None:
@@ -4278,6 +4311,8 @@ def _bounded_call_communicate(
     max_stdout: int,
     max_stderr: int,
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    *,
+    stdout_capture: JsonObject | None = None,
 ) -> tuple[bytes, bytes]:
     """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout.
 
@@ -4301,25 +4336,20 @@ def _bounded_call_communicate(
         message: str,
         stream: str,
     ) -> None:
+        capture = stream_capture.BoundedCapture(
+            buf.write, limit, compact_omp=stream == "stdout" and stdout_capture is not None
+        )
         try:
-            while not overflow.is_set():
-                chunk = pipe.read(65536)
-                if not chunk:
-                    break
-                available = limit - buf.tell()
-                if available <= 0:
-                    overflow_message[0] = message
-                    overflow_stream[0] = stream
-                    overflow.set()
-                    break
-                if len(chunk) > available:
-                    buf.write(chunk[:available])
-                    overflow_message[0] = message
-                    overflow_stream[0] = stream
-                    overflow.set()
-                    break
-                buf.write(chunk)
+            stream_capture.drain_bounded(lambda: pipe.read(65536), capture, stop=overflow.is_set)
+        except stream_capture.CaptureLimit as exc:
+            overflow_message[0] = (
+                f"Child call {stream} exceeded {exc}." if exc.kind != "retained" else message
+            )
+            overflow_stream[0] = stream
+            overflow.set()
         finally:
+            if stream == "stdout" and stdout_capture is not None:
+                stdout_capture.update(capture.payload())
             with contextlib.suppress(OSError):
                 pipe.close()
 
@@ -4435,6 +4465,10 @@ def _bounded_call_communicate(
     else:
         _terminate_call_process(process, grace_seconds=process_group_grace_seconds)
     _join_io_threads()
+    # A short-lived leader can exit before its drains observe the final overflow.
+    if overflow.is_set():
+        stream = overflow_stream[0] or "stdout"
+        raise RunnerLaunchError(f"call_{stream}_overflow", overflow_message[0], 1)
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
 
@@ -4622,6 +4656,7 @@ def _execute_call_once(
     ephemeral_codex_home: str | None = None
     process: subprocess.Popen[bytes] | None = None
     process_pgid: int | None = None
+    stdout_capture: JsonObject | None = {} if harness == "omp" else None
     try:
         if harness == "codex" and pure:
             if not seatbelt.codex_pure_available():
@@ -4679,6 +4714,7 @@ def _execute_call_once(
                 CALL_STDOUT_MAX_BYTES,
                 CALL_STDERR_MAX_BYTES,
                 process_group_grace_seconds,
+                **({"stdout_capture": stdout_capture} if stdout_capture is not None else {}),
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
@@ -4783,6 +4819,10 @@ def _execute_call_once(
     )
     if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
         error, message = failure.code, failure.message
+    if stdout_capture is not None:
+        warning = stream_capture.capture_warning(stdout_capture)
+        if warning is not None:
+            warnings = (*warnings, warning)
     return CallResult(
         text=text,
         exit_code=result_exit_code,
@@ -4796,6 +4836,7 @@ def _execute_call_once(
         error=error,
         message=message,
         usage=accumulator.usage or {"basis": "unavailable"},
+        stdout_capture=stdout_capture,
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0
