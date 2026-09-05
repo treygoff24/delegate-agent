@@ -1492,6 +1492,21 @@ def load_config(
     instead of discarding lower-precedence layers. Workspace config is never merged
     implicitly because repositories are not trusted to select executables or policy.
     """
+    if os.environ.get("DELEGATE_WORKFLOW_ATTEMPT"):
+        from delegate_agent import workflow_attempts, workflow_pinning
+
+        try:
+            attempt = workflow_attempts.from_environment()
+        except workflow_pinning.WorkflowPinError as exc:
+            raise ConfigError(exc.error, exc.message) from exc
+        if attempt is None:
+            raise ConfigError("invalid_workflow_attempt", "workflow attempt is missing")
+        if cli_overrides:
+            raise ConfigError(
+                "invalid_workflow_attempt",
+                "config overrides cannot replace an immutable workflow attempt",
+            )
+        return copy.deepcopy(attempt.config), str(attempt.config_path)
     merged = embedded_default_config()
     primary_source = "embedded-default"
 
