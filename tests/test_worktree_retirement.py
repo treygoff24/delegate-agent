@@ -583,6 +583,19 @@ class WorktreeRetirementTests(ExecutionTestBase):
             prune.assert_called_once()
             self.assertEqual(extra["autoPrune"], result)
 
+    def test_corrupt_snapshot_retains_completed_worktree(self):
+        agent = self._clean_agent()
+        fake_home, _repo, _config, run_id, registry_root, payload = self._completed_manifest_run(
+            agent=agent
+        )
+        snapshot = registry_root / "runs" / run_id / "snapshot.json"
+        snapshot.write_text("not json", encoding="utf-8")
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        self.assertNotIn("worktreeRetired", extra)
+        self.assertIn("worktreeRetained", extra)
+        self.assertTrue(self._worktree_paths(fake_home.name))
+        self.assertTrue(Path(payload["executionCwd"]).is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

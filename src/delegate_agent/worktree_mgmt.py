@@ -20,8 +20,8 @@ import contextlib
 import fnmatch
 import os
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 from delegate_agent import run_registry, run_status, worktree_summary
 from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
@@ -158,6 +158,46 @@ def _retirement_ignore_globs(ctx: object) -> tuple[str, ...]:
     return DEFAULT_RETIREMENT_IGNORE_GLOBS
 
 
+@dataclass(frozen=True)
+class RetirementContext:
+    registry_root: Path
+    run_id: str | None
+    mode: str | None
+    isolation_lifecycle: str | None
+    retire_worktree_on_completion: bool = True
+    retirement_ignore_globs: tuple[str, ...] = DEFAULT_RETIREMENT_IGNORE_GLOBS
+    worktree_auto_prune_on_completion: bool = False
+    worktree_auto_prune_merged_older_than_days: int = 7
+    structured_retry: bool = False
+    resumable: bool = False
+
+    @classmethod
+    def from_context(cls, ctx: object) -> RetirementContext | None:
+        """Compatibility boundary for runner contexts; core retirement is typed."""
+        if isinstance(ctx, cls):
+            return ctx
+        root = getattr(ctx, "registry_root", None)
+        run_id = getattr(ctx, "run_id", None)
+        if not isinstance(root, Path):
+            return None
+        return cls(
+            registry_root=root,
+            run_id=run_id if isinstance(run_id, str) else None,
+            mode=getattr(ctx, "mode", None),
+            isolation_lifecycle=getattr(ctx, "isolation_lifecycle", None),
+            retire_worktree_on_completion=getattr(ctx, "retire_worktree_on_completion", True),
+            retirement_ignore_globs=_retirement_ignore_globs(ctx),
+            worktree_auto_prune_on_completion=getattr(
+                ctx, "worktree_auto_prune_on_completion", False
+            ),
+            worktree_auto_prune_merged_older_than_days=getattr(
+                ctx, "worktree_auto_prune_merged_older_than_days", 7
+            ),
+            structured_retry=getattr(ctx, "structured_retry", False),
+            resumable=getattr(ctx, "resumable", False),
+        )
+
+
 def _effective_dirty_for_retirement(
     record: PersistentWorktreeRecord,
     status: str,
@@ -195,20 +235,20 @@ def _effective_dirty_for_retirement(
     return effective_total > 0, [str(item.get("path")) for item in effective], warnings
 
 
-def _completion_record(ctx: object) -> PersistentWorktreeRecord | None:
-    registry_root = getattr(ctx, "registry_root", None)
-    run_id = getattr(ctx, "run_id", None)
-    if not isinstance(registry_root, Path) or not isinstance(run_id, str):
+def _completion_record(ctx: RetirementContext) -> PersistentWorktreeRecord | None:
+    registry_root = ctx.registry_root
+    run_id = ctx.run_id
+    if run_id is None:
         return None
     index = run_registry.load_index(registry_root)
     entry = index.get("runs", {}).get(run_id) if isinstance(index.get("runs"), dict) else None
     return _record_for_run(registry_root, run_id, entry if isinstance(entry, dict) else None)
 
 
-def _persist_completion_worktree_fields(ctx: object, fields: JsonObject) -> None:
-    registry_root = getattr(ctx, "registry_root", None)
-    run_id = getattr(ctx, "run_id", None)
-    if not isinstance(registry_root, Path) or not isinstance(run_id, str):
+def _persist_completion_worktree_fields(ctx: RetirementContext, fields: JsonObject) -> None:
+    registry_root = ctx.registry_root
+    run_id = ctx.run_id
+    if run_id is None:
         return
     run_path = run_registry.run_directory(registry_root, run_id)
     with run_registry.registry_lock(registry_root):
@@ -221,7 +261,7 @@ def _persist_completion_worktree_fields(ctx: object, fields: JsonObject) -> None
             run_registry.write_json_atomic(path, payload)
 
 
-def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> None:
+def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: JsonObject) -> None:
     """Retire one completed work-lane worktree without weakening safety gates.
 
     The caller has already persisted the terminal run state. This hook mutates
@@ -230,21 +270,16 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     envelope includes the retirement result.
     """
 
-    if (
-        getattr(ctx, "mode", None) != "work"
-        or getattr(ctx, "isolation_lifecycle", None) != "persistent"
-    ):
+    if ctx.mode != "work" or ctx.isolation_lifecycle != "persistent":
         return
 
-    auto_prune_enabled = getattr(ctx, "worktree_auto_prune_on_completion", False)
-    auto_prune_days = getattr(ctx, "worktree_auto_prune_merged_older_than_days", 7)
+    auto_prune_enabled = ctx.worktree_auto_prune_on_completion
+    auto_prune_days = ctx.worktree_auto_prune_merged_older_than_days
 
     def run_auto_prune() -> None:
         if not auto_prune_enabled:
             return
-        registry_root = getattr(ctx, "registry_root", None)
-        if not isinstance(registry_root, Path):
-            return
+        registry_root = ctx.registry_root
         try:
             result = maybe_auto_prune(
                 registry_root,
@@ -272,13 +307,16 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
         _persist_completion_worktree_fields(ctx, persisted)
         run_auto_prune()
 
-    if getattr(ctx, "retire_worktree_on_completion", True) is not True:
+    if ctx.retire_worktree_on_completion is not True:
         run_auto_prune()
         return
 
     record = _completion_record(ctx)
     if record is None:
         retain("record_missing")
+        return
+    if record.get("recordWarnings"):
+        retain("record_conflict", worktreeRetentionWarnings=record["recordWarnings"])
         return
     state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
     if not isinstance(state, dict) or state.get("status") != run_registry.STATUS_SUCCEEDED:
@@ -287,10 +325,10 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     if completion_extra.get("processGroupSurvived") is True:
         retain("process_group_survived")
         return
-    if getattr(ctx, "structured_retry", False) is True:
+    if ctx.structured_retry is True:
         retain("structured_retry_pending")
         return
-    if getattr(ctx, "resumable", False) is True:
+    if ctx.resumable is True:
         retain("resumable_session")
         return
     status, status_warnings = detect_worktree_status(record)
@@ -304,7 +342,7 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
         record,
         status,
-        _retirement_ignore_globs(ctx),
+        ctx.retirement_ignore_globs,
     )
     if dirty is None:
         retain(
@@ -371,6 +409,10 @@ def retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> 
     """Best-effort completion hook; cleanup failures retain the worktree."""
 
     try:
+        ctx = RetirementContext.from_context(ctx)
+        if ctx is None:
+            completion_extra["worktreeRetained"] = "record_missing"
+            return
         _retire_worktree_on_completion(ctx, completion_extra)
     except Exception as exc:  # pragma: no cover - final safety net for run completion
         completion_extra["worktreeRetained"] = "cleanup_failed"
@@ -405,7 +447,7 @@ def retire_completed_worktree(
     manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
     if not isinstance(manifest, dict):
         return {}
-    ctx = SimpleNamespace(
+    ctx = RetirementContext(
         mode=manifest.get("mode"),
         isolation_lifecycle=manifest.get("isolationLifecycle"),
         retire_worktree_on_completion=retire_worktree,
@@ -445,6 +487,8 @@ def _branch_exists(source_git_root: str, branch: str) -> bool | None:
 
 
 def detect_worktree_status(record: PersistentWorktreeRecord) -> tuple[str, list[str]]:
+    if record.get("recordWarnings"):
+        return STATUS_UNKNOWN, record["recordWarnings"]
     warnings: list[str] = []
     registry_status = record.get("registryWorktreeStatus")
     if registry_status == STATUS_REMOVED:
