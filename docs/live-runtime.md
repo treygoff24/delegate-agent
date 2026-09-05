@@ -53,11 +53,29 @@ Repository development should not overwrite an installed runtime, user config, o
 
 Several agents can share one `~/.delegate/src`; when one of them installs a new runtime, every child the others launch from that moment runs the new code, and nothing in the launch path says so. The stamp is how that becomes visible:
 
-1. Install the reviewed checkout into `~/.delegate/src` (rsync or tarball).
-2. `delegate promote --actor <who> --source <commit or branch>` -- run through the installed command so the recorded digest is the live one. This writes `~/.delegate/last-promotion.json` and lists workflow supervisors still pinned to the previous runtime.
-3. `delegate doctor` -- confirm `promotionMatchesRuntime: true`. This requires the
+1. Preflight active ordinary runs and workflow supervisors. A live unpinned
+   Python process can import more modules later; replacing its import path can
+   mix versions even when its already-loaded code survives. Never kill runs as
+   an installation shortcut.
+2. Stage and verify the reviewed files in a new versioned payload, such as
+   `~/.delegate/releases/<revision-or-digest>/{bin,src}`. Do not rsync over an
+   in-use package. Keep the previous payload and verify a rollback bootstrap.
+3. Atomically switch `~/.delegate/bin/delegate.py` to the new payload's bootstrap.
+   Its resolved `__file__` must anchor imports to the immutable payload, not a
+   mutable compatibility link. Preserve any outer credential/profile shim.
+4. Once legacy-root users have drained, switch the `~/.delegate/src` compatibility
+   alias to the same payload. Converting a real directory needs a no-gap atomic
+   exchange or an equivalent verified transition; retain the old directory.
+   Rollback restores the old source alias before restoring its bootstrap.
+5. `delegate promote --actor <who> --source <commit or branch>` -- run through the installed command so the recorded digest is the live one. This writes `~/.delegate/last-promotion.json` and lists workflow supervisors still pinned to the previous runtime.
+6. `delegate doctor` -- confirm `promotionMatchesRuntime: true`. This requires the
    executing import root to be the installed root, matching package bytes,
    present launchers, and an unchanged artifact manifest from a verified stamp.
+
+Bulk payload installers must not traverse a versioned source alias and overwrite
+its target, or replace the paired bootstrap with an older mutable-path launcher.
+They must preserve these surfaces or use the same versioned installation path.
+Config and persona deployment are separate from runtime replacement.
 
 If `AI_PROFILE` is set and its overlay is missing mid-upgrade, the profile guard blocks `promote` like any other mutation; run it as `env -u AI_PROFILE delegate promote ...`.
 
