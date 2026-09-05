@@ -57,6 +57,17 @@ for _name, _module in list(sys.modules.items()):
         if _file is not None and not str(_file).startswith(_SRC + os.sep):
             del sys.modules[_name]
 os.environ.pop("DELEGATE_WORKFLOW_PIN", None)
+# A parent workflow's immutable operational attempt must not select config or
+# numeric overrides inside the test process after HOME has been redirected.
+for _name in (
+    "DELEGATE_WORKFLOW_ATTEMPT",
+    "DELEGATE_STALL_MINUTES",
+    "DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC",
+    "DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS",
+    "DELEGATE_PROGRESS_INITIAL_DELAY_SEC",
+    "DELEGATE_PROGRESS_INTERVAL_SEC",
+):
+    os.environ.pop(_name, None)
 _pythonpath = [
     entry
     for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
