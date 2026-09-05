@@ -1,6 +1,22 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-01 (late night; doctor/promote CLI + Claude schema lift shipped and promoted)
+Updated: 2026-09-05 (source improvement work in progress; not a live promotion)
+
+- Source fixes and refactors are tracked by `dlg-1vj`. Final verification and
+  CLI/JSON launch normalization are still in progress; do not treat this as a
+  release or completion receipt.
+- On this development host, checkout doctor reports
+  `executionMode: checkout-or-pinned` and `promotionMatchesRuntime: false`.
+  Source changes have not been installed into the live runtime. Verify the
+  executing and installed artifact identities separately before debugging or
+  promoting; the September 1 receipt below is historical, not current parity.
+- The native Codex scratch probe passed on Linux with Codex 0.153.4: scratch and
+  temporary-file writes succeed; source, metadata, symlink/hardlink escape, and
+  network probes are denied. This is an offline sandbox check, not a provider run.
+- Retain existing worktrees and rollback payloads. GitHub publication and live
+  runtime promotion remain separate authorization boundaries.
+
+## Historical receipt: September 1
 
 - **Engine at main db50f3d; installed runtime (~/.delegate/src) promoted to
   db50f3d** with a real stamp (`delegate promote` at 23:34Z, `delegate doctor`
