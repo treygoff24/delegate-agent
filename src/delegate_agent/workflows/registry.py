@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 from delegate_agent import run_registry
@@ -328,6 +329,63 @@ def iter_journal(path: Path) -> list[JsonObject]:
         if isinstance(value, dict):
             events.append(value)
     return events
+
+
+class JournalReader:
+    """Tail complete JSONL records without retaining already consumed events.
+
+    An inode change, shrink, or changed boundary bytes restarts the cursor.
+    Callers retaining a sequence watermark decide whether replayed rows should
+    be emitted. An incomplete final line is retried on the next poll.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.offset = 0
+        self.identity: tuple[int, int] | None = None
+        self.anchor = b""
+        self.pending = bytearray()
+
+    def read_events(self) -> Iterator[JsonObject]:
+        try:
+            handle = self.path.open("rb")
+        except FileNotFoundError:
+            self.offset = 0
+            self.identity = None
+            self.anchor = b""
+            self.pending.clear()
+            return
+        with handle:
+            metadata = os.fstat(handle.fileno())
+            identity = (metadata.st_dev, metadata.st_ino)
+            reset = identity != self.identity or metadata.st_size < self.offset
+            if not reset and self.anchor:
+                handle.seek(self.offset - len(self.anchor))
+                reset = handle.read(len(self.anchor)) != self.anchor
+            if reset:
+                self.offset = 0
+                self.anchor = b""
+                self.pending.clear()
+            self.identity = identity
+            handle.seek(self.offset)
+            while handle.tell() < metadata.st_size:
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    self.pending.extend(line)
+                    self.offset = handle.tell()
+                    self.anchor = (self.anchor + line)[-64:]
+                    break
+                # Decode before advancing, so malformed complete records remain
+                # errors rather than being silently discarded on another poll.
+                complete = self.pending + line if self.pending else line
+                value = json.loads(complete) if complete.strip() else None
+                self.pending.clear()
+                self.offset = handle.tell()
+                self.anchor = (self.anchor + line)[-64:]
+                if isinstance(value, dict):
+                    yield value
 
 
 def saved_workflow_path(name: str) -> Path:
