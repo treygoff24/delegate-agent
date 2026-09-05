@@ -62,6 +62,13 @@ git diff --check
 python3 -m unittest discover -s tests -t .
 ```
 
+`tests/acceptance.sh` runs all four required gates, including Ruff lint and
+format checks. It reports Python and Ruff versions and selects the pinned Ruff
+from the checkout's `.venv`, the main checkout's `.venv` when in a linked
+worktree, or PATH when its version matches the dev extra. A mismatched ambient
+Ruff fails before running the gates; install the dev extra rather than accepting
+different lint behavior on different machines.
+
 `-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
 `sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
 summary to stderr — pipe with `2>&1` when capturing output.
