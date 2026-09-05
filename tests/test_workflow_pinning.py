@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -409,7 +410,98 @@ finally:
         self.assertFalse(report["promotionMatchesRuntime"])
         self.assertTrue(any("no promotion stamp" in warning for warning in report["warnings"]))
 
-    def test_promote_defaults_to_live_digest_and_doctor_then_matches(self) -> None:
+    def test_checkout_stamp_cannot_certify_an_installed_runtime(self) -> None:
+        launcher = self.home / ".delegate" / "bin" / "delegate.py"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(workflow_pinning._LAUNCHER)
+        workflow_pinning.promote(actor="test", source="claimed-commit", home=self.home)
+        report = workflow_pinning.doctor(home=self.home)
+        self.assertFalse(report["promotionMatchesRuntime"])
+
+    def _installed_fixture(self) -> tuple[Path, Path]:
+        installed = self.home / ".delegate"
+        shutil.copytree(ROOT / "src" / "delegate_agent", installed / "src" / "delegate_agent")
+        launcher = installed / "bin" / "delegate.py"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(workflow_pinning._LAUNCHER)
+        outer = self.home / "bin" / "delegate"
+        outer.parent.mkdir()
+        outer.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{launcher}" "$@"\n')
+        outer.chmod(0o700)
+        return launcher, outer
+
+    def _installed_command(self, outer: Path, *args: str) -> dict:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env.pop("DELEGATE_WORKFLOW_PIN", None)
+        env["PATH"] = str(outer.parent) + os.pathsep + env.get("PATH", "")
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        result = subprocess.run(
+            [str(outer), "--json", *args],
+            cwd=self.workspace,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_installed_artifact_manifest_detects_package_and_outer_launcher_drift(self) -> None:
+        launcher, outer = self._installed_fixture()
+        stamp = self._installed_command(outer, "promote", "--actor", "fixture", "--source", "label")
+        self.assertTrue(stamp["artifactVerified"])
+        self.assertFalse(stamp["sourceVerified"])
+        before = self._home_snapshot()
+        report = self._installed_command(outer, "doctor")
+        self.assertTrue(report["promotionMatchesRuntime"])
+        self.assertEqual(before, self._home_snapshot())
+        with mock.patch.dict(os.environ, {"PATH": str(outer.parent)}):
+            mixed = workflow_pinning.doctor(home=self.home)
+        self.assertEqual(mixed["runtimeDigest"], mixed["installedRuntimeDigest"])
+        self.assertFalse(mixed["promotionMatchesRuntime"], "identical bytes do not unify roots")
+        original = outer.read_bytes()
+        outer.write_bytes(original + b"\n# changed outer shim\n")
+        self.assertFalse(self._installed_command(outer, "doctor")["promotionMatchesRuntime"])
+        outer.write_bytes(original)
+        self.assertTrue(self._installed_command(outer, "doctor")["promotionMatchesRuntime"])
+        module = launcher.parent.parent / "src" / "delegate_agent" / "__init__.py"
+        module.write_bytes(module.read_bytes() + b"\n# same version, different bytes\n")
+        changed = self._installed_command(outer, "doctor")
+        self.assertFalse(changed["promotionMatchesRuntime"])
+        self.assertNotEqual(changed["runtimeDigest"], stamp["runtimeDigest"])
+
+    def test_overrides_old_stamps_and_missing_launchers_cannot_certify(self) -> None:
+        launcher, outer = self._installed_fixture()
+        stamp = self._installed_command(outer, "promote", "--actor", "fixture", "--source", "label")
+        override = self._installed_command(
+            outer,
+            "promote",
+            "--actor",
+            "fixture",
+            "--source",
+            "label",
+            "--runtime-digest",
+            stamp["runtimeDigest"],
+        )
+        self.assertTrue(override["runtimeDigestOverride"])
+        self.assertFalse(self._installed_command(outer, "doctor")["promotionMatchesRuntime"])
+        workflow_pinning.promotion_path(self.home).write_text(
+            json.dumps(
+                {
+                    "schema": workflow_pinning.PROMOTION_SCHEMA,
+                    "runtimeDigest": stamp["runtimeDigest"],
+                }
+            )
+        )
+        self.assertFalse(self._installed_command(outer, "doctor")["promotionMatchesRuntime"])
+        self._installed_command(outer, "promote", "--actor", "fixture", "--source", "label")
+        launcher.rename(launcher.with_suffix(".absent"))
+        with mock.patch.dict(os.environ, {"PATH": str(outer.parent)}):
+            missing = workflow_pinning.doctor(home=self.home)
+        self.assertFalse(missing["installedArtifactComplete"])
+        self.assertFalse(missing["promotionMatchesRuntime"])
+
+    def test_promote_defaults_to_executing_digest_without_certifying_checkout(self) -> None:
         stdout = io.StringIO()
         code = workflow_pinning.emit_promote(
             actor="test", source="unit-test", home=self.home, stdout=stdout, json_mode=True
@@ -418,8 +510,9 @@ finally:
         stamp = json.loads(stdout.getvalue())
         self.assertEqual(stamp["runtimeDigest"], workflow_pinning.live_runtime_digest())
         report = workflow_pinning.doctor(home=self.home)
-        self.assertTrue(report["promotionMatchesRuntime"])
-        self.assertNotIn("warnings", report)
+        self.assertFalse(report["promotionMatchesRuntime"])
+        self.assertFalse(stamp["artifactVerified"])
+        self.assertFalse(stamp["sourceVerified"])
 
     def _home_snapshot(self) -> dict[str, bytes | None]:
         snapshot: dict[str, bytes | None] = {}
@@ -456,6 +549,37 @@ finally:
         workflow_pinning.reconcile_active_supervisors(home=self.home)
         self.assertNotEqual(index_path.read_text(encoding="utf-8"), stale)
 
+    def test_doctor_preserves_supervisor_lock_permissions_and_pin(self) -> None:
+        import fcntl
+
+        root = self.workspace / "workflow"
+        root.mkdir()
+        lock = root / workflow_registry.LOCK_FILE
+        lock.write_bytes(b"")
+        lock.chmod(0o644)
+        pin = workflow_pinning.create_pin(
+            "wf_123456abcdef", workspace=self.workspace, config={}, home=self.home
+        )
+        index = workflow_pinning.active_index_path(self.home)
+        index.write_text(
+            json.dumps(
+                {
+                    "supervisors": {
+                        pin.workflow_id: {"workflowRoot": str(root), "pinPath": str(pin.path)}
+                    }
+                }
+            )
+        )
+        before = self._home_snapshot()
+        with lock.open("rb") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            report = workflow_pinning.doctor(home=self.home)
+            self.assertIn(pin.workflow_id, report["activeSupervisors"])
+            self.assertTrue(any("pinned" in warning for warning in report["warnings"]))
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(before, self._home_snapshot())
+        self.assertEqual(workflow_pinning.load_pin(pin.workflow_id, home=self.home), pin)
+
     def test_launcher_identity_is_the_installed_file_not_argv(self) -> None:
         self.assertIsNone(workflow_pinning.entrypoint_path(self.home))
         launcher = self.home / ".delegate" / "bin" / "delegate.py"
@@ -474,12 +598,12 @@ finally:
         stamp = workflow_pinning.promote(actor="test", source="unit-test", home=self.home)
         self.assertEqual(stamp["entrypoint"], str(launcher))
         self.assertEqual(stamp["entrypointDigest"], workflow_pinning.entrypoint_digest(self.home))
-        self.assertNotIn("warnings", workflow_pinning.doctor(home=self.home))
+        self.assertFalse(workflow_pinning.doctor(home=self.home)["promotionMatchesRuntime"])
         # A launcher rewritten without a fresh promotion is the real defect
         # this catches: the package stamp still matches, the launcher does not.
         launcher.write_bytes(workflow_pinning._LAUNCHER + b"\n# rewritten by a later install\n")
         report = workflow_pinning.doctor(home=self.home)
-        self.assertTrue(report["promotionMatchesRuntime"])
+        self.assertFalse(report["promotionMatchesRuntime"])
         self.assertEqual(report["entrypoint"], str(launcher))
         self.assertTrue(any("launcher" in warning for warning in report["warnings"]))
 
@@ -599,12 +723,12 @@ finally:
         text = out.getvalue()
         self.assertIn(f"runtime digest: {stamp['runtimeDigest']}", text)
         self.assertIn("by unit (deadbeef)", text)
-        self.assertNotIn("warning:", text)
+        self.assertIn("warning: installed artifact parity is not verified", text)
 
         out = io.StringIO()
         self.assertEqual(cli.main(["--json", "doctor"], stdout=out, stderr=io.StringIO()), 0)
         after = json.loads(out.getvalue())
-        self.assertTrue(after["promotionMatchesRuntime"])
+        self.assertFalse(after["promotionMatchesRuntime"])
         self.assertEqual(after["promotion"], stamp)
 
 

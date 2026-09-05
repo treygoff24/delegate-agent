@@ -11,6 +11,7 @@ reconcile the active-supervisor index.
 from __future__ import annotations
 
 import compileall
+import fcntl
 import hashlib
 import json
 import os
@@ -243,8 +244,8 @@ _install()
 '''
 
 
-def _runtime_source_files() -> list[tuple[str, bytes]]:
-    source_root = Path(__file__).resolve().parents[1]
+def _runtime_source_files(source_root: Path | None = None) -> list[tuple[str, bytes]]:
+    source_root = source_root or Path(__file__).resolve().parents[1]
     package_root = source_root / "delegate_agent"
     files: list[tuple[str, bytes]] = []
     for source in sorted(package_root.rglob("*")):
@@ -303,6 +304,77 @@ def entrypoint_digest(home: Path | None = None) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _file_identity(path: Path | None) -> JsonObject | None:
+    """Record bytes and symlink routing without executing an untrusted launcher."""
+    if path is None:
+        return None
+    try:
+        links: list[JsonValue] = []
+        current = path.absolute()
+        seen: set[Path] = set()
+        while current.is_symlink():
+            if current in seen:
+                return None
+            seen.add(current)
+            target = os.readlink(current)
+            links.append({"path": str(current), "target": target})
+            current = current.parent / target if not Path(target).is_absolute() else Path(target)
+        return {
+            "path": str(path.absolute()),
+            "resolvedPath": str(path.resolve(strict=True)),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "symlinks": links,
+        }
+    except (OSError, RuntimeError):
+        return None
+
+
+def _runtime_provenance(home: Path | None = None) -> JsonObject:
+    executing_root = Path(__file__).resolve().parents[1]
+    installed_root = (home or Path.home()) / ".delegate" / "src"
+    launcher = entrypoint_path(home)
+    outer = shutil.which("delegate")
+    # Wheel/console-script installs have no HOME-level payload. Do not classify
+    # an arbitrary checkout as installed merely because it is on PYTHONPATH.
+    if not (installed_root / "delegate_agent").is_dir() and executing_root.name in {
+        "site-packages",
+        "dist-packages",
+    }:
+        installed_root = executing_root
+        launcher = Path(outer) if outer else None
+    installed_files = (
+        _runtime_source_files(installed_root)
+        if (installed_root / "delegate_agent").is_dir()
+        else []
+    )
+    installed_digest = _runtime_digest(installed_files) if installed_files else None
+    entry = _file_identity(launcher)
+    outer_identity = _file_identity(Path(outer)) if outer else None
+    manifest: JsonObject = {
+        "importRoot": str(installed_root.resolve()),
+        "runtimeDigest": installed_digest,
+        "files": [
+            {"path": name, "sha256": hashlib.sha256(raw).hexdigest()}
+            for name, raw in installed_files
+            if name.startswith("src/delegate_agent/")
+        ],
+        "entrypoint": entry,
+        "pathLauncher": outer_identity,
+        "sitecustomize": _file_identity(installed_root / "sitecustomize.py"),
+        "executingInterpreter": _file_identity(Path(sys.executable)),
+    }
+    executing_installed = executing_root == installed_root.resolve() and bool(installed_files)
+    return {
+        "executingImportRoot": str(executing_root),
+        "executionMode": "installed" if executing_installed else "checkout-or-pinned",
+        "executingMatchesInstalled": executing_installed,
+        "installedRuntimeDigest": installed_digest,
+        "installedArtifact": manifest,
+        "installedArtifactDigest": _json_digest(manifest),
+        "installedArtifactComplete": bool(installed_files and entry and outer_identity),
+    }
 
 
 def _runtime_directory_digest(root: Path) -> str:
@@ -619,12 +691,33 @@ def _reconcile_active_supervisors(*, home: Path | None = None, write: bool = Tru
         if not isinstance(root_value, str):
             continue
         root = Path(root_value)
-        if root.is_dir() and workflow_registry.supervisor_alive(root):
+        if root.is_dir() and (
+            workflow_registry.supervisor_alive(root) if write else _supervisor_alive_readonly(root)
+        ):
             live[workflow_id] = entry
     result: JsonObject = {"schema": ACTIVE_INDEX_SCHEMA, "supervisors": live}
     if write and (result != payload or path.exists() is False):
         _write_active_index(path, result)
     return result
+
+
+def _supervisor_alive_readonly(root: Path) -> bool:
+    # The normal registry helper opens via open_private_file, which chmods.
+    # Doctor must not repair permissions or create a raced-away lock file.
+    try:
+        fd = os.open(root / workflow_registry.LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        return False
+    finally:
+        os.close(fd)
 
 
 def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
@@ -670,26 +763,31 @@ def register_active_supervisor(
 
 
 def doctor(*, home: Path | None = None) -> JsonObject:
-    """Return the machine-local runtime view: live digest, promotion stamp, supervisors.
-
-    The digest comparison is what makes a stamp-less promotion visible: an
-    rsync into ``~/.delegate/src`` changes the live digest while the stamp
-    keeps naming the previous runtime, so the two disagree until someone runs
-    ``delegate promote``.
-    """
+    """Read executing/installed artifact identities, stamp, and pinned supervisors."""
     index = active_supervisors_view(home=home)
     entries = index.get("supervisors")
     promotion = _read_promotion(home=home)
     live_digest = live_runtime_digest()
+    provenance = _runtime_provenance(home)
     live_entrypoint = entrypoint_path(home)
     live_entrypoint_digest = entrypoint_digest(home)
     stamped_digest = promotion.get("runtimeDigest") if promotion is not None else None
     stamped_entrypoint_digest = promotion.get("entrypointDigest") if promotion is not None else None
-    matches = isinstance(stamped_digest, str) and stamped_digest == live_digest
+    matches = bool(
+        promotion
+        and promotion.get("artifactVerified") is True
+        and provenance["executingMatchesInstalled"]
+        and provenance["installedArtifactComplete"]
+        and stamped_digest == live_digest == provenance["installedRuntimeDigest"]
+        and promotion.get("installedArtifact") == provenance["installedArtifact"]
+        and promotion.get("installedArtifactDigest") == provenance["installedArtifactDigest"]
+    )
     payload: JsonObject = {
         "ok": True,
         "schema": DOCTOR_SCHEMA,
         "runtimeDigest": live_digest,
+        "executingRuntimeDigest": live_digest,
+        **provenance,
         "entrypoint": str(live_entrypoint) if live_entrypoint is not None else None,
         "entrypointDigest": live_entrypoint_digest,
         "promotion": promotion,
@@ -704,10 +802,9 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         )
     elif not matches:
         warnings.append(
-            f"runtime digest {live_digest[:12]} does not match the last promotion stamp "
-            f"{str(stamped_digest)[:12]} (promoted {promotion.get('promotedAt')} by "
-            f"{promotion.get('actor')} from {promotion.get('source')}); the installed "
-            "runtime changed without 'delegate promote'."
+            "installed artifact parity is not verified: the executing package, installed "
+            "package, launcher manifest, or verified stamp is missing or differs; an artifact "
+            "may have changed without 'delegate promote'."
         )
     if (
         isinstance(stamped_entrypoint_digest, str)
@@ -720,6 +817,8 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         )
     if isinstance(entries, dict) and entries:
         warnings.append(f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes.")
+    if not provenance["executingMatchesInstalled"]:
+        warnings.append("executing checkout or pinned package is not the installed import root.")
     if warnings:
         payload["warnings"] = warnings
     return payload
@@ -743,8 +842,8 @@ def promote(
 ) -> JsonObject:
     """Stamp a deploy/promotion event for the doctor surface.
 
-    ``runtime_digest=None`` records the live runtime, read under the promotion
-    lock so two promoters cannot stamp a digest that was already superseded.
+    ``runtime_digest=None`` records observed executing-package bytes. The lock
+    serializes stamp writers, not external installers replacing those bytes.
 
     Actual deploy mechanics belong to hq tooling; this local seam records only
     the immutable runtime identity, actor, source, and timestamp.
@@ -755,18 +854,26 @@ def promote(
         raise WorkflowPinError("invalid_promotion", "runtime digest must not be blank")
     path = promotion_path(home)
     run_registry.ensure_private_dir(path.parent)
-    # Serialize concurrent promoters: the live digest is read, the timestamp
-    # taken, and the stamp written under one lock, so the file always names
-    # the runtime that was installed at the moment of the latest promotion
-    # rather than whichever process happened to os.replace last.
+    # Observe and write under one lock so concurrent promoters cannot reorder
+    # their observations. Installer atomicity is outside this seam.
     with run_registry.file_lock(path.with_name(PROMOTION_LOCK_FILE)):
+        executing_digest = live_runtime_digest()
+        provenance = _runtime_provenance(home)
         payload: JsonObject = {
             "schema": PROMOTION_SCHEMA,
             "actor": actor,
             "source": source,
-            "runtimeDigest": runtime_digest
-            if runtime_digest is not None
-            else live_runtime_digest(),
+            "runtimeDigest": runtime_digest if runtime_digest is not None else executing_digest,
+            "executingRuntimeDigest": executing_digest,
+            **provenance,
+            "sourceVerified": False,
+            "runtimeDigestOverride": runtime_digest is not None,
+            "artifactVerified": bool(
+                runtime_digest is None
+                and provenance["executingMatchesInstalled"]
+                and provenance["installedArtifactComplete"]
+                and executing_digest == provenance["installedRuntimeDigest"]
+            ),
             "promotedAt": _utc_now(),
         }
         live_entrypoint = entrypoint_path(home)
@@ -791,7 +898,9 @@ def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = F
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
-        print(f"runtime digest: {payload['runtimeDigest']}", file=stdout)
+        print(f"executing runtime digest: {payload['runtimeDigest']}", file=stdout)
+        print(f"execution mode: {payload['executionMode']}", file=stdout)
+        print(f"installed runtime digest: {payload['installedRuntimeDigest']}", file=stdout)
         promotion = payload.get("promotion")
         if isinstance(promotion, dict):
             print(
