@@ -19,6 +19,56 @@ from delegate_agent import worktree_summary  # noqa: E402
 
 
 class ExecutionWorktreeRunTests(ExecutionTestBase):
+    def test_persistent_worktree_preserves_launch_policies(self):
+        for continuity_mode, grace_seconds in (
+            (None, None),
+            ("fungible", 9.5),
+            ("pinned", 7.25),
+            ("panel", 0.0),
+        ):
+            with (
+                self.subTest(continuity_mode=continuity_mode, grace_seconds=grace_seconds),
+                tempfile.TemporaryDirectory() as fake_home,
+                mock.patch.dict(os.environ, {"HOME": fake_home}),
+            ):
+                repo, _git_cd = self._make_git_repo_with_commit()
+                fake_bin = self.make_cursor_safe_fake_agent()
+                request = self._make_persistent_worktree_request(
+                    "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG
+                )
+                request.argv[0] = str(fake_bin / "agent")
+                if continuity_mode is not None:
+                    request.continuity_mode = continuity_mode
+                    request.process_group_termination_grace_sec = grace_seconds
+                else:
+                    self.assertEqual(request.continuity_mode, "fungible")
+
+                runner = self.delegate.worktree_execution.delegate_runner
+                with mock.patch.object(runner, "execute_tracked", return_value=(0, None)) as launch:
+                    code, _ = self.delegate.execute_request(
+                        request,
+                        json_mode=False,
+                        config=self.delegate.DEFAULT_CONFIG,
+                        pass_through=False,
+                        completion_report_mode="none",
+                        source_workspace=self.delegate.resolve_workspace(repo.name),
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+
+                self.assertEqual(code, 0)
+                launch.assert_called_once()
+                ctx = launch.call_args.args[2]
+                self.assertEqual(ctx.continuity_mode, request.continuity_mode)
+                self.assertEqual(
+                    ctx.process_group_termination_grace_sec,
+                    request.process_group_termination_grace_sec,
+                )
+                manifest = self.delegate.run_registry.load_run_manifest(
+                    ctx.registry_root, ctx.run_id
+                )
+                self.assertEqual(manifest["continuityMode"], request.continuity_mode)
+
     def test_persistent_worktree_launch_checks_pool_guardrail(self):
         execution = mock.Mock(config={"worktrees": {}}, stderr=io.StringIO())
         preflight = mock.sentinel.preflight
