@@ -55,11 +55,47 @@ Several agents can share one `~/.delegate/src`; when one of them installs a new 
 
 1. Install the reviewed checkout into `~/.delegate/src` (rsync or tarball).
 2. `delegate promote --actor <who> --source <commit or branch>` -- run through the installed command so the recorded digest is the live one. This writes `~/.delegate/last-promotion.json` and lists workflow supervisors still pinned to the previous runtime.
-3. `delegate doctor` -- confirm `promotionMatchesRuntime: true`.
+3. `delegate doctor` -- confirm `promotionMatchesRuntime: true`. This requires the
+   executing import root to be the installed root, matching package bytes,
+   present launchers, and an unchanged artifact manifest from a verified stamp.
 
 If `AI_PROFILE` is set and its overlay is missing mid-upgrade, the profile guard blocks `promote` like any other mutation; run it as `env -u AI_PROFILE delegate promote ...`.
 
-`delegate doctor` compares the digest of the runtime it is running against the stamped digest and warns on mismatch, so a lane that hits unexpected behavior can see that the code under it changed, when, and who changed it. Backfilling a stamp for a runtime you are not executing is possible with `--runtime-digest`, but the normal path is to promote from the installed command.
+`doctor` is offline and read-only: it does not run launchers, install code, repair
+permissions, or prune the supervisor index. Its identities are separate:
+
+- `runtimeDigest` remains the executing package's workflow-snapshot digest;
+  `executingRuntimeDigest` is its explicit alias. This digest includes the
+  generated pin launcher and persona hook, not the installed launcher's bytes.
+- `executingImportRoot` and `executionMode` distinguish an installed package
+  from a checkout or pinned snapshot. Equal package bytes do not make distinct
+  roots the same installation.
+- `installedRuntimeDigest` describes `~/.delegate/src`, or the executing
+  `site-packages`/`dist-packages` root for a wheel installation without that
+  HOME-level payload.
+- `installedArtifact` lists package-file hashes and identities of the installed
+  entrypoint and current PATH `delegate` launcher, including symlink targets.
+  `installedArtifactDigest` binds that manifest. Missing launchers prevent a
+  verified match. Arbitrary shell launchers are recorded, not interpreted: this
+  is an observed artifact manifest, not proof of every command a shim may run.
+- `promotion` is the last recorded stamp. Old stamps without the manifest remain
+  readable but cannot certify parity. A missing stamp or changed package,
+  entrypoint, or outer shim makes `promotionMatchesRuntime` false.
+
+`promote` records the executing and installed observations under its stamp lock.
+`source` remains an operator label: `sourceVerified: false` explicitly means it
+is not proof of a commit or reviewed build. A checkout invocation can record a
+stamp but cannot certify the installed artifact. `--runtime-digest` remains
+available for backfills; its supplied value is preserved with
+`runtimeDigestOverride: true` and `artifactVerified: false`, even when it happens
+to equal the observed digest. Run a normal promotion through the installed
+command to establish a new verified observation.
+
+The promotion lock serializes stamp writers, not external installers. These are
+point-in-time filesystem observations, not protection against concurrent payload
+replacement or proof of already-loaded Python bytecode. Installer changes and
+live promotion require separate authorization. Existing pinned supervisors
+remain untouched and are reported separately.
 
 ## Run metadata
 
