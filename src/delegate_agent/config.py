@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from delegate_agent import reasoning, redaction, stall_watchdog, wsl
-from delegate_agent.constants import VALID_MODES
+from delegate_agent.constants import KNOWN_ENGINES, VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH: Path | None = None
@@ -36,20 +36,7 @@ DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
 # ceiling a script that waits on a human gate parks forever and the dry run hangs
 # with it (observed 2026-08-27: 38 minutes and still climbing).
 DEFAULT_DRY_RUN_TIMEOUT_SECONDS: Final = 300
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
-    {
-        "codex",
-        "cursor",
-        "droid",
-        "kimi",
-        "claude",
-        "grok",
-        "devin",
-        "opencode",
-        "pi",
-        "omp",
-    }
-)
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(KNOWN_ENGINES)
 
 SAFE_BACKEND_COPY = "copy"
 SAFE_BACKEND_BWRAP = "bwrap"
