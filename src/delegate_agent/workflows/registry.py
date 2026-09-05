@@ -308,28 +308,39 @@ def append_jsonl(path: Path, event: JsonObject) -> None:
             os.fsync(handle.fileno())
 
 
+def _journal_record(
+    line: bytes | bytearray, path: Path, *, unterminated: bool
+) -> JsonObject | None:
+    if not line.strip():
+        return None
+    try:
+        value = json.loads(line.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        if not (unterminated and exc.reason == "unexpected end of data" and exc.end == len(line)):
+            raise
+    except json.JSONDecodeError:
+        if not unterminated:
+            raise
+    else:
+        return value if isinstance(value, dict) else None
+    warnings.warn(
+        f"Ignoring truncated final workflow journal line in {path}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return None
+
+
 def iter_journal(path: Path) -> list[JsonObject]:
     if not path.exists():
         return []
     events: list[JsonObject] = []
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    final_line_complete = text.endswith("\n")
+    lines = path.read_bytes().splitlines(keepends=True)
     for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            if index == len(lines) - 1 and not final_line_complete:
-                warnings.warn(
-                    f"Ignoring truncated final workflow journal line in {path}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                break
-            raise
-        if isinstance(value, dict):
+        value = _journal_record(
+            line, path, unterminated=index == len(lines) - 1 and not line.endswith((b"\n", b"\r"))
+        )
+        if value is not None:
             events.append(value)
     return events
 
@@ -383,7 +394,7 @@ class JournalReader:
                 # Decode before advancing, so malformed complete records remain
                 # errors rather than being silently discarded on another poll.
                 complete = self.pending + line if self.pending else line
-                value = json.loads(complete.decode("utf-8")) if complete.strip() else None
+                value = _journal_record(complete, self.path, unterminated=False)
                 self.pending.clear()
                 self.offset = handle.tell()
                 self.anchor = (self.anchor + line)[-64:]
@@ -392,18 +403,10 @@ class JournalReader:
             if final and self.pending:
                 # A settled/dead writer may have emitted complete JSON but not
                 # its newline. Match the batch reader; active readers still wait.
-                try:
-                    value = json.loads(self.pending.decode("utf-8"))
-                except json.JSONDecodeError:
-                    warnings.warn(
-                        f"Ignoring truncated final workflow journal line in {self.path}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                else:
+                value = _journal_record(self.pending, self.path, unterminated=True)
+                if value is not None:
                     self.pending.clear()
-                    if isinstance(value, dict):
-                        yield value
+                    yield value
 
 
 def saved_workflow_path(name: str) -> Path:
