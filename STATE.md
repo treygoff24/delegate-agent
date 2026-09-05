@@ -1,58 +1,23 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-05 (source improvements verified; not a live promotion)
+Updated: 2026-09-05 (devbox installed and promoted with explicit approval)
 
-- Source fixes and refactors are tracked by `dlg-1vj`. Application source is
-  `f2adb20`; final repository verification is `9aaa817`. All 12 approved
-  improvement areas are implemented, including common CLI/JSON launch planning.
-- Final gates: unittest ran 2,820 tests with 15 skips; pytest passed 2,805 with
-  the same 15 skips. Real runner parity, compileall, and pinned Ruff 0.15.15
-  lint/format passed. Four older cancellation regressions now run under the
-  authoritative unittest gate rather than only pytest.
-- An isolated wheel matched all 79 application modules and passed actual CLI
-  overview/help, no-write dry-run, honest doctor, and fake-OMP capture contracts.
-  These are source/package verification receipts, not a release or live install.
-- On this development host, checkout doctor reports
-  `executionMode: checkout-or-pinned` and `promotionMatchesRuntime: false`.
-  Source changes have not been installed into the live runtime. Verify the
-  executing and installed artifact identities separately before debugging or
-  promoting; the September 1 receipt below is historical, not current parity.
-- The native Codex scratch probe passed on Linux with Codex 0.153.4: scratch and
-  temporary-file writes succeed; source, metadata, symlink/hardlink escape, and
-  network probes are denied. This is an offline sandbox check, not a provider run.
-- Retain existing worktrees and rollback payloads. GitHub publication and live
-  runtime promotion remain separate authorization boundaries.
-
-## Historical receipt: September 1
-
-- **Engine at main db50f3d; installed runtime (~/.delegate/src) promoted to
-  db50f3d** with a real stamp (`delegate promote` at 23:34Z, `delegate doctor`
-  → `promotionMatchesRuntime: true`). Rollback trees: `~/.delegate/src.prev-pre-db50f3d`
-  (pre-tonight) and `~/.delegate/src.prev-1a74bec`.
-- **Tonight's lane (bead dlg-cn8, closed):** `delegate doctor` / `delegate
-  promote` wired into the CLI (docs/live-runtime.md "Promotion ritual",
-  docs/cli-reference.md "Runtime doctor and promotion"); Claude
-  `--output-schema` accepted in safe/work modes; workflow schema subset now
-  mirrors Claude's `--json-schema` preflight. Five Sol xhigh review rounds,
-  round 5 SHIP: docs/reviews/2026-09-01-doctor-promote-sol/. CHANGELOG
-  Unreleased carries the entries. Papercuts pc2_02c321c1 and pc2_105033d7
-  resolved.
-- **Earlier today:** Stack Upgrade lane (dlg-nek, #stack-upgrade) — typed
-  terminal receipts, model provenance, `--continuity-mode`, launch_cwd
-  (2721a7b, 9dbfe06, 9379aad, fa5c1d0); watchdog rewritten by deletion
-  (1a74bec; docs/evidence/runkillers/).
-- **writing-plans is fully live** at 779585f; dlg-4v1 closed fixed-upstream.
-- **Work ledger is beads** (`bd ready`). Open follow-ups: dlg-80z
-  (already_integrated retry guard, P3), dlg-1bg/dlg-oub/dlg-50p (polish),
-  dlg-87d (blocked external), dlg-3w5 (pointer repaired to bead + a1e2601).
-  Human decisions labeled `human`: dlg-507 (burst capacity), dlg-adl
-  (ops-knob freeze; docs/evidence/runkillers/2026-09-01-adl-config-freeze.md).
-  dlg-swn GitHub push stays GATED on Trey — main is ~313 commits ahead of the
-  GitHub mirror.
-- **Known gap:** doctor's launcher check covers `~/.delegate/bin/delegate.py`
-  only; the outer `~/.local/bin/delegate` profile shim is not hashed.
-- **Next:** dogfood `delegate doctor` in the promotion ritual (hq tooling
-  should call `promote` after every rsync); wp-zq7 in writing-plans
-  (restore-chain adversarial pass) is the top engine follow-up.
-- **Worktrees:** .worktrees/plan-burndown* kept (hold run records cited by
-  bead close-reasons) — prune only with Trey's ok.
+- Installed CLI: 0.30.0, reviewed application source `67abbc1`; doctor reports
+  `executionMode: installed` and `promotionMatchesRuntime: true`. See `dlg-133`.
+- Payload is versioned under `~/.delegate/releases/`; the bootstrap resolves to
+  that immutable root. `~/.delegate/src` is a compatibility link. Installation
+  and rollback rules: [docs/live-runtime.md](docs/live-runtime.md).
+- Old payload, bootstrap, and promotion stamp are retained. No active Delegate
+  process or supervisor was present at cutover; four live config files and
+  1,368 existing pin files were unchanged. Do not prune retained worktrees.
+- Installed checks passed: actual Codex read-only call; hermetic outer-shim
+  routing, resumable followup argv, no-write dry-run, overview/reject help,
+  scripts above 512 KiB accepted and above 1 MiB refused. OMP auth unverified.
+- Source refactor `dlg-1vj` is complete. Full gates at `9aaa817`: unittest
+  2,820 tests / 15 skips; pytest 2,805 passed / 15 skips; parity, compileall,
+  Ruff 0.15.15, 79-module wheel contracts and native Codex scratch probe passed.
+- Global Delegate/workflow skills are updated and synced to Forgejo; Codex and
+  Claude resolve the same canonical files. See `dlg-133` for deployment receipts.
+- Forgejo is the shipping remote. GitHub release/push remains separately gated
+  (`dlg-swn`); this install did not publish a new package version.
+- Open work and human decisions: `bd ready`. Older sitreps remain in Git history.
