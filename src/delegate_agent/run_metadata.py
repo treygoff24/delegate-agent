@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Protocol, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from delegate_agent.json_types import JsonObject
 
@@ -164,6 +164,49 @@ def add_model_payload_fields(payload: JsonObject, carrier: ModelMetadataCarrier)
         payload["capabilityModel"] = carrier.capability_model
     if carrier.capability_model_source is not None:
         payload["capabilityModelSource"] = carrier.capability_model_source
+
+
+if TYPE_CHECKING:
+    from delegate_agent.reasoning import ReasoningPayloadCarrier
+
+    class SelectionMetadataCarrier(
+        ModelMetadataCarrier, SpeedMetadataCarrier, ReasoningPayloadCarrier, Protocol
+    ):
+        pass
+
+
+def add_selection_payload_fields(payload: JsonObject, carrier: SelectionMetadataCarrier) -> None:
+    # Basic metadata cleaners are also imported during harness initialization;
+    # load the reasoning projection only after that dependency leaf is ready.
+    from delegate_agent import reasoning
+
+    add_model_payload_fields(payload, carrier)
+    reasoning.add_reasoning_payload_fields(payload, carrier)
+    add_speed_payload_fields(payload, carrier)
+
+
+class PersonaMetadataCarrier(Protocol):
+    persona_name: str | None
+    persona_source: str | None
+    persona_transport: str | None
+    persona_digest: str | None
+    persona_file: str | None
+
+
+def add_persona_payload_fields(
+    payload: JsonObject,
+    carrier: PersonaMetadataCarrier,
+    *,
+    default_file: str | None = None,
+) -> None:
+    if carrier.persona_name is not None:
+        payload["personaName"] = carrier.persona_name
+        payload["personaSource"] = carrier.persona_source
+        payload["personaTransport"] = carrier.persona_transport
+        payload["personaDigest"] = carrier.persona_digest
+        payload["personaFile"] = (
+            carrier.persona_file if default_file is None else carrier.persona_file or default_file
+        )
 
 
 class RunMetadataCarrier(Protocol):

@@ -1415,6 +1415,61 @@ def _safe_isolation_warnings(
     return ()
 
 
+def _plan_launch_isolation(
+    workspace: ResolvedWorkspace,
+    config: JsonObject,
+    *,
+    engine: str,
+    mode: str,
+    model_alias: str | None,
+    cli_isolation: str | None,
+    json_isolation: str | None = None,
+    include_dirty: bool,
+    forbid_commit: bool,
+    forbid_commit_note: str | None,
+    dry_run: bool = False,
+) -> tuple[IsolationContext, tuple[str, ...]]:
+    """Plan the workspace after input-specific validation, without creating it."""
+    git_root, git_common_dir, head_oid, head_ref, branch = capture_git_metadata(workspace.path)
+    try:
+        effective = delegate_config.resolve_isolation(
+            cli_value=cli_isolation,
+            input_json_value=json_isolation,
+            loaded_config=config,
+            engine=engine,
+            mode=mode,
+        )
+    except delegate_config.InvalidIsolationError as exc:
+        raise DelegateError("invalid_isolation", str(exc)) from exc
+    warnings = _safe_isolation_warnings(
+        engine=engine,
+        mode=mode,
+        requested=cli_isolation or json_isolation,
+        effective=effective,
+        source_path=workspace.path,
+    )
+    if forbid_commit_note is not None:
+        warnings = (*warnings, forbid_commit_note)
+    context = build_isolation_context(
+        source_workspace=workspace.path,
+        resolved_isolation=effective,
+        engine=engine,
+        mode=mode,
+        model_alias=model_alias,
+        config=config,
+        run_short_id="<short-run-id-placeholder>" if dry_run else None,
+        source_git_root=git_root,
+        source_git_common_dir=git_common_dir,
+        source_head_oid=head_oid,
+        source_head_ref=head_ref,
+        source_branch=branch,
+        include_dirty=include_dirty,
+    )
+    _validate_forbid_commit(forbid_commit=forbid_commit, mode=mode, isolation_context=context)
+    _validate_include_dirty(include_dirty=include_dirty, mode=mode, isolation_context=context)
+    return context, warnings
+
+
 def request_from_parsed(
     parsed: ParsedCommand,
     config: JsonObject,
@@ -1528,56 +1583,21 @@ def request_from_parsed(
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
     source_prompt = prompt
 
-    # Capture git metadata for isolation planning (read-only, safe in dry-run too).
-    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
-        workspace.path
-    )
-
-    try:
-        effective_isolation = delegate_config.resolve_isolation(
-            cli_value=global_options.isolation,
-            loaded_config=config,
-            engine=launch.engine,
-            mode=launch.mode,
-        )
-    except delegate_config.InvalidIsolationError as exc:
-        raise DelegateError("invalid_isolation", str(exc)) from exc
-    isolation_warnings = list(
-        _safe_isolation_warnings(
-            engine=launch.engine,
-            mode=launch.mode,
-            requested=global_options.isolation,
-            effective=effective_isolation,
-            source_path=workspace.path,
-        )
-    )
-    if launch.forbid_commit_implied_isolation:
-        isolation_warnings.append(_forbid_commit_implied_isolation_note())
-
-    isolation_context = build_isolation_context(
-        source_workspace=workspace.path,
-        resolved_isolation=effective_isolation,
+    isolation_context, isolation_warnings = _plan_launch_isolation(
+        workspace,
+        config,
         engine=launch.engine,
         mode=launch.mode,
         model_alias=_effective_cli_model_alias(launch, config),
-        config=config,
-        run_short_id="<short-run-id-placeholder>" if launch.dry_run else None,
-        source_git_root=git_root,
-        source_git_common_dir=git_common_dir,
-        source_head_oid=git_head_oid,
-        source_head_ref=git_head_ref,
-        source_branch=git_branch,
+        cli_isolation=global_options.isolation,
         include_dirty=launch.include_dirty,
-    )
-    _validate_forbid_commit(
         forbid_commit=launch.forbid_commit,
-        mode=launch.mode,
-        isolation_context=isolation_context,
-    )
-    _validate_include_dirty(
-        include_dirty=launch.include_dirty,
-        mode=launch.mode,
-        isolation_context=isolation_context,
+        forbid_commit_note=(
+            _forbid_commit_implied_isolation_note()
+            if launch.forbid_commit_implied_isolation
+            else None
+        ),
+        dry_run=launch.dry_run,
     )
     if launch.engine == "droid":
         _reject_droid_model_conflict(launch.model_alias, launch.model)
@@ -2095,56 +2115,17 @@ def request_from_input_json(
         )
 
     workspace = workspace or resolve_workspace(global_options.cwd, json_cwd)
-    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
-        workspace.path
-    )
-
-    try:
-        effective_isolation = delegate_config.resolve_isolation(
-            cli_value=global_options.isolation,
-            input_json_value=json_isolation,
-            loaded_config=config,
-            engine=str(engine),
-            mode=str(mode),
-        )
-    except delegate_config.InvalidIsolationError as exc:
-        raise DelegateError("invalid_isolation", str(exc)) from exc
-    isolation_warnings = list(
-        _safe_isolation_warnings(
-            engine=str(engine),
-            mode=str(mode),
-            requested=global_options.isolation or json_isolation,
-            effective=effective_isolation,
-            source_path=workspace.path,
-        )
-    )
-    if forbid_commit_note is not None:
-        isolation_warnings.append(forbid_commit_note)
-
-    isolation_context = build_isolation_context(
-        source_workspace=workspace.path,
-        resolved_isolation=effective_isolation,
+    isolation_context, isolation_warnings = _plan_launch_isolation(
+        workspace,
+        config,
         engine=str(engine),
         mode=str(mode),
         model_alias=model_alias,
-        config=config,
-        run_short_id=None,
-        source_git_root=git_root,
-        source_git_common_dir=git_common_dir,
-        source_head_oid=git_head_oid,
-        source_head_ref=git_head_ref,
-        source_branch=git_branch,
+        cli_isolation=global_options.isolation,
+        json_isolation=json_isolation,
         include_dirty=raw_include_dirty,
-    )
-    _validate_forbid_commit(
         forbid_commit=raw_forbid_commit,
-        mode=str(mode),
-        isolation_context=isolation_context,
-    )
-    _validate_include_dirty(
-        include_dirty=raw_include_dirty,
-        mode=str(mode),
-        isolation_context=isolation_context,
+        forbid_commit_note=forbid_commit_note,
     )
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
@@ -2221,10 +2202,10 @@ def request_from_input_json(
                 mode=str(mode),
                 model_alias=model_alias,
                 source_git_root=workspace.path if workspace.kind == "git" else None,
-                source_git_common_dir=git_common_dir,
-                source_head_oid=git_head_oid,
-                source_head_ref=git_head_ref,
-                source_branch=git_branch,
+                source_git_common_dir=isolation_context.source_git_common_dir,
+                source_head_oid=isolation_context.source_head_oid,
+                source_head_ref=isolation_context.source_head_ref,
+                source_branch=isolation_context.source_branch,
                 config=config,
                 include_dirty=raw_include_dirty,
             )

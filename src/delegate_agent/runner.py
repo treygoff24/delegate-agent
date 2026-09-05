@@ -32,7 +32,6 @@ from delegate_agent import (
     notify,
     profiles,
     prompt_instructions,
-    reasoning,
     redaction,
     rendering,
     resume_command,
@@ -531,13 +530,7 @@ def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
 
 
 def _add_persona_payload_fields(payload: JsonObject, ctx: RunContext) -> None:
-    if ctx.persona_name is None:
-        return
-    payload["personaName"] = ctx.persona_name
-    payload["personaSource"] = ctx.persona_source
-    payload["personaTransport"] = ctx.persona_transport
-    payload["personaDigest"] = ctx.persona_digest
-    payload["personaFile"] = ctx.persona_file or PERSONA_TXT_FILE
+    run_metadata.add_persona_payload_fields(payload, ctx, default_file=PERSONA_TXT_FILE)
 
 
 def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
@@ -565,9 +558,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     if ctx.temporary_workspace_cleanup is not None:
         payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
-    run_metadata.add_model_payload_fields(payload, ctx)
-    reasoning.add_reasoning_payload_fields(payload, ctx)
-    run_metadata.add_speed_payload_fields(payload, ctx)
+    run_metadata.add_selection_payload_fields(payload, ctx)
     if ctx.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if ctx.auth_profile is not None:
@@ -736,9 +727,7 @@ def build_snapshot(
         **events_meta,
     }
     run_metadata.add_run_metadata_payload_fields(snapshot, ctx)
-    run_metadata.add_model_payload_fields(snapshot, ctx)
-    reasoning.add_reasoning_payload_fields(snapshot, ctx)
-    run_metadata.add_speed_payload_fields(snapshot, ctx)
+    run_metadata.add_selection_payload_fields(snapshot, ctx)
     if ctx.resumable:
         snapshot["resumable"] = True
     if ctx.resumable and accumulator.harness_session_id is not None:
@@ -1366,9 +1355,7 @@ def completion_json_payload(
         payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
-    run_metadata.add_model_payload_fields(payload, ctx)
-    reasoning.add_reasoning_payload_fields(payload, ctx)
-    run_metadata.add_speed_payload_fields(payload, ctx)
+    run_metadata.add_selection_payload_fields(payload, ctx)
     _add_persona_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
