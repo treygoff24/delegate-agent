@@ -642,7 +642,7 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
         # appended just before that projection is not lost at watch shutdown.
         status = _status_view(root, registry.read_json(root / registry.STATUS_FILE) or {})
         poll_since = since
-        for event in reader.read_events():
+        for event in reader.read_events(final=status.get("status") in WAIT_DONE_WORKFLOW_STATUSES):
             if event.get("seq", 0) <= poll_since:
                 continue
             seq = event.get("seq")
