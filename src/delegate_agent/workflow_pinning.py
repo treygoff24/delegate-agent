@@ -89,6 +89,7 @@ class WorkflowPin:
     personas: JsonObject
     created_at: str
     attempt_config_version: int = 0
+    profile_identity: JsonObject | None = None
 
     @property
     def cli_argv(self) -> list[str]:
@@ -103,11 +104,19 @@ class WorkflowPin:
         if current:
             current_entries = [entry for entry in current.split(os.pathsep) if entry != pythonpath]
             pythonpath = os.pathsep.join((pythonpath, *current_entries))
-        return {
+        environment = {
             "DELEGATE_CONFIG": str(self.config_path),
             "DELEGATE_WORKFLOW_PIN": str(self.path),
             "PYTHONPATH": pythonpath,
         }
+        if self.profile_identity is not None:
+            namespaces = self.profile_identity["namespaces"]
+            # HOME remains the pin/registry owner's home. A profile-specific
+            # HOME is already frozen in its definition for external engines.
+            environment.update(
+                {name: namespaces[name] for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR")}
+            )
+        return environment
 
 
 def pin_root(home: Path | None = None) -> Path:
@@ -516,6 +525,7 @@ def create_pin(
 ) -> WorkflowPin:
     """Create (or verify) the immutable pin for a new workflow."""
     from delegate_agent import config as delegate_config
+    from delegate_agent import workflow_identity
 
     _validate_workflow_id(workflow_id)
     root = pin_directory(workflow_id, home=home)
@@ -532,6 +542,9 @@ def create_pin(
         if existing_pin.attempt_config_version == 0:
             raise WorkflowPinError("pin_collision", "legacy pins cannot be upgraded implicitly")
         requested = _complete_pin_config(existing_pin.config, config)
+        if existing_pin.profile_identity is not None:
+            workflow_identity.validate(existing_pin.profile_identity, existing_pin.config)
+            workflow_identity.freeze(requested)
         if (
             requested != existing_pin.config
             or live_runtime_digest() != existing_pin.runtime_digest
@@ -545,6 +558,7 @@ def create_pin(
     # Raw partial input is supported by this internal entry point too. Freeze
     # defaults only on creation, never during verification or attempt loading.
     cleaned_config = _complete_pin_config(delegate_config.embedded_default_config(), config)
+    profile_identity = workflow_identity.freeze(cleaned_config)
     run_registry.ensure_private_dir(root.parent)
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
@@ -577,6 +591,8 @@ def create_pin(
         "configPath": str(config_path),
         "configDigest": _json_digest(cleaned_config),
         "config": cleaned_config,
+        "profileIdentity": profile_identity,
+        "profileIdentityDigest": _json_digest(profile_identity),
         "personas": records,
     }
     if path.exists():
@@ -663,6 +679,19 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         raise WorkflowPinError("invalid_pin", "workflow pin config is unreadable") from exc
     if disk_config != config or payload.get("configDigest") != _json_digest(config):
         raise WorkflowPinError("invalid_pin", "workflow pin config does not match its digest")
+    profile_identity = payload.get("profileIdentity")
+    if profile_identity is not None:
+        from delegate_agent import workflow_identity
+
+        if not (import_root / "delegate_agent" / "workflow_identity.py").is_file():
+            raise WorkflowPinError(
+                "invalid_pin", "pinned runtime does not support profile identity validation"
+            )
+        if not isinstance(profile_identity, dict) or payload.get(
+            "profileIdentityDigest"
+        ) != _json_digest(profile_identity):
+            raise WorkflowPinError("invalid_pin", "workflow profile identity digest differs")
+        workflow_identity.validate_stamp(profile_identity, config)
     return WorkflowPin(
         workflow_id=workflow_id,
         path=path,
@@ -675,6 +704,7 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         python_executable=python_executable,
         personas=personas_payload,
         created_at=created_at,
+        profile_identity=profile_identity,
         attempt_config_version=(
             1
             if runtime.get("attemptConfigVersion") == 1

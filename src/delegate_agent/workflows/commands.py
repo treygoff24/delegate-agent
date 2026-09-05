@@ -206,6 +206,23 @@ def emit_run(
             raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
         try:
             pin = workflow_pinning.load_pin(wf_id)
+            if pin is None:
+                prior = registry.read_json(root / registry.STATUS_FILE) or {}
+                recorded = prior.get("attemptConfig")
+                identity_bound = isinstance(recorded, dict) and isinstance(
+                    recorded.get("baseProfileIdentityDigest"), str
+                )
+                if not identity_bound:
+                    identity_bound = any(
+                        event.get("type") == "attempt_config"
+                        and isinstance(event.get("baseProfileIdentityDigest"), str)
+                        for event in registry.iter_journal(root / registry.JOURNAL_FILE)
+                    )
+                if identity_bound:
+                    raise workflow_pinning.WorkflowPinError(
+                        "invalid_pin",
+                        "identity-bound workflow pin is missing; restore its original HOME and pin before resuming",
+                    )
             if pin is not None and pin.attempt_config_version == 1:
                 if not command.dry_run:
                     attempt = workflow_attempts.create(
@@ -217,6 +234,10 @@ def emit_run(
             elif pin is not None:
                 warnings.append(
                     "operational updates unavailable: this legacy pinned runtime uses frozen creation config"
+                )
+            if pin is not None and pin.profile_identity is None:
+                warnings.append(
+                    "credential profile selection is not pinned by this legacy pin; selector identity enforcement is unavailable"
                 )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -400,6 +421,8 @@ def emit_run(
         wf_id,
     ]
     try:
+        if pin is not None and pin.profile_identity is None:
+            _append_command_event(root, "profile_identity_unavailable", reason="legacy_pin")
         if attempt is not None:
             _append_command_event(root, "attempt_config", **attempt.metadata)
             current_status = registry.read_json(root / registry.STATUS_FILE) or {}
@@ -486,6 +509,10 @@ def emit_run(
     if attempt is not None:
         payload["attemptConfig"] = attempt.metadata
         payload["effectiveConfigPath"] = str(attempt.config_path)
+    if pin is not None:
+        payload["profileIdentityPinned"] = pin.profile_identity is not None
+        if pin.profile_identity is not None:
+            payload["profileIdentity"] = pin.profile_identity
     if source_script is not None:
         payload["sourceScript"] = source_script
     if script_hash is not None:

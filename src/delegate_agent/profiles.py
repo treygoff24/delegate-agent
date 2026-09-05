@@ -261,6 +261,7 @@ def child_environment(
 
 def _strip_workflow_pin_environment(env: dict[str, str]) -> None:
     pin_path = env.pop("DELEGATE_WORKFLOW_PIN", None)
+    env.pop("DELEGATE_WORKFLOW_ATTEMPT", None)
     env.pop("DELEGATE_WORKFLOW_LOCK_FD", None)
 
     pin_roots: list[Path] = []

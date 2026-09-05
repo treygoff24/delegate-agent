@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from delegate_agent import config as delegate_config
-from delegate_agent import private_io, redaction, run_registry, workflow_pinning
+from delegate_agent import private_io, redaction, run_registry, workflow_identity, workflow_pinning
 from delegate_agent.json_types import JsonObject
 
 ATTEMPT_ENV = "DELEGATE_WORKFLOW_ATTEMPT"
@@ -126,12 +126,13 @@ def prepare(
     *,
     environment: dict[str, str] | None = None,
 ) -> JsonObject:
+    workflow_identity.validate(pin.profile_identity, pin.config)
     if environment is None:
         environment = {key: value for key, value in os.environ.copy().items() if key in ENV_KEYS}
     values = operational_values(config, environment=environment)
     effective = _effective_config(pin, values)
     base_values = operational_values(pin.config)
-    return {
+    metadata: JsonObject = {
         "schema": SCHEMA,
         "wfId": pin.workflow_id,
         "baseRuntimeDigest": pin.runtime_digest,
@@ -142,6 +143,9 @@ def prepare(
         "opsChangedKeys": sorted(key for key in values if values[key] != base_values[key]),
         "opsValues": values,
     }
+    if pin.profile_identity is not None:
+        metadata["baseProfileIdentityDigest"] = workflow_pinning._json_digest(pin.profile_identity)
+    return metadata
 
 
 def create(pin: workflow_pinning.WorkflowPin, metadata: JsonObject) -> WorkflowAttempt:
@@ -185,7 +189,7 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
         metadata = run_registry.read_json_object(path)
         if not isinstance(metadata, dict) or metadata.get("schema") != SCHEMA:
             raise _error("unsupported attempt metadata")
-        if set(metadata) != {
+        allowed_fields = {
             "schema",
             "wfId",
             "baseRuntimeDigest",
@@ -195,7 +199,10 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
             "opsEnvironment",
             "opsChangedKeys",
             "opsValues",
-        }:
+        }
+        if "baseProfileIdentityDigest" in metadata:
+            allowed_fields.add("baseProfileIdentityDigest")
+        if set(metadata) != allowed_fields:
             raise _error("unsupported attempt metadata fields")
         wf_id = metadata.get("wfId")
         if not isinstance(wf_id, str):
@@ -203,6 +210,14 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
         pin = pin or workflow_pinning.load_pin(wf_id)
         if pin is None or pin.attempt_config_version != 1 or pin.workflow_id != wf_id:
             raise _error("attempt does not bind a supported workflow pin")
+        expected_identity = (
+            workflow_pinning._json_digest(pin.profile_identity)
+            if pin.profile_identity is not None
+            else None
+        )
+        if metadata.get("baseProfileIdentityDigest") != expected_identity:
+            raise _error("attempt profile identity digest differs")
+        workflow_identity.validate(pin.profile_identity, pin.config)
         environment_pin = os.environ.get("DELEGATE_WORKFLOW_PIN")
         if environment_pin is not None and environment_pin != str(pin.path):
             raise _error("workflow pin environment disagrees with the attempt")
