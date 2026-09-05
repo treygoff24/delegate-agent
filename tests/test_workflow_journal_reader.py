@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +15,33 @@ from delegate_agent.workflows import commands, registry, runtime
 
 
 class WorkflowJournalReaderTests(unittest.TestCase):
+    def test_liveness_probe_is_read_only_for_unheld_and_held_locks(self) -> None:
+        lock = self.root / registry.LOCK_FILE
+        lock.write_bytes(b"")
+        lock.chmod(0o644)
+        self.assertFalse(registry.supervisor_alive(self.root))
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o644)
+        with lock.open("rb") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertTrue(registry.supervisor_alive(self.root))
+            self.assertEqual(lock.stat().st_mode & 0o777, 0o644)
+
+    def test_nonregular_lock_is_unknown_not_proof_of_a_dead_supervisor(self) -> None:
+        os.mkfifo(self.root / registry.LOCK_FILE)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import tests; from pathlib import Path; from delegate_agent.workflows import registry; "
+                f"print(registry.supervisor_alive(Path({str(self.root)!r})))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
