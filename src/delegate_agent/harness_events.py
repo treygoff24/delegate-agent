@@ -511,7 +511,10 @@ class StreamAccumulator:
                 return
             self._ingest_text_fallback(stripped)
             return
-        except json.JSONDecodeError:
+        except ValueError:
+            # The interpreter's integer-digit limit raises plain ValueError,
+            # not JSONDecodeError. Malformed child data must not kill the drain
+            # thread and hide a later valid completion.
             if self.harness in ("kimi", "opencode", "pi"):
                 return
             self._ingest_text_fallback(stripped)
