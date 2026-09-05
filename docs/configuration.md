@@ -837,8 +837,15 @@ expansions are frozen as absolute paths. Ambient values hidden by a profile's
 explicit override do not cause false drift refusals. Token contents are never
 recorded, and rotation within the same namespace remains allowed.
 
-This validator covers the supervisor and managed Delegate child CLIs, not every
-vendor subprocess or credential store. External harness processes drop both pin
+New workflow pins require absolute effective credential-home paths. In particular,
+a relative ambient `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is refused instead of binding
+an account whose meaning changes with an isolated child's working directory.
+This creation-time restriction does not migrate existing pins.
+
+This validator covers ambient selection for the supervisor and managed DSL
+children, not arbitrary Python subprocesses, vendor processes, or credential
+stores. A workflow script remains trusted executable code: it can manually launch
+another command with an explicit `--auth-profile`. External harnesses drop both pin
 and attempt bootstrap markers, retaining the effective config data while trusted
 mail-push/private/pure home derivations remain free to operate. Older pins without
 a `profileIdentity` stamp retain their existing execution behavior and report
