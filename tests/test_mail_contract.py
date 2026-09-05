@@ -316,7 +316,14 @@ class MailContractTests(CommandTestBase):
         self.assertEqual(stderr, "")
         payload = json.loads(stdout)
         self._assert_sorted_json(self, stdout, payload)
-        self.assertEqual(set(payload), {"error", "exitCode", "message", "ok"})
+        self.assertEqual(
+            set(payload),
+            {"error", "exitCode", "message", "ok", "schema", "command", "helpTopic", "nextActions"},
+        )
+        self.assertEqual(payload["schema"], "delegate.error.v1")
+        self.assertEqual(payload["command"], "mail")
+        self.assertEqual(payload["helpTopic"], "mail")
+        self.assertEqual(payload["nextActions"], ["delegate help mail"])
         self.assertEqual(payload["error"], "unknown_recipient")
         self.assertEqual(payload["exitCode"], 2)
         self.assertFalse(payload["ok"])

@@ -68,7 +68,23 @@ class PersonaContractTests(unittest.TestCase):
             )
             self.assertEqual(code, 2)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(set(payload), {"ok", "error", "message", "exitCode"})
+            self.assertEqual(
+                set(payload),
+                {
+                    "ok",
+                    "error",
+                    "message",
+                    "exitCode",
+                    "schema",
+                    "command",
+                    "helpTopic",
+                    "nextActions",
+                },
+            )
+            self.assertEqual(payload["schema"], "delegate.error.v1")
+            self.assertEqual(payload["command"], "personas")
+            self.assertEqual(payload["helpTopic"], "personas")
+            self.assertEqual(payload["nextActions"], ["delegate help personas"])
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["error"], "invalid_cwd")
             self.assertEqual(payload["exitCode"], 2)
