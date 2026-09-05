@@ -19,7 +19,7 @@ import shutil
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
 import tempfile
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
@@ -612,7 +612,10 @@ def resolve_input_json_prompt_instruction_mode(
 ) -> str:
     if raw_mode is None:
         return resolve_prompt_instruction_mode(prompt, engine=engine, mode=mode)
-    if raw_mode not in {PROMPT_INSTRUCTION_MODE_WRAPPED, PROMPT_INSTRUCTION_MODE_SLASH}:
+    if not isinstance(raw_mode, str) or raw_mode not in {
+        PROMPT_INSTRUCTION_MODE_WRAPPED,
+        PROMPT_INSTRUCTION_MODE_SLASH,
+    }:
         raise DelegateError(
             "invalid_prompt_instruction_mode",
             "promptInstructionMode must be wrapped or slash-passthrough.",
@@ -630,7 +633,10 @@ def resolve_input_json_prompt_instruction_mode(
 
 
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
-    global_options = parsed.global_options
+    return _completion_mode(parsed.global_options, config)
+
+
+def _completion_mode(global_options: GlobalOptions, config: JsonObject) -> str:
     if global_options.pass_through:
         return delegate_config.COMPLETION_REPORT_MODE_NONE
     if global_options.completion_report is not None:
@@ -1470,6 +1476,179 @@ def _plan_launch_isolation(
     return context, warnings
 
 
+@dataclass(frozen=True)
+class _LaunchInput:
+    """Parsed CLI/JSON values before common launch planning and engine building.
+
+    LaunchOptions owns shared user options. Only JSON's verified workflow
+    session fields and source-specific instruction semantics live alongside it.
+    No raw input dictionary crosses this boundary.
+    """
+
+    options: LaunchOptions
+    global_options: GlobalOptions
+    origin: str
+    prompt: str
+    workspace: ResolvedWorkspace | None
+    output_schema: str | None
+    model_selection: tuple[str | None, str | None]
+    planning_model_alias: str | None
+    progress: tuple[bool, float, float]
+    instruction_mode: object = None
+    json_isolation: str | None = None
+    forbid_commit_note: str | None = None
+    workflow_agent_key: str | None = None
+    expected_persona_digest: str | None = None
+    structured_session: bool = False
+    structured_retry_workspace: bool = False
+    structured_retry_run_id: str | None = None
+    structured_retry_backend: str | None = None
+
+
+def _launch_progress(
+    intent: ProgressIntent, config: JsonObject, *, pass_through: bool, origin: str
+) -> tuple[bool, float, float]:
+    enabled = resolve_effective_progress(intent, config)
+    if enabled and pass_through:
+        label = "--progress" if origin == "cli" else "progress"
+        raise DelegateError(
+            "invalid_option_combination", f"{label} is incompatible with --pass-through."
+        )
+    initial, interval = resolve_progress_timing(config)
+    return enabled, initial, interval
+
+
+def _validate_cli_model(launch: LaunchOptions, config: JsonObject) -> None:
+    if launch.engine == "droid":
+        _reject_droid_model_conflict(launch.model_alias, launch.model)
+        if launch.model_alias is not None:
+            _validate_droid_model_alias(config, launch.model_alias)
+
+
+def _build_normalized_launch(
+    spec: _LaunchInput, config: JsonObject, *, stderr: TextIO | None
+) -> Request:
+    launch, global_options = spec.options, spec.global_options
+    engine, mode = launch.engine, launch.mode
+    assert isinstance(engine, str) and isinstance(mode, str)
+    call = mode == MODE_CALL
+    cleanup_workspace = False
+    isolation_context = None
+    isolation_warnings: tuple[str, ...] = ()
+    output_schema_warnings: tuple[str, ...] = ()
+    completion_mode = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+    if call:
+        prompt = validate_prompt(spec.prompt)
+        # CLI calls historically record wrapped mode (call framing is otherwise
+        # a no-op); JSON may explicitly select or infer slash passthrough.
+        instruction_mode = (
+            PROMPT_INSTRUCTION_MODE_WRAPPED
+            if spec.origin == "cli"
+            else resolve_input_json_prompt_instruction_mode(
+                spec.instruction_mode, prompt, engine=engine, mode=mode
+            )
+        )
+        workspace, cleanup_workspace = _call_workspace(launch.dry_run)
+        effective_progress = False
+        initial = delegate_runner.PROGRESS_INITIAL_DELAY_SEC
+        interval = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC
+    else:
+        workspace = spec.workspace
+        assert workspace is not None
+        isolation_context, isolation_warnings = _plan_launch_isolation(
+            workspace,
+            config,
+            engine=engine,
+            mode=mode,
+            model_alias=spec.planning_model_alias,
+            cli_isolation=global_options.isolation,
+            json_isolation=spec.json_isolation,
+            include_dirty=launch.include_dirty,
+            forbid_commit=launch.forbid_commit,
+            forbid_commit_note=spec.forbid_commit_note,
+            dry_run=launch.dry_run,
+        )
+        if spec.origin == "cli":
+            _validate_cli_model(launch, config)
+        completion_mode, output_schema_warnings = _completion_report_prompt_mode(
+            _completion_mode(global_options, config),
+            spec.output_schema,
+        )
+        prompt = validate_prompt(spec.prompt)
+        instruction_mode = (
+            resolve_prompt_instruction_mode(prompt, engine=engine, mode=mode)
+            if spec.origin == "cli"
+            else resolve_input_json_prompt_instruction_mode(
+                spec.instruction_mode, prompt, engine=engine, mode=mode
+            )
+        )
+        workspace, isolation_context = _structured_retry_launch(
+            spec, workspace, isolation_context, config
+        )
+        effective_progress, initial, interval = spec.progress
+    source_prompt = prompt
+    if call:
+        prompt = _call_effective_prompt(prompt, read_only=launch.read_only)
+    model_alias, model_override = spec.model_selection
+    try:
+        return build_request(
+            engine,
+            mode,
+            model_alias,
+            workspace,
+            prompt,
+            config,
+            launch.dry_run,
+            stream_capture=not global_options.pass_through,
+            isolation_context=isolation_context,
+            reasoning_effort=launch.reasoning_effort,
+            reasoning_effort_source=spec.origin if launch.reasoning_effort is not None else None,
+            fast=launch.fast,
+            progress=effective_progress,
+            progress_initial_delay_sec=initial,
+            progress_interval_sec=interval,
+            forbid_commit=launch.forbid_commit,
+            include_dirty=launch.include_dirty,
+            auth_profile_override=global_options.auth_profile,
+            output_schema=spec.output_schema,
+            output_schema_text=launch.output_schema_text,
+            warnings=(*output_schema_warnings, *isolation_warnings),
+            cleanup_workspace=cleanup_workspace,
+            call_read_only=launch.read_only,
+            pure=launch.pure,
+            timeout=launch.timeout,
+            group=global_options.group,
+            notify=global_options.notify,
+            workflow_agent_key=spec.workflow_agent_key,
+            prompt_instruction_mode=instruction_mode,
+            agent=launch.agent,
+            model_override=model_override,
+            source_prompt=source_prompt,
+            progress_requested=None if call else launch.progress_intent,
+            completion_report_mode=completion_mode,
+            persona=launch.persona,
+            allow_repo_persona=launch.allow_repo_persona,
+            pass_through=global_options.pass_through,
+            stderr=stderr,
+            persona_text_override=launch.persona_record_text,
+            persona_source_override=launch.persona_record_source,
+            persona_digest_override=launch.persona_record_digest,
+            persona_path_override=launch.persona_record_path,
+            expected_persona_digest=spec.expected_persona_digest,
+            mail_push=launch.mail_push,
+            resumable=launch.resumable,
+            resume_session_id=None if call else launch.resume_session_id,
+            frame_prompt=call or spec.origin == "cli" or launch.resume_session_id is None,
+            persist_session=not call and spec.structured_session,
+            preserve_safe_workspace=not call and spec.structured_retry_workspace,
+            continuity_mode=launch.continuity_mode,
+        )
+    except BaseException:
+        if cleanup_workspace:
+            shutil.rmtree(workspace.path, ignore_errors=True)
+        raise
+
+
 def request_from_parsed(
     parsed: ParsedCommand,
     config: JsonObject,
@@ -1481,11 +1660,8 @@ def request_from_parsed(
     validate_config(config)
     if parsed.subcommand == "run":
         return request_from_input_json(parsed, config, stderr=stderr, workspace=workspace)
-    launch = parsed.launch
-    global_options = parsed.global_options
-    if launch is None or launch.engine not in KNOWN_ENGINES:
-        raise DelegateError("invalid_command", "Command does not map to an execution request.")
-    if launch.mode is None:
+    launch, global_options = parsed.launch, parsed.global_options
+    if launch is None or launch.engine not in KNOWN_ENGINES or launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
@@ -1495,170 +1671,59 @@ def request_from_parsed(
                 "personas are not supported for call mode (including read-only calls).",
             )
         _validate_call_cli_options(global_options, launch)
-        read_only = launch.read_only
-        pure = launch.pure
-        if launch.engine == "droid":
-            _reject_droid_model_conflict(launch.model_alias, launch.model)
-            if launch.model_alias is not None:
-                _validate_droid_model_alias(config, launch.model_alias)
-        output_schema = (
-            INLINE_OUTPUT_SCHEMA_PLACEHOLDER
-            if launch.output_schema_text is not None
-            else resolve_output_schema(launch.engine, launch.output_schema)
+        _validate_cli_model(launch, config)
+        progress = (
+            False,
+            delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
+            delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
         )
-        raw_prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
-        if read_only and delegate_runner.detect_slash_command(raw_prompt):
+    else:
+        if launch.read_only:
             raise DelegateError(
-                "slash_passthrough_unsupported",
-                "call --read-only wraps the prompt in the read-only contract; "
-                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+                "invalid_option_combination", "--read-only only applies to call mode."
             )
-        prompt = _call_effective_prompt(raw_prompt, read_only=read_only)
-        workspace, cleanup_workspace = _call_workspace(launch.dry_run)
-        cli_model_alias, cli_model_override = _classify_cli_model(launch)
-        try:
-            return build_request(
-                launch.engine,
-                launch.mode,
-                cli_model_alias,
-                workspace,
-                prompt,
-                config,
-                launch.dry_run,
-                stream_capture=True,
-                isolation_context=None,
-                reasoning_effort=launch.reasoning_effort,
-                reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
-                fast=launch.fast,
-                progress=False,
-                forbid_commit=False,
-                auth_profile_override=global_options.auth_profile,
-                output_schema=output_schema,
-                output_schema_text=launch.output_schema_text,
-                cleanup_workspace=cleanup_workspace,
-                call_read_only=read_only,
-                pure=pure,
-                timeout=launch.timeout,
-                group=global_options.group,
-                notify=global_options.notify,
-                agent=launch.agent,
-                model_override=cli_model_override,
-                source_prompt=raw_prompt,
-                persona=None,
-                allow_repo_persona=launch.allow_repo_persona,
-                pass_through=global_options.pass_through,
-                stderr=stderr,
-                persona_text_override=launch.persona_record_text,
-                persona_source_override=launch.persona_record_source,
-                persona_digest_override=launch.persona_record_digest,
-                persona_path_override=launch.persona_record_path,
-                mail_push=launch.mail_push,
-                continuity_mode=launch.continuity_mode,
-                frame_prompt=True,
-            )
-        except BaseException:
-            if cleanup_workspace:
-                shutil.rmtree(workspace.path, ignore_errors=True)
-            raise
-    if launch.read_only:
-        raise DelegateError(
-            "invalid_option_combination",
-            "--read-only only applies to call mode.",
+        if launch.pure:
+            raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
+        progress = _launch_progress(
+            launch.progress_intent, config, pass_through=global_options.pass_through, origin="cli"
         )
-    if launch.pure:
-        raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
-    effective_progress = resolve_effective_progress(launch.progress_intent, config)
-    if effective_progress and global_options.pass_through:
-        raise DelegateError(
-            "invalid_option_combination",
-            "--progress is incompatible with --pass-through.",
-        )
-    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
     output_schema = (
         INLINE_OUTPUT_SCHEMA_PLACEHOLDER
         if launch.output_schema_text is not None
         else resolve_output_schema(launch.engine, launch.output_schema)
     )
-    workspace = workspace or resolve_workspace(global_options.cwd)
+    if launch.mode != MODE_CALL:
+        workspace = workspace or resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
-    source_prompt = prompt
-
-    isolation_context, isolation_warnings = _plan_launch_isolation(
-        workspace,
-        config,
-        engine=launch.engine,
-        mode=launch.mode,
-        model_alias=_effective_cli_model_alias(launch, config),
-        cli_isolation=global_options.isolation,
-        include_dirty=launch.include_dirty,
-        forbid_commit=launch.forbid_commit,
-        forbid_commit_note=(
-            _forbid_commit_implied_isolation_note()
-            if launch.forbid_commit_implied_isolation
-            else None
+    if (
+        launch.mode == MODE_CALL
+        and launch.read_only
+        and delegate_runner.detect_slash_command(prompt)
+    ):
+        raise DelegateError(
+            "slash_passthrough_unsupported",
+            "call --read-only wraps the prompt in the read-only contract; "
+            "slash-command prompts cannot run verbatim there. Use plain call mode.",
+        )
+    return _build_normalized_launch(
+        _LaunchInput(
+            options=launch,
+            global_options=global_options,
+            origin="cli",
+            prompt=prompt,
+            workspace=workspace,
+            output_schema=output_schema,
+            model_selection=_classify_cli_model(launch),
+            planning_model_alias=_effective_cli_model_alias(launch, config),
+            progress=progress,
+            forbid_commit_note=(
+                _forbid_commit_implied_isolation_note()
+                if launch.forbid_commit_implied_isolation
+                else None
+            ),
         ),
-        dry_run=launch.dry_run,
-    )
-    if launch.engine == "droid":
-        _reject_droid_model_conflict(launch.model_alias, launch.model)
-        if launch.model_alias is not None:
-            _validate_droid_model_alias(config, launch.model_alias)
-
-    completion_report_mode = resolve_completion_report_mode(parsed, config)
-    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
-        completion_report_mode,
-        output_schema,
-    )
-    instruction_mode = resolve_prompt_instruction_mode(
-        prompt,
-        engine=launch.engine,
-        mode=launch.mode,
-    )
-    cli_model_alias, cli_model_override = _classify_cli_model(launch)
-    return build_request(
-        launch.engine,
-        launch.mode,
-        cli_model_alias,
-        workspace,
-        prompt,
         config,
-        launch.dry_run,
-        stream_capture=not global_options.pass_through,
-        isolation_context=isolation_context,
-        reasoning_effort=launch.reasoning_effort,
-        reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
-        fast=launch.fast,
-        progress=effective_progress,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-        forbid_commit=launch.forbid_commit,
-        include_dirty=launch.include_dirty,
-        auth_profile_override=global_options.auth_profile,
-        output_schema=output_schema,
-        output_schema_text=launch.output_schema_text,
-        warnings=(*output_schema_warnings, *isolation_warnings),
-        timeout=launch.timeout,
-        group=global_options.group,
-        notify=global_options.notify,
-        prompt_instruction_mode=instruction_mode,
-        agent=launch.agent,
-        model_override=cli_model_override,
-        source_prompt=source_prompt,
-        progress_requested=launch.progress_intent,
-        completion_report_mode=completion_report_prompt_mode,
-        persona=launch.persona,
-        allow_repo_persona=launch.allow_repo_persona,
-        pass_through=global_options.pass_through,
         stderr=stderr,
-        persona_text_override=launch.persona_record_text,
-        persona_source_override=launch.persona_record_source,
-        persona_digest_override=launch.persona_record_digest,
-        persona_path_override=launch.persona_record_path,
-        mail_push=launch.mail_push,
-        resumable=launch.resumable,
-        resume_session_id=launch.resume_session_id,
-        continuity_mode=launch.continuity_mode,
-        frame_prompt=True,
     )
 
 
@@ -1834,13 +1899,9 @@ def request_from_input_json(
         raw_progress_intent = "on" if raw_progress else "off"
     else:
         raw_progress_intent = None
-    effective_progress = resolve_effective_progress(raw_progress_intent, config)
-    if effective_progress and global_options.pass_through:
-        raise DelegateError(
-            "invalid_option_combination",
-            "progress is incompatible with --pass-through.",
-        )
-    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
+    progress = _launch_progress(
+        raw_progress_intent, config, pass_through=global_options.pass_through, origin="input-json"
+    )
     raw_forbid_commit = raw.get("forbidCommit", False)
     if not isinstance(raw_forbid_commit, bool):
         raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
@@ -2016,6 +2077,45 @@ def request_from_input_json(
             "expectedPersonaDigest requires persona.",
         )
 
+    launch = LaunchOptions(
+        engine=str(engine),
+        mode=str(mode),
+        model_alias=json_model_alias,
+        model=json_model_override,
+        reasoning_effort=reasoning_effort,
+        fast=fast,
+        progress_intent=raw_progress_intent,
+        forbid_commit=raw_forbid_commit,
+        include_dirty=raw_include_dirty,
+        read_only=raw_read_only,
+        pure=raw_pure,
+        timeout=raw_timeout,
+        agent=json_agent,
+        persona=json_persona,
+        allow_repo_persona=raw_allow_repo_persona,
+        mail_push=raw_mail_push,
+        resumable=raw_resumable,
+        resume_session_id=raw_structured_retry_session_id,
+        continuity_mode=raw_continuity_mode,
+    )
+    spec = _LaunchInput(
+        options=launch,
+        global_options=global_options,
+        origin="input-json",
+        prompt=prompt,
+        workspace=workspace,
+        output_schema=output_schema,
+        model_selection=(json_model_alias, json_model_override),
+        planning_model_alias=json_model_alias,
+        progress=progress,
+        instruction_mode=raw_instruction_mode,
+        workflow_agent_key=raw_workflow_agent_key,
+        expected_persona_digest=raw_expected_persona_digest,
+        structured_session=raw_structured_session,
+        structured_retry_workspace=raw_structured_retry_workspace,
+        structured_retry_run_id=raw_structured_retry_run_id,
+        structured_retry_backend=raw_structured_retry_backend,
+    )
     if mode == MODE_CALL:
         if json_persona is not None:
             error = "persona_read_only_call_refused" if raw_read_only else "persona_call_refused"
@@ -2027,68 +2127,18 @@ def request_from_input_json(
             raw_forbid_commit=raw_forbid_commit,
             raw_include_dirty=raw_include_dirty,
         )
-        workspace, cleanup_workspace = _call_workspace(False)
-        call_prompt = validate_prompt(prompt)
         if raw_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH and raw_read_only:
             raise DelegateError(
                 "slash_passthrough_unsupported",
                 "call --read-only wraps the prompt in the read-only contract; "
                 "slash-command prompts cannot run verbatim there. Use plain call mode.",
             )
-        try:
-            return build_request(
-                str(engine),
-                str(mode),
-                json_model_alias,
-                workspace,
-                _call_effective_prompt(call_prompt, read_only=raw_read_only),
-                config,
-                dry_run=False,
-                stream_capture=True,
-                isolation_context=None,
-                reasoning_effort=reasoning_effort,
-                reasoning_effort_source="input-json" if reasoning_effort is not None else None,
-                fast=fast,
-                progress=False,
-                forbid_commit=False,
-                auth_profile_override=global_options.auth_profile,
-                output_schema=output_schema,
-                cleanup_workspace=cleanup_workspace,
-                call_read_only=raw_read_only,
-                pure=raw_pure,
-                timeout=raw_timeout,
-                group=global_options.group,
-                notify=global_options.notify,
-                workflow_agent_key=raw_workflow_agent_key,
-                prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
-                    raw_instruction_mode,
-                    call_prompt,
-                    engine=str(engine),
-                    mode=str(mode),
-                ),
-                agent=json_agent,
-                model_override=json_model_override,
-                source_prompt=call_prompt,
-                persona=None,
-                allow_repo_persona=raw_allow_repo_persona,
-                pass_through=global_options.pass_through,
-                stderr=stderr,
-                mail_push=raw_mail_push,
-                continuity_mode=raw_continuity_mode,
-                frame_prompt=True,
-            )
-        except BaseException:
-            if cleanup_workspace:
-                shutil.rmtree(workspace.path, ignore_errors=True)
-            raise
+        return _build_normalized_launch(spec, config, stderr=stderr)
 
-    # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
-    # config loading, but re-validate and resolve here for the request).
+    # Preserve JSON-specific absence/null semantics before common planning.
     json_cwd = raw.get("cwd")
     if json_cwd is not None and not isinstance(json_cwd, str):
         raise DelegateError("invalid_cwd", "cwd must be a string.")
-
-    # Reject explicit null isolation in the JSON (distinguish missing-key from null).
     if "isolation" in raw and raw["isolation"] is None:
         raise DelegateError(
             "invalid_isolation",
@@ -2097,14 +2147,8 @@ def request_from_input_json(
     json_isolation = raw.get("isolation")
     if json_isolation is not None and json_isolation not in delegate_config.VALID_ISOLATION_VALUES:
         raise DelegateError(
-            "invalid_isolation",
-            "isolation in input JSON must be auto, none, or worktree.",
+            "invalid_isolation", "isolation in input JSON must be auto, none, or worktree."
         )
-
-    # Apply the forbid-commit isolation implication shared with the CLI path so
-    # run --input-json with forbidCommit: true and no isolation gets the same
-    # implied worktree isolation + note. Explicit "none" + forbidCommit errors
-    # here (both paths share this refusal).
     forbid_commit_note: str | None = None
     if raw_forbid_commit:
         json_isolation, forbid_commit_note, _ = _apply_forbid_commit_isolation_implication(
@@ -2113,37 +2157,30 @@ def request_from_input_json(
             cli_isolation=global_options.isolation,
             json_isolation=json_isolation,
         )
-
     workspace = workspace or resolve_workspace(global_options.cwd, json_cwd)
-    isolation_context, isolation_warnings = _plan_launch_isolation(
-        workspace,
+    return _build_normalized_launch(
+        replace(
+            spec,
+            workspace=workspace,
+            json_isolation=json_isolation,
+            forbid_commit_note=forbid_commit_note,
+        ),
         config,
-        engine=str(engine),
-        mode=str(mode),
-        model_alias=model_alias,
-        cli_isolation=global_options.isolation,
-        json_isolation=json_isolation,
-        include_dirty=raw_include_dirty,
-        forbid_commit=raw_forbid_commit,
-        forbid_commit_note=forbid_commit_note,
+        stderr=stderr,
     )
-    completion_report_mode = resolve_completion_report_mode(parsed, config)
-    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
-        completion_report_mode,
-        output_schema,
-    )
-    prompt = validate_prompt(prompt)
-    source_prompt = prompt
-    instruction_mode = resolve_input_json_prompt_instruction_mode(
-        raw_instruction_mode,
-        prompt,
-        engine=str(engine),
-        mode=str(mode),
-    )
+
+
+def _structured_retry_launch(
+    spec: _LaunchInput,
+    workspace: ResolvedWorkspace,
+    isolation_context: IsolationContext,
+    config: JsonObject,
+) -> tuple[ResolvedWorkspace, IsolationContext]:
+    """JSON-only re-entry retains its existing owner/session validation."""
     execution_workspace = workspace
-    if raw_structured_retry_run_id is not None:
-        retry_group = global_options.group
-        retry_key = raw_workflow_agent_key
+    if spec.structured_retry_run_id is not None:
+        retry_group = spec.global_options.group
+        retry_key = spec.workflow_agent_key
         if retry_group is None or retry_key is None:
             raise DelegateError(
                 "invalid_structured_session",
@@ -2151,15 +2188,15 @@ def request_from_input_json(
             )
         execution_workspace = _structured_retry_workspace(
             workspace,
-            engine=str(engine),
+            engine=str(spec.options.engine),
             group=retry_group,
             workflow_agent_key=retry_key,
-            run_id=raw_structured_retry_run_id,
-            session_id=raw_structured_retry_session_id,
+            run_id=spec.structured_retry_run_id,
+            session_id=spec.options.resume_session_id,
         )
         retry_root = run_registry.registry_root_if_exists(Path(workspace.path))
         retry_manifest = (
-            run_registry.load_run_manifest_or_none(retry_root, raw_structured_retry_run_id)
+            run_registry.load_run_manifest_or_none(retry_root, spec.structured_retry_run_id)
             if retry_root is not None
             else None
         )
@@ -2180,78 +2217,34 @@ def request_from_input_json(
                 execution_cwd=execution_workspace.path,
                 source_git_root=retry_source_git_root,
                 attachment={
-                    "sourceRunId": raw_structured_retry_run_id,
+                    "sourceRunId": spec.structured_retry_run_id,
                     "sourceAlias": retry_manifest.get("alias"),
                     "path": execution_workspace.path,
                     "branch": retry_branch,
                     "sourceGitRoot": retry_source_git_root,
                 },
             )
-        elif raw_structured_retry_backend == "bwrap":
+        elif spec.structured_retry_backend == "bwrap":
             # Rebuild the safe bwrap context around the verified source path;
             # unlike copy-backend retries this must not drop the sandbox while
             # reusing the in-place workspace.
             isolation_context = build_isolation_context(
                 source_workspace=workspace.path,
                 resolved_isolation=delegate_config.ISOLATION_WORKTREE,
-                engine=str(engine),
-                mode=str(mode),
-                model_alias=model_alias,
+                engine=str(spec.options.engine),
+                mode=str(spec.options.mode),
+                model_alias=spec.planning_model_alias,
                 source_git_root=workspace.path if workspace.kind == "git" else None,
                 source_git_common_dir=isolation_context.source_git_common_dir,
                 source_head_oid=isolation_context.source_head_oid,
                 source_head_ref=isolation_context.source_head_ref,
                 source_branch=isolation_context.source_branch,
                 config=config,
-                include_dirty=raw_include_dirty,
+                include_dirty=spec.options.include_dirty,
             )
         else:
             isolation_context = IsolationContext.unisolated(workspace.path)
-    return build_request(
-        str(engine),
-        str(mode),
-        json_model_alias,
-        execution_workspace,
-        prompt,
-        config,
-        dry_run=False,
-        stream_capture=not global_options.pass_through,
-        isolation_context=isolation_context,
-        reasoning_effort=reasoning_effort,
-        reasoning_effort_source="input-json" if reasoning_effort is not None else None,
-        fast=fast,
-        progress=effective_progress,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-        forbid_commit=raw_forbid_commit,
-        include_dirty=raw_include_dirty,
-        auth_profile_override=global_options.auth_profile,
-        output_schema=output_schema,
-        warnings=(*output_schema_warnings, *isolation_warnings),
-        group=global_options.group,
-        notify=global_options.notify,
-        workflow_agent_key=raw_workflow_agent_key,
-        prompt_instruction_mode=instruction_mode,
-        agent=json_agent,
-        model_override=json_model_override,
-        pure=raw_pure,
-        timeout=raw_timeout,
-        source_prompt=source_prompt,
-        progress_requested=raw_progress_intent,
-        completion_report_mode=completion_report_prompt_mode,
-        persona=json_persona,
-        allow_repo_persona=raw_allow_repo_persona,
-        expected_persona_digest=raw_expected_persona_digest,
-        pass_through=global_options.pass_through,
-        stderr=stderr,
-        mail_push=raw_mail_push,
-        resumable=raw_resumable,
-        frame_prompt=raw_structured_retry_session_id is None,
-        persist_session=raw_structured_session,
-        resume_session_id=raw_structured_retry_session_id,
-        preserve_safe_workspace=raw_structured_retry_workspace,
-        continuity_mode=raw_continuity_mode,
-    )
+    return execution_workspace, isolation_context
 
 
 def build_request(
