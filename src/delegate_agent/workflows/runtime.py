@@ -630,6 +630,8 @@ class WorkflowState:
     completed_labels: dict[str, list[CompletedChild]] = field(default_factory=dict)
     supervisor_token: str = field(default_factory=lambda: os.urandom(8).hex())
     replay_attempt: int = 0
+    attempt_config: JsonObject | None = None
+    attempt_environment: dict[str, str] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     retry_worktree_runs: set[str] = field(default_factory=set)
     pending_gate: list[tuple[str, str | None, JsonValue, str]] = field(default_factory=list)
@@ -1153,6 +1155,8 @@ class WorkflowState:
         }
         if self.workflow_key_version == 2:
             payload["workflowKeyVersion"] = 2
+        if self.attempt_config is not None:
+            payload["attemptConfig"] = self.attempt_config
         if not self.replay_journal:
             payload["replayJournal"] = False
         if last_event is not None:
@@ -2118,6 +2122,8 @@ class WorkflowDsl:
             lifetime_counter=self.state.lifetime_counter,
             gate_state=self.state.gate_state,
             replay_attempt=self.state.replay_attempt,
+            attempt_config=self.state.attempt_config,
+            attempt_environment=self.state.attempt_environment,
             workflow_key_version=self.state.workflow_key_version,
             cancel_event=self.state.cancel_event,
             retry_worktree_runs=self.state.retry_worktree_runs,
@@ -3660,6 +3666,9 @@ def _run_child_command_for_state(
     the real runtime on the cancellation path.
     """
     kwargs: dict[str, object] = {"cwd": str(state.workspace), "timeout": timeout}
+    attempt_environment = getattr(state, "attempt_environment", None)
+    if attempt_environment is not None:
+        kwargs["environment"] = attempt_environment
     cancel_event = getattr(state, "cancel_event", None)
     if cancel_event is not None and hasattr(cancel_event, "is_set"):
         kwargs["cancel_event"] = cancel_event
@@ -3681,6 +3690,7 @@ def _run_child_command(
     cwd: str,
     timeout: int | float | None,
     cancel_event: threading.Event | None = None,
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     # Row children keep DELEGATE_WORKFLOW_PIN (nested delegate invocations
     # must run the pinned runtime) but never the lock-fd var: close_fds means
@@ -3688,6 +3698,8 @@ def _run_child_command(
     # unrelated file (wp-ptw, observed live 2026-08-31 as suite-wide EBADF in
     # rows entering _held_workflow_lock).
     child_env = {key: value for key, value in os.environ.items() if key != WORKFLOW_LOCK_FD_ENV}
+    if environment is not None:
+        child_env.update(environment)
     process = subprocess.Popen(  # nosec B603 - argv is Delegate's own validated CLI.
         argv,
         cwd=cwd,
@@ -4266,6 +4278,8 @@ def run_supervisor(
     wf_id: str,
     cli_argv: list[str],
     config: JsonObject,
+    attempt_config: JsonObject | None = None,
+    attempt_environment: dict[str, str] | None = None,
 ) -> int:
     root = registry.workflow_dir(workspace, wf_id)
     with _held_workflow_lock(root):
@@ -4297,6 +4311,8 @@ def run_supervisor(
             replay_journal=replay_journal,
             workflow_key_version=workflow_key_version,
             replay_attempt=replay_attempt,
+            attempt_config=attempt_config,
+            attempt_environment=attempt_environment,
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")

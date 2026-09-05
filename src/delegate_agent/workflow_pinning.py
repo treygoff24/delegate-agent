@@ -21,12 +21,15 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from delegate_agent import personas, redaction, run_registry
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry as workflow_registry
+
+if TYPE_CHECKING:
+    from delegate_agent.workflow_attempts import WorkflowAttempt
 
 PIN_SCHEMA = "delegate.workflow-pin.v1"
 PIN_VERSION = 1
@@ -85,6 +88,7 @@ class WorkflowPin:
     python_executable: str
     personas: JsonObject
     created_at: str
+    attempt_config_version: int = 0
 
     @property
     def cli_argv(self) -> list[str]:
@@ -154,7 +158,9 @@ def _non_secret_config(value: JsonValue, *, key: str | None = None) -> JsonValue
             if not isinstance(child_key, str) or redaction.key_looks_secret(child_key):
                 continue
             cleaned = _non_secret_config(child, key=child_key)
-            if cleaned is not None:
+            # Preserve explicit null defaults. An attempt config is loaded
+            # exactly, without merging mutable machine defaults back into it.
+            if cleaned is not None or child is None:
                 result[child_key] = cleaned
         return result
     if isinstance(value, list):
@@ -535,6 +541,7 @@ def create_pin(
             "importRoot": str(import_root),
             "entrypoint": str(entrypoint),
             "pythonExecutable": sys.executable,
+            "attemptConfigVersion": 1,
         },
         "configPath": str(config_path),
         "configDigest": _json_digest(cleaned_config),
@@ -602,6 +609,7 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         not runtime_root.resolve(strict=False).is_relative_to(runtime_pool)
         or not runtime_root.is_dir()
         or not import_root.is_dir()
+        or not import_root.resolve(strict=False).is_relative_to(runtime_root.resolve(strict=False))
         or not entrypoint.is_file()
         or not entrypoint.resolve(strict=False).is_relative_to(runtime_root.resolve(strict=False))
     ):
@@ -636,15 +644,29 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         python_executable=python_executable,
         personas=personas_payload,
         created_at=created_at,
+        attempt_config_version=(
+            1
+            if runtime.get("attemptConfigVersion") == 1
+            and (import_root / "delegate_agent" / "workflow_attempts.py").is_file()
+            else 0
+        ),
     )
 
 
-def temporarily_apply_environment(pin: WorkflowPin) -> dict[str, str | None]:
+def temporarily_apply_environment(
+    pin: WorkflowPin, *, attempt: WorkflowAttempt | None = None
+) -> dict[str, str | None]:
     """Apply pin env in the current process, returning prior values for restore."""
     previous: dict[str, str | None] = {}
-    for key, value in pin.environment.items():
+    environment: dict[str, str | None] = {**pin.environment, "DELEGATE_WORKFLOW_ATTEMPT": None}
+    if attempt is not None:
+        environment.update(attempt.environment)
+    for key, value in environment.items():
         previous[key] = os.environ.get(key)
-        os.environ[key] = value
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
     return previous
 
 

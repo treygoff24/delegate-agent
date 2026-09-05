@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import rendering, run_registry, workflow_pinning
+from delegate_agent import rendering, run_registry, workflow_attempts, workflow_pinning
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -63,22 +63,38 @@ def emit(
     config: JsonObject,
     stdout: TextIO,
     stderr: TextIO,
+    config_source: str = "command-config",
 ) -> int:
     workspace = Path(workspace_path)
     action = command.action
     if action == "check":
         return emit_check(command, stdout=stdout)
     if action == "run":
-        return emit_run(command, workspace=workspace, config=config, stdout=stdout, stderr=stderr)
+        return emit_run(
+            command,
+            workspace=workspace,
+            config=config,
+            stdout=stdout,
+            stderr=stderr,
+            config_source=config_source,
+        )
     if action == "_supervise":
         if command.wf_id is None:
             raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
         try:
             pin = workflow_pinning.load_pin(command.wf_id)
+            attempt = workflow_attempts.from_environment(pin=pin)
+            if pin is not None and pin.attempt_config_version == 1 and attempt is None:
+                raise workflow_pinning.WorkflowPinError(
+                    "invalid_workflow_attempt",
+                    "this pinned supervisor requires an attempt snapshot",
+                )
             if pin is not None:
-                previous_environment = workflow_pinning.temporarily_apply_environment(pin)
+                previous_environment = workflow_pinning.temporarily_apply_environment(
+                    pin, attempt=attempt
+                )
                 cli_argv = pin.cli_argv
-                launch_config = pin.config
+                launch_config = attempt.config if attempt is not None else pin.config
             else:
                 previous_environment = {}
                 cli_argv = _delegate_cli_argv()
@@ -88,8 +104,12 @@ def emit(
                 wf_id=command.wf_id,
                 cli_argv=cli_argv,
                 config=launch_config,
+                attempt_config=attempt.metadata if attempt is not None else None,
+                attempt_environment={**pin.environment, **attempt.environment}
+                if pin is not None and attempt is not None
+                else None,
             )
-        except workflow_pinning.WorkflowPinError as exc:
+        except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
         except BlockingIOError as exc:
             raise DelegateError(
@@ -110,7 +130,9 @@ def emit(
     if action == "wait":
         return emit_wait(command, workspace=workspace, stdout=stdout)
     if action == "approve":
-        return emit_approve(command, workspace=workspace, config=config, stdout=stdout)
+        return emit_approve(
+            command, workspace=workspace, config=config, stdout=stdout, config_source=config_source
+        )
     if action == "reject":
         return emit_reject(command, workspace=workspace, config=config, stdout=stdout)
     if action == "kill":
@@ -149,13 +171,18 @@ def emit_run(
     stdout: TextIO,
     stderr: TextIO,
     approve_gate: bool = False,
+    config_source: str = "command-config",
 ) -> int:
     warnings: list[str] = []
+    operational_environment = {
+        key: value for key, value in os.environ.copy().items() if key in workflow_attempts.ENV_KEYS
+    }
     lock_fd: int | None = None
     previous_status: JsonObject | None = None
     previous_result: bytes | None = None
     previous_result_exists = False
     pin: workflow_pinning.WorkflowPin | None = None
+    attempt: workflow_attempts.WorkflowAttempt | None = None
     source_script: str | None = None
     script_hash: str | None = None
     if command.resume:
@@ -165,7 +192,19 @@ def emit_run(
             raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
         try:
             pin = workflow_pinning.load_pin(wf_id)
-        except workflow_pinning.WorkflowPinError as exc:
+            if pin is not None and pin.attempt_config_version == 1:
+                if not command.dry_run:
+                    attempt = workflow_attempts.create(
+                        pin,
+                        workflow_attempts.prepare(
+                            pin, config, config_source, environment=operational_environment
+                        ),
+                    )
+            elif pin is not None:
+                warnings.append(
+                    "operational updates unavailable: this legacy pinned runtime uses frozen creation config"
+                )
+        except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
         # Acquire the lock before any approval/budget mutation so a failed
         # resume cannot clobber a live supervisor's status.json.
@@ -243,6 +282,11 @@ def emit_run(
                 os.close(lock_fd)
             raise
     else:
+        if not command.dry_run:
+            try:
+                workflow_attempts.operational_values(config, environment=operational_environment)
+            except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
+                raise DelegateError(exc.error, exc.message) from exc
         source = _script_path_for_command(command)
         check_result = check_script(source)
         warnings = list(check_result.warnings)
@@ -284,10 +328,19 @@ def emit_run(
             pin = workflow_pinning.create_pin(
                 wf_id,
                 workspace=workspace,
-                config=config,
+                config=delegate_config.merge_config_layer(
+                    delegate_config.embedded_default_config(), config
+                ),
                 data_home=worktrees_data_home(config),
             )
-        except workflow_pinning.WorkflowPinError as exc:
+            if not command.dry_run:
+                attempt = workflow_attempts.create(
+                    pin,
+                    workflow_attempts.prepare(
+                        pin, config, config_source, environment=operational_environment
+                    ),
+                )
+        except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
     if command.dry_run:
         status = registry.read_json(root / registry.STATUS_FILE) or {}
@@ -323,6 +376,17 @@ def emit_run(
         wf_id,
     ]
     try:
+        if attempt is not None:
+            _append_command_event(root, "attempt_config", **attempt.metadata)
+            current_status = registry.read_json(root / registry.STATUS_FILE) or {}
+            current_status["attemptConfig"] = attempt.metadata
+            registry.write_status(root, current_status)
+            if command.resume:
+                status["attemptConfig"] = attempt.metadata
+        elif pin is not None:
+            _append_command_event(
+                root, "attempt_config_unavailable", reason="legacy_pinned_runtime"
+            )
         if command.resume:
             prior_attempt = status.get("replayAttempt")
             replay_attempt = (
@@ -366,7 +430,9 @@ def emit_run(
                 pin=pin,
             )
         previous_environment = (
-            workflow_pinning.temporarily_apply_environment(pin) if pin is not None else {}
+            workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
+            if pin is not None
+            else {}
         )
         try:
             runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
@@ -392,6 +458,9 @@ def emit_run(
         "journalPath": str(root / registry.JOURNAL_FILE),
         "scriptPath": str(script_path),
     }
+    if attempt is not None:
+        payload["attemptConfig"] = attempt.metadata
+        payload["effectiveConfigPath"] = str(attempt.config_path)
     if source_script is not None:
         payload["sourceScript"] = source_script
     if script_hash is not None:
@@ -692,11 +761,18 @@ def emit_approve(
     workspace: Path,
     config: JsonObject,
     stdout: TextIO,
+    config_source: str = "command-config",
 ) -> int:
     root = _workflow_dir_for_command(command, workspace)
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     result = emit_run(
-        resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout, approve_gate=True
+        resumed,
+        workspace=workspace,
+        config=config,
+        stdout=stdout,
+        stderr=stdout,
+        approve_gate=True,
+        config_source=config_source,
     )
     # Approval is an operator-facing transition: wait for the detached
     # trampoline to publish a terminal projection when the child is already
