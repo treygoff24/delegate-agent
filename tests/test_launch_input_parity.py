@@ -476,6 +476,30 @@ class LaunchInputParityTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "timeout"):
             self.assert_equivalent(left, right)
 
+    def test_json_call_empty_prompt_precedes_read_only_slash_refusal(self):
+        path = self.root / "invalid-call.json"
+        for prompt, expected in ((" ", "empty_prompt"), ("task", "slash_passthrough_unsupported")):
+            path.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "call",
+                        "prompt": prompt,
+                        "readOnly": True,
+                        "promptInstructionMode": "slash-passthrough",
+                    }
+                )
+            )
+            parsed = cli_parser.parse_cli(["run", "--input-json", str(path)])
+            with (
+                self.subTest(prompt=prompt),
+                mock.patch.object(request_build, "_call_workspace") as allocate,
+                self.assertRaises(DelegateError) as error,
+            ):
+                request_build.request_from_input_json(parsed, self.config)
+            self.assertEqual(error.exception.error, expected)
+            allocate.assert_not_called()
+
     def test_unsupported_combinations_keep_both_frontend_refusals(self):
         cases = (
             ("work", ("--read-only",), {"readOnly": True}, (), "invalid_option_combination"),
