@@ -311,8 +311,10 @@ at a time without retaining an event history:
 The final record includes the complete status projection (abbreviated above).
 As with existing watch behavior, its `ok` is false only for a stalled supervisor;
 it is not a claim that a terminal workflow succeeded. JSONL takes precedence
-over global `--json`. A truncated tail without a terminating newline is not
-emitted, including when the workflow has stopped.
+over global `--json`. While a writer is active, an unterminated tail is buffered.
+Once settled, valid JSON without a final newline is emitted; an incomplete
+JSON or UTF-8 tail is ignored with a warning. Malformed complete records remain
+errors.
 
 Approval recovers journal-backed gate evidence under the supervisor lock. If a
 supervisor is still draining, a rejected approval attempt does not rewrite its
