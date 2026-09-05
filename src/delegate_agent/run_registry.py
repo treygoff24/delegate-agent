@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io, terminal_states
+from delegate_agent import archived_logs, private_io, run_status, terminal_states
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
@@ -49,18 +49,61 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     write_private_text_atomic,
     write_text_atomic,
 )
+from delegate_agent.record_io import (  # noqa: F401  # existing registry API
+    MANIFEST_FILE,
+    RUN_ID_RE,
+    SNAPSHOT_FILE,
+    STATE_FILE,
+    STDERR_LOG,
+    STDOUT_LOG,
+    index_run_entries,
+    load_run_manifest,
+    load_run_manifest_or_none,
+    load_run_snapshot,
+    load_run_snapshot_or_none,
+    load_run_state,
+    load_run_state_or_none,
+    parse_utc_timestamp,
+    run_directory,
+    run_output_command,
+    runs_dir,
+    snapshot_command,
+    timestamp_from_run_id,
+)
+from delegate_agent.run_status import (  # noqa: F401  # existing registry API
+    DEFAULT_RUNS_LIMIT,
+    LARGE_LOG_WARN_BYTES,
+    LARGE_LOG_WARN_MIB,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_FILTER_RUNNING,
+    STATUS_FILTER_STALE,
+    STATUS_RUNNING,
+    STATUS_STALE,
+    STATUS_SUCCEEDED,
+    STATUS_UNKNOWN,
+    TERMINAL_STATUSES,
+    activity_datetime,
+    activity_timestamp,
+    build_run_summary,
+    effective_log_byte_sizes,
+    effective_status,
+    large_log_warnings,
+    list_run_summaries,
+    log_byte_sizes,
+    process_alive,
+    raw_logs_archived,
+    raw_status,
+    run_succeeded,
+    stale_next_actions,
+    status_fields,
+)
 
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
-RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
-STDOUT_LOG = "stdout.log"
-STDERR_LOG = "stderr.log"
 EVENTS_JSONL = "events.jsonl"
-MANIFEST_FILE = "manifest.json"
-STATE_FILE = "state.json"
-SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
 PROMPT_TXT_FILE = "prompt.txt"
 PERSONA_TXT_FILE = "persona.txt"
@@ -178,10 +221,6 @@ def git_info_exclude_path(git_root: Path) -> Path | None:
 
 def aliases_dir(registry_root: Path) -> Path:
     return registry_root / "aliases"
-
-
-def runs_dir(registry_root: Path) -> Path:
-    return registry_root / "runs"
 
 
 def index_path(registry_root: Path) -> Path:
@@ -549,33 +588,11 @@ def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     return None
 
 
-def index_run_entries(index: JsonObject) -> Iterator[tuple[str, JsonObject]]:
-    """Yield usable index entries without deriving paths from corrupt keys."""
-    runs = index.get("runs", {})
-    if not isinstance(runs, dict):
-        return
-    for run_id, entry in runs.items():
-        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) and isinstance(entry, dict):
-            yield run_id, entry
-
-
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).strftime(UTC_TIMESTAMP_FORMAT)
-
-
-def parse_utc_timestamp(value: str | None) -> datetime | None:
-    if not value or not isinstance(value, str):
-        return None
-    try:
-        if value.endswith("Z"):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        parsed = datetime.fromisoformat(value)
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-    except ValueError:
-        return None
 
 
 def _format_age(timestamp: str, *, now: datetime | None = None) -> str:
@@ -622,29 +639,6 @@ def latest_handle_suggestions(
         if len(suggestions) >= limit:
             break
     return suggestions
-
-
-def snapshot_command(alias: str, *, cwd: str | None = None) -> str:
-    if cwd is None:
-        return f"delegate snapshot {alias}"
-    return shlex.join(["delegate", "--cwd", cwd, "snapshot", alias])
-
-
-def run_output_command(
-    handle: str,
-    *,
-    completion_report: bool = False,
-    cwd: str | None = None,
-) -> str:
-    if cwd is not None:
-        argv = ["delegate", "--cwd", cwd, "run-output", handle]
-        if completion_report:
-            argv.append("--completion-report")
-        return shlex.join(argv)
-    base = f"delegate run-output {handle}"
-    if completion_report:
-        return f"{base} --completion-report"
-    return base
 
 
 def alias_sequence_for_harness(alias: object, harness: str) -> int:
@@ -841,18 +835,6 @@ def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
             warnings.append(target.resolution_warning)
 
 
-def run_directory(registry_root: Path, run_id: str) -> Path:
-    if not RUN_ID_RE.fullmatch(run_id):
-        raise RegistryJsonError(f"invalid run id for registry path: {run_id!r}")
-    root = runs_dir(registry_root).resolve(strict=False)
-    path = (root / run_id).resolve(strict=False)
-    try:
-        path.relative_to(root)
-    except ValueError:
-        raise RegistryJsonError(f"run path escapes registry: {run_id!r}") from None
-    return path
-
-
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
     aliases = sorted(
         alias
@@ -993,30 +975,6 @@ def resolve_run_target(
     )
 
 
-def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / STATE_FILE)
-
-
-def load_run_state_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / STATE_FILE)
-
-
-def load_run_snapshot(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
-
-
-def load_run_snapshot_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
-
-
-def load_run_manifest(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
-
-
-def load_run_manifest_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / MANIFEST_FILE)
-
-
 def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
@@ -1027,14 +985,6 @@ def alias_for_run(index: JsonObject, run_id: str) -> str | None:
         if candidate_id == run_id and isinstance(candidate, str) and ALIAS_RE.fullmatch(candidate):
             return candidate
     return None
-
-
-def timestamp_from_run_id(run_id: str) -> str:
-    match = re.match(r"^del_(\d{8}T\d{6}Z)_", run_id)
-    if not match:
-        return ""
-    raw = match.group(1)
-    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[9:11]}:{raw[11:13]}:{raw[13:15]}Z"
 
 
 def _write_worktree_status(
@@ -1182,37 +1132,6 @@ def _latest_run_id_for_harness(
     # themselves; any explicit ordinal from a newer run outranks them.
     matches.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
     return matches[0][3]
-
-
-from delegate_agent import run_status  # noqa: E402  # facade re-export, placed after core defs
-from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
-    DEFAULT_RUNS_LIMIT,
-    LARGE_LOG_WARN_BYTES,
-    LARGE_LOG_WARN_MIB,
-    STATUS_CANCELLED,
-    STATUS_FAILED,
-    STATUS_FILTER_RUNNING,
-    STATUS_FILTER_STALE,
-    STATUS_RUNNING,
-    STATUS_STALE,
-    STATUS_SUCCEEDED,
-    STATUS_UNKNOWN,
-    TERMINAL_STATUSES,
-    activity_datetime,
-    activity_timestamp,
-    build_run_summary,
-    effective_log_byte_sizes,
-    effective_status,
-    large_log_warnings,
-    list_run_summaries,
-    log_byte_sizes,
-    process_alive,
-    raw_logs_archived,
-    raw_status,
-    run_succeeded,
-    stale_next_actions,
-    status_fields,
-)
 
 
 def _run_prune_ref(
