@@ -501,6 +501,52 @@ finally:
         self.assertFalse(missing["installedArtifactComplete"])
         self.assertFalse(missing["promotionMatchesRuntime"])
 
+    def test_doctor_nonregular_artifacts_and_locks_do_not_block(self) -> None:
+        _launcher, outer = self._installed_fixture()
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        fifo.chmod(0o700)
+        cycle = self.root / "cycle"
+        cycle.symlink_to("./cycle")
+        code = (
+            "import json, pathlib, sys; from delegate_agent import workflow_pinning as p; "
+            "print(json.dumps([p._file_identity(pathlib.Path(x)) for x in sys.argv[1:]]))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(fifo), str(self.root), str(cycle)],
+            env={**os.environ, "PYTHONPATH": SRC},
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), [None, None, None])
+        workflow_root = self.workspace / "workflow"
+        workflow_root.mkdir()
+        os.mkfifo(workflow_root / workflow_registry.LOCK_FILE)
+        index = workflow_pinning.active_index_path(self.home)
+        index.write_text(
+            json.dumps({"supervisors": {"wf_123456abcdef": {"workflowRoot": str(workflow_root)}}})
+        )
+        outer.rename(outer.with_suffix(".saved"))
+        os.mkfifo(outer)
+        outer.chmod(0o700)
+        code = (
+            "import json; from delegate_agent import workflow_pinning as p; "
+            "print(json.dumps(p.doctor()))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": SRC, "PATH": str(outer.parent)},
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        report = json.loads(result.stdout)
+        self.assertFalse(report["installedArtifactComplete"])
+        self.assertFalse(report["promotionMatchesRuntime"])
+
     def test_promote_defaults_to_executing_digest_without_certifying_checkout(self) -> None:
         stdout = io.StringIO()
         code = workflow_pinning.emit_promote(
