@@ -455,6 +455,7 @@ class StreamAccumulator:
     _last_error_message: str | None = field(default=None, repr=False)
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     _pi_text_buffer: str = field(default="", repr=False)
+    _pi_retry_error: str | None = field(default=None, repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     provider_terminal_state: str | None = None
@@ -1172,8 +1173,27 @@ class StreamAccumulator:
         self._invalidate_assistant_text_cache()
 
     def _ingest_pi_event(self, payload: JsonObject, event_type: str) -> None:
+        if event_type == "auto_retry_start":
+            self._pi_retry_error = (
+                _string_field(payload, "errorMessage")
+                or self._last_error_message
+                or "Provider retry ended without a terminal result."
+            )
+            self._clear_pi_terminal()
+            self.completion_text = None
+            return
+        if event_type == "auto_retry_end":
+            if payload.get("success") is False:
+                reason = _string_field(payload, "finalError") or self._pi_retry_error
+                self._pi_retry_error = None
+                self._ingest_error_event({"message": reason})
+                self._record_terminal_event(
+                    event=f"{self.harness}.auto_retry_end", status="failed", reason=reason
+                )
+            return
         if event_type == "turn_start":
             self._reset_pi_turn_text()
+            self._clear_pi_terminal()
             return
         if event_type == "message_update":
             update = payload.get("assistantMessageEvent")
@@ -1201,17 +1221,58 @@ class StreamAccumulator:
                 if isinstance(message, dict)
                 else payload.get("stopReason")
             )
-            if role != "assistant" or stop_reason != "stop":
+            if role != "assistant":
                 return
-            if isinstance(message, dict):
-                text = _extract_text(message.get("content"))
-                if text:
-                    self._publish_pi_text(text, completion=True)
-            self._record_terminal_event(event=f"{self.harness}.turn_end", status="succeeded")
+            error_status = message.get("errorStatus")
+            http_error = (
+                isinstance(error_status, int)
+                and not isinstance(error_status, bool)
+                and error_status >= 400
+            )
+            if stop_reason not in ("stop", "error", "aborted", "length") and not http_error:
+                return
+            status = (
+                "cancelled"
+                if stop_reason == "aborted"
+                else "succeeded"
+                if stop_reason == "stop" and not http_error
+                else "failed"
+            )
+            text = _extract_text(message.get("content"))
+            if text:
+                self._publish_pi_text(text, completion=status == "succeeded")
+            reason = None
+            if status != "succeeded":
+                self.completion_text = None
+                reason = (
+                    _string_field(message, "errorMessage") or f"Provider stopped: {stop_reason}"
+                )
+                self._ingest_error_event({"message": reason})
+            else:
+                self._last_error_message = None
+            self._pi_retry_error = None
+            self._record_terminal_event(
+                event=f"{self.harness}.turn_end", status=status, reason=reason
+            )
             return
         if event_type == "error":
             self._ingest_error_event(payload)
             self._record_terminal_event(event=f"{self.harness}.error", status="failed")
+
+    def _clear_pi_terminal(self) -> None:
+        self.terminal_status = None
+        self.terminal_event = None
+        self.provider_terminal_state = None
+        self.provider_terminal_reason = None
+
+    def finish_stream(self) -> None:
+        """An interrupted harness retry cannot turn an exit-zero child into success."""
+        if self._pi_retry_error is not None and self.terminal_status is None:
+            self._record_terminal_event(
+                event=f"{self.harness}.retry_incomplete",
+                status="failed",
+                reason=self._pi_retry_error,
+            )
 
     def _ingest_pi_tool(self, payload: JsonObject, *, completed: bool) -> None:
         tool = _string_field(payload, "toolName") or "tool"
