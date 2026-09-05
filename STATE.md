@@ -1,10 +1,17 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-05 (source improvement work in progress; not a live promotion)
+Updated: 2026-09-05 (source improvements verified; not a live promotion)
 
-- Source fixes and refactors are tracked by `dlg-1vj`. Final verification and
-  CLI/JSON launch normalization are still in progress; do not treat this as a
-  release or completion receipt.
+- Source fixes and refactors are tracked by `dlg-1vj`. Application source is
+  `f2adb20`; final repository verification is `9aaa817`. All 12 approved
+  improvement areas are implemented, including common CLI/JSON launch planning.
+- Final gates: unittest ran 2,820 tests with 15 skips; pytest passed 2,805 with
+  the same 15 skips. Real runner parity, compileall, and pinned Ruff 0.15.15
+  lint/format passed. Four older cancellation regressions now run under the
+  authoritative unittest gate rather than only pytest.
+- An isolated wheel matched all 79 application modules and passed actual CLI
+  overview/help, no-write dry-run, honest doctor, and fake-OMP capture contracts.
+  These are source/package verification receipts, not a release or live install.
 - On this development host, checkout doctor reports
   `executionMode: checkout-or-pinned` and `promotionMatchesRuntime: false`.
   Source changes have not been installed into the live runtime. Verify the

@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a read-only record module reduce duplicated policy and circular imports.
 - Unit tests use owning modules while CLI contracts retain entrypoint coverage.
   Acceptance selects the pinned Ruff toolchain; both test runners share private
-  temporary state and ownership-checked process cleanup.
+  temporary state and ownership-checked process cleanup. Runner parity retains
+  complete logs, and four existing cancellation regressions now run under the
+  authoritative unittest gate as well as pytest.
 
 ### Fixed
 - Claude `--output-schema` is accepted in tracked `safe`/`work` modes, not only
