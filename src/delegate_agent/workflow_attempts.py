@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,13 +146,26 @@ def create(pin: workflow_pinning.WorkflowPin, metadata: JsonObject) -> WorkflowA
     run_registry.ensure_private_dir(root.parent)
     with run_registry.file_lock(root.parent / ".attempt.lock"):
         if not root.exists():
-            root.mkdir(mode=0o700)
-            run_registry.write_json_atomic(root / "config.json", effective)
-            run_registry.write_json_atomic(root / "attempt.json", metadata)
-            (root / "config.json").chmod(0o400)
-            (root / "attempt.json").chmod(0o400)
-            root.chmod(0o500)
-    return load(root / "attempt.json", pin=pin)
+            # A failed write may leave this private staging directory for
+            # inspection, but never publishes a poisoned content-addressed
+            # destination. Do not remove pre-existing partial artifacts.
+            staging = Path(tempfile.mkdtemp(prefix=f".{digest}.", dir=root.parent))
+            run_registry.write_json_atomic(staging / "config.json", effective)
+            run_registry.write_json_atomic(staging / "attempt.json", metadata)
+            if (
+                run_registry.read_json_object(staging / "config.json") != effective
+                or run_registry.read_json_object(staging / "attempt.json") != metadata
+            ):
+                raise _error("staged workflow attempt differs from its validated input")
+            (staging / "config.json").chmod(0o400)
+            (staging / "attempt.json").chmod(0o400)
+            staging.chmod(0o500)
+            if root.exists() or root.is_symlink():
+                # A non-cooperating writer may have published while we staged.
+                # Never replace even an empty foreign partial directory.
+                return load(root / "attempt.json", pin=pin)
+            staging.rename(root)
+        return load(root / "attempt.json", pin=pin)
 
 
 def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> WorkflowAttempt:
