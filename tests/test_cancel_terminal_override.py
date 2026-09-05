@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import unittest
 from pathlib import Path
 
 from delegate_agent import (
@@ -49,169 +50,169 @@ def _assert_operator_cancel_receipt(payload: dict[str, object]) -> None:
     assert "message" not in payload
 
 
-def test_wal_replay_operator_cancel_overrides_provider_receipt() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
-        run_id, _alias = run_registry.register_run(root, harness="codex")
-        run_path = run_registry.run_directory(root, run_id)
-        run_registry.write_json_atomic(
-            run_path / run_registry.STATE_FILE,
-            {"status": "running", "cancelRequested": True},
-        )
-        run_registry.write_snapshot(run_path, {"status": "running", "ok": False})
-        receipt = _provider_cancel_receipt("provider stopped the turn")
-        run_registry.write_finalize_wal(
-            root,
-            run_id,
-            status=run_registry.STATUS_CANCELLED,
-            state={"status": run_registry.STATUS_CANCELLED, "exitCode": 1, **receipt},
-            snapshot={
+class CancelTerminalOverrideTests(unittest.TestCase):
+    def test_wal_replay_operator_cancel_overrides_provider_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = run_registry.register_run(root, harness="codex")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {"status": "running", "cancelRequested": True},
+            )
+            run_registry.write_snapshot(run_path, {"status": "running", "ok": False})
+            receipt = _provider_cancel_receipt("provider stopped the turn")
+            run_registry.write_finalize_wal(
+                root,
+                run_id,
+                status=run_registry.STATUS_CANCELLED,
+                state={"status": run_registry.STATUS_CANCELLED, "exitCode": 1, **receipt},
+                snapshot={
+                    "status": run_registry.STATUS_CANCELLED,
+                    "ok": False,
+                    "exitCode": 1,
+                    **receipt,
+                },
+            )
+
+            with run_registry.registry_lock(root, timeout_seconds=1):
+                pass
+
+            _assert_operator_cancel_receipt(_read_json(run_path / run_registry.STATE_FILE))
+            _assert_operator_cancel_receipt(_read_json(run_path / run_registry.SNAPSHOT_FILE))
+
+    def test_wal_replay_without_cancel_request_preserves_provider_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = run_registry.register_run(root, harness="codex")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE, {"status": "running"}
+            )
+            run_registry.write_snapshot(run_path, {"status": "running", "ok": False})
+            receipt = _provider_cancel_receipt("provider stopped the turn")
+            run_registry.write_finalize_wal(
+                root,
+                run_id,
+                status=run_registry.STATUS_CANCELLED,
+                state={"status": run_registry.STATUS_CANCELLED, "exitCode": 1, **receipt},
+                snapshot={
+                    "status": run_registry.STATUS_CANCELLED,
+                    "ok": False,
+                    "exitCode": 1,
+                    **receipt,
+                },
+            )
+
+            with run_registry.registry_lock(root, timeout_seconds=1):
+                pass
+
+            for name in (run_registry.STATE_FILE, run_registry.SNAPSHOT_FILE):
+                persisted = _read_json(run_path / name)
+                assert persisted["failureReason"] == terminal_states.PROVIDER_CANCELLED
+                assert persisted["terminalState"] == terminal_states.PROVIDER_CANCELLED
+                terminal_record = persisted["terminalRecord"]
+                assert isinstance(terminal_record, dict)
+                assert terminal_record["state"] == terminal_states.PROVIDER_CANCELLED
+                assert terminal_record["reason"] == "provider stopped the turn"
+
+    def test_post_grace_cancel_persist_overrides_existing_provider_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="codex")
+            run_path = run_registry.run_directory(root, run_id)
+            receipt = _provider_cancel_receipt("provider stopped during cancel grace")
+            state = {
+                "schema": run_registry.STATE_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
+                "status": run_registry.STATUS_CANCELLED,
+                "exitCode": 1,
+                "cancelRequested": True,
+                **receipt,
+            }
+            snapshot = {
+                "schema": run_registry.SNAPSHOT_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
                 "status": run_registry.STATUS_CANCELLED,
                 "ok": False,
                 "exitCode": 1,
+                "cancelRequested": True,
                 **receipt,
-            },
-        )
+            }
+            run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
+            run_registry.write_snapshot(run_path, snapshot)
 
-        with run_registry.registry_lock(root, timeout_seconds=1):
-            pass
+            target = run_registry.RunTarget(run_id=run_id, alias=alias)
+            with run_registry.registry_lock(root):
+                wait_cancel_commands._persist_cancelled_terminal_locked(root, target, state, [])
 
-        _assert_operator_cancel_receipt(_read_json(run_path / run_registry.STATE_FILE))
-        _assert_operator_cancel_receipt(_read_json(run_path / run_registry.SNAPSHOT_FILE))
+            _assert_operator_cancel_receipt(_read_json(run_path / run_registry.STATE_FILE))
+            _assert_operator_cancel_receipt(_read_json(run_path / run_registry.SNAPSHOT_FILE))
 
+    def test_operator_cancel_report_omits_provider_harness_error(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="codex")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {"status": "running", "cancelRequested": True},
+            )
+            ctx = runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+            accumulator = harness_events.StreamAccumulator(harness="codex")
+            provider_reason = "provider cancelled after an upstream refusal"
+            accumulator.terminal_event = {
+                "event": "turn.failed",
+                "status": "failed",
+                "reason": provider_reason,
+            }
+            accumulator.terminal_status = run_registry.STATUS_FAILED
+            accumulator.provider_terminal_state = terminal_states.PROVIDER_CANCELLED
+            accumulator.provider_terminal_reason = provider_reason
+            capture = runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+            )
 
-def test_wal_replay_without_cancel_request_preserves_provider_receipt() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
-        run_id, _alias = run_registry.register_run(root, harness="codex")
-        run_path = run_registry.run_directory(root, run_id)
-        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, {"status": "running"})
-        run_registry.write_snapshot(run_path, {"status": "running", "ok": False})
-        receipt = _provider_cancel_receipt("provider stopped the turn")
-        run_registry.write_finalize_wal(
-            root,
-            run_id,
-            status=run_registry.STATUS_CANCELLED,
-            state={"status": run_registry.STATUS_CANCELLED, "exitCode": 1, **receipt},
-            snapshot={
-                "status": run_registry.STATUS_CANCELLED,
-                "ok": False,
-                "exitCode": 1,
-                **receipt,
-            },
-        )
+            finalization = runner._finalize_tracked_run(
+                runner.TrackedRunFiles(
+                    run_path=run_path,
+                    stdout_log=run_path / run_registry.STDOUT_LOG,
+                    stderr_log=run_path / run_registry.STDERR_LOG,
+                ),
+                ctx,
+                capture,
+                completion_report_mode="off",
+            )
 
-        with run_registry.registry_lock(root, timeout_seconds=1):
-            pass
-
-        for name in (run_registry.STATE_FILE, run_registry.SNAPSHOT_FILE):
-            persisted = _read_json(run_path / name)
-            assert persisted["failureReason"] == terminal_states.PROVIDER_CANCELLED
-            assert persisted["terminalState"] == terminal_states.PROVIDER_CANCELLED
-            terminal_record = persisted["terminalRecord"]
-            assert isinstance(terminal_record, dict)
-            assert terminal_record["state"] == terminal_states.PROVIDER_CANCELLED
-            assert terminal_record["reason"] == "provider stopped the turn"
-
-
-def test_post_grace_cancel_persist_overrides_existing_provider_receipt() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
-        run_id, alias = run_registry.register_run(root, harness="codex")
-        run_path = run_registry.run_directory(root, run_id)
-        receipt = _provider_cancel_receipt("provider stopped during cancel grace")
-        state = {
-            "schema": run_registry.STATE_SCHEMA,
-            "runId": run_id,
-            "alias": alias,
-            "status": run_registry.STATUS_CANCELLED,
-            "exitCode": 1,
-            "cancelRequested": True,
-            **receipt,
-        }
-        snapshot = {
-            "schema": run_registry.SNAPSHOT_SCHEMA,
-            "runId": run_id,
-            "alias": alias,
-            "status": run_registry.STATUS_CANCELLED,
-            "ok": False,
-            "exitCode": 1,
-            "cancelRequested": True,
-            **receipt,
-        }
-        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
-        run_registry.write_snapshot(run_path, snapshot)
-
-        target = run_registry.RunTarget(run_id=run_id, alias=alias)
-        with run_registry.registry_lock(root):
-            wait_cancel_commands._persist_cancelled_terminal_locked(root, target, state, [])
-
-        _assert_operator_cancel_receipt(_read_json(run_path / run_registry.STATE_FILE))
-        _assert_operator_cancel_receipt(_read_json(run_path / run_registry.SNAPSHOT_FILE))
-
-
-def test_operator_cancel_report_omits_provider_harness_error() -> None:
-    with tempfile.TemporaryDirectory() as workspace:
-        root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
-        run_id, alias = run_registry.register_run(root, harness="codex")
-        run_path = run_registry.run_directory(root, run_id)
-        run_registry.write_json_atomic(
-            run_path / run_registry.STATE_FILE,
-            {"status": "running", "cancelRequested": True},
-        )
-        ctx = runner.RunContext(
-            registry_root=root,
-            run_id=run_id,
-            alias=alias,
-            harness="codex",
-            engine="codex",
-            mode="safe",
-            model=None,
-            source_cwd=workspace,
-            execution_cwd=workspace,
-            workspace_kind="directory",
-            isolated_workspace=False,
-            started_at="2026-09-01T17:00:00Z",
-        )
-        accumulator = harness_events.StreamAccumulator(harness="codex")
-        provider_reason = "provider cancelled after an upstream refusal"
-        accumulator.terminal_event = {
-            "event": "turn.failed",
-            "status": "failed",
-            "reason": provider_reason,
-        }
-        accumulator.terminal_status = run_registry.STATUS_FAILED
-        accumulator.provider_terminal_state = terminal_states.PROVIDER_CANCELLED
-        accumulator.provider_terminal_reason = provider_reason
-        capture = runner.TrackedCaptureResult(
-            accumulator=accumulator,
-            exit_code=0,
-            duration_ms=10,
-            stdout_bytes=1,
-            stderr_bytes=0,
-            stdin_failures=(),
-            pid=os.getpid(),
-            pgid=os.getpgid(0),
-        )
-
-        finalization = runner._finalize_tracked_run(
-            runner.TrackedRunFiles(
-                run_path=run_path,
-                stdout_log=run_path / run_registry.STDOUT_LOG,
-                stderr_log=run_path / run_registry.STDERR_LOG,
-            ),
-            ctx,
-            capture,
-            completion_report_mode="off",
-        )
-
-        assert finalization.status == run_registry.STATUS_CANCELLED
-        assert finalization.extra["failureReason"] == "cancelled_by_user"
-        assert "terminalEvent" not in finalization.extra
-        assert "terminalStatus" not in finalization.extra
-        assert accumulator.terminal_event is None
-        assert accumulator.terminal_status is None
-        report = (run_path / run_registry.COMPLETION_REPORT_FILE).read_text(encoding="utf-8")
-        assert "Failure reason: cancelled_by_user" in report
-        assert "Harness error:" not in report
-        assert provider_reason not in report
+            assert finalization.status == run_registry.STATUS_CANCELLED
+            assert finalization.extra["failureReason"] == "cancelled_by_user"
+            assert "terminalEvent" not in finalization.extra
+            assert "terminalStatus" not in finalization.extra
+            assert accumulator.terminal_event is None
+            assert accumulator.terminal_status is None
+            report = (run_path / run_registry.COMPLETION_REPORT_FILE).read_text(encoding="utf-8")
+            assert "Failure reason: cancelled_by_user" in report
+            assert "Harness error:" not in report
+            assert provider_reason not in report
