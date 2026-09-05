@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,42 @@ class GateApprovalBindingTests(unittest.TestCase):
                 stderr=io.StringIO(),
             )
         self.assertEqual(result, 0)
+
+    def test_approve_during_gate_drain_does_not_change_projection(self) -> None:
+        self._park({"ok": False, "reason": "draining"})
+        registry.write_json(
+            self.root / registry.STATUS_FILE,
+            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+        )
+        before = (self.root / registry.STATUS_FILE).read_bytes()
+        fd = registry.acquire_workflow_lock(self.root)
+        try:
+            with (
+                mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
+                self.assertRaises(commands.DelegateError) as raised,
+            ):
+                commands.emit_approve(
+                    commands.WorkflowCommand("approve", wf_id=self.wf_id),
+                    workspace=self.workspace,
+                    config={},
+                    stdout=io.StringIO(),
+                )
+            self.assertEqual(raised.exception.error, "workflow_locked")
+            self.assertEqual((self.root / registry.STATUS_FILE).read_bytes(), before)
+            self.assertFalse((self.root / registry.APPROVAL_FILE).exists())
+        finally:
+            os.close(fd)
+
+    def test_checkpoint_key_stable_but_changed_evidence_needs_new_approval(self) -> None:
+        first = self._park({"ok": False, "reason": "first"})
+        repeated = self._park({"ok": False, "reason": "first"})
+        self.assertEqual(first.gate_key, repeated.gate_key)
+        self.assertEqual(first.result_hash, repeated.result_hash)
+        registry.record_approval(self.root, first.gate_key, first.result_hash)
+        changed = self._park({"ok": False, "reason": "changed"})
+        self.assertEqual(first.gate_key, changed.gate_key)
+        self.assertNotEqual(first.result_hash, changed.result_hash)
+        self.assertFalse(registry.approval_allows(self.root, changed.gate_key, changed.result_hash))
 
     def test_same_red_replay_uses_its_result_bound_approval(self) -> None:
         red = {"ok": False, "reason": "same"}

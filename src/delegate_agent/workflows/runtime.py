@@ -644,20 +644,13 @@ class WorkflowState:
         self.agent_semaphore = threading.Semaphore(_global_agent_cap())
         self.engine_semaphores = _engine_semaphores(self.config)
         self.item_semaphore = threading.Semaphore(_item_thread_cap(self.config))
-        self._load_sequence()
         self._load_replay(include_simulated=self.replay_journal)
 
-    def _load_sequence(self) -> None:
+    def _load_replay(self, *, include_simulated: bool) -> None:
         status = registry.read_json(self.status_path) or {}
         last_seq = status.get("lastSeq")
         if isinstance(last_seq, int):
             self.sequence = max(self.sequence, last_seq)
-        for event in registry.iter_journal(self.journal_path):
-            seq = event.get("seq")
-            if isinstance(seq, int):
-                self.sequence = max(self.sequence, seq)
-
-    def _load_replay(self, *, include_simulated: bool) -> None:
         simulated_keys: set[str] = set()
         child_info: dict[str, tuple[str, str, bool, str | None]] = {}
         for event in registry.iter_journal(self.journal_path):
