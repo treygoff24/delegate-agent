@@ -349,7 +349,7 @@ class JournalReader:
         self.anchor = b""
         self.pending = bytearray()
 
-    def read_events(self) -> Iterator[JsonObject]:
+    def read_events(self, *, final: bool = False) -> Iterator[JsonObject]:
         try:
             handle = self.path.open("rb")
         except FileNotFoundError:
@@ -389,6 +389,21 @@ class JournalReader:
                 self.anchor = (self.anchor + line)[-64:]
                 if isinstance(value, dict):
                     yield value
+            if final and self.pending:
+                # A settled/dead writer may have emitted complete JSON but not
+                # its newline. Match the batch reader; active readers still wait.
+                try:
+                    value = json.loads(self.pending.decode("utf-8"))
+                except json.JSONDecodeError:
+                    warnings.warn(
+                        f"Ignoring truncated final workflow journal line in {self.path}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    self.pending.clear()
+                    if isinstance(value, dict):
+                        yield value
 
 
 def saved_workflow_path(name: str) -> Path:
