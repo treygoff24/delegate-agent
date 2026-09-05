@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from delegate_agent import config as delegate_config
-from delegate_agent import redaction, run_registry, workflow_pinning
+from delegate_agent import private_io, redaction, run_registry, workflow_pinning
 from delegate_agent.json_types import JsonObject
 
 ATTEMPT_ENV = "DELEGATE_WORKFLOW_ATTEMPT"
@@ -168,11 +168,14 @@ def create(pin: workflow_pinning.WorkflowPin, metadata: JsonObject) -> WorkflowA
             (staging / "config.json").chmod(0o400)
             (staging / "attempt.json").chmod(0o400)
             staging.chmod(0o500)
-            if root.exists() or root.is_symlink():
-                # A non-cooperating writer may have published while we staged.
-                # Never replace even an empty foreign partial directory.
+            try:
+                private_io.rename_directory_noreplace(staging, root)
+            except FileExistsError:
+                # A competing publication must validate as the same artifact;
+                # even an empty foreign directory is never replaced.
                 return load(root / "attempt.json", pin=pin)
-            staging.rename(root)
+            except OSError as exc:
+                raise _error(f"atomic no-replace publication failed (errno {exc.errno})") from exc
         return load(root / "attempt.json", pin=pin)
 
 

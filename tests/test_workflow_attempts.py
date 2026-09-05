@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import cli, config, workflow_attempts, workflow_pinning
+from delegate_agent import cli, config, private_io, workflow_attempts, workflow_pinning
 from delegate_agent.workflows import commands, registry, runtime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +172,41 @@ class WorkflowAttemptTests(unittest.TestCase):
             workflow_attempts.create(self.pin, metadata)
         self.assertEqual(destination.stat().st_ino, collision_inode[0])
         self.assertEqual(list(destination.iterdir()), [])
+
+    def test_foreign_empty_directory_inserted_at_rename_is_never_replaced(self):
+        original_rename = Path.rename
+        foreign = []
+
+        def race_rename(source, target):
+            target = Path(target)
+            target.mkdir()
+            foreign.append((target, target.stat().st_ino))
+            return original_rename(source, target)
+
+        with mock.patch.object(Path, "rename", race_rename):
+            self.attempt()
+        for path, inode in foreign:
+            self.assertEqual(path.stat().st_ino, inode, "publication replaced a foreign directory")
+            self.assertEqual(list(path.iterdir()), [])
+
+    def test_native_publication_refuses_empty_destination_created_at_final_seam(self):
+        publish = private_io.rename_directory_noreplace
+        foreign = []
+
+        def race_publish(source, target):
+            target.mkdir()
+            foreign.append((target, target.stat().st_ino))
+            publish(source, target)
+
+        with (
+            mock.patch.object(private_io, "rename_directory_noreplace", side_effect=race_publish),
+            self.assertRaises(workflow_pinning.WorkflowPinError),
+        ):
+            self.attempt()
+        self.assertEqual(len(foreign), 1)
+        path, inode = foreign[0]
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(list(path.iterdir()), [])
 
     def test_failed_resume_restores_exact_prior_approval(self):
         root = registry.ensure_workflow_dir(self.workspace, self.pin.workflow_id)
