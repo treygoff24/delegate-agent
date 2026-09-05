@@ -99,6 +99,17 @@ remain untouched and are reported separately.
 
 ## Run metadata
 
+### Workflow attempt config versus runtime promotion
+
+New workflow pins advertise `runtime.attemptConfigVersion: 1`. Their immutable
+code/model/security pin remains separate from the allowlisted operational config
+snapshot selected for each launch or resume. Both supervisor and Delegate
+children validate that snapshot against the base pin; an altered artifact is
+refused. Old copied runtimes remain frozen and report that operational updates
+are unavailable. Neither path installs code or promotes a runtime. See
+[operational attempt settings](configuration.md#operational-settings-on-pinned-workflow-attempts)
+for the allowlist and provenance fields.
+
 Tracked runs may write workspace-local metadata under `.delegate/`. That metadata is for inspection commands such as:
 
 ```bash

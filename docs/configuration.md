@@ -803,6 +803,58 @@ Timing resolves as environment override, then config, then embedded default. Non
 
 ### `workflows`
 
+#### Operational settings on pinned workflow attempts
+
+New workflow pins support immutable per-attempt operational snapshots. On a
+normal launch, resume, or approval, Delegate takes the command's already-loaded
+config and copies only these settings over the creation pin:
+
+- `workflows.engineCaps`, `itemThreads`, `structuredOutputRetries`, and
+  `stallMinutes` (including its top-level `stallMinutes` fallback).
+- `tracking.processGroupTerminationGraceSec` and `registryLockTimeoutSec`
+  (including the older `registryLockTimeoutSeconds` spelling).
+- `progress.enabled`, `initialDelaySec`, and `intervalSec`.
+- `worktrees.poolWarnCount`.
+
+Models, binaries, profile/account selection configuration, permissions,
+isolation, personas, and executable code stay pinned. Cleanup permissions stay
+pinned too: changing `retirementIgnoreGlobs`, retirement enablement, or auto-prune
+policy does not change an existing workflow's authority to remove files.
+There is no restored workflow-timeout/watchdog setting in this allowlist.
+
+The operational environment overrides `DELEGATE_STALL_MINUTES`,
+`DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC`,
+`DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`, `DELEGATE_PROGRESS_INITIAL_DELAY_SEC`,
+and `DELEGATE_PROGRESS_INTERVAL_SEC` are captured once at launch, ahead of config
+values. Invalid operational numbers fail before approval or launch-state
+mutation. The supervisor and its Delegate children receive the captured values
+and the same effective config path; a conflicting inherited override is refused,
+not silently applied later. Global and local config overlays are not merged into
+a validated attempt snapshot.
+
+The content-addressed artifact lives under
+`~/.delegate-workflow-pins/attempts/<wfId>/<digest>/`. It contains read-only
+`config.json` and `attempt.json`, bound to the base config and runtime digests.
+Identical snapshots may be reused; different concurrent attempts cannot overwrite
+each other's settings. No user config file is required when embedded defaults
+are sufficient. An explicitly selected missing config remains an error.
+
+Launch responses, journal `attempt_config` events, and supervisor status expose
+`attemptConfig`: `effectiveConfigDigest`, base digests, `opsSource`,
+`opsChangedKeys`, `opsEnvironment`, and allowlisted `opsValues`. The launch
+response also gives `effectiveConfigPath`. Source is a provenance label, not a
+verified source-control revision. Credentials are not included in this projection.
+
+Old copied runtimes cannot implement this behavior merely by receiving a new
+environment variable. Pins without `attemptConfigVersion: 1` retain their frozen
+config and launch with an explicit operational-updates-unavailable warning and
+an `attempt_config_unavailable` journal event. They are not migrated or repinned
+implicitly. Unpinned legacy workflows retain their existing config behavior.
+Synchronous dry runs also retain their existing command-config semantics and do
+not establish an operational snapshot for a live attempt.
+
+#### Workflow defaults
+
 ```json
 {
   "workflows": {
