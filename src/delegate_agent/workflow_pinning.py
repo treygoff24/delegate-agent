@@ -11,7 +11,6 @@ reconcile the active-supervisor index.
 from __future__ import annotations
 
 import compileall
-import fcntl
 import hashlib
 import json
 import os
@@ -698,38 +697,12 @@ def _reconcile_active_supervisors(*, home: Path | None = None, write: bool = Tru
         if not isinstance(root_value, str):
             continue
         root = Path(root_value)
-        if root.is_dir() and (
-            workflow_registry.supervisor_alive(root) if write else _supervisor_alive_readonly(root)
-        ):
+        if root.is_dir() and workflow_registry.supervisor_alive(root):
             live[workflow_id] = entry
     result: JsonObject = {"schema": ACTIVE_INDEX_SCHEMA, "supervisors": live}
     if write and (result != payload or path.exists() is False):
         _write_active_index(path, result)
     return result
-
-
-def _supervisor_alive_readonly(root: Path) -> bool:
-    # The normal registry helper opens via open_private_file, which chmods.
-    # Doctor must not repair permissions or create a raced-away lock file.
-    try:
-        fd = os.open(
-            root / workflow_registry.LOCK_FILE,
-            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
-        )
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return True
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        return False
-    finally:
-        os.close(fd)
 
 
 def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
