@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import threading
@@ -1066,7 +1067,9 @@ def _status_view(root: Path, payload: JsonObject) -> JsonObject:
         view["statusOnDisk"] = on_disk
         view["ok"] = False
     status = view.get("status")
-    wf_id = view.get("wfId") or root.name
+    # The directory was selected through validated workflow targeting. Do not
+    # interpolate a child-written status field into a suggested shell command.
+    wf_id = root.name
     actions: list[str] = []
     if status == "paused" and isinstance(view.get("gateKey"), str):
         actions = [f"workflow approve {wf_id}", f"workflow events {wf_id}"]
@@ -1076,6 +1079,10 @@ def _status_view(root: Path, payload: JsonObject) -> JsonObject:
         actions = [f"workflow wait {wf_id}"]
     elif status in {"succeeded", "dry_run"}:
         actions = [f"workflow result {wf_id}"]
+    actions = [
+        shlex.join(["delegate", "--cwd", str(root.parent.parent.parent), *action.split()])
+        for action in actions
+    ]
     view["decision"] = {
         "status": status,
         "gate": {"key": view.get("gateKey"), "resultHash": view.get("gateResultHash")}

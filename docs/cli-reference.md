@@ -542,7 +542,7 @@ delegate [--json] workflow run --resume <wfId> [--budget N]
 delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
-delegate [--json] workflow watch <wfId> [--since SEQ]
+delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]
 delegate [--json] workflow wait [<wfId>] [--timeout SEC]
 delegate [--json] workflow result [<wfId>] [--field KEY]
 delegate [--json] workflow approve <wfId>
@@ -554,6 +554,10 @@ delegate [--json] workflow save <script.py> --name NAME
 
 - `check` validates the workflow script, including literal preflight checks for
   unsupported `agent()` combinations.
+- `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
+  status record. It overrides `--json` buffering; ordinary `--json` still returns
+  the existing single envelope. A successful watch observes the workflow; inspect
+  its final workflow status to distinguish successful work from failed work.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
   without launching child agents or consuming real budget. Each entry in
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,

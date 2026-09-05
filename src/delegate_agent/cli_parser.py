@@ -2766,11 +2766,16 @@ def _parse_workflow_id_action(
     key_or_label: str | None = None
     reason: str | None = None
     since = 0
+    jsonl = False
     timeout: int | None = None
     result_field: str | None = None
     i = 0
     while i < len(args):
         token = args[i]
+        if token == "--jsonl" and action == "watch":
+            jsonl = True
+            i += 1
+            continue
         if token == "--since" and action in {"events", "watch"}:
             if i + 1 >= len(args):
                 raise DelegateError("missing_since", f"workflow {action} --since requires a value.")
@@ -2840,6 +2845,7 @@ def _parse_workflow_id_action(
             timeout=timeout,
             result_field=result_field,
             json_mode=json_mode,
+            jsonl=jsonl,
         ),
     )
 

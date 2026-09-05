@@ -380,7 +380,7 @@ class JournalReader:
                 # Decode before advancing, so malformed complete records remain
                 # errors rather than being silently discarded on another poll.
                 complete = self.pending + line if self.pending else line
-                value = json.loads(complete) if complete.strip() else None
+                value = json.loads(complete.decode("utf-8")) if complete.strip() else None
                 self.pending.clear()
                 self.offset = handle.tell()
                 self.anchor = (self.anchor + line)[-64:]
