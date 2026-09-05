@@ -1302,6 +1302,8 @@ def execute_request(
                 # resultQuality is unconditional: emitting it only when a retry
                 # ran made a skipped-retry empty invisible to JSON consumers.
                 payload["resultQuality"] = result.result_quality
+                if result.stdout_capture is not None:
+                    payload["stdoutCapture"] = result.stdout_capture
                 if result.empty_retry_attempted:
                     payload["emptyRetry"] = {
                         "attempted": True,
