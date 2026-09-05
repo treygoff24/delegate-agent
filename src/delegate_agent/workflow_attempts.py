@@ -44,8 +44,12 @@ def operational_values(
     config: JsonObject, *, environment: dict[str, str] | None = None
 ) -> JsonObject:
     """Resolve defaults and aliases once, without rereading operator config files."""
-    merged = delegate_config.merge_config_layer(delegate_config.embedded_default_config(), config)
+    defaults = delegate_config.embedded_default_config()
+    merged = delegate_config.merge_config_layer(defaults, config)
     delegate_config.validate_config(merged)
+    for section, _key in OPS_KEYS:
+        if merged.get(section) is None:
+            merged[section] = copy.deepcopy(defaults[section])
     merged["workflows"]["stallMinutes"] = delegate_config.resolve_stall_minutes(merged)
     tracking = merged["tracking"]
     tracking["registryLockTimeoutSec"] = tracking.get(
@@ -87,6 +91,10 @@ def _effective_config(pin: workflow_pinning.WorkflowPin, values: JsonObject) -> 
     # below are permitted to cross that boundary.
     base = copy.deepcopy(pin.config)
     for section, key in OPS_KEYS:
+        # Optional sections may explicitly be null (meaning defaults). Only
+        # operational keys are populated here; never refill frozen identity.
+        if base.get(section) is None:
+            base[section] = {}
         base[section][key] = copy.deepcopy(values[f"{section}.{key}"])
     delegate_config.validate_config(base)
     if operational_values(base) != values:

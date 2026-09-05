@@ -816,6 +816,11 @@ config and copies only these settings over the creation pin:
 - `progress.enabled`, `initialDelaySec`, and `intervalSec`.
 - `worktrees.poolWarnCount`.
 
+Pin creation completes empty or partial input from creation-time defaults and
+preserves explicit scalar nulls. Nullable operational sections are resolved to
+their creation defaults. Later attempts never refill model/security identity
+from a newer CLI's defaults; verifying an existing pin does not rewrite it.
+
 Models, binaries, profile/account selection configuration, permissions,
 isolation, personas, and executable code stay pinned. Cleanup permissions stay
 pinned too: changing `retirementIgnoreGlobs`, retirement enablement, or auto-prune
