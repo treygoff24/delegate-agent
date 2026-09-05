@@ -1468,8 +1468,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "workflow watch": CommandSpec(
         name="workflow watch",
         summary="Print workflow journal events incrementally.",
-        usage=("delegate [--json] workflow watch <wfId> [--since SEQ]",),
-        options=(OptionSpec("--since", "SEQ", "Start after sequence number."),),
+        usage=("delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]",),
+        options=(
+            OptionSpec("--since", "SEQ", "Start after sequence number."),
+            OptionSpec(
+                "--jsonl",
+                None,
+                "Stream JSONL event records and one final status; overrides --json buffering.",
+            ),
+        ),
         see_also=("workflow events",),
     ),
     "workflow result": CommandSpec(
