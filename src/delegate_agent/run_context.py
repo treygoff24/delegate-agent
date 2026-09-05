@@ -13,6 +13,7 @@ from delegate_agent import profiles, run_registry
 from delegate_agent import runner as delegate_runner
 from delegate_agent.json_types import JsonObject
 from delegate_agent.request_models import Request
+from delegate_agent.sandbox_bwrap import SandboxPlan
 
 
 class RunLocation(TypedDict, total=False):
@@ -33,7 +34,7 @@ class RunLocation(TypedDict, total=False):
     branch: str | None
     worktree_status: str | None
     safe_workspace_method: str | None
-    sandbox: JsonObject | None
+    sandbox: SandboxPlan | None
     warnings: tuple[str, ...]
     synced_files: int
     retire_worktree_on_completion: bool

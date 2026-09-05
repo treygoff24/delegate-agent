@@ -2174,14 +2174,10 @@ def request_from_input_json(
                     "structured_retry_workspace_changed",
                     "Structured retry persistent worktree metadata is incomplete.",
                 )
-            isolation_context = IsolationContext(
-                source_workspace=workspace.path,
-                effective_isolation=delegate_config.ISOLATION_WORKTREE,
-                isolation_mode=delegate_config.ISOLATION_WORKTREE,
-                isolation_lifecycle="attached",
-                preserved_workspace=False,
-                planned_branch=retry_branch,
-                planned_execution_cwd=execution_workspace.path,
+            isolation_context = IsolationContext.attached(
+                workspace.path,
+                branch=retry_branch,
+                execution_cwd=execution_workspace.path,
                 source_git_root=retry_source_git_root,
                 attachment={
                     "sourceRunId": raw_structured_retry_run_id,
@@ -2210,13 +2206,7 @@ def request_from_input_json(
                 include_dirty=raw_include_dirty,
             )
         else:
-            isolation_context = IsolationContext(
-                source_workspace=workspace.path,
-                effective_isolation=delegate_config.ISOLATION_NONE,
-                isolation_mode=delegate_config.ISOLATION_NONE,
-                isolation_lifecycle="none",
-                preserved_workspace=False,
-            )
+            isolation_context = IsolationContext.unisolated(workspace.path)
     return build_request(
         str(engine),
         str(mode),

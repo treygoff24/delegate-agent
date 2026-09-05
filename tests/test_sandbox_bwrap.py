@@ -464,10 +464,11 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
             self.assertEqual(isolated.workspace, str(self.repo))
             self.assertEqual(isolated.argv, request.argv)
             self.assertEqual(ctx.safe_workspace_method, sandbox_bwrap.BWRAP_METHOD)
-            self.assertEqual(ctx.sandbox["backend"], "bwrap")
+            self.assertIsInstance(ctx.sandbox, sandbox_bwrap.SandboxPlan)
+            self.assertEqual(ctx.sandbox.backend, "bwrap")
             self.assertEqual(
-                ctx.sandbox["masks"],
-                [{"path": "secret.env", "kind": sandbox_bwrap.MASK_KIND_DEVNULL}],
+                ctx.sandbox.masks,
+                (sandbox_bwrap.Mask("secret.env", sandbox_bwrap.MASK_KIND_DEVNULL),),
             )
 
     def test_structured_retry_accepts_bwrap_source_without_cleanup_descriptor(self):
@@ -767,18 +768,17 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
             {"bwrapBinds": [{"path": "/x", "mode": "ro"}, {"path": "~/y", "mode": "rw"}]}
         )
 
-    def test_runner_splits_binds_by_mode(self):
-        payload = {
-            "backend": "bwrap",
-            "masks": [],
-            "binds": [{"path": "/a", "mode": "ro"}, {"path": "/b", "mode": "rw"}, {"x": 1}],
-        }
-        self.assertEqual(runner._binds_from_sandbox(payload, "ro"), ["/a"])
-        self.assertEqual(runner._binds_from_sandbox(payload, "rw"), ["/b"])
-        self.assertEqual(runner._binds_from_sandbox(None, "rw"), [])
+    def test_typed_plan_keeps_bind_modes_and_refuses_malformed_entries(self):
+        plan = sandbox_bwrap.SandboxPlan(
+            None, binds=(sandbox_bwrap.Bind("/a", "ro"), sandbox_bwrap.Bind("/b", "rw"))
+        )
+        self.assertEqual([bind.path for bind in plan.binds if bind.mode == "ro"], ["/a"])
+        self.assertEqual([bind.path for bind in plan.binds if bind.mode == "rw"], ["/b"])
+        with self.assertRaises(DelegateError):
+            sandbox_bwrap.SandboxPlan(None, binds=({"x": 1},))
 
     def test_terminal_metadata_reports_effective_isolation_backend(self):
-        for backend, sandbox in (("copy", None), ("bwrap", {"backend": "bwrap"})):
+        for backend, sandbox in (("copy", None), ("bwrap", sandbox_bwrap.SandboxPlan(None))):
             with self.subTest(backend=backend):
                 ctx = runner.RunContext(
                     registry_root=Path("/tmp"),
