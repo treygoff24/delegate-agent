@@ -213,7 +213,14 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
         ):
             raise _error("attempt effective config differs from its allowed base projection")
         return WorkflowAttempt(path, config_path, effective, metadata)
-    except (OSError, RuntimeError, ValueError, TypeError, KeyError, delegate_config.ConfigError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        delegate_config.ConfigError,
+    ) as exc:
         raise _error("could not validate workflow attempt artifact") from exc
 
 
