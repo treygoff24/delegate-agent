@@ -12,13 +12,30 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import config, workflow_attempts, workflow_pinning
+from delegate_agent import cli, config, workflow_attempts, workflow_pinning
 from delegate_agent.workflows import commands, registry, runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowAttemptTests(unittest.TestCase):
+    def test_cli_supplies_the_resolved_config_source(self) -> None:
+        with (
+            mock.patch.object(
+                cli,
+                "load_config",
+                return_value=(config.embedded_default_config(), "fixture-config"),
+            ),
+            mock.patch.object(commands, "emit", return_value=0) as emit,
+        ):
+            self.assertEqual(
+                cli.main(
+                    ["--json", "workflow", "list"], stdout=io.StringIO(), stderr=io.StringIO()
+                ),
+                0,
+            )
+        self.assertEqual(emit.call_args.kwargs["config_source"], "fixture-config")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

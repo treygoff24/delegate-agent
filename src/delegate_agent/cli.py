@@ -336,6 +336,8 @@ def emit_workflow(
     config: JsonObject,
     stdout: TextIO,
     stderr: TextIO,
+    *,
+    config_source: str = "command-config",
 ) -> int:
     command = parsed.workflow_command
     if command is None:
@@ -346,6 +348,7 @@ def emit_workflow(
         config=config,
         stdout=stdout,
         stderr=stderr,
+        config_source=config_source,
     )
 
 
@@ -1887,7 +1890,7 @@ def main(
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
         if parsed.subcommand == "workflow":
-            return emit_workflow(parsed, workspace, config, stdout, stderr)
+            return emit_workflow(parsed, workspace, config, stdout, stderr, config_source=source)
 
         if parsed.subcommand == "profiles":
             return emit_profiles_command(parsed, config, source, stdout)
