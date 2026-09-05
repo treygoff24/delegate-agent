@@ -557,7 +557,12 @@ class HarnessEventsTests(unittest.TestCase):
         )
 
     def test_pi_non_stop_turn_end_is_not_terminal_success(self):
-        for stop_reason in ("error", "aborted", "length", "toolUse"):
+        for stop_reason, terminal_status in (
+            ("error", "failed"),
+            ("aborted", "cancelled"),
+            ("length", "failed"),
+            ("toolUse", None),
+        ):
             acc = self.events.StreamAccumulator(harness="pi")
             acc.ingest_line(
                 json.dumps(
@@ -571,8 +576,9 @@ class HarnessEventsTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertIsNone(
+            self.assertEqual(
                 acc.terminal_status,
+                terminal_status,
                 f"stopReason={stop_reason} must not record a succeeded terminal",
             )
 
@@ -622,7 +628,12 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIn("omp", self.events.ASSISTANT_RECOVERY_HARNESSES)
 
     def test_omp_non_stop_turn_end_matrix_is_not_terminal_success(self):
-        for stop_reason in ("error", "aborted", "length", "toolUse"):
+        for stop_reason, terminal_status in (
+            ("error", "failed"),
+            ("aborted", "cancelled"),
+            ("length", "failed"),
+            ("toolUse", None),
+        ):
             acc = self.events.StreamAccumulator(harness="omp")
             acc.ingest_line(
                 json.dumps(
@@ -636,9 +647,10 @@ class HarnessEventsTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertIsNone(acc.terminal_status, stop_reason)
+            self.assertEqual(acc.terminal_status, terminal_status, stop_reason)
             self.assertEqual(
-                len([event for event in acc.events if event.kind == "run.completed"]), 0
+                len([event for event in acc.events if event.kind == "run.completed"]),
+                int(terminal_status is not None),
             )
 
     def test_pi_tool_result_content_is_not_exposed(self):
