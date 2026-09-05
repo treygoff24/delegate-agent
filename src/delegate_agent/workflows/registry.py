@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -224,21 +225,23 @@ def acquire_workflow_lock(root: Path) -> int:
 
 
 def supervisor_alive(root: Path) -> bool:
-    """Return True if the workflow lock is held (supervisor still alive).
+    """Return True for a held lock or an inconclusive probe.
 
-    Non-blocking probe: if the lock is acquirable, the supervisor is dead —
-    release immediately so the read path never retains the lock.
+    A missing lock or an acquirable regular lock establishes no live owner.
+    The read-only probe never retains a lock or repairs filesystem metadata.
     """
     path = root / LOCK_FILE
-    if not path.exists():
-        return False
     try:
-        fd = run_registry.open_private_file(path, os.O_RDWR)
+        fd = run_registry.open_private_file(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
     except OSError:
         # Unexpected probe failure (EMFILE, permissions drift): fail toward
         # "alive" so a transient error never fabricates a stalled overlay.
         return True
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return True
