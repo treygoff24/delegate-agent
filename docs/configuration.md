@@ -827,6 +827,24 @@ pinned too: changing `retirementIgnoreGlobs`, retirement enablement, or auto-pru
 policy does not change an existing workflow's authority to remove files.
 There is no restored workflow-timeout/watchdog setting in this allowlist.
 
+New pins also record the resolved Delegate profile identity, not just profile
+definitions. `DELEGATE_PROFILE`, custom `profiles.detectFrom` variables, and
+default/no-selection cases are resolved at creation. A later selector that
+chooses a different profile fails with `workflow_profile_drift` before approval
+or a managed child launch. The effective `HOME`, `CODEX_HOME`, and
+`CLAUDE_CONFIG_DIR` namespaces are bound; configured primary/fallback home
+expansions are frozen as absolute paths. Ambient values hidden by a profile's
+explicit override do not cause false drift refusals. Token contents are never
+recorded, and rotation within the same namespace remains allowed.
+
+This validator covers the supervisor and managed Delegate child CLIs, not every
+vendor subprocess or credential store. External harness processes drop both pin
+and attempt bootstrap markers, retaining the effective config data while trusted
+mail-push/private/pure home derivations remain free to operate. Older pins without
+a `profileIdentity` stamp retain their existing execution behavior and report
+`profileIdentityPinned: false` plus an identity-unavailable warning; definitions
+alone are not represented as proof of frozen credential selection.
+
 The operational environment overrides `DELEGATE_STALL_MINUTES`,
 `DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC`,
 `DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`, `DELEGATE_PROGRESS_INITIAL_DELAY_SEC`,
