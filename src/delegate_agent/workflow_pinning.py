@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -297,13 +298,9 @@ def entrypoint_path(home: Path | None = None) -> Path | None:
 
 
 def entrypoint_digest(home: Path | None = None) -> str | None:
-    path = entrypoint_path(home)
-    if path is None:
-        return None
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    identity = _file_identity(entrypoint_path(home))
+    digest = identity.get("sha256") if identity is not None else None
+    return digest if isinstance(digest, str) else None
 
 
 def _file_identity(path: Path | None) -> JsonObject | None:
@@ -312,19 +309,29 @@ def _file_identity(path: Path | None) -> JsonObject | None:
         return None
     try:
         links: list[JsonValue] = []
-        current = path.absolute()
+        current = Path(os.path.abspath(path))
         seen: set[Path] = set()
         while current.is_symlink():
-            if current in seen:
+            if current in seen or len(links) >= 40:
                 return None
             seen.add(current)
             target = os.readlink(current)
             links.append({"path": str(current), "target": target})
-            current = current.parent / target if not Path(target).is_absolute() else Path(target)
+            current = Path(os.path.abspath(current.parent / target))
+        resolved = current.resolve(strict=True)
+        fd = os.open(resolved, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            digest = hashlib.sha256()
+            while chunk := os.read(fd, 1024 * 1024):
+                digest.update(chunk)
+        finally:
+            os.close(fd)
         return {
             "path": str(path.absolute()),
-            "resolvedPath": str(path.resolve(strict=True)),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "resolvedPath": str(resolved),
+            "sha256": digest.hexdigest(),
             "symlinks": links,
         }
     except (OSError, RuntimeError):
@@ -705,12 +712,17 @@ def _supervisor_alive_readonly(root: Path) -> bool:
     # The normal registry helper opens via open_private_file, which chmods.
     # Doctor must not repair permissions or create a raced-away lock file.
     try:
-        fd = os.open(root / workflow_registry.LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(
+            root / workflow_registry.LOCK_FILE,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+        )
     except FileNotFoundError:
         return False
     except OSError:
         return True
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
