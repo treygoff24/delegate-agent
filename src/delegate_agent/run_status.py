@@ -200,12 +200,16 @@ def build_run_summary(
     registry_root: Path,
     run_id: str,
     index_entry: JsonObject,
+    *,
+    include_logs: bool = True,
 ) -> JsonObject:
     state = run_registry.load_run_state_or_none(registry_root, run_id)
     manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
     source_cwd = _source_workspace(registry_root, index_entry, state, manifest)
 
-    stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id, state)
+    stdout_bytes, stderr_bytes = (
+        effective_log_byte_sizes(registry_root, run_id, state) if include_logs else (0, 0)
+    )
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
     handle = alias if isinstance(alias, str) else run_id
@@ -338,7 +342,7 @@ def list_run_summaries(
         if group is not None and entry_group != group:
             continue
         scope_total += 1
-        summary = build_run_summary(registry_root, run_id, entry)
+        summary = build_run_summary(registry_root, run_id, entry, include_logs=False)
         status = summary.get("status")
         if active and status not in (STATUS_RUNNING, STATUS_STALE):
             continue
@@ -349,7 +353,21 @@ def list_run_summaries(
         summaries.append(summary)
     summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
     total = len(summaries)
-    return summaries[:limit], total, scope_total
+    selected = summaries[:limit]
+    for summary in selected:
+        stdout_bytes, stderr_bytes = effective_log_byte_sizes(
+            registry_root,
+            summary["runId"],
+            run_registry.load_run_state_or_none(registry_root, summary["runId"]),
+        )
+        summary["stdoutBytes"] = stdout_bytes
+        summary["stderrBytes"] = stderr_bytes
+        warnings = large_log_warnings(stdout_bytes, stderr_bytes)
+        for warning in summary["warnings"]:
+            if warning not in warnings:
+                warnings.append(warning)
+        summary["warnings"] = warnings
+    return selected, total, scope_total
 
 
 # Deferred to the bottom to break the run_registry<->run_status facade cycle:

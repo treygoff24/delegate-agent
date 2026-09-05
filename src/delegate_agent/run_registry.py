@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import archived_logs, private_io, terminal_states
+from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
@@ -91,20 +92,7 @@ PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
-HARNESS_NAMES = frozenset(
-    {
-        "codex",
-        "cursor",
-        "grok",
-        "kimi",
-        "claude",
-        "droid",
-        "devin",
-        "opencode",
-        "pi",
-        "omp",
-    }
-)
+HARNESS_NAMES = frozenset(KNOWN_ENGINES)
 
 
 def generate_run_id(now: datetime | None = None) -> str:

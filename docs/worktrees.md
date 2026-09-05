@@ -53,6 +53,21 @@ on disk and the completion JSON includes `worktreeRetained` with a reason. Set
 manual-cleanup behavior. If `worktrees.autoPrune.enabled` is true, its existing
 merged-and-age-filtered pass also runs at completion.
 
+Worktree inspection uses one state/manifest/snapshot bundle per run, retaining
+the existing legacy fallback order. Missing older projections can fall back to
+consistent surviving records. Corrupt records, mismatched run IDs, or conflicting
+branch/source/execution identities produce warnings and withhold the source
+metadata required for destructive cleanup. Even forced removal cannot turn
+contradictory ownership records into permission to delete a directory. Completion
+retirement retains the worktree when required evidence cannot be verified.
+Mutation and GC paths still reload records under their existing registry locks;
+an inspection bundle is not a cached authorization to remove anything.
+
+The `runs` listing still examines current state for every in-scope run, preserving
+status accuracy, ordering, and total counts. It reads log sizes/archive metadata
+only for rows returned after filtering and the requested limit. There is no
+persistent listing cache.
+
 A few boundaries are worth stating explicitly:
 
 - **Tracked-but-gitignored files sync by design.** A path that is tracked in
