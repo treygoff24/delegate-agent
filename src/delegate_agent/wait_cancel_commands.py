@@ -532,6 +532,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         generation = _cancel_signal_generation(state, target)
     warnings: list[str] = []
     cancel_marker_written = False
+    signal_refusal: JsonObject | None = None
     for _attempt in range(CANCEL_GENERATION_MAX_ATTEMPTS):
         pid, pgid, signal_value, process_group = generation
 
@@ -593,6 +594,10 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
             except ProcessLookupError:
                 pass
             except PermissionError:
+                signal_refusal = {
+                    "signal": "SIGKILL",
+                    "reason": "permission_denied",
+                }
                 warnings.append(
                     "SIGKILL was not permitted after SIGTERM; run state marked cancelled"
                 )
@@ -621,6 +626,8 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         payload = _terminal_payload(registry_root, target)
         if warnings:
             payload["warnings"] = warnings
+        if signal_refusal is not None:
+            payload["signalRefusal"] = signal_refusal
         return payload
 
     marker_note = (
