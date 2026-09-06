@@ -1380,6 +1380,13 @@ recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are
 registered and can be selected for cancellation.
 
+`cancelled` records operator intent; it is not proof that every process exited.
+If SIGKILL is denied, the direct-cancel response keeps that status and its warning
+and adds `signalRefusal: {"signal": "SIGKILL", "reason": "permission_denied"}`.
+Inspect the refusal before assuming cleanup finished. Workflow child cancellation
+treats it as a failure, attempts the remaining siblings, and cannot claim a
+recovered approval gate while a signal refusal remains.
+
 Before sending any signal, cancel stamps a `cancelRequested: true` marker (with
 a `cancelRequestedAt` timestamp) on the run state under the registry lock, so
 that a runner finalizer observing the marker persists `cancelled` even if the
@@ -1389,8 +1396,8 @@ the persisted state, and the eventual reconciled registry entry in agreement
 regardless of which side finishes first. The marker is never stamped on an
 already-terminal run.
 
-A cancelled run has no child completion report (the child was killed mid-flight),
-so Delegate synthesizes one with `completionReportSource: delegate_synthesized`.
+For a cancelled run without a child completion report, Delegate synthesizes one
+with `completionReportSource: delegate_synthesized`.
 The synthesized cancelled report records `Status: cancelled`, the failure reason
 (`cancelled_by_user` for an operator cancel, `harness_cancelled` for a harness
 terminal cancellation event), a bounded redacted stderr tail when present, and a

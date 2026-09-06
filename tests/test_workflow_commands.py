@@ -3181,6 +3181,50 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("scriptPath", status)
         self.assertIn("journalPath", status)
 
+    def test_workflow_kill_unsafe_child_returns_typed_json_error(self) -> None:
+        wf_id = "wf_111122223333"
+        workflow_root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        workflow_registry.write_status(
+            workflow_root,
+            {
+                "wfId": wf_id,
+                "status": "running",
+                "budget": {"total": None, "spent": 0},
+            },
+        )
+        registry_root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
+        run_id, alias = run_registry.register_run(
+            registry_root,
+            harness="codex",
+            metadata={"group": wf_id},
+        )
+        run_registry.write_json_atomic(
+            run_registry.run_directory(registry_root, run_id) / run_registry.STATE_FILE,
+            {
+                "schema": run_registry.STATE_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
+                "status": run_registry.STATUS_RUNNING,
+                "pid": 1,
+                "pgid": 1,
+            },
+        )
+
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+
+        self.assertEqual(killed.returncode, 2)
+        self.assertNotIn("Traceback", killed.stderr)
+        payload = json.loads(killed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "delegate.error.v1")
+        self.assertEqual(payload["error"], "unsafe_signal_target")
+        self.assertIn("pid/pgid <= 1", payload["message"])
+        self.assertEqual(payload["failureCount"], 1)
+        self.assertEqual(payload["failures"][0]["runId"], run_id)
+        self.assertNotIn(payload.get("status"), {"killed", "paused"})
+        status = workflow_registry.read_json(workflow_root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "running")
+
     def test_structured_output_with_codex_schema(self) -> None:
         script = self.write_workflow(
             """
