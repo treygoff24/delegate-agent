@@ -106,6 +106,24 @@ class WorkflowAttemptTests(unittest.TestCase):
         )
         self.assertEqual(self.base["tracking"]["registryLockTimeoutSec"], 120)
 
+    def test_load_reports_a_bad_artifact_but_never_masks_a_coding_defect(self):
+        attempt = self.attempt()
+        # A defect inside the validator must surface as itself. Reporting it as
+        # a tampered attempt would make a bug indistinguishable from an attack.
+        with (
+            mock.patch.object(
+                workflow_attempts, "operational_values", side_effect=KeyError("workflows")
+            ),
+            self.assertRaises(KeyError),
+        ):
+            workflow_attempts.load(attempt.path, pin=self.pin)
+        # Published attempt files are read-only; tampering has to unlock first.
+        attempt.path.chmod(0o600)
+        attempt.path.write_text("{ not json", encoding="utf-8")
+        with self.assertRaises(workflow_pinning.WorkflowPinError) as caught:
+            workflow_attempts.load(attempt.path, pin=self.pin)
+        self.assertEqual(caught.exception.error, "invalid_workflow_attempt")
+
     def test_failed_attempt_write_does_not_poison_identical_retry(self):
         metadata = workflow_attempts.prepare(self.pin, self.base, "test")
         writer = workflow_attempts.run_registry.write_json_atomic
