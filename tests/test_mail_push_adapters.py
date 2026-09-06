@@ -86,8 +86,17 @@ class MailPushAdapterTests(CommandTestBase):
             with self.subTest(engine=engine):
                 env = self._env()
                 argv = argv_by_engine[engine]
+                # Provisioning writes into the workspace registry and, for
+                # engines with a private engine home, into neutral run scratch
+                # outside it. Both roots are scanned so the delta stays real.
+                scratch_root = mail.mail_push_scratch_root(self.registry_root, self.run_id)
+                provisioned_roots = (self.workspace, scratch_root)
                 before_files = {
-                    path.resolve() for path in self.workspace.rglob("*") if path.is_file()
+                    path.resolve()
+                    for root in provisioned_roots
+                    if root.is_dir()
+                    for path in root.rglob("*")
+                    if path.is_file()
                 }
                 provision = mail.provision_mail_push(
                     engine,
@@ -132,7 +141,12 @@ class MailPushAdapterTests(CommandTestBase):
                     self.assertTrue(
                         Path(env["CODEX_HOME"])
                         .resolve()
-                        .is_relative_to(run_registry.run_directory(self.registry_root, self.run_id))
+                        .is_relative_to(
+                            mail.mail_push_scratch_root(self.registry_root, self.run_id).resolve()
+                        )
+                    )
+                    self.assertFalse(
+                        Path(env["CODEX_HOME"]).resolve().is_relative_to(self.workspace.resolve())
                     )
                     self.assertTrue(Path(env["CODEX_HOME"]).joinpath("hooks.json").is_file())
                     self.assertFalse((box / "codex-home").exists())
@@ -143,7 +157,9 @@ class MailPushAdapterTests(CommandTestBase):
                     self.assertEqual(path.read_bytes(), contents, path)
                 created_files = {
                     path.resolve()
-                    for path in self.workspace.rglob("*")
+                    for root in provisioned_roots
+                    if root.is_dir()
+                    for path in root.rglob("*")
                     if path.is_file() and path.resolve() not in before_files
                 }
                 self.assertTrue(created_files)
@@ -153,6 +169,7 @@ class MailPushAdapterTests(CommandTestBase):
                         or path.is_relative_to(
                             run_registry.run_directory(self.registry_root, self.run_id)
                         )
+                        or path.is_relative_to(scratch_root.resolve())
                         for path in created_files
                     ),
                     created_files,
