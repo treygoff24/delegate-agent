@@ -260,8 +260,27 @@ def emit_run(
                 status = dict(status)
                 status.update({"status": "paused", "gateKey": gate_key})
                 if recovered:
-                    status["gateResult"] = recovered.get("result")
-                    status["gateResultHash"] = recovered.get("gateResultHash")
+                    status.update(
+                        {
+                            "ok": True,
+                            "gateResult": recovered.get("result"),
+                            "updatedAt": run_registry.utc_now_iso(),
+                        }
+                    )
+                    result_hash = recovered.get("gateResultHash")
+                    if isinstance(result_hash, str):
+                        status["gateResultHash"] = result_hash
+                    else:
+                        # Absent, never null: a gate event from an older
+                        # journal carries no hash, and a null would claim one.
+                        status.pop("gateResultHash", None)
+                    # status.json is a projection the journal outranks, so the
+                    # repair is published to disk rather than kept in memory
+                    # for this call. Re-reading it makes the recovered
+                    # projection the rollback target too: a resume that fails
+                    # below must not restore the clobbered projection.
+                    registry.write_status(root, status)
+                    previous_status = registry.read_json(root / registry.STATUS_FILE) or {}
             result_path = root / registry.RESULT_FILE
             try:
                 previous_result = result_path.read_bytes()
