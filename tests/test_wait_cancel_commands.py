@@ -1124,6 +1124,44 @@ class WaitCancelCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_sigkill_permission_error_reports_structured_signal_refusal(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        pgid = os.getpgid(proc.pid)
+        _run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
+
+        def refuse_sigkill(value, sig, *, process_group):  # type: ignore[no-untyped-def]
+            self.assertEqual(value, pgid)
+            self.assertTrue(process_group)
+            if sig == wait_cancel_commands.signal.SIGKILL:
+                raise PermissionError("fixture denies SIGKILL")
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands,
+                "_send_signal",
+                side_effect=refuse_sigkill,
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=True
+            ),
+            unittest_mock.patch.object(wait_cancel_commands, "CANCEL_GRACE_SECONDS", 0),
+        ):
+            code, out, err = self.run_cli(["--json", "cancel", alias])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        payload = json.loads(out)["runs"][0]
+        self.assertEqual(payload["status"], run_registry.STATUS_CANCELLED)
+        self.assertEqual(
+            payload.get("signalRefusal"),
+            {"signal": "SIGKILL", "reason": "permission_denied"},
+        )
+        self.assertIsNone(proc.poll(), "mocked signal refusal unexpectedly killed fixture")
+
     def test_process_group_vanishing_at_sigterm_is_safely_cancelled(self):
         pid = os.getpid()
         pgid = os.getpgid(0)

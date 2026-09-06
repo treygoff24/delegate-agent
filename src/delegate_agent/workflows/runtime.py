@@ -557,6 +557,33 @@ class SupervisorWatchdogExit(RuntimeError):
         self.reason = reason
 
 
+class WorkflowChildCancellationError(wait_cancel_commands.WaitCancelError):
+    """One or more workflow-owned children could not be safely cancelled."""
+
+    def __init__(self, failures: list[JsonObject]) -> None:
+        self.failure_count = len(failures)
+        self.failures = failures[:16]
+        errors = {error for failure in failures if isinstance((error := failure.get("error")), str)}
+        summary = ", ".join(
+            f"{failure.get('runId', 'unknown')} ({failure.get('error', 'unknown')})"
+            for failure in self.failures
+        )
+        if self.failure_count > len(self.failures):
+            summary += f", plus {self.failure_count - len(self.failures)} more"
+        sole_detail = self.failures[0].get("detail") if self.failure_count == 1 else None
+        message = (
+            sole_detail
+            if isinstance(sole_detail, str) and sole_detail
+            else f"Workflow child cancellation incomplete: {summary}"
+        )
+        error = errors.pop() if len(errors) == 1 else "workflow_child_cancellation_failed"
+        super().__init__(error, message)
+        self.diagnostics = {
+            "failureCount": self.failure_count,
+            "failures": self.failures,
+        }
+
+
 @dataclass
 class Budget:
     total: int | None
@@ -938,14 +965,25 @@ class WorkflowState:
                 latest = event
         return latest
 
-    def latest_gate_event(self) -> JsonObject | None:
+    def latest_gate_event(self, *, unapproved_only: bool = False) -> JsonObject | None:
+        """Return the latest live gate, optionally limited to pending approval."""
         with self.journal_lock:
             latest: JsonObject | None = None
             for event in registry.iter_journal(self.journal_path):
+                gate_key = event.get("key")
+                result_hash = event.get("gateResultHash")
                 if (
                     not _is_simulated_event(event)
                     and event.get("type") == "gate"
-                    and isinstance(event.get("key"), str)
+                    and isinstance(gate_key, str)
+                    and (
+                        not unapproved_only
+                        or not registry.approval_allows(
+                            self.root,
+                            gate_key,
+                            result_hash if isinstance(result_hash, str) else None,
+                        )
+                    )
                 ):
                     latest = event
             return latest
@@ -1297,16 +1335,17 @@ class WorkflowState:
                 target, message, cwd=str(self.workspace), env=profiles.child_environment()
             )
         except Exception as exc:  # telemetry never fails the workflow
-            self.append_journal_only(
-                "notify_degraded", event=event, reason="hook_failed", detail=str(exc)[:200]
-            )
+            if self.root.exists():
+                self.append_journal_only(
+                    "notify_degraded", event=event, reason="hook_failed", detail=str(exc)[:200]
+                )
             return
         # A silent degradation is indistinguishable from a delivered
         # notification, which is the same failure this feature exists to prevent
         # one level up. The launch path records notify.ok=false plus a reason;
         # this recorded nothing at all, so a workflow could believe it had rung
         # someone for hours.
-        if not outcome.ok:
+        if not outcome.ok and self.root.exists():
             self.append_journal_only(
                 "notify_degraded",
                 event=event,
@@ -4014,17 +4053,82 @@ def _cancel_workflow_runs(
             not in run_registry.TERMINAL_STATUSES
         ):
             handles.append(run_id)
-    if not handles:
-        return []
-    command = wait_cancel_commands.CancelCommand(tuple(handles), json_mode=True)
-    out = io.StringIO()
-    wait_cancel_commands.emit_cancel(command, workspace_path=str(workspace), stdout=out)
-    try:
-        payload = json.loads(out.getvalue())
-    except json.JSONDecodeError:
-        return []
-    cancelled = payload.get("runs") if isinstance(payload, dict) else None
-    return cancelled if isinstance(cancelled, list) else []
+    cancelled: list[JsonObject] = []
+    failures: list[JsonObject] = []
+    for run_id in handles:
+        command = wait_cancel_commands.CancelCommand((run_id,), json_mode=True)
+        out = io.StringIO()
+        try:
+            wait_cancel_commands.emit_cancel(
+                command,
+                workspace_path=str(workspace),
+                stdout=out,
+            )
+        except wait_cancel_commands.WaitCancelError as exc:
+            state = run_registry.load_run_state_or_none(root, run_id)
+            effective = run_registry.status_fields(state).get("effectiveStatus")
+            if exc.error == "run_already_terminal" and effective in run_registry.TERMINAL_STATUSES:
+                continue
+            failures.append(
+                {
+                    "runId": run_id,
+                    "error": exc.error,
+                    "detail": " ".join(str(exc).split())[:200],
+                }
+            )
+            continue
+        except Exception as exc:
+            failures.append(
+                {
+                    "runId": run_id,
+                    "error": "workflow_child_cancellation_failed",
+                    "stage": "emit_cancel",
+                    "failureClass": type(exc).__name__,
+                }
+            )
+            continue
+        try:
+            payload = json.loads(out.getvalue())
+        except json.JSONDecodeError as exc:
+            failures.append(
+                {
+                    "runId": run_id,
+                    "error": "workflow_child_cancellation_failed",
+                    "stage": "decode_cancel_response",
+                    "failureClass": type(exc).__name__,
+                }
+            )
+            continue
+        runs = payload.get("runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, list):
+            failures.append(
+                {
+                    "runId": run_id,
+                    "error": "workflow_child_cancellation_failed",
+                    "stage": "validate_cancel_response",
+                    "failureClass": "MissingRunsList",
+                }
+            )
+            continue
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            refusal = item.get("signalRefusal")
+            if isinstance(refusal, dict):
+                failures.append(
+                    {
+                        "runId": run_id,
+                        "error": "signal_refused",
+                        "stage": "cancel_escalation",
+                        "signal": refusal.get("signal"),
+                        "reason": refusal.get("reason"),
+                    }
+                )
+                continue
+            cancelled.append(item)
+    if failures:
+        raise WorkflowChildCancellationError(failures)
+    return cancelled
 
 
 def _run_registry_root(workspace: Path) -> Path:
@@ -4481,10 +4585,62 @@ def run_supervisor(
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
             watchdog_reason = watchdog.reason or exc.reason
+            cancellation_failures: list[JsonObject] = []
+            cancellation_failure_count = 0
+            try:
+                cancel_workflow_children(workspace, wf_id)
+            except WorkflowChildCancellationError as cancel_exc:
+                cancellation_failures = list(cancel_exc.failures)
+                cancellation_failure_count = cancel_exc.failure_count
+            except Exception as cancel_exc:
+                cancellation_failures = [
+                    {
+                        "error": "workflow_child_cancellation_failed",
+                        "stage": "cancel_workflow_children",
+                        "failureClass": type(cancel_exc).__name__,
+                    }
+                ]
+                cancellation_failure_count = 1
+            if cancellation_failures:
+                failure_message = f"{exc}; child cancellation incomplete"
+                if root.exists():
+                    with contextlib.suppress(Exception):
+                        state.append_journal_only(
+                            "workflow_watchdog",
+                            reason=watchdog_reason,
+                            traceback=tb,
+                            childCancellationFailureCount=cancellation_failure_count,
+                            childCancellationFailures=cancellation_failures,
+                        )
+                    with contextlib.suppress(Exception):
+                        registry.write_result(
+                            root,
+                            {
+                                "ok": False,
+                                "wfId": wf_id,
+                                "error": failure_message,
+                                "traceback": tb,
+                                "childCancellationFailureCount": cancellation_failure_count,
+                                "childCancellationFailures": cancellation_failures,
+                            },
+                        )
+                    if state.status_path.exists():
+                        with contextlib.suppress(Exception):
+                            state.write_status(
+                                "failed",
+                                error=failure_message,
+                                traceback=tb,
+                                watchdogReason=watchdog_reason,
+                                watchdogChildCancellationFailureCount=cancellation_failure_count,
+                                watchdogChildCancellationFailures=cancellation_failures,
+                            )
+                with contextlib.suppress(Exception):
+                    state.notify_event("failed", detail=failure_message[:160])
+                return 1
             if root.exists() and (root / registry.STATUS_FILE).exists():
                 with contextlib.suppress(Exception):
                     state.append_event("workflow_watchdog", reason=watchdog_reason, traceback=tb)
-                gate_event = state.latest_gate_event()
+                gate_event = state.latest_gate_event(unapproved_only=True)
                 if isinstance(gate_event, dict) and isinstance(gate_event.get("key"), str):
                     # A watchdog can interrupt the drain after the gate row was
                     # fsynced.  Keep that journal-authoritative checkpoint
