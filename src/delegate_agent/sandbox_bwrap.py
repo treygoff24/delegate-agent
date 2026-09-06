@@ -190,8 +190,7 @@ def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> t
     entry may never intersect the workspace in either direction: a rw mount of
     the workspace or an ancestor would shadow the read-only bind, and a rw
     mount of a descendant would re-open that subtree (or the masked registry)
-    for writes. Only the tracked launcher's own run directory is ever rw-bound
-    inside the workspace.
+    for writes. No writable bind is permitted inside the workspace.
     """
     isolation = config.get("isolation")
     entries = isolation.get("bwrapBinds") if isinstance(isolation, Mapping) else None
@@ -316,9 +315,9 @@ def parity_masks(git_root: str) -> tuple[Mask, ...]:
     directory when a directory entry covers them. Directories become tmpfs
     masks; files become ``/dev/null`` ro-binds. ``.delegate/`` is skipped here
     because ``wrap_engine_argv`` always masks the whole registry with a tmpfs
-    (prior runs' prompts, logs and manifests must stay invisible) and then
-    rw-binds only the current run's scratch on top. Non-git workspaces have no
-    masks by construction (callers pass an empty tuple).
+    (prior runs' prompts, logs and manifests must stay invisible). Current-run
+    scratch is mounted from a neutral path outside the workspace. Non-git
+    workspaces have no masks by construction (callers pass an empty tuple).
     """
     result = run_git_bytes(
         git_root,
@@ -376,7 +375,8 @@ def build_bwrap_argv(
     Emission order matters: core system roots first, then ``$HOME`` tmpfs,
     then the optional read-only roots (several live under ``$HOME``), then the
     read-only workspace, then masks stacked on top of the workspace, then
-    writable roots (run scratch, mail-push homes, engine homes) stacked last.
+    writable roots (neutral run scratch, declared external roots, engine homes)
+    stacked last.
     """
     mounted: set[str] = set()
     argv: list[str] = [
@@ -454,8 +454,8 @@ def wrap_engine_argv(
     (rw), and any extra ro/rw roots (configured ``isolation.bwrapBinds``,
     mail-push private homes). The workspace's ``.delegate/`` registry is always
     masked with a tmpfs so prior runs' prompts and logs are invisible; the
-    current run's scratch (under it) is then rw-bound on top. Any rw root that
-    equals or contains the workspace is refused.
+    neutral current-run scratch is rw-bound separately. Any rw root that
+    intersects the workspace is refused.
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())
@@ -489,16 +489,9 @@ def wrap_engine_argv(
         else None
     )
     registry = os.path.join(cwd, REGISTRY_DIR_NAME)
-    run_dir = (
-        os.path.dirname(os.path.realpath(scratch_dir))
-        if scratch_dir
-        and Path(os.path.realpath(scratch_dir)).is_relative_to(Path(registry).resolve())
-        else None
-    )
     _refuse_rw_roots_intersecting_workspace(
         cwd,
         [*rw_roots, *([engine_home] if engine_home else [])],
-        internal_allowed=run_dir,
     )
     if os.path.isdir(registry) and not any(mask.path == REGISTRY_DIR_NAME for mask in masks):
         masks = (*masks, Mask(path=REGISTRY_DIR_NAME, kind=MASK_KIND_TMPFS))
@@ -578,22 +571,16 @@ def _paths_intersect(a: Path, b: Path) -> bool:
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 
-def _refuse_rw_roots_intersecting_workspace(
-    workspace: str, rw_roots: list[str], *, internal_allowed: str | None
-) -> None:
+def _refuse_rw_roots_intersecting_workspace(workspace: str, rw_roots: list[str]) -> None:
     """Refuse any rw mount that intersects the workspace in either direction.
 
-    The one permitted exception is the current run's own directory under the
-    masked ``.delegate/`` registry (``internal_allowed``): scratch and the
-    mail-push private homes live there and must stay writable on top of the
-    registry tmpfs.
+    Active scratch is outside the workspace. Old mixed-layout scratch and any
+    other in-registry writable root are refused rather than reopening part of
+    the masked registry.
     """
     resolved_workspace = Path(workspace).resolve()
-    allowed = Path(internal_allowed).resolve() if internal_allowed else None
     for root in rw_roots:
         target = Path(root).resolve()
-        if allowed is not None and (target == allowed or target.is_relative_to(allowed)):
-            continue
         if _paths_intersect(target, resolved_workspace):
             raise DelegateError(
                 "bwrap_bind_conflict",

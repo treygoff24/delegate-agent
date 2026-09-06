@@ -577,6 +577,9 @@ that later vanishes.
 ## Node/tsx children fail with EINVAL on Unix IPC sockets
 
 Delegate gives each run a private scratch `TMPDIR` whose deep path can exceed
-the macOS `sun_path` limit for socket-creating tools. Workaround: have the
-child set `TMPDIR=/tmp` (or another short dir) for those tools. The private
-scratch dir is deliberate isolation, not a bug.
+the macOS `sun_path` limit for socket-creating tools. Current releases place
+scratch under a shorter neutral global root rather than the workspace registry.
+Do not override `TMPDIR` in a safe run: an arbitrary replacement is outside the
+write grant. If the neutral path still exceeds a tool's socket limit, shorten
+the user-home path or report the exact socket path so Delegate can reduce its
+owned prefix without broadening write access.

@@ -79,6 +79,19 @@ class _MissingType:
 _MISSING = _MissingType()
 
 
+class _StructuredNullType:
+    """Sentinel for a schema-valid JSON null before public settlement."""
+
+    __slots__ = ()
+
+
+_STRUCTURED_NULL = _StructuredNullType()
+
+
+def _unwrap_structured_null(value: object) -> JsonValue | _MissingType:
+    return None if value is _STRUCTURED_NULL else value  # type: ignore[return-value]
+
+
 class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
 
@@ -757,7 +770,7 @@ class WorkflowState:
                 self.replay_keys.add(key)
                 self.replay[key] = result
                 self.started_without_result.discard(key)
-                if result is not None and key in child_info:
+                if event.get("exhausted") is not True and "result" in event and key in child_info:
                     crun_id, cengine, cresumable, clabel = child_info[key]
                     if clabel is not None:
                         self.record_completed_child(clabel, crun_id, cengine, cresumable)
@@ -2296,15 +2309,16 @@ class WorkflowDsl:
                     timeout=timeout,
                 )
                 if adopted is not _MISSING and adopted is not None:
-                    self.state.replay[key] = adopted
+                    adopted_result = _unwrap_structured_null(adopted)
+                    self.state.replay[key] = adopted_result
                     self.state.append_event(
                         "agent_finished",
                         key=key,
                         scope=path,
-                        result=adopted,
+                        result=adopted_result,
                         adopted=True,
                     )
-                    return adopted
+                    return adopted_result
             self.state.append_event(
                 "agent_cache_hit",
                 key=key,
@@ -2325,17 +2339,18 @@ class WorkflowDsl:
                 timeout=timeout,
             )
             if adopted is not _MISSING:
+                adopted_result = _unwrap_structured_null(adopted)
                 self.state.replay_keys.add(key)
-                self.state.replay[key] = adopted
+                self.state.replay[key] = adopted_result
                 self.state.started_without_result.discard(key)
                 self.state.append_event(
                     "agent_finished",
                     key=key,
                     scope=path,
-                    result=adopted,
+                    result=adopted_result,
                     adopted=True,
                 )
-                return adopted
+                return adopted_result
             # Failed/cancelled/unparseable/schema-invalid: keep the key in
             # started_without_result and fall through to a live respawn.
         already_claimed = key in self.state.claimed_keys
@@ -2474,6 +2489,7 @@ class WorkflowDsl:
                     )
                     result = None
                 if result is not None:
+                    result = _unwrap_structured_null(result)
                     self.state.tombstoned_keys.discard(key)
                     self.state.replay_keys.add(key)
                     self.state.replay[key] = result
@@ -2505,7 +2521,7 @@ class WorkflowDsl:
         schema: JsonObject | None,
         prefer_assistant: bool,
         timeout: int | float | None,
-    ) -> JsonValue | _MissingType:
+    ) -> JsonValue | _MissingType | _StructuredNullType:
         run_id = _find_workflow_agent_run(self.state.workspace, self.state.wf_id, key)
         if run_id is None:
             return _MISSING
@@ -2551,7 +2567,7 @@ class WorkflowDsl:
             try:
                 value = workflow_schema.parse_json_tolerant(text, schema)
                 workflow_schema.validate_value(value, schema)
-                result = value
+                result = _STRUCTURED_NULL if value is None else value
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
                 self.state.append_event(
@@ -2577,7 +2593,7 @@ class WorkflowDsl:
             label=label,
             phase=phase,
             runId=run_id,
-            result=result,
+            result=_unwrap_structured_null(result),
         )
         return result
 
@@ -2620,7 +2636,7 @@ class WorkflowDsl:
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         resumable: bool = False,
-    ) -> JsonValue:
+    ) -> JsonValue | _StructuredNullType:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
         if mode == MODE_SAFE and passthrough and engine in PROMPT_ENFORCED_SAFE_ENGINES:
@@ -2694,7 +2710,7 @@ class WorkflowDsl:
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         resumable: bool = False,
-    ) -> JsonValue:
+    ) -> JsonValue | _StructuredNullType:
         if schema is None:
             # Retry attachment is a child-run concern, not a structured-output
             # concern.  A work-lane timeout with no schema still has a dirty
@@ -2930,7 +2946,7 @@ class WorkflowDsl:
                 _cleanup_structured_retry_workspace(workspace_cleanup)
                 if first_child_run_id is not None:
                     self._release_structured_retry_worktree(first_child_run_id)
-                return value
+                return _STRUCTURED_NULL if value is None else value
             except PersonaDigestMismatch:
                 _cleanup_structured_retry_workspace(workspace_cleanup)
                 if first_child_run_id is not None:
@@ -2975,7 +2991,7 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
-        fallback: JsonValue | _MissingType = _MISSING
+        fallback: JsonValue | _MissingType | _StructuredNullType = _MISSING
         if child is not None:
             fallback = _structured_completion_report_fallback(child, self.state.workspace, schema)
         if fallback is not _MISSING:
@@ -3343,17 +3359,18 @@ class WorkflowDsl:
                 timeout=timeout,
             )
             if adopted is not _MISSING:
+                adopted_result = _unwrap_structured_null(adopted)
                 self.state.replay_keys.add(key)
-                self.state.replay[key] = adopted
+                self.state.replay[key] = adopted_result
                 self.state.started_without_result.discard(key)
                 self.state.append_event(
                     "agent_finished",
                     key=key,
                     scope=path,
-                    result=adopted,
+                    result=adopted_result,
                     adopted=True,
                 )
-                return adopted
+                return adopted_result
         already_claimed = key in self.state.claimed_keys
         if not already_claimed:
             self.state.claim_agent_lifetime()
@@ -3452,6 +3469,7 @@ class WorkflowDsl:
                 )
                 result = None
         if result is not None:
+            result = _unwrap_structured_null(result)
             self.state.tombstoned_keys.discard(key)
             self.state.replay_keys.add(key)
             self.state.replay[key] = result
@@ -3481,7 +3499,7 @@ class WorkflowDsl:
         schema: JsonObject | None,
         timeout: int | float | None,
         retries: int | None,
-    ) -> JsonValue:
+    ) -> JsonValue | _StructuredNullType:
         engine = prior_child.engine
         engine_sem = self.state.engine_semaphores.get(engine)
         with self.state.agent_semaphore:
@@ -3516,7 +3534,7 @@ class WorkflowDsl:
         retries: int | None,
         key: str,
         label: str | None = None,
-    ) -> JsonValue:
+    ) -> JsonValue | _StructuredNullType:
         if schema is None:
             return self._run_delegate_followup(
                 prior_child.run_id,
@@ -3550,7 +3568,7 @@ class WorkflowDsl:
                 candidate_present = True
                 workflow_schema.validate_value(value, schema)
                 self._record_structured_attempt(key, None)
-                return value
+                return _STRUCTURED_NULL if value is None else value
             except Exception as exc:
                 prior_output = text or ""
                 prior_error = str(exc)
@@ -4152,7 +4170,7 @@ def _last_fenced_json_block(report: str) -> str | None:
 
 def _structured_completion_report_fallback(
     child: _DelegateChildResult, workspace: Path, schema: JsonObject
-) -> JsonValue | _MissingType:
+) -> JsonValue | _MissingType | _StructuredNullType:
     try:
         report = _final_child_completion_report(child, workspace)
     except Exception:
@@ -4167,7 +4185,7 @@ def _structured_completion_report_fallback(
         workflow_schema.validate_value(value, schema)
     except Exception:
         return _MISSING
-    return value
+    return _STRUCTURED_NULL if value is None else value
 
 
 def _read_completion_report(report_path: object, workspace: Path) -> str | None:

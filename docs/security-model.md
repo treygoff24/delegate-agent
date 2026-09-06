@@ -130,10 +130,13 @@ A successful process exit does not prove that the requested inspection ran.
 #### Codex writable scratch
 
 Tracked Codex read-only launches grant writes only to
-`.delegate/runs/<runId>/scratch`. `TMPDIR`, `TMP`, and `TEMP` point there. The
-review workspace, source files, registry metadata siblings, and symlink targets
-outside scratch remain read-only. Cwd, session arguments, AGENTS discovery, and
-Delegate's safe prompt framing are unchanged.
+the private neutral path recorded as `manifest.scratchPath`, normally
+`~/.delegate/run-scratch/<registry-hash>/<runId>`. If a valid user home is
+inside a Git worktree, the path uses `/var/tmp/delegate-<uid>/run-scratch/`
+instead. `TMPDIR`, `TMP`, and `TEMP` all point there. The review workspace,
+source files, registry metadata, sibling-run scratch, and symlink targets outside
+the current scratch remain read-only. Cwd, session arguments, AGENTS discovery,
+and Delegate's safe prompt framing are unchanged.
 Tool-network access remains restricted, even when an ambient default profile
 allows it; the offline probe verifies this against a local loopback listener.
 
@@ -157,8 +160,16 @@ not that label, defines the write boundary.
 Run `python3 -m tests.codex_scratch_probe /path/to/codex` for the explicit offline
 check. It first proves the temporary sentinel files are writable without a
 sandbox, then checks scratch success, source/copy/metadata denials, symlink/hardlink
-escape denial, legacy read-only scratch denial, and strict-config rejection.
+escape denial, sibling-scratch denial, work-mode temp writes, legacy read-only
+scratch denial, and strict-config rejection.
 It runs no model turn and uses neither credentials nor live user config.
+
+Scratch-owned directories are current-user-owned and `0700`; Delegate does not
+re-mode the shared `~/.delegate` directory. Pruning never follows the manifest
+path. It first requires that pointer to equal the path independently derived
+from the current registry and selected neutral root, then performs owner-checked,
+no-follow removal. A changed `HOME`, moved registry, symlink, foreign owner, or
+live run therefore preserves both scratch and its sole registry pointer.
 
 Internally, bwrap uses a typed `SandboxPlan` with immutable `Mask` and `Bind`
 tuples. Invalid entries are refused instead of silently dropped while decoding
@@ -313,7 +324,7 @@ every gitignored path is hidden behind a tmpfs or `/dev/null` mask computed
 from `git ls-files -o -i --exclude-standard --directory` (so the engine sees
 the same tree shape a copy would), `$HOME` and `/tmp` are private tmpfs, the
 workspace `.delegate/` registry is masked (prior runs' prompts, logs and
-manifests are invisible) with only the current run's scratch rw-bound on top,
+manifests are invisible) with only the current run's neutral scratch rw-bound,
 and only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
 is writable. System roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
 `~/.bun`, the engine's dot-directory, the engine executable itself, a

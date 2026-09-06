@@ -254,6 +254,83 @@ def ensure_private_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_owned_dir_fd(path: Path) -> int:
+    """Create/open one directory and return a no-follow, current-owner fd."""
+    parent_fd, name = _open_parent(path, create=True)
+    created = False
+    try:
+        try:
+            entry = os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
+            created = True
+            entry = os.lstat(name, dir_fd=parent_fd)
+        if stat.S_ISLNK(entry.st_mode):
+            raise OSError(errno.ELOOP, "private directory is a symlink", str(path))
+        if not stat.S_ISDIR(entry.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "private path is not a directory", str(path))
+        if hasattr(os, "geteuid") and entry.st_uid != os.geteuid():
+            raise PermissionError(errno.EPERM, "private directory has a foreign owner", str(path))
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            current = os.fstat(fd)
+            if hasattr(os, "geteuid") and current.st_uid != os.geteuid():
+                raise PermissionError(
+                    errno.EPERM, "private directory has a foreign owner", str(path)
+                )
+            if created and supports_private_modes():
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def ensure_owned_dir(path: Path) -> None:
+    """Create a missing owner-only directory; preserve an existing owned directory's mode."""
+    os.close(_ensure_owned_dir_fd(path))
+
+
+def ensure_private_owned_dir(path: Path) -> None:
+    """Create/harden one directory while refusing foreign ownership and symlinks."""
+    fd = _ensure_owned_dir_fd(path)
+    try:
+        if supports_private_modes():
+            os.fchmod(fd, PRIVATE_DIR_MODE)
+            if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
+                raise PermissionError(
+                    errno.EPERM, "private directory could not be hardened", str(path)
+                )
+    finally:
+        os.close(fd)
+
+
+def create_private_owned_dir(path: Path) -> None:
+    """Atomically create a new owner-only directory without following symlinks."""
+    parent_fd, name = _open_parent(path, create=False)
+    try:
+        os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            info = os.fstat(fd)
+            if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+                raise PermissionError(
+                    errno.EPERM, "private directory has a foreign owner", str(path)
+                )
+            if supports_private_modes():
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
+                    raise PermissionError(
+                        errno.EPERM, "private directory is not owner-only", str(path)
+                    )
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
 def ensure_private_file(path: Path) -> None:
     """Make an existing non-symlink registry file owner-read/write on POSIX."""
     fd = open_private_file(path, os.O_RDONLY)

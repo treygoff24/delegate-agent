@@ -37,6 +37,7 @@ from delegate_agent import (
     resume_command,
     run_metadata,
     run_registry,
+    run_scratch,
     sandbox_bwrap,
     seatbelt,
     stall_watchdog,
@@ -1937,8 +1938,34 @@ def _prepare_tracked_run(
     run_registry.ensure_private_dir(run_path)
     scratch_dir: Path | None = None
     if ctx.mode == "safe" or ctx.effective_isolation != "none":
-        scratch_dir = run_path / "scratch"
-        run_registry.ensure_private_dir(scratch_dir)
+        scratch_plan: run_scratch.ScratchPlan | None = None
+        try:
+            scratch_plan = run_scratch.plan(ctx.registry_root, ctx.run_id)
+            scratch_dir = run_scratch.allocate_plan(scratch_plan)
+        except run_scratch.ScratchSafetyError as exc:
+            error = RunnerLaunchError(
+                "unsafe_scratch_directory",
+                f"Could not create safe neutral scratch for this run: {exc}",
+            )
+            manifest = build_manifest(ctx, manifest_argv or argv)
+            allocation: JsonObject = {"status": "failed", "message": str(exc)}
+            if scratch_plan is not None:
+                allocation["plannedPath"] = str(scratch_plan.path)
+                manifest["scratchPath"] = str(scratch_plan.path)
+            manifest["scratchAllocation"] = allocation
+            write_manifest(run_path, manifest)
+            stdout_log = run_path / STDOUT_LOG
+            stderr_log = run_path / STDERR_LOG
+            run_registry.write_private_bytes(stdout_log, b"")
+            run_registry.write_private_bytes(stderr_log, b"")
+            files = TrackedRunFiles(
+                run_path=run_path,
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+                scratch_dir=None,
+            )
+            _record_tracked_launch_failure(files, ctx, error)
+            raise error from exc
     if ctx.source_prompt is not None:
         # The user prompt exactly as resolved, before instruction framing, so
         # `delegate resume` can rebuild the original task text. Verbatim by
@@ -1946,7 +1973,10 @@ def _prepare_tracked_run(
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
     if ctx.persona_text is not None:
         run_registry.write_private_text(run_path / PERSONA_TXT_FILE, ctx.persona_text)
-    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
+    manifest = build_manifest(ctx, manifest_argv or argv)
+    if scratch_dir is not None:
+        manifest["scratchPath"] = str(scratch_dir)
+    write_manifest(run_path, manifest)
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
@@ -3705,6 +3735,7 @@ def _execute_tracked(
     )
     if ctx.engine == "codex" and files.scratch_dir is not None:
         manifest = build_manifest(ctx, run_manifest_argv or run_argv)
+        manifest["scratchPath"] = str(files.scratch_dir)
         write_manifest(files.run_path, manifest)
     sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
