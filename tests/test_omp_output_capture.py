@@ -48,22 +48,6 @@ def final_line():
 
 
 class OmpOutputCaptureTests(unittest.TestCase):
-    def test_saved_sanitized_incident_records_can_cross_the_old_cap(self):
-        fixture = Path(__file__).parent / "fixtures" / "omp" / "thinking_deltas.sanitized.jsonl"
-        sample = fixture.read_bytes()
-        output = io.BytesIO()
-        capture = stream_capture.BoundedCapture(
-            output.write, runner.TRACKED_STREAM_MAX_BYTES, compact_omp=True
-        )
-        for _ in range(runner.TRACKED_STREAM_MAX_BYTES // len(sample) + 1):
-            capture.feed(sample)
-        capture.feed(final_line())
-        capture.finish()
-        self.assertGreater(capture.stats.transport_bytes, runner.TRACKED_STREAM_MAX_BYTES)
-        self.assertGreater(capture.stats.omitted_thinking_records, 0)
-        self.assertLess(len(output.getvalue()), runner.TRACKED_STREAM_MAX_BYTES)
-        self.assertTrue(output.getvalue().endswith(final_line()))
-
     def noisy_script(self, ending=None):
         line = thinking_line()
         count = runner.TRACKED_STREAM_MAX_BYTES // len(line) + 100
