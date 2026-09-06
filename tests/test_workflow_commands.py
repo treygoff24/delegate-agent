@@ -35,6 +35,7 @@ from delegate_agent.workflows import commands as workflow_commands  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 from delegate_agent.workflows import runtime as workflow_runtime  # noqa: E402
 from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
+from tests import proc_harness  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
 
@@ -279,6 +280,27 @@ class WorkflowCommandTests(unittest.TestCase):
     # `workflow` while every plain launch accepted it.
 
     def test_notify_survives_the_supervisors_status_rebuild(self) -> None:
+        post_started = self.workspace / "post-started"
+        post_release = self.workspace / "post-release"
+        post_call = self.home / "post-call.json"
+        post = self.bin_dir / "post"
+        post.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            "started = Path(os.environ['FAKE_POST_STARTED'])\n"
+            "release = Path(os.environ['FAKE_POST_RELEASE'])\n"
+            "started.write_text('started\\n', encoding='utf-8')\n"
+            "deadline = time.monotonic() + 5\n"
+            "while not release.exists():\n"
+            "    if time.monotonic() >= deadline:\n"
+            "        raise SystemExit('notification barrier release timed out')\n"
+            "    time.sleep(0.01)\n"
+            "Path(os.environ['FAKE_POST_CALL']).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
+            "print('message: pst_test_notification')\n",
+            encoding="utf-8",
+        )
+        post.chmod(0o755)
         script = self.write_workflow(
             """
             meta = {"name": "notify-target"}
@@ -286,7 +308,13 @@ class WorkflowCommandTests(unittest.TestCase):
             """
         )
         result = self.run_delegate(
-            ["--notify", "channel:somewhere", "workflow", "run", str(script)]
+            ["--notify", "channel:somewhere", "workflow", "run", str(script)],
+            env_extra={
+                "PATH": str(self.bin_dir),
+                "FAKE_POST_STARTED": str(post_started),
+                "FAKE_POST_RELEASE": str(post_release),
+                "FAKE_POST_CALL": str(post_call),
+            },
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         wf_id = next(
@@ -295,11 +323,12 @@ class WorkflowCommandTests(unittest.TestCase):
             if line.startswith("wfId:")
         )
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
         deadline = time.monotonic() + 20
         status: dict[str, object] = {}
         while time.monotonic() < deadline:
             status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
-            if status.get("status") in {"succeeded", "failed"}:
+            if status.get("status") in {"succeeded", "failed"} and post_started.exists():
                 break
             time.sleep(0.1)
         self.assertEqual(status.get("status"), "succeeded", status)
@@ -308,15 +337,55 @@ class WorkflowCommandTests(unittest.TestCase):
         # supervisor's first write. That is exactly what happened to the first
         # version of this feature, and only a live run revealed it.
         self.assertEqual(status.get("notify"), "channel:somewhere")
+        self.assertTrue(
+            workflow_registry.supervisor_alive(root),
+            "the notification barrier must keep the terminal supervisor alive",
+        )
+        self.assertFalse(post_call.exists(), "notification escaped its release barrier")
+
+        post_release.write_text("release\n", encoding="utf-8")
+        self.assertTrue(
+            workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=5),
+            "notification writer did not finish and release the workflow lock",
+        )
+        self.assertFalse(
+            workflow_registry.supervisor_alive(root),
+            "workflow lock was released while its supervisor still appeared live",
+        )
+        self.assertTrue(post_call.exists(), "notifier exited without recording its call")
+        self.assertEqual(
+            json.loads(post_call.read_text(encoding="utf-8")),
+            [
+                "chat",
+                "somewhere",
+                "--send",
+                "--anyway",
+                "--body",
+                f"delegate workflow {wf_id} succeeded",
+            ],
+        )
 
     def test_workflow_without_notify_records_none_and_sends_nothing(self) -> None:
+        post_call = self.home / "unexpected-post-call"
+        post = self.bin_dir / "post"
+        post.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['FAKE_POST_CALL']).write_text('called\\n', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        post.chmod(0o755)
         script = self.write_workflow(
             """
             meta = {"name": "no-notify"}
             return {"ok": True}
             """
         )
-        result = self.run_delegate(["workflow", "run", str(script)])
+        result = self.run_delegate(
+            ["workflow", "run", str(script)],
+            env_extra={"PATH": str(self.bin_dir), "FAKE_POST_CALL": str(post_call)},
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         wf_id = next(
             line.split(": ", 1)[1].strip()
@@ -324,6 +393,7 @@ class WorkflowCommandTests(unittest.TestCase):
             if line.startswith("wfId:")
         )
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
         deadline = time.monotonic() + 20
         status: dict[str, object] = {}
         while time.monotonic() < deadline:
@@ -331,7 +401,13 @@ class WorkflowCommandTests(unittest.TestCase):
             if status.get("status") in {"succeeded", "failed"}:
                 break
             time.sleep(0.1)
+        self.assertEqual(status.get("status"), "succeeded", status)
         self.assertIsNone(status.get("notify"))
+        self.assertTrue(
+            workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=5),
+            "no-notify workflow supervisor did not exit",
+        )
+        self.assertFalse(post_call.exists(), "workflow without --notify invoked post")
 
     def test_a_valid_notify_target_is_accepted_for_workflow_run(self) -> None:
         """The defect was a VALID target being refused, so pin acceptance.
@@ -376,6 +452,7 @@ class WorkflowCommandTests(unittest.TestCase):
             if line.startswith("wfId:")
         )
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
         deadline = time.monotonic() + 20
         status: dict[str, object] = {}
         while time.monotonic() < deadline:
@@ -384,6 +461,10 @@ class WorkflowCommandTests(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(status.get("status"), "succeeded", status)
+        self.assertTrue(
+            workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=5),
+            "failed-notification workflow supervisor did not exit",
+        )
 
     def test_a_degraded_notification_is_recorded_and_does_not_un_finish_the_run(self) -> None:
         """Telemetry about a finished workflow must not reset it to running.
@@ -410,6 +491,7 @@ class WorkflowCommandTests(unittest.TestCase):
             if line.startswith("wfId:")
         )
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
         deadline = time.monotonic() + 20
         status: dict[str, object] = {}
         while time.monotonic() < deadline:
@@ -418,6 +500,10 @@ class WorkflowCommandTests(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(status.get("status"), "succeeded", status)
+        self.assertTrue(
+            workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=5),
+            "degraded-notification workflow supervisor did not exit",
+        )
 
         # A silent degradation is indistinguishable from a delivered
         # notification, which is the failure this whole feature exists to stop.
