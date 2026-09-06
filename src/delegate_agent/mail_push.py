@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import private_io, run_registry
+from delegate_agent import private_io, run_registry, run_scratch
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 from delegate_agent.mail_core import (
@@ -41,6 +41,7 @@ MAIL_PUSH_FAILURE_FILE_NAME = "hook-degraded.json"
 MAIL_PUSH_NONCE_FILE_NAME = "mail-hook-nonce"
 MAIL_PUSH_SETTINGS_FILE_NAME = "settings.json"
 MAIL_PUSH_FALLBACK_CODEX_HOME_NAME = "codex-home-fallback"
+MAIL_PUSH_SCRATCH_SIDECAR = "mail-push"
 MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
 MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
 MAIL_PUSH_FAILURE_SENTINEL = "DELEGATE_MAIL_HOOK_FAILURE:"
@@ -132,8 +133,20 @@ def _remove_legacy_codex_homes(registry_root: Path) -> None:
         _remove_directory(legacy_home)
 
 
+def mail_push_scratch_root(registry_root: Path, run_id: str) -> Path:
+    """The neutral directory holding this run's mail-push private homes.
+
+    These homes are handed to the child as ``CODEX_HOME`` and must stay
+    writable. A sandboxed run read-only-binds the workspace and masks its
+    ``.delegate/`` registry, so a home under the run directory could not be
+    rw-bound inside the boundary and the launch was refused outright. Run
+    scratch is the neutral location the boundary already accepts.
+    """
+    return run_scratch.sidecar_plan(registry_root, run_id, MAIL_PUSH_SCRATCH_SIDECAR).path
+
+
 def _private_codex_home_path(registry_root: Path, run_id: str, name: str) -> Path:
-    return run_registry.run_directory(registry_root, run_id) / name
+    return mail_push_scratch_root(registry_root, run_id) / name
 
 
 def _hook_nonce_path(registry_root: Path, run_id: str) -> Path:
@@ -148,7 +161,9 @@ def _codex_home_for_mail_push(
     *,
     name: str = MAIL_PUSH_CODEX_HOME_NAME,
 ) -> Path:
-    codex_home = _private_codex_home_path(registry_root, run_id, name)
+    codex_home = (
+        run_scratch.allocate_sidecar(registry_root, run_id, MAIL_PUSH_SCRATCH_SIDECAR) / name
+    )
     _remove_directory(codex_home)
     private_io.ensure_private_dir(codex_home)
     source_home = Path(
@@ -186,8 +201,10 @@ def mail_push_fallback_env_overrides(
 
 
 def cleanup_mail_push_private_homes(registry_root: Path, run_id: str) -> None:
-    for name in (MAIL_PUSH_CODEX_HOME_NAME, MAIL_PUSH_FALLBACK_CODEX_HOME_NAME):
-        _remove_directory(_private_codex_home_path(registry_root, run_id, name))
+    # The whole sidecar goes, not just the two known home names: nothing else
+    # is ever provisioned into it, and a partially written home must not
+    # survive a failed launch.
+    _remove_directory(mail_push_scratch_root(registry_root, run_id))
 
 
 def _set_claude_settings(argv: list[str], settings_path: str) -> None:

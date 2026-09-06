@@ -450,12 +450,13 @@ def wrap_engine_argv(
 
     Pure assembly lives in ``build_bwrap_argv``; this wrapper resolves the
     host-dependent inputs: real HOME, existing optional ro-bind roots (home
-    dirs, the per-engine dot-directory, system roots), the run scratch dir
-    (rw), and any extra ro/rw roots (configured ``isolation.bwrapBinds``,
-    mail-push private homes). The workspace's ``.delegate/`` registry is always
-    masked with a tmpfs so prior runs' prompts and logs are invisible; the
-    neutral current-run scratch is rw-bound separately. Any rw root that
-    intersects the workspace is refused.
+    dirs, the per-engine dot-directory, system roots, configured
+    ``isolation.bwrapBinds`` in ``extra_ro_roots``), and the writable roots:
+    the current run's scratch plus ``extra_rw_roots``, which carries the
+    mail-push private home sidecar. All of those writable paths are neutral
+    locations outside the workspace. The workspace's ``.delegate/`` registry is
+    always masked with a tmpfs so prior runs' prompts and logs are invisible.
+    Any rw root that intersects the workspace is refused, with no exception.
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())

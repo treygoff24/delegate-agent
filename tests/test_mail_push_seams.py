@@ -149,6 +149,15 @@ class MailPushSeamTests(CommandTestBase):
         ]
         self.assertEqual(credential_files, [])
 
+    def _mail_push_scratch_root(self, run_path: Path) -> Path:
+        """Where the launch put this run's private homes.
+
+        Run scratch is selected from the launching process's HOME, which is the
+        harness config HOME, not this test process's own.
+        """
+        with mock.patch.dict(os.environ, {"HOME": self._config_env["HOME"]}):
+            return mail.mail_push_scratch_root(run_path.parent.parent, run_path.name).resolve()
+
     @staticmethod
     def _file_snapshot(root: Path) -> dict[Path, bytes | str]:
         snapshot: dict[Path, bytes | str] = {}
@@ -236,7 +245,11 @@ class MailPushSeamTests(CommandTestBase):
             )
         else:
             private_home = Path(child["env"]["CODEX_HOME"]).resolve()
-            self.assertTrue(private_home.is_relative_to(run_path.resolve()))
+            scratch_root = self._mail_push_scratch_root(run_path)
+            self.assertTrue(private_home.is_relative_to(scratch_root), private_home)
+            # Neutral run scratch, never the read-only workspace a sandboxed
+            # run binds, and never the mail box.
+            self.assertFalse(private_home.is_relative_to(workspace.resolve()))
             self.assertFalse(private_home.is_relative_to(mail.mail_root(workspace / ".delegate")))
             self.assertEqual(child["codexHome"], str(private_home))
             self.assertTrue(child["codexHomeHooksPresent"])
@@ -735,7 +748,9 @@ class MailPushSeamTests(CommandTestBase):
             self.assertEqual(primary_home.name, mail.MAIL_PUSH_CODEX_HOME_NAME)
             self.assertEqual(fallback_home.name, mail.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME)
             self.assertNotEqual(primary_home, fallback_home)
-            self.assertTrue(fallback_home.is_relative_to(run_path.resolve()))
+            scratch_root = self._mail_push_scratch_root(run_path)
+            self.assertTrue(fallback_home.resolve().is_relative_to(scratch_root), fallback_home)
+            self.assertFalse(fallback_home.resolve().is_relative_to(workspace.resolve()))
             self.assertEqual(observed[0]["codexHome"], str(primary_home.resolve()))
             self.assertTrue(observed[0]["codexHomeHooksPresent"])
             self.assertEqual(observed[1]["codexHome"], str(fallback_home.resolve()))
