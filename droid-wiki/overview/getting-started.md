@@ -15,7 +15,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 python3 bin/delegate.py --json describe
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 `CONTRIBUTING.md` and `AGENTS.md` both prefer `python3 bin/delegate.py` while developing in this checkout.
@@ -58,11 +58,11 @@ HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delega
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ruff check .
 ruff format --check .
 ```
 
-Packaging changes should also run `python3 -m build --sdist --wheel` and `twine check dist/*`. The CI workflow in `.github/workflows/ci.yml` runs compileall, unittest, Ruff, build, twine, and a clean wheel install smoke test on Python 3.11 through 3.14.
+Packaging changes should also run `python3 -m build --sdist --wheel` and `twine check dist/*`. The CI workflow in `.github/workflows/ci.yml` runs compileall, pytest, Ruff, build, twine, and a clean wheel install smoke test on Python 3.11 through 3.14.
 
 See [testing](../how-to-contribute/testing.md) and [tooling](../how-to-contribute/tooling.md).

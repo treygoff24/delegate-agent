@@ -24,10 +24,6 @@ live under `src/delegate_agent/`:
 
 Unit tests should call the module that owns the behavior. Keep CLI tests for
 parsing/dispatch/output contracts and subprocess fixtures for launch boundaries.
-Write application tests as `unittest.TestCase` methods. Module-level `test_*`
-functions run under pytest but are silently absent from the authoritative
-unittest gate. `scripts/test-parity.sh` checks runner counts and retains both
-complete logs, including failures, under the receipt directory it prints.
 Adding a request field needs non-default propagation checks across ordinary,
 temporary, persistent, attached, and grouped-call paths, not another copied
 constructor block.
@@ -80,7 +76,7 @@ Run focused tests first, then the broader checks before handoff:
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 `tests/acceptance.sh` runs all four required gates, including Ruff lint and
@@ -90,15 +86,10 @@ worktree, or PATH when its version matches the dev extra. A mismatched ambient
 Ruff fails before running the gates; install the dev extra rather than accepting
 different lint behavior on different machines.
 
-`-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
-`sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
-summary to stderr — pipe with `2>&1` when capturing output.
-
-Both runners load the same private HOME/temp environment and process ownership
-guard from `tests/__init__.py`. Pytest adds per-test cleanup; unittest has the
-same guard at suite exit. Run `scripts/test-parity.sh` after changing this
-process-global setup. Matching counts prove collection-count agreement, not
-identical behavior or live-provider compatibility.
+Collection imports `tests/__init__.py`, which shims `src` onto `sys.path`,
+installs a private HOME/temp environment, and strips ambient env.
+`pyproject.toml` sets `testpaths = ["tests"]`, so a test file placed outside
+`tests/` is never collected and never runs.
 
 Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin,
 OpenCode, Pi, Oh My Pi, or Kimi binaries.
