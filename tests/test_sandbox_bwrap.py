@@ -19,8 +19,10 @@ if SRC not in sys.path:
 # Imported after the base (which bootstraps sys.path).
 from delegate_agent import config as delegate_config  # noqa: E402
 from delegate_agent import (  # noqa: E402
+    mail_push,
     request_build,
     run_registry,
+    run_scratch,
     runner,
     safe_workspace,
     sandbox_bwrap,
@@ -1100,6 +1102,72 @@ class EndToEndBwrapRunTests(CommandTestBase):
         state = json.loads((runs[0] / "state.json").read_text())
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state.get("error"), "bwrap_launch_failed")
+
+
+class MailPushSandboxBoundaryTests(unittest.TestCase):
+    """The mail-push private home must be bindable inside a bwrap boundary."""
+
+    def test_mail_push_home_is_a_writable_root_outside_the_read_only_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-push-bwrap-") as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            workspace = root / "workspace"
+            workspace.mkdir()
+            source_codex = root / "codex"
+            source_codex.mkdir()
+            (source_codex / "auth.json").write_text('{"token":"x"}', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+                run_id, alias = run_registry.register_run(registry_root, harness="codex")
+                env: dict[str, str] = {"CODEX_HOME": str(source_codex)}
+                provision = mail_push.provision_mail_push(
+                    "codex",
+                    ["codex", "exec", "prompt"],
+                    None,
+                    registry_root,
+                    run_id,
+                    env,
+                )
+                self.assertIsNone(provision.warning)
+                codex_home = provision.codex_home
+                self.assertIsNotNone(codex_home)
+                assert codex_home is not None
+                ctx = runner.RunContext(
+                    registry_root=registry_root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="codex",
+                    engine="codex",
+                    mode="safe",
+                    model=None,
+                    source_cwd=str(workspace),
+                    execution_cwd=str(workspace),
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at=run_registry.utc_now_iso(),
+                    mail_push=True,
+                )
+                rw_roots = runner._bwrap_mail_push_rw_roots(ctx)
+                scratch = run_scratch.allocate(registry_root, run_id)
+                self.assertEqual(len(rw_roots), 1, rw_roots)
+                argv = sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"],
+                    cwd=str(workspace),
+                    env={"HOME": str(home), "CODEX_HOME": codex_home},
+                    engine="codex",
+                    scratch_dir=str(scratch),
+                    extra_rw_roots=rw_roots,
+                )
+                resolved_workspace = workspace.resolve()
+                self.assertTrue(Path(codex_home).is_relative_to(Path(rw_roots[0])))
+                for rw_root in (*rw_roots, codex_home):
+                    self.assertFalse(
+                        Path(rw_root).resolve().is_relative_to(resolved_workspace), rw_root
+                    )
+                self.assertEqual(argv[argv.index(rw_roots[0]) - 1], "--bind")
+                mail_push.cleanup_mail_push_private_homes(registry_root, run_id)
+                self.assertFalse(Path(codex_home).exists())
 
 
 if __name__ == "__main__":

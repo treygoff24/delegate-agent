@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import stat
 import subprocess  # nosec B404 - fixed offline Git ancestry probe.
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from delegate_agent import private_io
@@ -15,6 +16,9 @@ from delegate_agent.record_io import RUN_ID_RE
 
 SCRATCH_ROOT_NAME = "run-scratch"
 PERSISTENT_TEMP_ROOT = Path("/var/tmp")
+# A sidecar name cannot collide with a run id: run ids never contain a dot.
+SIDECAR_SEPARATOR = "."
+_SIDECAR_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 
 class ScratchSafetyError(OSError):
@@ -130,18 +134,23 @@ def expected_path(registry_root: Path, run_id: str) -> Path:
     return plan(registry_root, run_id).path
 
 
+def _ensure_shared_roots(scratch_plan: ScratchPlan) -> None:
+    """Create and re-verify the roots every run in this registry shares."""
+    shared_parent = scratch_plan.root.parent
+    if scratch_plan.fallback:
+        private_io.ensure_private_owned_dir(shared_parent)
+    else:
+        private_io.ensure_owned_dir(shared_parent)
+    for directory in (scratch_plan.root, scratch_plan.bucket):
+        private_io.ensure_private_owned_dir(directory)
+        _require_owned_directory(directory, private=True)
+        _require_outside_git_worktree(directory)
+
+
 def allocate_plan(scratch_plan: ScratchPlan) -> Path:
     """Create one previously calculated scratch path."""
-    shared_parent = scratch_plan.root.parent
     try:
-        if scratch_plan.fallback:
-            private_io.ensure_private_owned_dir(shared_parent)
-        else:
-            private_io.ensure_owned_dir(shared_parent)
-        for directory in (scratch_plan.root, scratch_plan.bucket):
-            private_io.ensure_private_owned_dir(directory)
-            _require_owned_directory(directory, private=True)
-            _require_outside_git_worktree(directory)
+        _ensure_shared_roots(scratch_plan)
         private_io.create_private_owned_dir(scratch_plan.path)
     except OSError as exc:
         raise ScratchSafetyError(f"could not allocate private run scratch: {exc}") from exc
@@ -154,21 +163,67 @@ def allocate(registry_root: Path, run_id: str) -> Path:
     return allocate_plan(plan(registry_root, run_id))
 
 
+def sidecar_plan(registry_root: Path, run_id: str, name: str) -> ScratchPlan:
+    """Plan a run-scoped neutral directory beside the run's own scratch.
+
+    The run scratch is claimed atomically at launch and must not already
+    exist, so an artifact provisioned earlier in the launch (the mail-push
+    private engine homes) cannot live inside it. A sidecar shares the run's
+    bucket, carries the run id, and is removed with the run's scratch.
+    """
+    if _SIDECAR_NAME_RE.fullmatch(name) is None:
+        raise ScratchSafetyError(f"invalid run scratch sidecar name: {name!r}")
+    base = plan(registry_root, run_id)
+    return replace(base, path=base.bucket / f"{run_id}{SIDECAR_SEPARATOR}{name}")
+
+
+def allocate_sidecar(registry_root: Path, run_id: str, name: str) -> Path:
+    """Create or reuse one run-scoped sidecar directory.
+
+    Unlike the run scratch this is not an atomic claim: provisioning writes
+    several artifacts into the same sidecar across separate calls. Foreign
+    ownership, a symlink, and a non-owner-only mode are still refused.
+    """
+    scratch_plan = sidecar_plan(registry_root, run_id, name)
+    try:
+        _ensure_shared_roots(scratch_plan)
+        private_io.ensure_private_owned_dir(scratch_plan.path)
+    except OSError as exc:
+        raise ScratchSafetyError(f"could not allocate private run scratch: {exc}") from exc
+    _require_owned_directory(scratch_plan.path, private=True)
+    _require_outside_git_worktree(scratch_plan.path)
+    return scratch_plan.path
+
+
+def _sidecar_paths(scratch_plan: ScratchPlan, run_id: str) -> list[Path]:
+    """Existing sidecars of this run, found by name rather than by record."""
+    if not scratch_plan.bucket.is_dir() or scratch_plan.bucket.is_symlink():
+        return []
+    prefix = f"{run_id}{SIDECAR_SEPARATOR}"
+    return sorted(entry for entry in scratch_plan.bucket.iterdir() if entry.name.startswith(prefix))
+
+
 def remove_owned(registry_root: Path, run_id: str) -> None:
-    """Remove only the deterministic scratch owned by this registry and run."""
+    """Remove the deterministic scratch and sidecars owned by this run."""
     scratch_plan = plan(registry_root, run_id)
-    if not _path_exists(scratch_plan.path):
+    if not _path_exists(scratch_plan.bucket):
+        return
+    targets = [scratch_plan.path] if _path_exists(scratch_plan.path) else []
+    targets.extend(_sidecar_paths(scratch_plan, run_id))
+    if not targets:
         return
     _require_owned_directory(scratch_plan.root.parent, private=scratch_plan.fallback)
-    for directory in (scratch_plan.root, scratch_plan.bucket, scratch_plan.path):
+    for directory in (scratch_plan.root, scratch_plan.bucket):
         _require_owned_directory(directory, private=True)
-    _require_outside_git_worktree(scratch_plan.path)
     if not shutil.rmtree.avoids_symlink_attacks:
         raise ScratchSafetyError("safe no-follow directory removal is unavailable")
-    for root, directories, files in os.walk(scratch_plan.path, topdown=True, followlinks=False):
-        for name in [*directories, *files]:
-            entry = Path(root) / name
-            info = entry.lstat()
-            if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
-                raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry}")
-    shutil.rmtree(scratch_plan.path)
+    for target in targets:
+        _require_owned_directory(target, private=True)
+        _require_outside_git_worktree(target)
+        for root, directories, files in os.walk(target, topdown=True, followlinks=False):
+            for name in [*directories, *files]:
+                entry = Path(root) / name
+                info = entry.lstat()
+                if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+                    raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry}")
+        shutil.rmtree(target)

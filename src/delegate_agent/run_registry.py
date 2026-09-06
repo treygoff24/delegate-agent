@@ -1165,12 +1165,7 @@ def _remove_run_record_artifacts(
             f"refusing to prune run {run_id}: unreadable manifest must be preserved: "
             f"{manifest_error}"
         ) from manifest_error
-    if manifest is None:
-        # A genuinely absent legacy manifest carries no deletion pointer. The
-        # deterministic current path is still safe to inspect/remove because
-        # it is derived from registry identity and run id, never record bytes.
-        run_scratch.remove_owned(registry_root, run_id)
-    elif "scratchPath" in manifest:
+    if manifest is not None and "scratchPath" in manifest:
         recorded = manifest.get("scratchPath")
         if not isinstance(recorded, str) or not recorded:
             raise OSError(f"refusing to prune run {run_id}: invalid recorded scratch path")
@@ -1181,7 +1176,13 @@ def _remove_run_record_artifacts(
                 f"refusing to prune run {run_id}: recorded scratch path {recorded_path} "
                 f"does not match current owned path {expected}"
             )
-        run_scratch.remove_owned(registry_root, run_id)
+    # A manifest without a recorded scratch path, or an absent legacy manifest,
+    # carries no deletion pointer, and a run that allocated no scratch can
+    # still have left a sidecar (the mail-push private homes). The
+    # deterministic current paths are safe to inspect and remove either way
+    # because they derive from registry identity and run id, never from record
+    # bytes.
+    run_scratch.remove_owned(registry_root, run_id)
     if run_path.exists():
         shutil.rmtree(run_path)
     archived_logs.archive_path(registry_root, run_id).unlink(missing_ok=True)
