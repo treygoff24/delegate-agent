@@ -273,6 +273,155 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             },
         )
 
+    def test_schema_allowed_null_stays_private_until_agent_settlement(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text="null",
+            run_id="del_20260827T040000Z_null1",
+            execution_cwd="/tmp/null-worktree",
+            session_id=None,
+        )
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "null",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "null"},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="null-key",
+            )
+        self.assertIs(result, runtime._STRUCTURED_NULL)
+        self.assertIsNone(runtime._unwrap_structured_null(result))
+        self.assertNotIn(
+            "agent_structured_exhausted",
+            {event["type"] for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)},
+        )
+
+    def test_completion_report_null_uses_the_same_success_sentinel(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text("Status: completed.\n\n```json\nnull\n```\n", encoding="utf-8")
+        child = runtime._DelegateChildResult(
+            text="assistant prose, not JSON",
+            run_id="del_20260827T040000Z_null-report",
+            execution_cwd="/tmp/null-report-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "null fallback",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "null"},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="null-report-key",
+            )
+        self.assertIs(result, runtime._STRUCTURED_NULL)
+        self.assertIsNone(runtime._unwrap_structured_null(result))
+
+    def test_provider_refusal_never_becomes_successful_null(self) -> None:
+        dsl = self._dsl()
+        refused = runtime._DelegateChildResult(
+            text=None,
+            run_id="del_20260827T040000Z_refused",
+            execution_cwd="/tmp/refused-worktree",
+            session_id=None,
+            outcome=runtime.ChildAttemptOutcome(
+                run_id="del_20260827T040000Z_refused",
+                failure_reason="nonzero_exit",
+            ),
+        )
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=refused),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "refused",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "null"},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="refused-key",
+            )
+        self.assertIsNone(result)
+        self.assertNotIsInstance(result, runtime._StructuredNullType)
+
+    def test_replay_only_registers_non_exhausted_explicit_result_children(self) -> None:
+        rows = [
+            {
+                "seq": 1,
+                "type": "agent_child",
+                "key": "exhausted-key",
+                "workflowAgentKey": "exhausted-key",
+                "runId": "del_exhausted",
+                "engine": "codex",
+                "label": "exhausted",
+                "resumable": True,
+            },
+            {
+                "seq": 2,
+                "type": "agent_finished",
+                "key": "exhausted-key",
+                "result": None,
+                "exhausted": True,
+            },
+            {
+                "seq": 3,
+                "type": "agent_child",
+                "key": "missing-result-key",
+                "workflowAgentKey": "missing-result-key",
+                "runId": "del_missing",
+                "engine": "codex",
+                "label": "missing-result",
+                "resumable": True,
+            },
+            {
+                "seq": 4,
+                "type": "agent_finished",
+                "key": "missing-result-key",
+            },
+        ]
+        for row in rows:
+            registry.append_jsonl(self.root / registry.JOURNAL_FILE, row)
+        state = runtime.WorkflowState(
+            wf_id="wf_666666666666",
+            workspace=self.workspace,
+            root=self.root,
+            script_path=self.script,
+            config={},
+            cli_argv=["delegate"],
+            args=None,
+            budget=runtime.Budget(None),
+        )
+        self.assertEqual(state.completed_labels, {})
+        self.assertIn("exhausted-key", state.exhausted_keys)
+
     def test_claude_workflow_schema_goes_native_through_output_schema(self) -> None:
         dsl = self._dsl()
         schema = {

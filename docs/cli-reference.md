@@ -1120,22 +1120,27 @@ For worktree actions, a `--help` token anywhere in the args wins and performs no
 ### Scratch directory for isolated runs
 
 Tracked safe-mode and isolated runs get a per-run scratch directory at
-`.delegate/runs/<run-id>/scratch`. Delegate exports `TMPDIR`, `TMP`, and `TEMP`
-to that path after applying profile env overrides, so the scratch directory wins
-over profile-provided temp variables. The scratch directory persists with the
-run directory for inspection and is cleaned up only when the run directory is
-cleaned up.
+`~/.delegate/run-scratch/<registry-hash>/<run-id>`, outside the source registry
+and every Git worktree. If the user's valid home directory is itself inside a
+Git worktree, Delegate uses the private persistent fallback
+`/var/tmp/delegate-<uid>/run-scratch/`. A symlinked or foreign-owned default
+fails closed instead of selecting the fallback. Delegate preserves the existing
+mode of the shared `~/.delegate` directory and hardens only scratch-owned
+descendants to `0700`.
 
-For Codex safe/isolated runs, Delegate also passes `--add-dir <scratch>` along
-with `--sandbox read-only`. Verified live 2026-07-04: the Codex read-only sandbox
-still denies scratch writes despite `--add-dir` ("operation not permitted"), so
-Codex safe children currently cannot use the scratch TMPDIR; the flag is kept so
-scratch access starts working automatically if a future Codex honors it. Prompts
-for Codex safe runs should not depend on temp-file writes. The scratch export is
-verified working on the copy-isolated lanes (Cursor, Droid, Kimi, Grok, Claude).
-Cursor, Droid, Kimi, Grok, and Claude receive the scratch path through the temp
-environment variables only. This does not change the isolation semantics of the
-repo copy or persistent worktree itself.
+Delegate exports `TMPDIR`, `TMP`, and `TEMP` to the exact manifest-recorded path
+after applying profile env overrides. Scratch survives failure and cancellation.
+`delegate runs prune` removes it with the terminal run record only when the
+recorded path still equals the deterministic current owned path; moving the
+registry or changing `HOME` causes a refusal rather than deletion through an
+untrusted pointer. Legacy run-local scratch remains part of its run record.
+
+For Codex read-only runs, Delegate selects a high-entropy named permissions
+profile extending `:read-only` with exactly the neutral scratch path writable.
+Isolated work-mode Codex keeps its configured workspace sandbox and receives the
+same temp environment. Other engines receive the neutral scratch path through the
+temp environment only; repo-copy and persistent-worktree isolation semantics
+are unchanged.
 
 ### Run registry inspection
 

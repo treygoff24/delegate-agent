@@ -566,7 +566,6 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as home_tmp,
-            tempfile.TemporaryDirectory() as scratch_tmp,
         ):
             home = Path(home_tmp)
             profile_dir = home / ".ai-profiles" / "personal"
@@ -574,7 +573,13 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
             canary = profile_dir / "keys.zsh"
             canary.write_text("# CANARY never-leak\n", encoding="utf-8")
 
-            scratch = Path(scratch_tmp)
+            scratch_root = home / ".delegate" / "run-scratch" / "bucket"
+            scratch = scratch_root / "del_current"
+            sibling = scratch_root / "del_sibling"
+            scratch.mkdir(parents=True)
+            sibling.mkdir()
+            sibling_canary = sibling / "keep.txt"
+            sibling_canary.write_text("keep\n", encoding="utf-8")
             repo = _make_committed_repo()
             self.addCleanup(repo.cleanup)
             workspace = Path(repo.name)
@@ -594,6 +599,7 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
                     "if touch write-attempt 2>/dev/null; then echo workspace-write=yes; else echo workspace-write=no; fi",
                     'echo "secret-bytes=$(dd if=secret.env bs=64 count=1 2>/dev/null | wc -c)"',
                     f'if touch "{scratch}/scratch-ok" 2>/dev/null; then echo scratch-write=yes; else echo scratch-write=no; fi',
+                    f'if touch "{sibling}/denied" 2>/dev/null; then echo sibling-write=yes; else echo sibling-write=no; fi',
                 ]
             )
             argv = sandbox_bwrap.build_bwrap_argv(
@@ -623,6 +629,8 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
             self.assertEqual(observed.get("workspace-write"), "no")
             self.assertEqual(observed.get("secret-bytes"), "0")
             self.assertEqual(observed.get("scratch-write"), "yes")
+            self.assertEqual(observed.get("sibling-write"), "no")
+            self.assertEqual(sibling_canary.read_text(encoding="utf-8"), "keep\n")
 
 
 class DryRunBwrapTests(CommandTestBase):
@@ -817,9 +825,10 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
 
 class RegistryMaskAndContainmentTests(unittest.TestCase):
     def test_workspace_registry_is_masked_then_scratch_rebound(self):
-        with tempfile.TemporaryDirectory() as ws:
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as scratch_tmp:
             registry = Path(ws) / ".delegate"
-            scratch = registry / "runs" / "del_new" / "scratch"
+            registry.mkdir()
+            scratch = Path(scratch_tmp) / "run-scratch" / "bucket" / "del_new"
             scratch.mkdir(parents=True)
             argv = sandbox_bwrap.wrap_engine_argv(
                 engine_argv=["true"], cwd=ws, env={}, engine="codex", scratch_dir=str(scratch)
@@ -847,24 +856,20 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
             )
             self.assertNotIn("/usr/bin/env", argv[: argv.index("--")])
 
-    def test_rw_root_inside_workspace_is_refused_except_the_run_dir(self):
-        with tempfile.TemporaryDirectory() as ws:
+    def test_all_rw_roots_inside_workspace_are_refused(self):
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as scratch_tmp:
             run_dir = Path(ws) / ".delegate" / "runs" / "del_x"
-            scratch = run_dir / "scratch"
+            run_dir.mkdir(parents=True)
+            scratch = Path(scratch_tmp) / "run-scratch" / "bucket" / "del_x"
             scratch.mkdir(parents=True)
             mail_home = run_dir / "mail-push-home"
             mail_home.mkdir()
             (Path(ws) / "src").mkdir()
-            argv = sandbox_bwrap.wrap_engine_argv(
-                engine_argv=["true"],
-                cwd=ws,
-                env={},
-                engine="omp",
-                scratch_dir=str(scratch),
-                extra_rw_roots=[str(mail_home)],
-            )
-            self.assertIn(str(mail_home), argv)
-            for inside in (str(Path(ws) / "src"), str(Path(ws) / ".delegate")):
+            for inside in (
+                str(Path(ws) / "src"),
+                str(Path(ws) / ".delegate"),
+                str(mail_home),
+            ):
                 with self.assertRaises(DelegateError) as caught:
                     sandbox_bwrap.wrap_engine_argv(
                         engine_argv=["true"],
@@ -875,6 +880,17 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
                         extra_rw_roots=[inside],
                     )
                 self.assertEqual(caught.exception.error, "bwrap_bind_conflict", inside)
+            legacy_scratch = run_dir / "scratch"
+            legacy_scratch.mkdir()
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"],
+                    cwd=ws,
+                    env={},
+                    engine="omp",
+                    scratch_dir=str(legacy_scratch),
+                )
+            self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
             with self.assertRaises(DelegateError):
                 sandbox_bwrap.wrap_engine_argv(
                     engine_argv=["true"],
@@ -1019,6 +1035,7 @@ class EndToEndBwrapRunTests(CommandTestBase):
         fake.write_text(
             "#!/bin/sh\n"
             "if touch leak.txt 2>/dev/null; then echo write=allowed; else echo write=denied; fi\n"
+            'if touch "$TMPDIR/bwrap-temp" 2>/dev/null; then echo temp=allowed; else echo temp=denied; fi\n'
             "if [ -e .delegate/runs/del_old/prompt.txt ]; then echo registry=visible; "
             "else echo registry=hidden; fi\n"
             "if grep -q OLD-PROMPT-CANARY .delegate/runs/*/prompt.txt 2>/dev/null; then echo canary=leaked; "
@@ -1046,10 +1063,13 @@ class EndToEndBwrapRunTests(CommandTestBase):
         )
         observed = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
         self.assertEqual(observed.get("write"), "denied", raw)
+        self.assertEqual(observed.get("temp"), "allowed", raw)
         self.assertEqual(observed.get("registry"), "hidden")
         self.assertEqual(observed.get("canary"), "clean")
         self.assertEqual(observed.get("git"), "ok")
         self.assertFalse((workspace / "leak.txt").exists())
+        manifest = run_registry.load_run_manifest(workspace / ".delegate", payload["runId"])
+        self.assertTrue((Path(manifest["scratchPath"]) / "bwrap-temp").is_file())
 
     def test_boundary_construction_error_is_a_recorded_launch_failure(self):
         if not sandbox_bwrap.bwrap_available():
