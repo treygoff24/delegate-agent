@@ -265,6 +265,12 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         self.assertIn("Expecting value", event["validationError"])
         self.assertIsNone(dsl.structured_attempt("parse-key")["lastParsedCandidate"])
         resumed_dsl = self._dsl()
+        with self.assertRaises(ValueError):
+            resumed_dsl.state.resolve_agent_key("parse-key")
+        runtime.registry.append_jsonl(
+            dsl.state.journal_path,
+            {"type": "agent_finished", "key": "parse-key", "result": "stub", "simulated": True},
+        )
         self.assertEqual(
             resumed_dsl.structured_attempt("parse-key"),
             {

@@ -929,7 +929,11 @@ def emit_reject(
 def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
     latest: JsonObject | None = None
     for event in registry.iter_journal(root / registry.JOURNAL_FILE):
-        if event.get("type") != "gate":
+        if (
+            event.get("type") != "gate"
+            or event.get("simulated") is True
+            or event.get("dryRun") is True
+        ):
             continue
         key = event.get("key")
         result_hash = event.get("gateResultHash")
@@ -1161,6 +1165,8 @@ def _parse_args(raw: str | None) -> JsonValue:
 
 
 def _append_command_event(root: Path, event_type: str, **payload: JsonValue) -> None:
+    # Command events are explicit operator actions, not script dry-run events;
+    # emit_reject resolves simulated-only keys before reaching this writer.
     sequence = 0
     for event in registry.iter_journal(root / registry.JOURNAL_FILE):
         seq = event.get("seq")

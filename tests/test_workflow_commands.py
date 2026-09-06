@@ -4280,6 +4280,336 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(state.replay, {"live": "done"})
         self.assertEqual(state.budget.spent(), 1)
 
+    def test_legacy_dry_run_marker_variants_cannot_create_replay_authority(self) -> None:
+        root = self.workspace / "legacy-marker-replay"
+        root.mkdir()
+        events = [
+            {"seq": 1, "type": "budget", "key": "dry-budget", "dryRun": True},
+            {
+                "seq": 2,
+                "type": "agent_started",
+                "key": "dry-start",
+                "label": "dry-label",
+                "dryRun": True,
+            },
+            {
+                "seq": 3,
+                "type": "agent_child",
+                "key": "dry-child",
+                "workflowAgentKey": "dry-child",
+                "runId": "dry-run",
+                "engine": "codex",
+                "label": "dry-child-label",
+                "dryRun": True,
+            },
+            {
+                "seq": 4,
+                "type": "item_parked",
+                "name": "dry-item",
+                "scope": "root/soft-park/dry-item",
+                "dryRun": True,
+            },
+            {
+                "seq": 5,
+                "type": "agent_finished",
+                "key": "dry-finish",
+                "label": "dry-finish-label",
+                "result": "stub",
+                "simulated": True,
+            },
+            {"seq": 6, "type": "agent_rejected", "key": "dry-finish", "reason": "legacy"},
+            {"seq": 7, "type": "budget", "key": "live"},
+            {
+                "seq": 8,
+                "type": "agent_child",
+                "key": "live",
+                "workflowAgentKey": "live",
+                "runId": "live-run",
+                "engine": "codex",
+                "label": "live-label",
+            },
+            {
+                "seq": 9,
+                "type": "agent_started",
+                "key": "live",
+                "label": "live-label",
+                "scope": "root/live",
+            },
+            {"seq": 10, "type": "agent_finished", "key": "live", "result": "real"},
+            {
+                "seq": 11,
+                "type": "agent_child",
+                "workflowAgentKey": "live-child-only",
+                "runId": "live-child-run",
+                "engine": "codex",
+                "label": "live-child-label",
+            },
+            {
+                "seq": 12,
+                "type": "agent_rejected",
+                "key": "live-child-only",
+                "reason": "retry",
+            },
+            {
+                "seq": 13,
+                "type": "agent_child",
+                "workflowAgentKey": "dry-child-only",
+                "runId": "dry-child-only-run",
+                "engine": "codex",
+                "dryRun": True,
+            },
+            {"seq": 14, "type": "agent_rejected", "key": "dry-child-only", "reason": "legacy"},
+        ]
+        for event in events:
+            workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
+
+        state = workflow_runtime.WorkflowState(
+            wf_id="legacy-marker-replay",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+
+        self.assertEqual(state.claimed_keys, {"live"})
+        self.assertEqual(state.replay, {"live": "real"})
+        self.assertEqual(state.label_keys, {"live-label": "live"})
+        self.assertEqual(state.started_scopes, {"live": "root/live"})
+        self.assertEqual(state.tombstoned_keys, {"live-child-only"})
+        self.assertEqual(state.soft_parked_items, {})
+
+    def test_live_rejection_survives_simulated_history_in_both_replay_modes(self) -> None:
+        for replay_journal in (True, False):
+            with self.subTest(replay_journal=replay_journal):
+                root = self.workspace / f"mixed-live-reject-{replay_journal}"
+                root.mkdir()
+                events = [
+                    {"seq": 1, "type": "agent_finished", "key": "live", "result": "real"},
+                    {
+                        "seq": 2,
+                        "type": "agent_finished",
+                        "key": "live",
+                        "result": "stub",
+                        "simulated": True,
+                    },
+                    {"seq": 3, "type": "agent_rejected", "key": "live", "reason": "retry"},
+                ]
+                for event in events:
+                    workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
+                state = workflow_runtime.WorkflowState(
+                    wf_id=f"mixed-live-reject-{replay_journal}",
+                    workspace=self.workspace,
+                    root=root,
+                    script_path=root / workflow_registry.SCRIPT_FILE,
+                    config=json.loads(self.config_path.read_text(encoding="utf-8")),
+                    cli_argv=[sys.executable, str(CLI)],
+                    args=None,
+                    budget=workflow_runtime.Budget(None),
+                    replay_journal=replay_journal,
+                )
+                self.assertEqual(state.replay, {})
+                self.assertEqual(state.tombstoned_keys, {"live"})
+
+    def test_dry_run_rejection_and_custom_events_are_simulated_for_live_resume(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-reject", "defaults": {"engine": "codex", "mode": "safe"}}
+            value = agent("one", label="one")
+            reject("one", "retry")
+            log("ordinary custom event")
+            return value
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        rejection = next(event for event in events if event["type"] == "agent_rejected")
+        self.assertTrue(rejection["simulated"])
+        self.assertTrue(next(event for event in events if event["type"] == "log")["simulated"])
+
+        dry_state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+            dry_run=True,
+        )
+        ordinary = dry_state.append_event("custom", key="custom", simulated=False)
+        durable = dry_state.append_durable_event("custom_durable", key="durable", simulated=False)
+        dry_state.append_journal_only("custom_journal", simulated=False)
+        dry_state.append_event("gate", key="gate", result={"ok": True}, simulated=False)
+        self.assertTrue(ordinary["simulated"])
+        self.assertTrue(durable["simulated"])
+
+        live_state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        self.assertEqual(live_state.replay, {})
+        self.assertEqual(live_state.replay_keys, set())
+        self.assertEqual(live_state.claimed_keys, set())
+        self.assertEqual(live_state.started_without_result, set())
+        self.assertEqual(live_state.tombstoned_keys, set())
+        self.assertEqual(live_state.budget.spent(), 0)
+        self.assertIsNone(live_state.latest_gate_event())
+        self.assertIsNone(workflow_commands._latest_unapproved_gate_event(root))
+        live_event = live_state.append_event("live_custom", simulated=False)
+        self.assertFalse(live_event["simulated"])
+        all_events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        journal_event = next(event for event in all_events if event["type"] == "custom_journal")
+        self.assertTrue(journal_event["simulated"])
+
+    def test_cli_reject_refuses_dry_only_key_but_allows_live_key(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-reject-cli", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one")
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        before = journal.read_bytes()
+        dry_key = next(
+            json.loads(line)["key"]
+            for line in before.decode(encoding="utf-8").splitlines()
+            if json.loads(line).get("type") == "agent_started"
+        )
+
+        refused = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, dry_key, "--reason", "retry"]
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(json.loads(refused.stdout)["error"], "workflow_reject_unresolved")
+        self.assertEqual(journal.read_bytes(), before)
+
+        # Old dry runs left an unmarked rejection after simulated agent rows.
+        # That diagnostic residue is not a real agent the operator can reject.
+        sequence = max(
+            json.loads(line)["seq"] for line in before.decode(encoding="utf-8").splitlines()
+        )
+        workflow_registry.append_jsonl(
+            journal, {"seq": sequence + 1, "type": "agent_rejected", "key": dry_key}
+        )
+        before = journal.read_bytes()
+        legacy_refused = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, dry_key, "--reason", "retry"]
+        )
+        self.assertEqual(legacy_refused.returncode, 2)
+        self.assertEqual(json.loads(legacy_refused.stdout)["error"], "workflow_reject_unresolved")
+        self.assertEqual(journal.read_bytes(), before)
+
+        live_key = "live-control"
+        sequence = max(
+            json.loads(line)["seq"] for line in before.decode(encoding="utf-8").splitlines()
+        )
+        for event in (
+            {"type": "budget", "key": live_key},
+            {"type": "agent_started", "key": live_key, "label": "live-control"},
+            {"type": "agent_finished", "key": live_key, "result": "real"},
+        ):
+            sequence += 1
+            workflow_registry.append_jsonl(journal, {"seq": sequence, **event})
+        accepted = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, live_key, "--reason", "retry"]
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        rejection = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(rejection["type"], "agent_rejected")
+        self.assertEqual(rejection["key"], live_key)
+        self.assertNotIn("simulated", rejection)
+
+    def test_dry_run_kill_then_resume_does_not_replay_simulated_authority(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-kill-resume", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one")
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        live_budgets = [event for event in events if event["type"] == "budget"]
+        self.assertEqual(len(live_budgets), 2)
+        self.assertEqual(sum(event.get("simulated") is True for event in live_budgets), 1)
+        self.assertEqual(sum(event.get("simulated") is not True for event in live_budgets), 1)
+        self.assertEqual(
+            sum(event["type"] == "agent_retry" for event in events),
+            0,
+        )
+        self.assertEqual(sum(event["type"] == "gate" for event in events), 0)
+        self.assertFalse((root / workflow_registry.APPROVAL_FILE).exists())
+
+    def test_workflow_stubbed_preserves_requested_gate_and_marks_dry_run(self) -> None:
+        self.write_saved_workflow(
+            "stub-child",
+            """
+            meta = {"name": "child", "defaults": {"engine": "codex", "mode": "safe"}}
+            return "child"
+            """,
+        )
+        script = self.write_workflow(
+            """
+            meta = {"name": "stub", "defaults": {"engine": "codex", "mode": "safe"}}
+            return workflow("stub-child", gate=True)
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        stub = next(event for event in events if event["type"] == "workflow_stubbed")
+        self.assertTrue(stub["simulated"])
+        self.assertTrue(stub["dryRun"])
+        self.assertIs(stub["gate"], True)
+
     def test_resume_budget_override_does_not_mutate_while_locked(self) -> None:
         # R5: lock before budget mutation on resume.
         script = self.write_workflow(
