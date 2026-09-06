@@ -12,13 +12,14 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from unittest import mock
 
-from delegate_agent import runner
+from delegate_agent import run_registry, run_scratch, runner
 
 PROGRAM = """import json,os,socket,sys,tempfile
 from pathlib import Path
 result={}
-for name,path in zip(('scratch','workspace','source','metadata','symlink'),sys.argv[1:]):
+for name,path in zip(('scratch','workspace','source','metadata','symlink','sibling'),sys.argv[1:]):
     try:
         Path(path).write_text('probe')
         result[name]=True
@@ -48,6 +49,22 @@ result['instructions']=Path('AGENTS.md').read_text()
 print(json.dumps(result))
 """
 
+WORK_PROGRAM = """import json,os,tempfile
+from pathlib import Path
+result={}
+try:
+    Path(os.environ['TMPDIR'],'work.txt').write_text('ok')
+    result['scratch']=True
+except OSError:
+    result['scratch']=False
+try:
+    with tempfile.NamedTemporaryFile() as temporary:
+        result['tempfile']=Path(temporary.name).parent==Path(os.environ['TMPDIR'])
+except OSError:
+    result['tempfile']=False
+print(json.dumps(result))
+"""
+
 
 def probe(binary: str) -> dict:
     with (
@@ -60,9 +77,21 @@ def probe(binary: str) -> dict:
         source, workspace, home = root / "source", root / "review-copy", root / "home"
         for directory in (source, workspace, home):
             directory.mkdir()
-        scratch = source / ".delegate" / "runs" / "fixture" / "scratch"
-        scratch.mkdir(parents=True)
-        protected = (workspace / "sentinel", source / "sentinel", scratch.parent / "state.json")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            registry = run_registry.ensure_registry(source, workspace_kind="directory")
+            run_registry.register_run(
+                registry, harness="codex", run_id="del_20260906T000000Z_aaaaaa"
+            )
+            run_registry.register_run(
+                registry, harness="codex", run_id="del_20260906T000000Z_bbbbbb"
+            )
+            scratch = run_scratch.allocate(registry, "del_20260906T000000Z_aaaaaa")
+            sibling = run_scratch.allocate(registry, "del_20260906T000000Z_bbbbbb")
+        protected = (
+            workspace / "sentinel",
+            source / "sentinel",
+            run_registry.run_directory(registry, "del_20260906T000000Z_aaaaaa") / "state.json",
+        )
         for path in protected:
             path.write_text("unchanged")
         (workspace / "AGENTS.md").write_text("SCRATCH_PROBE_INSTRUCTIONS")
@@ -72,6 +101,7 @@ def probe(binary: str) -> dict:
             str(scratch / "result"),
             *(str(path) for path in protected),
             str(link),
+            str(sibling / "denied"),
             str(listener.getsockname()[1]),
         ]
         env = {
@@ -94,7 +124,15 @@ def probe(binary: str) -> dict:
         control = json.loads(run([sys.executable, "-c", PROGRAM, *paths]))
         assert all(
             control[name]
-            for name in ("scratch", "workspace", "source", "metadata", "symlink", "hardlink")
+            for name in (
+                "scratch",
+                "workspace",
+                "source",
+                "metadata",
+                "symlink",
+                "sibling",
+                "hardlink",
+            )
         ), control
         assert control["tempfile"] is True and control["network"] is True, control
         for path in protected:
@@ -153,7 +191,14 @@ def probe(binary: str) -> dict:
         assert observed["tempfile"] is True and observed["network"] is False, observed
         assert all(
             observed[name] is False
-            for name in ("workspace", "source", "metadata", "symlink", "hardlink")
+            for name in (
+                "workspace",
+                "source",
+                "metadata",
+                "symlink",
+                "sibling",
+                "hardlink",
+            )
         ), observed
         assert observed["cwd"] == str(workspace), observed
         assert observed["instructions"] == "SCRATCH_PROBE_INSTRUCTIONS", observed
@@ -166,6 +211,24 @@ def probe(binary: str) -> dict:
         )
         assert "SCRATCH_PROBE_INSTRUCTIONS" in rendered, "AGENTS instructions were not discovered"
         assert str(scratch) in rendered, "model context omitted the configured scratch root"
+
+        work_observed = json.loads(
+            run(
+                [
+                    binary,
+                    "sandbox",
+                    "-P",
+                    ":workspace",
+                    "-C",
+                    str(workspace),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    WORK_PROGRAM,
+                ]
+            )
+        )
+        assert work_observed == {"scratch": True, "tempfile": True}, work_observed
 
         # Regression control: a legacy writable_roots setting does NOT grant
         # writable scratch when the selected base policy remains read-only.
@@ -209,9 +272,11 @@ def probe(binary: str) -> dict:
             "unsandboxedControl": True,
             "scratchWritable": True,
             "workspaceSourceMetadataDenied": True,
+            "siblingScratchDenied": True,
             "symlinkEscapeDenied": True,
             "hardlinkEscapeDenied": True,
             "temporaryFilesUseScratch": True,
+            "workModeTemporaryFilesUseScratch": True,
             "networkDeniedWithPermissiveAmbientDefault": True,
             "cwdAndInstructionsPreserved": True,
             "modelVisibleInstructionsPreserved": True,

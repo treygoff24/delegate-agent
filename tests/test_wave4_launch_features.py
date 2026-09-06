@@ -295,7 +295,11 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         config_path = self.write_config(config)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_CONFIG": str(config_path), "HOME": self._test_home},
+            clear=False,
+        ):
             code = self.delegate.main(
                 ["--cwd", repo.name, "--json", "cursor", "safe", "hello"],
                 stdout=stdout,
@@ -304,8 +308,8 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         self.assertEqual(code, 0, stderr.getvalue())
         payload = json.loads(stdout.getvalue())
         run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
-        scratch = run_path / "scratch"
-        expected_scratch = scratch.resolve()
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        expected_scratch = Path(manifest["scratchPath"])
         stdout_log = (run_path / "stdout.log").read_text(encoding="utf-8")
         self.assertIn(f"TMPDIR={expected_scratch}", stdout_log)
         self.assertIn(f"TMP={expected_scratch}", stdout_log)
@@ -321,7 +325,11 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         config_path = self.write_config(config)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_CONFIG": str(config_path), "HOME": self._test_home},
+            clear=False,
+        ):
             code = self.delegate.main(
                 ["--cwd", repo.name, "--json", "codex", "safe", "hello"],
                 stdout=stdout,
@@ -337,7 +345,7 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         self.assertIn("--strict-config", argv)
         permissions = manifest["scratchPermissions"]
         self.assertEqual(permissions["base"], ":read-only")
-        self.assertEqual(permissions["writableRoots"], [str((run_path / "scratch").resolve())])
+        self.assertEqual(permissions["writableRoots"], [manifest["scratchPath"]])
         self.assertIn(f'default_permissions="{permissions["profile"]}"', argv)
         self.assertEqual(payload["scratchPermissions"], permissions)
 

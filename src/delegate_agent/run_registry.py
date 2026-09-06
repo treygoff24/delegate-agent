@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io, run_status, terminal_states
+from delegate_agent import archived_logs, private_io, run_scratch, run_status, terminal_states
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
@@ -1151,10 +1151,37 @@ def _run_prune_ref(
     return entry
 
 
-def _remove_run_record_artifacts(registry_root: Path, run_id: str) -> None:
+def _remove_run_record_artifacts(
+    registry_root: Path,
+    run_id: str,
+    manifest: JsonObject | None,
+    manifest_error: RegistryJsonError | None,
+) -> None:
     run_path = run_directory(registry_root, run_id)
     if run_path.is_symlink():
         raise OSError(f"refusing to prune symlinked run directory: {run_path}")
+    if manifest_error is not None:
+        raise OSError(
+            f"refusing to prune run {run_id}: unreadable manifest must be preserved: "
+            f"{manifest_error}"
+        ) from manifest_error
+    if manifest is None:
+        # A genuinely absent legacy manifest carries no deletion pointer. The
+        # deterministic current path is still safe to inspect/remove because
+        # it is derived from registry identity and run id, never record bytes.
+        run_scratch.remove_owned(registry_root, run_id)
+    elif "scratchPath" in manifest:
+        recorded = manifest.get("scratchPath")
+        if not isinstance(recorded, str) or not recorded:
+            raise OSError(f"refusing to prune run {run_id}: invalid recorded scratch path")
+        expected = run_scratch.expected_path(registry_root, run_id)
+        recorded_path = Path(os.path.abspath(recorded))
+        if recorded_path != expected:
+            raise OSError(
+                f"refusing to prune run {run_id}: recorded scratch path {recorded_path} "
+                f"does not match current owned path {expected}"
+            )
+        run_scratch.remove_owned(registry_root, run_id)
     if run_path.exists():
         shutil.rmtree(run_path)
     archived_logs.archive_path(registry_root, run_id).unlink(missing_ok=True)
@@ -1293,7 +1320,12 @@ def prune_runs(
                     _run_prune_ref(index, run_id, effective_status, reason="non_terminal")
                 )
                 continue
-            manifest = load_run_manifest_or_none(registry_root, run_id)
+            manifest_error: RegistryJsonError | None = None
+            try:
+                manifest = load_run_manifest(registry_root, run_id)
+            except RegistryJsonError as exc:
+                manifest = None
+                manifest_error = exc
             activity = run_status.activity_datetime(state, manifest, run_id)
             if activity is None:
                 skipped.append(
@@ -1311,7 +1343,7 @@ def prune_runs(
             if dry_run:
                 continue
             try:
-                _remove_run_record_artifacts(registry_root, run_id)
+                _remove_run_record_artifacts(registry_root, run_id, manifest, manifest_error)
             except OSError as exc:
                 errors.append({**candidate, "code": "record_remove_failed", "message": str(exc)})
                 continue

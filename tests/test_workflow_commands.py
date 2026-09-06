@@ -202,7 +202,9 @@ class WorkflowCommandTests(unittest.TestCase):
             "    sys.exit(0)\n"
             "structured = '--output-schema' in sys.argv or 'Return ONLY' in prompt\n"
             "attempt_file = os.environ.get('FAKE_CODEX_ATTEMPT_FILE')\n"
-            "if structured and attempt_file:\n"
+            "if structured and os.environ.get('FAKE_CODEX_NULL'):\n"
+            "    text = 'null'\n"
+            "elif structured and attempt_file:\n"
             "    try:\n"
             "        attempt = int(open(attempt_file, encoding='utf-8').read() or '0') + 1\n"
             "    except FileNotFoundError:\n"
@@ -1207,6 +1209,288 @@ class WorkflowCommandTests(unittest.TestCase):
         events = self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"])
         self.assertIn(
             "agent_cache_hit", {event["type"] for event in json.loads(events.stdout)["events"]}
+        )
+
+    def test_schema_allowed_null_agent_is_success_and_replays(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-success", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("structured null", schema={"type": "null"}, retries=0)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        finished = [event for event in events if event.get("type") == "agent_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertIsNone(finished[0]["result"])
+        self.assertNotIn("exhausted", finished[0])
+        self.assertNotIn("agent_structured_exhausted", {event["type"] for event in events})
+        self.assertIsNone(
+            json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)["result"]
+        )
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        events_after = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        self.assertIn("agent_cache_hit", {event["type"] for event in events_after})
+        self.assertEqual(
+            len(json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]),
+            1,
+        )
+
+    def test_schema_allowed_null_stops_engine_chain(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-chain", "defaults": {"mode": "safe"}}
+            return agent("structured null", engine=["codex", "droid"], schema={"type": "null"}, retries=0)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["harness"], "codex")
+
+    def test_schema_allowed_null_followup_is_success_and_cached(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-followup", "defaults": {"engine": "codex", "mode": "work"}}
+            agent("prior", label="prior", resumable=True)
+            return followup("prior", "structured null", schema={"type": "null"}, retries=0)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1", "FAKE_CODEX_THREAD_ID": "th_null_followup"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr or launch.stdout)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        followup_finished = [
+            event
+            for event in events
+            if event.get("type") == "agent_finished" and event.get("scope", "").endswith("seq#1")
+        ]
+        self.assertTrue(followup_finished)
+        self.assertIsNone(followup_finished[-1]["result"])
+        self.assertNotIn("exhausted", followup_finished[-1], events)
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        events_after = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        self.assertGreaterEqual(
+            sum(event.get("type") == "agent_cache_hit" for event in events_after), 2
+        )
+
+    def test_resume_preserves_labeled_schema_null_prior_for_followup(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-prior-followup", "defaults": {"engine": "codex", "mode": "work"}}
+            agent("prior null", label="prior", schema={"type": "null"}, resumable=True, retries=0)
+            return followup("prior", "followup null", schema={"type": "null"}, retries=0)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1", "FAKE_CODEX_THREAD_ID": "th_null_prior"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr or launch.stdout)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        initial_events = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        initial_started = [
+            event for event in initial_events if event.get("type") == "agent_started"
+        ]
+        self.assertEqual(len(initial_started), 2)
+        self.assertIsNone(
+            json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)["result"]
+        )
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr or resumed.stdout)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        events_after = [
+            json.loads(line)
+            for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
+        ]
+        self.assertEqual(
+            len([event for event in events_after if event.get("type") == "agent_started"]),
+            2,
+        )
+        self.assertGreaterEqual(
+            sum(event.get("type") == "agent_cache_hit" for event in events_after), 2
+        )
+
+    def test_resume_adopts_schema_allowed_null_without_exhaustion(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-adopt", "defaults": {"engine": "codex", "mode": "work"}}
+            return agent("structured null", schema={"type": "null"}, resumable=True)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr or launch.stdout)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        events = [json.loads(line) for line in journal.read_text().splitlines()]
+        journal.write_text(
+            "".join(
+                json.dumps(event, sort_keys=True) + "\n"
+                for event in events
+                if event["type"] not in {"agent_finished", "workflow_finished"}
+            ),
+            encoding="utf-8",
+        )
+        (root / workflow_registry.RESULT_FILE).unlink()
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        adopted = [
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("type") == "agent_adopted"
+        ]
+        self.assertTrue(adopted)
+        self.assertIsNone(adopted[-1]["result"])
+        self.assertIsNone(
+            json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)["result"]
+        )
+        self.assertEqual(
+            len(json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]),
+            1,
+        )
+
+    def test_resume_adopts_authoritative_null_for_exhausted_cached_key(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "null-exhausted-adopt", "defaults": {"engine": "codex", "mode": "work"}}
+            agent("prior null", label="prior", schema={"type": "null"}, resumable=True, retries=0)
+            return followup("prior", "followup null", schema={"type": "null"}, retries=0)
+            """
+        )
+        env = {"FAKE_CODEX_NULL": "1", "FAKE_CODEX_THREAD_ID": "th_null_exhausted"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr or launch.stdout)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        events = [json.loads(line) for line in journal.read_text().splitlines()]
+        prior_key = next(
+            event["key"]
+            for event in events
+            if event.get("type") == "agent_finished" and event.get("scope", "").endswith("seq#0")
+        )
+        for event in events:
+            if event.get("type") == "agent_finished" and event.get("key") == prior_key:
+                event["exhausted"] = True
+        journal.write_text(
+            "".join(
+                json.dumps(event, sort_keys=True) + "\n"
+                for event in events
+                if event.get("type") != "workflow_finished"
+            ),
+            encoding="utf-8",
+        )
+        (root / workflow_registry.RESULT_FILE).unlink()
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr or resumed.stdout)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        final_events = [json.loads(line) for line in journal.read_text().splitlines()]
+        adopted = [event for event in final_events if event.get("type") == "agent_adopted"]
+        self.assertTrue(adopted)
+        self.assertIsNone(adopted[-1]["result"])
+        prior_settlements = [
+            event
+            for event in final_events
+            if event.get("type") == "agent_finished" and event.get("key") == prior_key
+        ]
+        self.assertNotIn("exhausted", prior_settlements[-1])
+        self.assertEqual(
+            len(json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]),
+            2,
         )
 
     def test_nested_workflow_events_keep_unique_monotonic_sequences(self) -> None:
