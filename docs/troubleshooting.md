@@ -552,7 +552,7 @@ Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 Integration tests that launch real child agents should be separate from required CI.

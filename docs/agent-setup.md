@@ -253,7 +253,7 @@ where needed:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 Real runtime authentication is only required for integration smoke tests that intentionally launch a child agent.
