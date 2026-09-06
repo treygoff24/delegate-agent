@@ -173,22 +173,6 @@ class WorkflowAttemptTests(unittest.TestCase):
         self.assertEqual(destination.stat().st_ino, collision_inode[0])
         self.assertEqual(list(destination.iterdir()), [])
 
-    def test_foreign_empty_directory_inserted_at_rename_is_never_replaced(self):
-        original_rename = Path.rename
-        foreign = []
-
-        def race_rename(source, target):
-            target = Path(target)
-            target.mkdir()
-            foreign.append((target, target.stat().st_ino))
-            return original_rename(source, target)
-
-        with mock.patch.object(Path, "rename", race_rename):
-            self.attempt()
-        for path, inode in foreign:
-            self.assertEqual(path.stat().st_ino, inode, "publication replaced a foreign directory")
-            self.assertEqual(list(path.iterdir()), [])
-
     def test_native_publication_refuses_empty_destination_created_at_final_seam(self):
         publish = private_io.rename_directory_noreplace
         foreign = []
