@@ -2034,18 +2034,15 @@ def _codex_argv_with_scratch(
 
 
 def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
-    """Mail-push private homes must stay writable inside the bwrap boundary."""
+    """Mail-push private homes must stay writable inside the bwrap boundary.
+
+    They live in neutral run scratch, outside the read-only workspace, so the
+    boundary accepts them as an ordinary external writable root.
+    """
     if not ctx.mail_push:
         return []
-    run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
-    return [
-        str(run_path / name)
-        for name in (
-            mail_push.MAIL_PUSH_CODEX_HOME_NAME,
-            mail_push.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
-        )
-        if (run_path / name).is_dir()
-    ]
+    scratch_root = mail_push.mail_push_scratch_root(ctx.registry_root, ctx.run_id)
+    return [str(scratch_root)] if scratch_root.is_dir() else []
 
 
 def _launch_tracked_process(

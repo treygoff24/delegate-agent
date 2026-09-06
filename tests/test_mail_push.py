@@ -154,9 +154,10 @@ class MailPushTests(unittest.TestCase):
         self.assertTrue(Path(codex.codex_home or "").joinpath("auth.json").is_file())
         self.assertTrue(
             Path(codex.codex_home or "").is_relative_to(
-                run_registry.run_directory(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id)
             )
         )
+        self.assertFalse(Path(codex.codex_home or "").is_relative_to(self.workspace.resolve()))
         self.assertFalse(
             (mail.boxes_root(self.registry_root) / self.run_id / "codex-home").exists()
         )
@@ -286,9 +287,10 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertTrue(
             fallback_home.is_relative_to(
-                run_registry.run_directory(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id)
             )
         )
+        self.assertFalse(fallback_home.is_relative_to(self.workspace.resolve()))
 
     def test_fallback_home_failure_reverts_to_pull_without_aborting_launch(self):
         source = self.workspace / "source-codex-home"
