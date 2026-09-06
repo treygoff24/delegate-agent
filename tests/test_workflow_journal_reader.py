@@ -224,7 +224,7 @@ class WorkflowJournalReaderTests(unittest.TestCase):
                     reads.assert_called_once_with(self.path)
                     self.assertEqual(state.sequence, max(10, last_seq))
                     self.assertEqual(state.replay["real"], {"ok": True})
-                    self.assertEqual("legacy" in state.replay, include_simulated)
+                    self.assertNotIn("legacy", state.replay)
                     self.assertNotIn("simulated", state.replay)
 
     def test_watch_streams_active_appends_and_keeps_legacy_json_envelope(self) -> None:

@@ -593,6 +593,14 @@ class CompletedChild:
     resumable: bool
 
 
+_AGENT_AUTHORITY_EVENTS = frozenset({"budget", "agent_started", "agent_child", "agent_finished"})
+
+
+def _is_simulated_event(event: JsonObject) -> bool:
+    """Return whether a journal row must stay outside live authority."""
+    return event.get("simulated") is True or event.get("dryRun") is True
+
+
 @dataclass
 class WorkflowState:
     wf_id: str
@@ -667,12 +675,16 @@ class WorkflowState:
         if isinstance(last_seq, int):
             self.sequence = max(self.sequence, last_seq)
         simulated_keys: set[str] = set()
+        live_authority_keys: set[str] = set()
         child_info: dict[str, tuple[str, str, bool, str | None]] = {}
         for event in registry.iter_journal(self.journal_path):
             seq = event.get("seq")
             if isinstance(seq, int):
                 self.sequence = max(self.sequence, seq)
-            if event.get("simulated") is True:
+            if _is_simulated_event(event):
+                key = event.get("key") or event.get("workflowAgentKey")
+                if isinstance(key, str):
+                    simulated_keys.add(key)
                 continue
             etype = event.get("type")
             if etype == "agent_child":
@@ -706,6 +718,8 @@ class WorkflowState:
             # correct metadata, so a separate agent_adopted handler here would
             # double-register the label and break followup() after a resume.
             key = event.get("key")
+            if etype == "agent_child" and not isinstance(key, str):
+                key = event.get("workflowAgentKey")
             if not isinstance(key, str):
                 continue
             label = event.get("label")
@@ -718,17 +732,17 @@ class WorkflowState:
             scope = event.get("scope")
             if event.get("type") == "agent_started" and isinstance(scope, str):
                 self.started_scopes[key] = scope
-            is_simulated = event.get("simulated") is True or event.get("dryRun") is True
-            if is_simulated:
-                simulated_keys.add(key)
-            if not include_simulated and is_simulated:
+            if isinstance(etype, str) and etype in _AGENT_AUTHORITY_EVENTS:
+                # A legacy unmarked rejection following only simulated rows
+                # must not resurrect a tombstone; any real agent/budget row
+                # makes the key genuinely live and keeps explicit rejection
+                # semantics intact.
+                live_authority_keys.add(key)
+            if not include_simulated and key in simulated_keys and key not in live_authority_keys:
                 continue
-            if not include_simulated and key in simulated_keys:
-                if event.get("type") in {"budget", "agent_started"}:
-                    simulated_keys.discard(key)
-                else:
-                    continue
             if event.get("type") == "agent_rejected":
+                if key in simulated_keys and key not in live_authority_keys:
+                    continue
                 # A tombstone only invalidates a result that exists before it.
                 # Repeated tombstones and no-result tombstones are durable
                 # no-ops, preserving any unfinished adoption state.  The
@@ -791,15 +805,15 @@ class WorkflowState:
         """
         with self.journal_lock:
             self.sequence += 1
-            registry.append_jsonl(
-                self.journal_path,
-                {
-                    "seq": self.sequence,
-                    "type": event_type,
-                    "at": run_registry.utc_now_iso(),
-                    **payload,
-                },
-            )
+            event: JsonObject = {
+                "seq": self.sequence,
+                "type": event_type,
+                "at": run_registry.utc_now_iso(),
+                **payload,
+            }
+            if self.dry_run:
+                event["simulated"] = True
+            registry.append_jsonl(self.journal_path, event)
 
     def append_durable_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         """Append and fsync a journal event without relying on its registry list."""
@@ -815,6 +829,11 @@ class WorkflowState:
                 "at": run_registry.utc_now_iso(),
                 **payload,
             }
+            if self.dry_run:
+                # Dry-run journal rows are diagnostic only.  Set this after
+                # caller payload so a script cannot opt an event back into
+                # live replay with ``simulated=False``.
+                event["simulated"] = True
             fd = run_registry.open_private_file(
                 self.journal_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY
             )
@@ -857,6 +876,10 @@ class WorkflowState:
                 "at": run_registry.utc_now_iso(),
                 **payload,
             }
+            if self.dry_run:
+                # See append_durable_event: dry-run callers cannot override
+                # the simulated marker through event payloads.
+                event["simulated"] = True
             event_key = event.get("key")
             event_label = event.get("label")
             if (
@@ -904,6 +927,8 @@ class WorkflowState:
     ) -> JsonObject | None:
         latest: JsonObject | None = None
         for event in registry.iter_journal(self.journal_path):
+            if _is_simulated_event(event):
+                continue
             event_hash = event.get("gateResultHash")
             if (
                 event.get("type") == "gate"
@@ -917,7 +942,11 @@ class WorkflowState:
         with self.journal_lock:
             latest: JsonObject | None = None
             for event in registry.iter_journal(self.journal_path):
-                if event.get("type") == "gate" and isinstance(event.get("key"), str):
+                if (
+                    not _is_simulated_event(event)
+                    and event.get("type") == "gate"
+                    and isinstance(event.get("key"), str)
+                ):
                     latest = event
             return latest
 
@@ -961,6 +990,8 @@ class WorkflowState:
                     "result": result,
                     "gateResultHash": result_hash,
                 }
+                if self.dry_run:
+                    event["simulated"] = True
                 # ``gate`` is in DURABLE_EVENT_TYPES, so append_jsonl flushes
                 # and fsyncs before anything below can close admission.
                 registry.append_jsonl(self.journal_path, event)
@@ -1052,12 +1083,13 @@ class WorkflowState:
             }
             for event in registry.iter_journal(self.journal_path):
                 event_type = event.get("type")
-                if not (
-                    isinstance(event_type, str)
-                    and (event_type.startswith("agent_") or event_type == "budget")
-                ):
+                if not isinstance(event_type, str) or event_type not in _AGENT_AUTHORITY_EVENTS:
+                    continue
+                if not self.dry_run and _is_simulated_event(event):
                     continue
                 key = event.get("key")
+                if event_type == "agent_child" and not isinstance(key, str):
+                    key = event.get("workflowAgentKey")
                 if isinstance(key, str):
                     known.add(key)
             return known
@@ -1083,9 +1115,7 @@ class WorkflowState:
             for event in registry.iter_journal(self.journal_path):
                 if event.get("key") != key:
                     continue
-                if not self.replay_journal and (
-                    event.get("simulated") is True or event.get("dryRun") is True
-                ):
+                if not self.dry_run and _is_simulated_event(event):
                     continue
                 if event.get("type") == "agent_rejected":
                     cached = False
@@ -1204,6 +1234,8 @@ class WorkflowState:
                 "at": fired_at,
                 "reason": reason,
             }
+            if self.dry_run:
+                event["simulated"] = True
             with contextlib.suppress(OSError):
                 registry.append_jsonl(self.journal_path, event)
             # A deliberately removed status file is itself the watchdog signal.
@@ -1576,10 +1608,10 @@ class WorkflowDsl:
             return None
         key = key_or_label
         if key not in getattr(self, "_structured_attempts", {}):
-            try:
+            # Exhaustion diagnostics can exist without a replayable agent row.
+            # Read the exact key without granting reject authority.
+            with contextlib.suppress(ValueError):
                 key, _label = self.state.resolve_agent_key(key_or_label)
-            except ValueError:
-                return None
         lock = getattr(self, "_structured_attempt_lock", None)
         if lock is None:
             return None
@@ -1590,6 +1622,8 @@ class WorkflowDsl:
         with self.state.journal_lock:
             for event in reversed(registry.iter_journal(self.state.journal_path)):
                 if event.get("key") != key:
+                    continue
+                if not self.state.dry_run and _is_simulated_event(event):
                     continue
                 if event.get("type") == "agent_structured_exhausted":
                     return {
@@ -2100,7 +2134,9 @@ class WorkflowDsl:
                     "gate": gate,
                 }
             )
-            self.state.append_event("workflow_stubbed", scope=scope, child=name, gate=gate)
+            self.state.append_event(
+                "workflow_stubbed", scope=scope, child=name, gate=gate, dryRun=True
+            )
             return None
         child_state = WorkflowState(
             wf_id=self.state.wf_id,
@@ -4049,6 +4085,8 @@ def _workflow_agent_run_resumable(workspace: Path, run_id: str) -> bool:
 
 def _workflow_agent_child_event_exists(journal_path: Path, run_id: str, key: str) -> bool:
     for event in registry.iter_journal(journal_path):
+        if _is_simulated_event(event):
+            continue
         if event.get("type") != "agent_child" or event.get("runId") != run_id:
             continue
         event_key = event.get("workflowAgentKey") or event.get("key")
