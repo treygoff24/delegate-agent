@@ -28,6 +28,6 @@ Commands run:
 ## Gate
 
 - [ ] `python3 -m compileall -q src tests bin`
-- [ ] `python3 -m unittest discover -s tests -t .`
+- [ ] `python3 -m pytest -q`
 - [ ] `ruff check . && ruff format --check .`
 - [ ] `README.md`, `docs/`, and the `CHANGELOG.md` Unreleased section updated for any behavior, flag, or config change

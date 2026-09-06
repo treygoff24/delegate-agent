@@ -52,13 +52,13 @@ python3 -m pip install -e .
 python3 bin/delegate.py --json describe
 ```
 
-Run the test suite with unittest (the validation gate), or the pytest
-accelerator for a faster local loop:
+Run the test suite with pytest, the validation gate. Add xdist workers for a
+faster local loop:
 
 ```bash
 python3 -m pip install -e ".[dev]"
-python3 -m unittest discover -s tests -t .   # gate
-pytest -n 8 --dist loadfile                  # fast accelerator, not a gate
+python3 -m pytest -q                # gate
+python3 -m pytest -n 8 --dist loadfile   # same gate, in parallel
 ```
 
 CI validates on Linux with Python 3.11, 3.12, 3.13, and 3.14, and on macOS with Python 3.12. Windows support is not claimed until it is covered by tests.

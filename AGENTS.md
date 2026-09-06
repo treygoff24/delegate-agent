@@ -18,36 +18,33 @@ repository change.
 
 ## Validation gate
 
-Narrowest relevant check first, then the four commands CI runs:
+Pytest is the only test runner. Narrowest relevant check first, then the four
+commands CI runs:
 
 ```bash
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 python3 -m compileall -q src tests bin
 ruff check .
 ruff format --check .
 ```
 
-`-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
-`sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
-summary to stderr — pipe with `2>&1` when capturing output.
+`tests/acceptance.sh` runs those four in order from any checkout root, and
+`scripts/gate.sh` runs the pinned-tooling form through `uv`.
 
-`ruff` comes from the `dev` extra (`python3 -m pip install -e ".[dev]"`);
-`ruff format .` applies formatting.
+Collection imports `tests/__init__.py`, which shims `src` onto `sys.path` and
+strips ambient env. `pyproject.toml` sets `testpaths = ["tests"]`, so a test
+file placed anywhere else is never collected.
 
-Fast local accelerator (not a gate): the dev extra also ships pytest +
-pytest-xdist, so the same suite can run in parallel with
+`pytest` and `ruff` come from the `dev` extra
+(`python3 -m pip install -e ".[dev]"`); `ruff format .` applies formatting.
+
+The dev extra also ships pytest-xdist, so the same gate can run in parallel:
 
 ```bash
 uv run --extra dev pytest -n 8 --dist loadfile
 ```
 
-`scripts/test-parity.sh` checks that both runners agree on the executed and
-skipped counts (ran == passed + skipped, skips equal) — a drift receipt, not a
-proof of identical collection; run it after adding tests that use
-process-global state or skip conditions.
-
-Use an explicit `-n` (never `-n auto`) on shared machines, and treat unittest
-as the source of truth when the two disagree.
+Use an explicit `-n` (never `-n auto`) on shared machines.
 
 ## Runtime boundaries
 
