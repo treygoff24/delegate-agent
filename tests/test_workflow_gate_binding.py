@@ -97,6 +97,69 @@ class GateApprovalBindingTests(unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_approve_repairs_a_clobbered_gate_projection_on_disk(self) -> None:
+        parked = self._park({"ok": False, "reason": "clobbered"})
+        # status.json is a projection and can be lost or overwritten while a
+        # supervisor drains a gate. The journal is authoritative.
+        registry.write_json(
+            self.root / registry.STATUS_FILE,
+            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+        )
+        with (
+            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
+            mock.patch.object(runtime, "detach_supervisor", side_effect=OSError("injected")),
+            self.assertRaises(OSError),
+        ):
+            commands.emit_approve(
+                commands.WorkflowCommand("approve", wf_id=self.wf_id),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+            )
+        # The repair is durable: a resume that fails afterwards rolls back to
+        # the recovered projection, not to the clobbered one.
+        status = registry.read_json(self.root / registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "paused")
+        self.assertIs(status.get("ok"), True)
+        self.assertEqual(status.get("gateKey"), parked.gate_key)
+        self.assertEqual(status.get("gateResultHash"), parked.result_hash)
+        self.assertIsInstance(status.get("updatedAt"), str)
+
+    def test_recovered_legacy_gate_never_writes_a_null_result_hash(self) -> None:
+        # A gate event from an older journal carries no gateResultHash. The key
+        # has to stay absent from the projection rather than become null.
+        registry.append_jsonl(
+            self.root / registry.JOURNAL_FILE,
+            {
+                "seq": 1,
+                "type": "gate",
+                "at": "2026-01-01T00:00:00Z",
+                "key": "legacy-gate",
+                "child": "child.py",
+                "result": {"ok": False},
+            },
+        )
+        registry.write_json(
+            self.root / registry.STATUS_FILE,
+            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+        )
+        with (
+            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
+            mock.patch.object(runtime, "detach_supervisor"),
+        ):
+            result = commands.emit_run(
+                commands.WorkflowCommand("run", resume=self.wf_id),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                approve_gate=True,
+            )
+        self.assertEqual(result, 0)
+        status = registry.read_json(self.root / registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("gateKey"), "legacy-gate")
+        self.assertNotIn("gateResultHash", status)
+
     def test_checkpoint_key_stable_but_changed_evidence_needs_new_approval(self) -> None:
         first = self._park({"ok": False, "reason": "first"})
         repeated = self._park({"ok": False, "reason": "first"})
