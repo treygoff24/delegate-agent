@@ -253,14 +253,13 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
         ):
             raise _error("attempt effective config differs from its allowed base projection")
         return WorkflowAttempt(path, config_path, effective, metadata)
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        TypeError,
-        KeyError,
-        delegate_config.ConfigError,
-    ) as exc:
+    except (OSError, ValueError, delegate_config.ConfigError) as exc:
+        # Only the failure modes of a bad artifact are translated: unreadable
+        # or unlinkable files (OSError), untrustworthy JSON
+        # (private_io.RegistryJsonError, a ValueError) and refused config
+        # (ConfigError). A TypeError, KeyError or RuntimeError from this
+        # validator is a coding defect, and reporting it as a tampered attempt
+        # would hide it behind an operator-facing integrity message.
         raise _error("could not validate workflow attempt artifact") from exc
 
 
