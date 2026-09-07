@@ -36,7 +36,7 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 
 - codex-78 = dlg-j0q (confirmed): audit found no volatile field; test-only merge.
 
-- codex-72 = dlg-278.1 (Astra, confirmed): merged d8dc170 (workflow_pinning). Astra found a second seal-before-rename site in workflow_attempts.py:172-174; followup launched on codex-72 (envelope /var/tmp/dlg-lanes/runs/278-1-fu.json) with the write boundary extended. Bead stays open until that lands.
+- codex-72 = dlg-278.1 (Astra, confirmed): merged d8dc170 (workflow_pinning). Astra found a second seal-before-rename site in workflow_attempts.py:172-174; followup launched on codex-72 (envelope /var/tmp/dlg-lanes/runs/278-1-fu.json) with the write boundary extended. Followup e0df7cf merged. Bead stays open until macOS CI runs (needs a gated GitHub push).
 
 ## Failure modes seen
 - Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
