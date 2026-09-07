@@ -108,7 +108,7 @@ Delegate does not control:
 Safe mode is for review and investigation.
 
 - Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
-- Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only, and emits `--mode ask`, which Cursor documents as read-only. Live evidence: a child run under that mode reports that shell access is blocked.
+- Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only. It does **not** select a Cursor read-only mode: the isolated workspace copy and the safe-review prompt prefix are what make a Cursor safe run review-shaped, and neither is harness-enforced. `cursor call --read-only` is the one Cursor path that takes `--mode ask`, which Cursor documents as read-only and which a live child confirmed by reporting shell access blocked.
 - Codex safe sets `-c approval_policy="never"` inside the `exec` scope; the
   global `--ask-for-approval` flag is declared on the interactive TUI and never
   reached `codex exec` at all. Headless Codex defaults to never asking anyway, so

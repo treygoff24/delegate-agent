@@ -216,7 +216,7 @@ including Droid:
 
 ```bash
 delegate devin work --model implementer "Implement the scoped change and report it."
-delegate droid work --model custom:my-model "Implement the scoped change."
+delegate droid work --model custom:My-Model-0 "Implement the scoped change."
 delegate --json dry-run codex safe --model fast "Review this repository. Do not edit files."
 ```
 
