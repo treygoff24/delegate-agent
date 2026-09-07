@@ -69,3 +69,6 @@ docs/briefs/
 
 # plan integration worktrees (writing-plans compiled runs)
 .worktrees/
+
+# Raw agent/runtime audit artifacts; retain concise sanitized reports instead.
+/docs/receipts/
