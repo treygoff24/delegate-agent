@@ -1175,11 +1175,21 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertLessEqual(len(sample), self.events.MALFORMED_SAMPLE_CHARS)
         self.assertNotIn("sk-ant-api03-AAAA", sample)
 
-    def test_malformed_lines_alone_do_not_reach_the_raw_stdout_fallback(self):
-        """The runner reads structured_events_seen to decide the parser owned stdout."""
+    def test_a_malformed_line_is_counted_apart_from_parsed_events(self):
+        """structured_events_seen decides whether the parser owned stdout; a plain
+        line did not come from the parser, so it must not inflate that count."""
         acc = self.events.StreamAccumulator(harness="kimi")
         acc.ingest_line("kimi: fatal: no credentials configured")
-        self.assertGreater(acc.structured_events_seen, 0)
+        self.assertEqual(acc.structured_events_seen, 0)
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "")
+
+    def test_a_parsed_event_beside_a_malformed_line_still_counts_as_structured(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: warning: retrying")
+        acc.ingest_line(json.dumps({"type": "tool_call", "toolName": "read"}))
+        self.assertEqual(acc.structured_events_seen, 1)
+        self.assertEqual(acc.malformed_lines, 1)
         self.assertEqual(acc.assistant_text, "")
 
     def test_a_later_valid_assistant_message_clears_the_textless_state(self):
