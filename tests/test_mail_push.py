@@ -279,8 +279,6 @@ class MailPushTests(unittest.TestCase):
         fallback_env = mail.mail_push_fallback_env_overrides(
             provision,
             {},
-            self.registry_root,
-            self.run_id,
         )
         fallback_home = Path(fallback_env["CODEX_HOME"])
         self.assertNotEqual(fallback_home, Path(provision.codex_home or ""))

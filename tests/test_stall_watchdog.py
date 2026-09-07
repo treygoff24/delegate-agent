@@ -281,6 +281,73 @@ class CodexStreamTests(unittest.TestCase):
 
 
 class OtherHarnessTests(unittest.TestCase):
+    def test_opencode_running_tool_holds_until_matching_completion(self):
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="opencode")
+        watchdog.observe_line(
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {"status": "running"},
+                    },
+                }
+            ),
+            now=0.0,
+        )
+
+        self.assertEqual(watchdog.tools_in_flight, 1)
+        self.assertIsNone(watchdog.stalled_for(600.0))
+
+        watchdog.observe_line(
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {"status": "completed"},
+                    },
+                }
+            ),
+            now=600.0,
+        )
+        self.assertEqual(watchdog.tools_in_flight, 0)
+        self.assertEqual(watchdog.stalled_for(1_200.0), 600.0)
+
+    def test_grok_tool_call_holds_until_matching_update(self):
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="grok")
+        watchdog.observe_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "toolCallId": "call_1",
+                    "name": "read_file",
+                    "rawInput": {"target_file": "PLAN.md"},
+                }
+            ),
+            now=0.0,
+        )
+
+        self.assertEqual(watchdog.tools_in_flight, 1)
+        self.assertIsNone(watchdog.stalled_for(600.0))
+
+        watchdog.observe_line(
+            json.dumps(
+                {
+                    "type": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "completed",
+                }
+            ),
+            now=600.0,
+        )
+        self.assertEqual(watchdog.tools_in_flight, 0)
+        self.assertEqual(watchdog.stalled_for(1_200.0), 600.0)
+
     def test_kimi_role_envelopes_pair_tool_calls(self):
         watchdog = stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="kimi")
         watchdog.observe_line(

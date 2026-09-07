@@ -333,6 +333,7 @@ class HelpSubcommandTests(HelpCliTestBase):
                 "--pass-through",
                 "--completion-report",
                 "--no-completion-report",
+                "--no-mail",
             },
         )
 

@@ -317,8 +317,9 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
-    if request.mode == "work" and delegate_config.mail_enabled(execution.config):
-        mail.prepare_mail_storage(preflight.registry_root)
+    mail.prepare_launch_storage(
+        request, execution.config, preflight.registry_root, execution.stderr
+    )
     _initiator_root, request.env_overrides = run_metadata.apply_initiator_root_env(
         request.env_overrides
     )
@@ -655,7 +656,7 @@ def _launch_child_in_persistent_worktree(
             registration.worktree_path,
         )
         mail_launch = mail.prepare_work_mail_launch(
-            enabled=request.mode == "work" and delegate_config.mail_enabled(execution.config),
+            enabled=mail.launch_enabled(request.mode, execution.config),
             mail_push=request.mail_push,
             engine=request.engine,
             argv=execution_request.argv,

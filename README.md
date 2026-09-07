@@ -21,6 +21,14 @@ require prompt argv. Delegate redacts Cursor, Oh My Pi, and Kimi prompt argv in
 dry-run output and run manifests, but true process-argv hiding for those Harnesses
 depends on the child CLIs exposing stdin or prompt-file transport.
 
+Work runs have a workspace-local mailbox by default: use `delegate mail inbox`
+and `delegate mail read <id>` to check it. Global `--no-mail` or
+`mail.enabled: false` disables automatic mail setup; explicit mail commands
+still work. Mail needs no daemon, network, or `post`. Unavailable mail storage
+warns once and leaves the work launch running without mail setup. Stop-hook
+push (`--mail-push`) stays opt-in, and completion notifications (`--notify`)
+still require an explicit target. See [workspace mail](docs/cli-reference.md#workspace-mail).
+
 ## Install
 
 Delegate requires Python 3.11 or newer. The PyPI package is named `delegate-agent-cli` (PyPI's name-similarity rule blocked the shorter `delegate-agent`), but it installs the same `delegate` command either way.

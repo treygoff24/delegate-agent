@@ -34,9 +34,15 @@ persistent-worktree setup failures.
 
 ## Workspace mail
 
-Mail is a parent-owned pull mailbox under `.delegate/mail`; mail commands are
-available even when `mail.enabled` is false. Mail's `--group` is command-local
-and must not be confused with launch `--group`:
+Mail is a parent-owned pull mailbox under `.delegate/mail`, enabled by default
+for work launches. Global `--no-mail` or `mail.enabled: false` disables the
+launch-time prompt suffix and sandbox grants, not explicit mail commands or
+`--notify`. Mail does not use `post`. Unavailable mail storage disables mail
+setup for that launch with one stderr warning and a `warnings` entry; an
+unreachable isolated mailbox produces only a deduplicated manifest warning.
+Dry-run reports `mailPromptSuffix` when injected and includes any planned mail
+grant in `argv`, without creating mail storage or exposing the user's prompt.
+Mail's `--group` is command-local and must not be confused with launch `--group`:
 
 ```text
 delegate mail send (--to ALIAS|coordinator | --group NAME) [--reply-to ID] [--subject S] (BODY|--file FILE|-)
