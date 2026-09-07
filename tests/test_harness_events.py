@@ -2351,6 +2351,49 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(grok.assistant_text, "x")
         self.assertEqual(grok.completion_text, "x")
 
+    def test_kimi_goal_summary_is_preserved_as_a_terminal_reason(self):
+        """kimi L2: a paused goal reported a bare failure with no reason."""
+        for status, expected in (
+            ("complete", "succeeded"),
+            ("blocked", "failed"),
+            ("paused", "failed"),
+        ):
+            with self.subTest(status=status):
+                acc = self.events.StreamAccumulator(harness="kimi")
+                acc.ingest_line(
+                    json.dumps(
+                        {
+                            "type": "goal.summary",
+                            "goalId": "g-1",
+                            "status": status,
+                            "reason": "waiting on a human decision",
+                            "turnsUsed": 7,
+                            "tokensUsed": 41234,
+                            "wallClockMs": 90210,
+                        }
+                    )
+                )
+                self.assertEqual(acc.terminal_status, expected)
+                self.assertEqual(
+                    acc.terminal_event["reason"],
+                    f"status={status} reason=waiting on a human decision turns=7 tokens=41234",
+                )
+
+    def test_kimi_goal_summary_reason_is_bounded(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps({"type": "goal.summary", "status": "blocked", "reason": "R" * 5000})
+        )
+        completed = next(event for event in acc.events if event.kind == "run.completed")
+        payload = completed.to_dict()
+        self.assertEqual(len(payload["message"]), self.events.EVENT_TEXT_LIMIT)
+        self.assertTrue(payload["truncated"])
+
+    def test_goal_summary_is_ignored_for_other_harnesses(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "goal.summary", "status": "paused"}))
+        self.assertIsNone(acc.terminal_status)
+
     def test_codex_thread_started_captures_harness_session_id(self):
         acc = self.events.StreamAccumulator(harness="codex")
         acc.ingest_line(

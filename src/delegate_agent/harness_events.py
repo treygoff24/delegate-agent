@@ -757,6 +757,9 @@ class StreamAccumulator:
                     reason=self._terminal_error_reason(payload),
                 )
             return
+        if event_type == "goal.summary" and self.harness == "kimi":
+            self._ingest_kimi_goal_summary(payload)
+            return
         if event_type == "tool_result":
             return
         if event_type == "system":
@@ -1011,6 +1014,30 @@ class StreamAccumulator:
                 )
             )
             self.current = _tool_current(tool, target)
+
+    def _ingest_kimi_goal_summary(self, payload: JsonObject) -> None:
+        """Preserve the only accounting a Kimi `/goal` run ever emits.
+
+        A `/goal` prompt in print mode exits 0 on `complete`, 3 on `blocked` and
+        6 on `paused`, and writes one extra `goal.summary` line. The line has a
+        `type` but no `role`, so it fell through every branch: a paused goal was
+        published as a bare non-zero failure with no reason at all.
+        """
+        status = _string_field(payload, "status")
+        parts: list[str] = []
+        if status:
+            parts.append(f"status={status}")
+        if reason := _string_field(payload, "reason"):
+            parts.append(f"reason={reason}")
+        for key, label in (("turnsUsed", "turns"), ("tokensUsed", "tokens")):
+            value = payload.get(key)
+            if is_non_negative_int(value):
+                parts.append(f"{label}={value}")
+        self._record_terminal_event(
+            event="kimi.goal_summary",
+            status="succeeded" if status == "complete" else "failed",
+            reason=" ".join(parts) or None,
+        )
 
     def _ingest_kimi_tool_result(self, payload: JsonObject) -> None:
         tool_id = _string_field(payload, "tool_call_id")
