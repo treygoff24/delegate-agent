@@ -310,6 +310,92 @@ class ProviderOutcomeTests(unittest.TestCase):
                 self.assertEqual(acc.terminal_status, "succeeded")
                 self.assertEqual(acc.completion_text, "completed answer")
 
+    def test_bare_compaction_names_are_accepted_alongside_the_auto_prefix(self):
+        """pi B1: Pi 0.85.1 renamed these; the auto_ guard was dead for pi."""
+        for start, end in (
+            ("auto_compaction_start", "auto_compaction_end"),
+            ("compaction_start", "compaction_end"),
+        ):
+            with self.subTest(end=end):
+                acc = harness_events.StreamAccumulator(harness="pi")
+                for event in (
+                    {"type": start, "reason": "threshold"},
+                    {
+                        "type": end,
+                        "aborted": True,
+                        "willRetry": False,
+                        "errorMessage": "compaction aborted: context overflow",
+                    },
+                ):
+                    acc.ingest_line(json.dumps(event))
+                acc.finish_stream()
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertEqual(
+                    acc.terminal_event["reason"], "compaction aborted: context overflow"
+                )
+
+    def test_an_aborted_compaction_fails_without_a_preceding_provider_error(self):
+        acc = harness_events.StreamAccumulator(harness="pi")
+        acc.ingest_line(json.dumps({"type": "compaction_end", "aborted": True, "willRetry": False}))
+        acc.finish_stream()
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_a_compaction_that_will_retry_is_not_a_failure(self):
+        for payload in (
+            {"type": "compaction_end", "aborted": True, "willRetry": True},
+            {"type": "compaction_end", "aborted": False, "willRetry": False},
+            {"type": "compaction_end"},
+        ):
+            with self.subTest(payload=payload):
+                acc = harness_events.StreamAccumulator(harness="pi")
+                acc.ingest_line(json.dumps(payload))
+                acc.finish_stream()
+                self.assertIsNone(acc.terminal_status)
+
+    def test_deferred_stop_reason_is_a_terminal(self):
+        """pi L5: a deferred turn ended with no terminal on an exit code of 0."""
+        for harness in ("pi", "omp"):
+            with self.subTest(harness=harness):
+                acc = harness_events.StreamAccumulator(harness=harness)
+                acc.ingest_line(json.dumps(turn("deferred", "batch queued")))
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.assistant_text, "batch queued")
+
+    def test_pending_and_tool_use_stop_reasons_stay_mid_turn(self):
+        for reason in ("pending", "toolUse"):
+            with self.subTest(reason=reason):
+                acc = harness_events.StreamAccumulator(harness="pi")
+                acc.ingest_line(json.dumps(turn(reason)))
+                self.assertIsNone(acc.terminal_status)
+
+    def test_an_error_notice_is_recorded_as_an_error_event(self):
+        """omp L6: session-layer error notices were dropped entirely."""
+        acc = harness_events.StreamAccumulator(harness="omp")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "notice",
+                    "level": "error",
+                    "message": "provider key rejected",
+                    "source": "session",
+                }
+            )
+        )
+        errors = [event for event in acc.events if event.kind == "error"]
+        self.assertEqual([event.message for event in errors], ["provider key rejected"])
+        self.assertEqual(acc._last_error_message, "provider key rejected")
+
+    def test_a_non_error_notice_is_not_recorded_as_an_error(self):
+        for level in ("info", "warning"):
+            with self.subTest(level=level):
+                acc = harness_events.StreamAccumulator(harness="omp")
+                acc.ingest_line(
+                    json.dumps({"type": "notice", "level": level, "message": "compacting"})
+                )
+                self.assertEqual([event.kind for event in acc.events], [])
+                self.assertIsNone(acc._last_error_message)
+
     def test_recovery_bookkeeping_and_tool_use_do_not_prove_success(self):
         acc = harness_events.StreamAccumulator(harness="omp")
         for event in (

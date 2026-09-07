@@ -316,6 +316,22 @@ _PROVIDER_MAX_TURNS_CODES = frozenset(
 _MAX_TURNS_EVENT_TYPES = frozenset({"max_turns_reached"})
 
 
+# Pi 0.85.1 renamed its compaction events to the bare spelling and uses it for
+# manual and automatic compaction alike; Oh My Pi 18.1.13 still emits the
+# `auto_` prefix. The field names on the payload (`aborted`, `willRetry`,
+# `errorMessage`) are identical, so both spellings are accepted on both engines.
+_PI_COMPACTION_START_TYPES = frozenset({"auto_compaction_start", "compaction_start"})
+_PI_COMPACTION_END_TYPES = frozenset({"auto_compaction_end", "compaction_end"})
+
+# Pi's StopReason union. `toolUse` and `pending` are mid-turn and correctly
+# ignored; `deferred` is a real terminal state for batch provider responses and
+# a deferred turn would otherwise end with no terminal at all on an exit code
+# that is always 0.
+# A tuple, not a set: a malformed stop reason can be an unhashable dict or
+# list, and a membership test must not raise on the drain thread.
+_PI_TERMINAL_STOP_REASONS = ("stop", "error", "aborted", "length", "deferred")
+
+
 def _event_timestamp(payload: JsonObject) -> str:
     for key in ("timestamp", "ts", "created_at", "createdAt"):
         value = payload.get(key)
@@ -1397,7 +1413,7 @@ class StreamAccumulator:
             )
             self.completion_text = None
             return
-        if event_type == "auto_compaction_start":
+        if event_type in _PI_COMPACTION_START_TYPES:
             if (
                 self.terminal_status in {"failed", "cancelled"}
                 or self._pi_recovery_error is not None
@@ -1405,12 +1421,11 @@ class StreamAccumulator:
                 self._clear_pi_terminal()
                 self.completion_text = None
             return
-        if event_type in {"auto_retry_end", "auto_compaction_end"}:
+        if event_type == "auto_retry_end" or event_type in _PI_COMPACTION_END_TYPES:
             failed = (
                 payload.get("success") is False
                 if event_type == "auto_retry_end"
-                else self._pi_recovery_error is not None
-                and (payload.get("aborted") is True or payload.get("willRetry") is False)
+                else _pi_compaction_failed(payload, self._pi_recovery_error, self.terminal_status)
             )
             if failed:
                 reason = (
@@ -1462,7 +1477,7 @@ class StreamAccumulator:
                 and not isinstance(error_status, bool)
                 and error_status >= 400
             )
-            if stop_reason not in ("stop", "error", "aborted", "length") and not http_error:
+            if stop_reason not in _PI_TERMINAL_STOP_REASONS and not http_error:
                 return
             status = (
                 "cancelled"
@@ -1491,6 +1506,12 @@ class StreamAccumulator:
         if event_type == "error":
             self._ingest_error_event(payload)
             self._record_terminal_event(event=f"{self.harness}.error", status="failed")
+            return
+        if event_type == "notice" and _string_field(payload, "level") == "error":
+            # A session-layer error notice is not a terminal on its own, but its
+            # text is what the failover classifier and the synthesized
+            # completion report read out of the accumulator.
+            self._ingest_error_event(payload)
 
     def _clear_pi_terminal(self) -> None:
         # A new turn/compaction suspends terminal shutdown, not the obligation
@@ -1695,6 +1716,28 @@ class StreamAccumulator:
             "eventsOmittedMiddle": max(omitted, 0),
         }
         return serialized, meta
+
+
+def _pi_compaction_failed(
+    payload: JsonObject, recovery_error: str | None, terminal_status: str | None
+) -> bool:
+    """Did a compaction end in a way the run cannot come back from?
+
+    An abort with no retry queued is terminal on its own: pi's `--mode json`
+    exits 0 regardless, so an unclassified abort is published as a success.
+    Requiring a preceding provider error, as this once did, made the guard dead
+    for exactly the case it was written for.
+
+    Three things are not failures: an abort that will retry, a plain successful
+    compaction, and an abort that lands after a turn has already sealed a
+    successful answer. Compaction is context housekeeping, and housekeeping
+    cannot retract a delivered result.
+    """
+    aborted = payload.get("aborted") is True
+    will_retry = payload.get("willRetry")
+    if aborted and will_retry is not True and terminal_status != "succeeded":
+        return True
+    return recovery_error is not None and (aborted or will_retry is False)
 
 
 def _extract_text(content: JsonValue) -> str:
