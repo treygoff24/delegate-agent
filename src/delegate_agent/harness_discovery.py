@@ -1267,18 +1267,31 @@ def parse_grok_catalog(raw: str) -> JsonObject:
     default_match = re.search(r"^Default model:\s*(\S+)\s*$", raw, re.MULTILINE)
     default_model = default_match.group(1) if default_match else None
     collecting = False
-    models: JsonObject = {}
+    entries: list[str] = []
     for line in raw.splitlines():
         stripped = line.strip()
         if not collecting:
             collecting = stripped.lower() == "available models:"
             continue
-        if models and (not stripped or (line and not line[0].isspace())):
+        if entries and (not stripped or (line and not line[0].isspace())):
             break
-        match = re.match(r"^[*-]\s+(\S+?)(?:\s+\(default\))?$", stripped)
-        if match:
-            selector = match.group(1)
-            models[selector] = {}
+        if stripped:
+            entries.append(stripped)
+    # Bulleted entries are what grok 1.0.13 prints, and requiring the bullet is
+    # what keeps a trailing prose line out of the catalog. A build that prints
+    # plain selectors must still parse rather than fail the whole probe, so the
+    # unbulleted form is a second pass over the same lines: it applies only when
+    # the section carried no bullet at all, and a bulleted section keeps its
+    # prose guard. In a wholly unbulleted section a single-word prose line is
+    # indistinguishable from a selector and would be read as one.
+    models: JsonObject = {}
+    for pattern in (r"^[*-]\s+(\S+?)(?:\s+\(default\))?$", r"^(\S+?)(?:\s+\(default\))?$"):
+        for entry in entries:
+            match = re.match(pattern, entry)
+            if match:
+                models[match.group(1)] = {}
+        if models:
+            break
     if not models:
         raise ValueError("Grok catalog had no Available models entries")
     warnings: list[str] = []
