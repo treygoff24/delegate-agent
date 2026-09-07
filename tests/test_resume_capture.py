@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import cli, run_registry, runner, safe_workspace, worktree_execution
+from delegate_agent import config as config_api
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import Request, ResolvedWorkspace
 
@@ -121,7 +122,7 @@ class ResumeCaptureTests(unittest.TestCase):
             execution = worktree_execution.PersistentWorktreeExecution(
                 request=request,
                 json_mode=True,
-                config=cli.DEFAULT_CONFIG,
+                config=config_api.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
                 source_workspace=ResolvedWorkspace(str(workspace), "git"),

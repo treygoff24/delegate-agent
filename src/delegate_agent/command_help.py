@@ -11,14 +11,11 @@ appears in any spec or rendered output.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from delegate_agent import VERSION
-from delegate_agent.constants import ENGINES_PROSE
+from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
-
-# Kept local so importing help never imports the mutable run registry.
-DEFAULT_RUN_PRUNE_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -2202,8 +2199,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
 }
 
-# Non-launch commands do not consume launch-only globals. Keeping this in the
-# registry makes focused help and parser rejection share one policy table.
+# One canonical policy and option list feed help and parser validation.
 _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--isolation",
     "--pass-through",
@@ -2214,81 +2210,31 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
 )
 for _command_name in ("models", "capabilities", "describe", "agent-help", "personas", "help"):
     _spec = COMMAND_SPECS[_command_name]
-    _unsupported = tuple(
-        dict.fromkeys((*_spec.unsupported_global_options, *_INSPECTION_GLOBAL_RESTRICTIONS))
-    )
-    COMMAND_SPECS[_command_name] = CommandSpec(
-        name=_spec.name,
-        summary=_spec.summary,
-        usage=_spec.usage,
-        arguments=_spec.arguments,
-        options=_spec.options,
-        examples=_spec.examples,
-        notes=_spec.notes,
-        see_also=_spec.see_also,
-        unsupported_global_options=_unsupported,
-        internal=_spec.internal,
-    )
-
-# Keep the persona option spelling and descriptions identical for every engine
-# and dry-run surface. Focused call specs are derived from these base specs.
-for _persona_command in (
-    "cursor",
-    "kimi",
-    "codex",
-    "claude",
-    "grok",
-    "devin",
-    "opencode",
-    "pi",
-    "omp",
-    "droid",
-    "dry-run",
-):
-    _spec = COMMAND_SPECS[_persona_command]
-    COMMAND_SPECS[_persona_command] = CommandSpec(
-        name=_spec.name,
-        summary=_spec.summary,
-        usage=_spec.usage,
-        arguments=_spec.arguments,
-        options=(*_spec.options, *PERSONA_OPTIONS),
-        examples=_spec.examples,
-        notes=_spec.notes,
-        see_also=_spec.see_also,
-        unsupported_global_options=_spec.unsupported_global_options,
-        internal=_spec.internal,
-    )
-
-for _mail_command in (
-    "cursor",
-    "kimi",
-    "codex",
-    "claude",
-    "grok",
-    "devin",
-    "opencode",
-    "pi",
-    "omp",
-    "droid",
-    "dry-run",
-):
-    _spec = COMMAND_SPECS[_mail_command]
-    COMMAND_SPECS[_mail_command] = CommandSpec(
-        name=_spec.name,
-        summary=_spec.summary,
-        usage=_spec.usage,
-        arguments=_spec.arguments,
-        options=(
-            *_spec.options[: -len(PERSONA_OPTIONS)],
-            _MAIL_PUSH_OPTION,
-            _CONTINUITY_MODE_OPTION,
-            *_spec.options[-len(PERSONA_OPTIONS) :],
+    COMMAND_SPECS[_command_name] = replace(
+        _spec,
+        unsupported_global_options=tuple(
+            dict.fromkeys((*_spec.unsupported_global_options, *_INSPECTION_GLOBAL_RESTRICTIONS))
         ),
-        examples=_spec.examples,
-        notes=_spec.notes,
-        see_also=_spec.see_also,
-        unsupported_global_options=_spec.unsupported_global_options,
-        internal=_spec.internal,
+    )
+_spec = COMMAND_SPECS["workflow"]
+COMMAND_SPECS["workflow"] = replace(
+    _spec,
+    unsupported_global_options=tuple(
+        dict.fromkeys(
+            (
+                *_spec.unsupported_global_options,
+                "--group",
+                "--completion-report",
+                "--no-completion-report",
+            )
+        )
+    ),
+)
+for _engine in (*KNOWN_ENGINES, "dry-run"):
+    _spec = COMMAND_SPECS[_engine]
+    COMMAND_SPECS[_engine] = replace(
+        _spec,
+        options=(*_spec.options, _MAIL_PUSH_OPTION, _CONTINUITY_MODE_OPTION, *PERSONA_OPTIONS),
     )
 
 
@@ -2359,6 +2305,21 @@ COMMAND_SPECS["dry-run call"] = CommandSpec(
     see_also=("dry-run", "cursor call", "codex call", "droid call"),
     unsupported_global_options=_CALL_UNSUPPORTED_GLOBAL_OPTIONS,
 )
+
+
+# Materialize inherited policy once so both text/JSON help and parsing agree.
+for _name, _spec in tuple(COMMAND_SPECS.items()):
+    if " " in _name:
+        _parent = COMMAND_SPECS.get(_name.split()[0])
+        if _parent is not None:
+            COMMAND_SPECS[_name] = replace(
+                _spec,
+                unsupported_global_options=tuple(
+                    dict.fromkeys(
+                        (*_parent.unsupported_global_options, *_spec.unsupported_global_options)
+                    )
+                ),
+            )
 
 
 # Help-token detection.

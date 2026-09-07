@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from delegate_agent import cli, cli_parser, command_help
+from delegate_agent import errors as errors_api
 from delegate_agent.workflows import commands, registry
 
 
@@ -17,7 +18,7 @@ class WorkflowJsonlCliTests(unittest.TestCase):
             "--jsonl", {o.flag for o in command_help.COMMAND_SPECS["workflow watch"].options}
         )
         for action in ("status", "events", "wait", "result", "approve", "run"):
-            with self.subTest(action=action), self.assertRaises(cli.DelegateError):
+            with self.subTest(action=action), self.assertRaises(errors_api.DelegateError):
                 cli_parser.parse_cli(["workflow", action, "wf_123456abcdef", "--jsonl"])
 
     def test_cli_jsonl_emits_filtered_events_and_final_state(self):

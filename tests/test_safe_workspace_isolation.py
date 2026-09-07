@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import isolation as isolation_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import safe_workspace as safe_api
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +72,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             None,
             "/repo",
             "hello",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -78,8 +85,8 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "source"
             source.mkdir()
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.cleanup_safe_isolated_workspace(
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                safe_api.cleanup_safe_isolated_workspace(
                     git_root=None,
                     isolated_workspace=str(source),
                     temp_base=temp_dir,
@@ -93,12 +100,12 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             isolated.mkdir()
             temp_base = Path(parent) / "missing"
 
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=None,
                 isolated_workspace=str(isolated),
                 temp_base=str(temp_base),
             )
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=None,
                 isolated_workspace=str(isolated),
                 temp_base=str(temp_base),
@@ -113,7 +120,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 (nested / "payload.txt").write_text("scratch\n", encoding="utf-8")
                 nested.chmod(mode)
 
-                self.delegate.cleanup_safe_isolated_workspace(
+                safe_api.cleanup_safe_isolated_workspace(
                     git_root=None,
                     isolated_workspace=str(temp_base / "copy"),
                     temp_base=str(temp_base),
@@ -141,7 +148,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 self.assertLogs(safe_workspace._LOGGER, level="WARNING") as logs,
                 self.assertRaisesRegex(RuntimeError, "copy post-processing failed"),
             ):
-                self.delegate.create_directory_safe_workspace(workspace)
+                safe_api.create_directory_safe_workspace(workspace)
 
             self.assertTrue(any("cleanup failed" in message for message in logs.output))
 
@@ -171,7 +178,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 ),
                 self.assertRaisesRegex(RuntimeError, "copy post-processing failed"),
             ):
-                self.delegate.create_directory_safe_workspace(workspace)
+                safe_api.create_directory_safe_workspace(workspace)
 
             self.assertFalse(temp_base.exists())
             self.assertEqual(
@@ -211,21 +218,19 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.assertEqual(self._submodule_paths_from_status(status), ("renamed",))
 
     def test_cursor_safe_cli_config_omits_mutating_shell(self):
-        allow = self.delegate.CURSOR_SAFE_CLI_CONFIG["permissions"]["allow"]
+        allow = safe_api.CURSOR_SAFE_CLI_CONFIG["permissions"]["allow"]
         self.assertIn("Read(**)", allow)
         self.assertNotIn("Shell(git)", allow)
         self.assertNotIn("Shell(find)", allow)
         self.assertNotIn("Shell(ls)", allow)
 
     def test_cursor_safe_cli_config_is_permissions_only(self):
-        self.assertEqual(set(self.delegate.CURSOR_SAFE_CLI_CONFIG), {"permissions"})
+        self.assertEqual(set(safe_api.CURSOR_SAFE_CLI_CONFIG), {"permissions"})
 
     def test_write_cursor_safe_project_config_serializes_permissions_only(self):
         with tempfile.TemporaryDirectory() as workspace:
-            self.delegate.write_cursor_safe_project_config(Path(workspace))
-            config = self.delegate.json.loads(
-                (Path(workspace) / ".cursor" / "cli.json").read_text()
-            )
+            safe_api.write_cursor_safe_project_config(Path(workspace))
+            config = json.loads((Path(workspace) / ".cursor" / "cli.json").read_text())
         self.assertEqual(set(config), {"permissions"})
         self.assertIn("allow", config["permissions"])
         self.assertIn("deny", config["permissions"])
@@ -238,7 +243,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             link.symlink_to(secret)
 
             destination = Path(workspace) / "mirror" / "link.txt"
-            self.delegate.mirror_path_preserving_symlinks(link, destination)
+            safe_api.mirror_path_preserving_symlinks(link, destination)
 
             self.assertTrue(destination.is_symlink())
             self.assertEqual(os.readlink(destination), str(secret))
@@ -249,7 +254,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             secret.write_text("outside-secret\n")
             (Path(workspace) / "link.txt").symlink_to(secret)
 
-            copy_path, temp_base, warnings = self.delegate.create_directory_safe_workspace(
+            copy_path, temp_base, warnings = safe_api.create_directory_safe_workspace(
                 workspace,
                 include_warnings=True,
             )
@@ -258,11 +263,11 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 self.assertFalse(copied.is_symlink())
                 self.assertEqual(
                     copied.read_text(encoding="utf-8"),
-                    self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                    safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
                 )
                 self.assertNotIn(str(secret), copied.read_text(encoding="utf-8"))
                 self.assertEqual(len(warnings), 1)
-                self.assertIn(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
+                self.assertIn(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
                 self.assertIn("link.txt", warnings[0])
                 self.assertNotIn(str(secret), warnings[0])
             finally:
@@ -274,7 +279,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             (root / "target.txt").write_text("inside\n", encoding="utf-8")
             (root / "link.txt").symlink_to("target.txt")
 
-            copy_path, temp_base = self.delegate.create_directory_safe_workspace(workspace)
+            copy_path, temp_base = safe_api.create_directory_safe_workspace(workspace)
             try:
                 copied = Path(copy_path) / "link.txt"
                 self.assertTrue(copied.is_symlink())
@@ -288,7 +293,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             delegate_dir.mkdir()
             (delegate_dir / "stdout.log").write_text("private run output\n", encoding="utf-8")
 
-            copy_path, temp_base = self.delegate.create_directory_safe_workspace(workspace)
+            copy_path, temp_base = safe_api.create_directory_safe_workspace(workspace)
             try:
                 self.assertFalse((Path(copy_path) / ".delegate").exists())
             finally:
@@ -301,7 +306,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             (root / "normal.txt").write_text("copy me\n", encoding="utf-8")
             os.mkfifo(root / "signal.fifo")
 
-            copy_path, temp_base = self.delegate.create_directory_safe_workspace(workspace)
+            copy_path, temp_base = safe_api.create_directory_safe_workspace(workspace)
             try:
                 copied = Path(copy_path)
                 self.assertEqual((copied / "normal.txt").read_text(encoding="utf-8"), "copy me\n")
@@ -315,9 +320,9 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             secret.write_text("outside-secret\n")
             (Path(workspace) / "link.txt").symlink_to(secret)
 
-            warnings = self.delegate.external_symlink_warnings(workspace)
+            warnings = safe_api.external_symlink_warnings(workspace)
             self.assertEqual(len(warnings), 1)
-            self.assertIn(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
+            self.assertIn(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
             self.assertIn("link.txt", warnings[0])
             self.assertNotIn(str(secret), warnings[0])
 
@@ -330,7 +335,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             link = Path(repo.name) / "external-link.txt"
             link.symlink_to(secret)
 
-            worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
                 repo.name,
                 include_warnings=True,
             )
@@ -339,15 +344,15 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 self.assertFalse(copied.is_symlink())
                 self.assertEqual(
                     copied.read_text(encoding="utf-8"),
-                    self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                    safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
                 )
                 self.assertNotIn(str(secret), copied.read_text(encoding="utf-8"))
                 self.assertEqual(len(warnings), 1)
-                self.assertIn(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
+                self.assertIn(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
                 self.assertIn("external-link.txt", warnings[0])
                 self.assertNotIn(str(secret), warnings[0])
             finally:
-                self.delegate.cleanup_safe_isolated_workspace(
+                safe_api.cleanup_safe_isolated_workspace(
                     git_root=repo.name,
                     isolated_workspace=worktree_path,
                     temp_base=temp_base,
@@ -356,14 +361,14 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
     def test_git_safe_workspace_syncs_tracked_and_untracked_changes(self):
         repo = self.make_dirty_repo()
 
-        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        worktree_path, temp_base = safe_api.create_git_safe_workspace(repo.name)
         try:
             isolated = Path(worktree_path)
             self.assertEqual((isolated / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
             self.assertEqual((isolated / "notes.txt").read_text(encoding="utf-8"), "local-only\n")
             self.assertFalse((isolated / "ignored.txt").exists())
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -384,14 +389,14 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         for name in names:
             (root / name).write_text(name, encoding="utf-8")
 
-        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        worktree_path, temp_base = safe_api.create_git_safe_workspace(repo.name)
         try:
             isolated = Path(worktree_path)
             self.assertTrue(set(names).issubset(safe_workspace.changed_files_vs_head(repo.name)))
             for name in names:
                 self.assertEqual((isolated / name).read_text(encoding="utf-8"), name)
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -434,7 +439,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         (sub / "secret.txt").write_text("subdir-secret\n", encoding="utf-8")
         (sub / "kept.txt").write_text("kept\n", encoding="utf-8")
 
-        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        worktree_path, temp_base = safe_api.create_git_safe_workspace(repo.name)
         try:
             isolated = Path(worktree_path)
             self.assertFalse((isolated / "sub" / "secret.txt").exists())
@@ -445,7 +450,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             # The nested .gitignore itself is untracked and non-ignored, so it syncs.
             self.assertTrue((isolated / "sub" / ".gitignore").exists())
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -463,7 +468,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         (root / "secret.txt").write_text("host secret\n", encoding="utf-8")
         (root / "leak.link").symlink_to("secret.txt")
 
-        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+        worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
             repo.name,
             include_warnings=True,
         )
@@ -473,14 +478,14 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertFalse(blocked.is_symlink())
             self.assertEqual(
                 blocked.read_text(encoding="utf-8"),
-                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
             )
             self.assertTrue(
-                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+                any(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
             )
             self.assertTrue(any("leak.link" in item for item in warnings))
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -495,7 +500,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         (root / "target.txt").write_text("inside\n", encoding="utf-8")
         (root / "good.link").symlink_to("target.txt")
 
-        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+        worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
             repo.name,
             include_warnings=True,
         )
@@ -509,11 +514,11 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 "inside\n",
             )
             self.assertNotIn(
-                self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
+                safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
                 warnings,
             )
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -530,7 +535,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         absolute_target = (root / "target.txt").resolve()
         (root / "abs.link").symlink_to(absolute_target)
 
-        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+        worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
             repo.name,
             include_warnings=True,
         )
@@ -540,14 +545,14 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertFalse(blocked.is_symlink())
             self.assertEqual(
                 blocked.read_text(encoding="utf-8"),
-                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
             )
             self.assertTrue(
-                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+                any(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
             )
             self.assertTrue(any("abs.link" in item for item in warnings))
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -599,7 +604,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         # Relative symlink whose readlink target contains the newline path.
         (root / "weird.link").symlink_to(f"secrets/{newline_name}")
 
-        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+        worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
             repo.name,
             include_warnings=True,
         )
@@ -612,14 +617,14 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             )
             self.assertEqual(
                 blocked.read_text(encoding="utf-8"),
-                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
             )
             self.assertTrue(
-                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+                any(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
             )
             self.assertTrue(any("weird.link" in item for item in warnings))
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -654,7 +659,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             )
 
         with mock.patch.object(safe_workspace, "_run_git_bytes", side_effect=failing_check_ignore):
-            worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
                 repo.name,
                 include_warnings=True,
             )
@@ -668,7 +673,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 )
                 self.assertEqual(
                     blocked.read_text(encoding="utf-8"),
-                    self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                    safe_api.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
                 )
             # Fail-closed notice is emitted alongside the per-path blocked warning.
             self.assertIn(
@@ -682,7 +687,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 "inside-a\n",
             )
         finally:
-            self.delegate.cleanup_safe_isolated_workspace(
+            safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,
                 isolated_workspace=worktree_path,
                 temp_base=temp_base,
@@ -690,8 +695,8 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
 
     def test_safe_dirty_tree_note_reaches_prompt_transport(self):
         repo = self.make_dirty_repo()
-        workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-        iso_ctx = self.delegate.build_isolation_context(
+        workspace = request_types.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=repo.name,
             resolved_isolation="auto",
             engine="codex",
@@ -699,13 +704,13 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             source_git_root=repo.name,
         )
 
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "codex",
             "safe",
             None,
             workspace,
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
@@ -718,8 +723,8 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
     def test_safe_clean_tree_omits_dirty_tree_note(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-        iso_ctx = self.delegate.build_isolation_context(
+        workspace = request_types.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=repo.name,
             resolved_isolation="auto",
             engine="codex",
@@ -727,13 +732,13 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             source_git_root=repo.name,
         )
 
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "codex",
             "safe",
             None,
             workspace,
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
@@ -749,25 +754,25 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             f"Review {source}/src/module.py and {external}; "
             f"leave {source}-backup/src/module.py unchanged."
         )
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=source,
             resolved_isolation="auto",
             engine=engine,
             mode="safe",
             source_git_root=source,
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             engine,
             "safe",
             None,
-            self.delegate.ResolvedWorkspace(source, "git"),
+            request_types.ResolvedWorkspace(source, "git"),
             prompt,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
 
-        with self.delegate.safe_isolated_request(request) as isolated:
+        with safe_api.safe_isolated_request(request) as isolated:
             if transport_field == "argv":
                 transported = isolated.argv[-1]
             else:
@@ -794,20 +799,20 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.addCleanup(repo.cleanup)
         source = repo.name
         prompt = f"/goal inspect {source}/src/module.py byte-for-byte"
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=source,
             resolved_isolation="auto",
             engine=engine,
             mode="safe",
             source_git_root=source,
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             engine,
             "safe",
             None,
-            self.delegate.ResolvedWorkspace(source, "git"),
+            request_types.ResolvedWorkspace(source, "git"),
             prompt,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
             prompt_instruction_mode=PROMPT_INSTRUCTION_MODE_SLASH,
@@ -817,7 +822,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             # provide the already-resolved verbatim payload directly here.
             request.argv[-1] = prompt
 
-        with self.delegate.safe_isolated_request(request) as isolated:
+        with safe_api.safe_isolated_request(request) as isolated:
             transported = (
                 isolated.argv[-1]
                 if transport_field == "argv"
@@ -860,45 +865,45 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
         prompt = f"Edit {repo.name}/src/module.py"
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=repo.name,
             resolved_isolation="auto",
             engine="cursor",
             mode="work",
             source_git_root=repo.name,
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "cursor",
             "work",
             None,
-            self.delegate.ResolvedWorkspace(repo.name, "git"),
+            request_types.ResolvedWorkspace(repo.name, "git"),
             prompt,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
 
-        with self.delegate.safe_isolated_request(request) as unchanged:
+        with safe_api.safe_isolated_request(request) as unchanged:
             self.assertIs(unchanged, request)
             self.assertEqual(unchanged.prompt, prompt)
 
     def test_safe_isolated_request_preserves_call_metadata(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=repo.name,
             resolved_isolation="auto",
             engine="codex",
             mode="safe",
             source_git_root=repo.name,
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "codex",
             "safe",
             None,
-            self.delegate.ResolvedWorkspace(repo.name, "git"),
+            request_types.ResolvedWorkspace(repo.name, "git"),
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
@@ -907,7 +912,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         request.timeout = 42
         request.model_requested = "requested-model"
 
-        with self.delegate.safe_isolated_request(request) as isolated:
+        with safe_api.safe_isolated_request(request) as isolated:
             self.assertTrue(isolated.call_read_only)
             self.assertTrue(isolated.pure)
             self.assertEqual(isolated.timeout, 42)
@@ -922,9 +927,9 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         )
         with (
             mock.patch.object(safe_workspace, "_run_git", return_value=timeout),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors_api.DelegateError) as ctx,
         ):
-            self.delegate.create_git_safe_workspace("/repo")
+            safe_api.create_git_safe_workspace("/repo")
 
         self.assertEqual(ctx.exception.error, "safe_workspace_create_failed")
         self.assertIn("timed out", ctx.exception.message)
@@ -938,9 +943,9 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         )
         with (
             mock.patch.object(safe_workspace, "_run_git_bytes", return_value=timeout),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors_api.DelegateError) as ctx,
         ):
-            self.delegate.read_git_tracked_diff("/repo")
+            safe_api.read_git_tracked_diff("/repo")
 
         self.assertEqual(ctx.exception.error, "safe_workspace_sync_failed")
         self.assertIn("timed out", ctx.exception.message)
@@ -952,33 +957,30 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             secret = Path(outside) / "secret.txt"
             secret.write_text("outside-secret\n")
             (Path(repo.name) / "external-link.txt").symlink_to(secret)
-            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-            iso_ctx = self.delegate.build_isolation_context(
+            workspace = request_types.ResolvedWorkspace(repo.name, "git")
+            iso_ctx = isolation_api.build_isolation_context(
                 source_workspace=repo.name,
                 resolved_isolation="auto",
                 engine="cursor",
                 mode="safe",
                 source_git_root=repo.name,
             )
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "cursor",
                 "safe",
                 None,
                 workspace,
                 "review",
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 dry_run=False,
                 isolation_context=iso_ctx,
             )
 
-            with self.delegate.safe_isolated_request(request) as isolated:
+            with safe_api.safe_isolated_request(request) as isolated:
                 warnings = isolated.isolation_context.warnings
                 self.assertEqual(isolated.isolation_context.safe_workspace_method, "git-worktree")
                 self.assertTrue(
-                    any(
-                        self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item
-                        for item in warnings
-                    )
+                    any(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
                 )
 
     def test_unborn_git_safe_isolation_falls_back_to_directory_copy(self):
@@ -987,26 +989,26 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         delegate_dir = Path(repo.name) / ".delegate"
         delegate_dir.mkdir()
         (delegate_dir / "stdout.log").write_text("private run output\n", encoding="utf-8")
-        workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-        iso_ctx = self.delegate.build_isolation_context(
+        workspace = request_types.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=repo.name,
             resolved_isolation="auto",
             engine="codex",
             mode="safe",
             source_git_root=repo.name,
         )
-        request = self.delegate.build_request(
+        request = request_api.build_request(
             "codex",
             "safe",
             None,
             workspace,
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=False,
             isolation_context=iso_ctx,
         )
 
-        with self.delegate.safe_isolated_request(request) as isolated:
+        with safe_api.safe_isolated_request(request) as isolated:
             self.assertEqual(isolated.workspace_kind, "directory")
             self.assertFalse((Path(isolated.workspace) / ".git").exists())
             self.assertFalse((Path(isolated.workspace) / ".delegate").exists())
@@ -1015,7 +1017,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 "directory-copy",
             )
             self.assertIn(
-                self.delegate.SAFE_UNBORN_GIT_WARNING,
+                safe_api.SAFE_UNBORN_GIT_WARNING,
                 isolated.isolation_context.warnings,
             )
             self.assertIn("--skip-git-repo-check", isolated.argv)
@@ -1032,7 +1034,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             ["--cwd", str(workspace), "dry-run", "codex", "safe", "review"],
             stdout=stdout,
         )
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, errors_api.EXIT_OK)
         self.assertFalse(delegate_dir.exists())
 
     def test_directory_safe_workspace_source_is_tempdir_uses_cache_fallback(self):
@@ -1042,7 +1044,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 mock.patch.object(tempfile, "gettempdir", return_value=source),
                 mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache_home}),
             ):
-                copy_path, temp_base = self.delegate.create_directory_safe_workspace(source)
+                copy_path, temp_base = safe_api.create_directory_safe_workspace(source)
             try:
                 self.assertEqual(Path(temp_base).parent.resolve(), fallback.resolve())
                 self.assertFalse(
@@ -1057,7 +1059,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             tempfile.TemporaryDirectory() as source,
             mock.patch.object(tempfile, "gettempdir", return_value=str(Path(source) / "tmp")),
             mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(source) / "cache")}),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors_api.DelegateError) as ctx,
         ):
             safe_workspace.safe_workspace_temp_base(source)
         self.assertEqual(ctx.exception.error, "safe_workspace_source_too_broad")
@@ -1072,7 +1074,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             (private / "secret.txt").write_text("nope", encoding="utf-8")
             private.chmod(0)
             try:
-                copy_path, temp_base, warnings = self.delegate.create_directory_safe_workspace(
+                copy_path, temp_base, warnings = safe_api.create_directory_safe_workspace(
                     source, include_warnings=True
                 )
             finally:

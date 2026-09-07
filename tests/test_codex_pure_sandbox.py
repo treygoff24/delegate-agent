@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import errors as errors_api
+from delegate_agent import runner as runner_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 
@@ -328,8 +332,8 @@ class CodexPureSandboxUnitTests(CommandTestBase):
             schema = tmp / "schema.json"
             schema.write_text("{}", encoding="utf-8")
             bin_dir = self.write_fake_executable("codex")
-            with mock.patch.object(self.delegate.delegate_runner, "execute_call") as execute_call:
-                execute_call.return_value = self.delegate.delegate_runner.CallResult(
+            with mock.patch.object(runner_api, "execute_call") as execute_call:
+                execute_call.return_value = runner_api.CallResult(
                     text="",
                     exit_code=0,
                     duration_ms=0,
@@ -355,8 +359,8 @@ class CodexPureSandboxUnitTests(CommandTestBase):
         self.assertIn(str(schema.resolve()), kwargs["sensitive_texts"])
 
     def test_codex_pure_is_rejected_at_parse(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "call", "--pure", "answer"])
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            parser_api.parse_cli(["codex", "call", "--pure", "answer"])
         self.assertEqual(ctx.exception.error, "unsupported_pure_call")
         self.assertIn("claude", ctx.exception.next_actions[0])
         self.assertNotIn("codex", ctx.exception.next_actions[0])

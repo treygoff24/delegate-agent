@@ -142,7 +142,7 @@ def merge_snapshot_view(
         for key in run_metadata.SNAPSHOT_MANIFEST_FALLBACK_KEYS:
             if key in manifest and key not in view:
                 view[key] = manifest[key]
-    if state and state.get("plannedExecutionCwd") and state.get("worktreeStatus") != "present":
+    if state and state.get("plannedExecutionCwd") and "worktreeStatus" not in state:
         # The launch manifest describes the plan, not proof that creation succeeded.
         for key in ("executionCwd", "branch", "worktreeStatus", "worktreeCleanupCommands"):
             view.pop(key, None)

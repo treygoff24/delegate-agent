@@ -22,6 +22,7 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_SAFE,
     MODELESS_ENGINES,
+    RUN_OUTPUT_DEFAULT_TAIL_LINES,
     VALID_MODES,
     WORKFLOW_DRY_RUN_HINT,
     validate_mode,
@@ -41,18 +42,11 @@ from delegate_agent.request_models import (
     RunJsonOptions,
 )
 
-RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
 _OPTION_VALUE_FLAGS = frozenset(
-    {
-        "--model",
-        "--prompt-file",
-        "--output-schema",
-        "--reasoning-effort",
-        "--timeout",
-        "--continuity-mode",
-        "--agent",
-        "--persona",
-    }
+    option.flag
+    for engine in KNOWN_ENGINES
+    for option in command_help.COMMAND_SPECS[engine].options
+    if option.arg is not None
 )
 
 FLAG_GLOBAL_OPTIONS = frozenset(
@@ -625,6 +619,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "--cwd": cwd,
             "--pass-through": pass_through,
             "--completion-report": completion_report,
+            "--no-completion-report": completion_report
+            == delegate_config.COMPLETION_REPORT_MODE_NONE,
             "--isolation": isolation,
             "--auth-profile": auth_profile,
             "--group": group,

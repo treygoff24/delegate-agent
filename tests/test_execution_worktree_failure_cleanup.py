@@ -6,18 +6,25 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import run_registry as registry_api
+from delegate_agent import runner as runner_api
+from delegate_agent import worktree_execution as worktree_execution_api
 from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
     def test_partial_cleanup_refuses_source_root_target(self):
         with tempfile.TemporaryDirectory() as source_root:
-            run_path = Path(source_root) / "run"
-            run_path.mkdir()
-            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
-            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
-            with mock.patch.object(self.delegate.worktree_execution, "_run_git") as run_git:
-                self.delegate.worktree_execution._cleanup_partial_worktree(
+            run_path = Path(source_root) / ".delegate" / "runs" / "del_20260907T000000Z_abcdef"
+            run_path.mkdir(parents=True)
+            state_path = run_path / registry_api.STATE_FILE
+            registry_api.write_json_atomic(state_path, {"ok": False})
+            with mock.patch.object(worktree_execution_api, "_run_git") as run_git:
+                worktree_execution_api._cleanup_partial_worktree(
                     source_root,
                     source_root,
                     "delegate/cursor-guarded",
@@ -25,7 +32,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             run_git.assert_not_called()
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(snapshot["cleanupRefused"], "source_root_guard")
 
     def test_prelaunch_failure_inspectable_via_snapshot(self):
@@ -35,15 +42,15 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
             fake_bin = self.make_fake_bin()
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -56,20 +63,20 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 isolation_context=request.isolation_context,
             )
             # Force create_persistent_worktree to fail.
-            original_create = self.delegate.worktree_execution.create_persistent_worktree
+            original_create = worktree_execution_api.create_persistent_worktree
 
             def failing_create(*args, **kwargs):
-                raise self.delegate.worktree_execution.IsolationExecutionError(
+                raise worktree_execution_api.IsolationExecutionError(
                     "worktree_create_failed", "Simulated worktree failure"
                 )
 
-            self.delegate.worktree_execution.create_persistent_worktree = failing_create
+            worktree_execution_api.create_persistent_worktree = failing_create
             try:
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                with self.assertRaises(errors_api.DelegateError) as ctx:
                     self.delegate.execute_request(
                         request,
                         json_mode=False,
-                        config=self.delegate.DEFAULT_CONFIG,
+                        config=config_api.embedded_default_config(),
                         pass_through=False,
                         completion_report_mode="none",
                         source_workspace=workspace,
@@ -98,7 +105,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 self.assertIn("plannedBranch", snapshot_payload)
                 self.assertIn("plannedExecutionCwd", snapshot_payload)
             finally:
-                self.delegate.worktree_execution.create_persistent_worktree = original_create
+                worktree_execution_api.create_persistent_worktree = original_create
 
     def test_prelaunch_failure_snapshot_omits_unrealized_fields(self):
         """Pre-launch failure snapshot omits executionCwd/worktreeStatus/worktreeCleanupCommands
@@ -108,15 +115,15 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
             fake_bin = self.make_fake_bin()
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -128,20 +135,20 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 workspace_kind=request.workspace_kind,
                 isolation_context=request.isolation_context,
             )
-            original_create = self.delegate.worktree_execution.create_persistent_worktree
+            original_create = worktree_execution_api.create_persistent_worktree
 
             def failing_create(*args, **kwargs):
-                raise self.delegate.worktree_execution.IsolationExecutionError(
+                raise worktree_execution_api.IsolationExecutionError(
                     "worktree_create_failed", "Simulated worktree failure"
                 )
 
-            self.delegate.worktree_execution.create_persistent_worktree = failing_create
+            worktree_execution_api.create_persistent_worktree = failing_create
             try:
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                with self.assertRaises(errors_api.DelegateError) as ctx:
                     self.delegate.execute_request(
                         request,
                         json_mode=False,
-                        config=self.delegate.DEFAULT_CONFIG,
+                        config=config_api.embedded_default_config(),
                         pass_through=False,
                         completion_report_mode="none",
                         source_workspace=workspace,
@@ -155,7 +162,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 run_dirs = list(runs_dir.glob("del_*"))
                 self.assertTrue(len(run_dirs) > 0)
                 run_id = run_dirs[0].name
-                snapshot = self.delegate.run_registry.load_run_snapshot(registry_root, run_id)
+                snapshot = registry_api.load_run_snapshot(registry_root, run_id)
 
                 # Planned fields MUST be present (they carry the intent).
                 self.assertIn("plannedBranch", snapshot)
@@ -167,20 +174,20 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 self.assertNotIn("worktreeCleanupCommands", snapshot)
                 self.assertNotIn("branch", snapshot)
             finally:
-                self.delegate.worktree_execution.create_persistent_worktree = original_create
+                worktree_execution_api.create_persistent_worktree = original_create
 
     def test_partial_worktree_cleanup_uses_git_timeouts(self):
         """Failure-path cleanup must not run unbounded git subprocesses."""
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree_path = Path(temp_dir) / "partial-worktree"
             worktree_path.mkdir()
-            run_path = Path(temp_dir) / "run"
-            run_path.mkdir()
+            run_path = Path(temp_dir) / ".delegate" / "runs" / "del_20260907T000000Z_abcdef"
+            run_path.mkdir(parents=True)
             completed = subprocess.CompletedProcess(["git"], 0, "", "")
             with mock.patch.object(
-                self.delegate.worktree_execution.subprocess, "run", return_value=completed
+                worktree_execution_api.subprocess, "run", return_value=completed
             ) as run_mock:
-                self.delegate.worktree_execution._cleanup_partial_worktree(
+                worktree_execution_api._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
@@ -193,17 +200,17 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             for call in run_mock.call_args_list:
                 self.assertEqual(
                     call.kwargs.get("timeout"),
-                    self.delegate.worktree_execution.GIT_MUTATION_TIMEOUT_SECONDS,
+                    worktree_execution_api.GIT_MUTATION_TIMEOUT_SECONDS,
                 )
 
     def test_partial_worktree_cleanup_records_branch_delete_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree_path = Path(temp_dir) / "partial-worktree"
             worktree_path.mkdir()
-            run_path = Path(temp_dir) / "run"
-            run_path.mkdir()
-            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
-            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            run_path = Path(temp_dir) / ".delegate" / "runs" / "del_20260907T000000Z_abcdef"
+            run_path.mkdir(parents=True)
+            state_path = run_path / registry_api.STATE_FILE
+            registry_api.write_json_atomic(state_path, {"ok": False})
             worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
             branch_failed = subprocess.CompletedProcess(
                 ["git"],
@@ -215,13 +222,13 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
 
             with (
                 mock.patch.object(
-                    self.delegate.worktree_execution.subprocess,
+                    worktree_execution_api.subprocess,
                     "run",
                     side_effect=[worktree_removed, branch_failed, branch_still_exists],
                 ),
             ):
                 stderr = io.StringIO()
-                self.delegate.worktree_execution._cleanup_partial_worktree(
+                worktree_execution_api._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
@@ -230,7 +237,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     remove_branch=True,
                 )
 
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertTrue(snapshot["cleanupFailed"])
             self.assertIn("branch -D delegate/cursor-partial", snapshot["manualCleanup"])
             self.assertIn("manual cleanup required", stderr.getvalue())
@@ -239,10 +246,10 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree_path = Path(temp_dir) / "partial-worktree"
             worktree_path.mkdir()
-            run_path = Path(temp_dir) / "run"
-            run_path.mkdir()
-            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
-            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            run_path = Path(temp_dir) / ".delegate" / "runs" / "del_20260907T000000Z_abcdef"
+            run_path.mkdir(parents=True)
+            state_path = run_path / registry_api.STATE_FILE
+            registry_api.write_json_atomic(state_path, {"ok": False})
             worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
             branch_failed = subprocess.CompletedProcess(
                 ["git"],
@@ -254,18 +261,18 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
 
             with (
                 mock.patch.object(
-                    self.delegate.worktree_execution.subprocess,
+                    worktree_execution_api.subprocess,
                     "run",
                     side_effect=[worktree_removed, branch_failed, branch_still_exists],
                 ),
                 mock.patch.object(
-                    self.delegate.run_registry,
-                    "write_json_atomic",
+                    registry_api,
+                    "write_run_state",
                     side_effect=OSError("disk full"),
                 ),
             ):
                 stderr = io.StringIO()
-                self.delegate.worktree_execution._cleanup_partial_worktree(
+                worktree_execution_api._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
@@ -282,10 +289,10 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree_path = Path(temp_dir) / "partial-worktree"
             worktree_path.mkdir()
-            run_path = Path(temp_dir) / "run"
-            run_path.mkdir()
-            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
-            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            run_path = Path(temp_dir) / ".delegate" / "runs" / "del_20260907T000000Z_abcdef"
+            run_path.mkdir(parents=True)
+            state_path = run_path / registry_api.STATE_FILE
+            registry_api.write_json_atomic(state_path, {"ok": False})
             worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
             branch_delete_failed = subprocess.CompletedProcess(
                 ["git"],
@@ -297,13 +304,13 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
 
             with (
                 mock.patch.object(
-                    self.delegate.worktree_execution.subprocess,
+                    worktree_execution_api.subprocess,
                     "run",
                     side_effect=[worktree_removed, branch_delete_failed, branch_absent],
                 ),
             ):
                 stderr = io.StringIO()
-                self.delegate.worktree_execution._cleanup_partial_worktree(
+                worktree_execution_api._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
@@ -312,7 +319,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     remove_branch=True,
                 )
 
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertNotIn("cleanupFailed", snapshot)
             self.assertNotIn("manualCleanup", snapshot)
             self.assertEqual(stderr.getvalue(), "")
@@ -335,14 +342,14 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             )
             bad_agent.chmod(0o755)
 
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -373,7 +380,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 code, _payload = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -397,7 +404,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(len(run_dirs) > 0)
-            state = self.delegate.json.loads((run_dirs[0] / "state.json").read_text())
+            state = json.loads((run_dirs[0] / "state.json").read_text())
             self.assertEqual(state.get("status"), "failed")
             self.assertIn("exitCode", state)
             self.assertIsNotNone(state["exitCode"])
@@ -409,15 +416,15 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
             fake_bin = self.make_fake_bin()
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -430,7 +437,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             )
 
             def fail_execute_tracked(*_args, **_kwargs):
-                raise self.delegate.delegate_runner.RunnerLaunchError(
+                raise runner_api.RunnerLaunchError(
                     "simulated_setup_error",
                     "simulated setup failure",
                 )
@@ -441,16 +448,16 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_execution.delegate_runner,
+                    worktree_execution_api.delegate_runner,
                     "execute_tracked",
                     side_effect=fail_execute_tracked,
                 ),
-                self.assertRaises(self.delegate.DelegateError) as ctx,
+                self.assertRaises(errors_api.DelegateError) as ctx,
             ):
                 self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -462,7 +469,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             registry_root = Path(repo.name) / ".delegate"
             run_dirs = list((registry_root / "runs").glob("del_*"))
             self.assertTrue(run_dirs)
-            snapshot = self.delegate.json.loads((run_dirs[0] / "snapshot.json").read_text())
+            snapshot = registry_api.load_run_snapshot(run_dirs[0].parent.parent, run_dirs[0].name)
             self.assertEqual(snapshot.get("status"), "failed")
             self.assertEqual(snapshot.get("error"), "simulated_setup_error")
             self.assertIn("simulated setup failure", snapshot.get("message", ""))
@@ -487,7 +494,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             # Monkey-patch generate_run_id so we know the predicted branch.
             fixed_run_id = "del_20250101T000000Z_abcdef"
             with mock.patch.object(
-                self.delegate.run_registry,
+                registry_api,
                 "generate_run_id",
                 return_value=fixed_run_id,
             ):
@@ -527,14 +534,14 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 )
 
                 fake_bin = self.make_fake_bin()
-                workspace = self.delegate.resolve_workspace(repo.name)
+                workspace = request_api.resolve_workspace(repo.name)
                 request = self._make_persistent_worktree_request(
                     "cursor",
                     "work",
                     repo.name,
-                    self.delegate.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                 )
-                request = self.delegate.Request(
+                request = request_types.Request(
                     request.engine,
                     request.mode,
                     request.workspace,
@@ -556,11 +563,11 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     workspace_kind=request.workspace_kind,
                     isolation_context=request.isolation_context,
                 )
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                with self.assertRaises(errors_api.DelegateError) as ctx:
                     self.delegate.execute_request(
                         request,
                         json_mode=False,
-                        config=self.delegate.DEFAULT_CONFIG,
+                        config=config_api.embedded_default_config(),
                         pass_through=False,
                         completion_report_mode="none",
                         source_workspace=workspace,
@@ -647,14 +654,14 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             )
             agent.chmod(0o755)
 
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -668,16 +675,14 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             )
 
             executed_tracked = {"called": False}
-            original_execute_tracked = (
-                self.delegate.worktree_execution.delegate_runner.execute_tracked
-            )
+            original_execute_tracked = worktree_execution_api.delegate_runner.execute_tracked
 
             def tracking_execute_tracked(*_args, **_kwargs):
                 executed_tracked["called"] = True
                 return original_execute_tracked(*_args, **_kwargs)
 
             def failing_sync(*_args, **_kwargs):
-                raise self.delegate.DelegateError(
+                raise errors_api.DelegateError(
                     "safe_workspace_sync_failed",
                     "Simulated include-dirty sync failure",
                 )
@@ -688,21 +693,21 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     {"PATH": str(agent_marker_parent) + os.pathsep + os.environ.get("PATH", "")},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_execution.safe_workspace,
+                    worktree_execution_api.safe_workspace,
                     "sync_git_dirty_snapshot",
                     side_effect=failing_sync,
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_execution.delegate_runner,
+                    worktree_execution_api.delegate_runner,
                     "execute_tracked",
                     side_effect=tracking_execute_tracked,
                 ),
-                self.assertRaises(self.delegate.DelegateError) as ctx,
+                self.assertRaises(errors_api.DelegateError) as ctx,
             ):
                 self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -719,7 +724,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             registry_root = Path(repo.name) / ".delegate"
             run_dirs = list((registry_root / "runs").glob("del_*"))
             self.assertTrue(run_dirs)
-            snapshot = json.loads((run_dirs[0] / "snapshot.json").read_text())
+            snapshot = registry_api.load_run_snapshot(run_dirs[0].parent.parent, run_dirs[0].name)
             self.assertEqual(snapshot.get("status"), "failed")
             self.assertEqual(snapshot.get("error"), "safe_workspace_sync_failed")
             self.assertIn("Simulated include-dirty sync failure", snapshot.get("message", ""))

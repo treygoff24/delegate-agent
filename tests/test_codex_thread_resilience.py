@@ -224,12 +224,15 @@ raise SystemExit(1)
         self.assertIn("2026-07-22 01:00 UTC", payload["message"])
         self.assertNotIn(secret, payload["message"])
         run_path = root / "runs" / run_id
-        for name in ("state.json", "completion-report.md"):
-            with self.subTest(artifact=name):
-                self.assertNotIn(secret, (run_path / name).read_text(encoding="utf-8"))
-        # recentEvents deliberately mirrors the raw event log, so the snapshot
-        # is checked on the fields delegate itself composes.
-        snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+        self.assertNotIn(secret, (run_path / "completion-report.md").read_text(encoding="utf-8"))
+        state = run_registry.load_run_state(root, run_id)
+        # The single record now also holds the raw diagnostic mirror that used
+        # to live in snapshot.json. Every other persisted field remains scrubbed.
+        self.assertNotIn(
+            secret,
+            json.dumps({key: value for key, value in state.items() if key != "recentEvents"}),
+        )
+        snapshot = run_registry.load_run_snapshot(root, run_id)
         self.assertNotIn(secret, snapshot["message"])
         self.assertNotIn(secret, snapshot["current"])
         # Retained event surfaces are a raw diagnostic mirror: secret-shaped

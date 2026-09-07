@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from delegate_agent import cli, mail, profile_guard, run_registry
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import mail, profile_guard, run_registry
 from tests.delegate_commands_test_base import CommandTestBase
 
 # Stop-hook injection is verified only for Claude and Codex. Promote another
@@ -195,12 +196,12 @@ class MailPushAdapterTests(CommandTestBase):
                 self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
     def test_provisioning_is_absent_without_mail_push_flag(self):
-        parsed = cli.parse_cli(["claude", "work", "prompt"])
+        parsed = parser_api.parse_cli(["claude", "work", "prompt"])
         self.assertFalse(parsed.payload.mail_push)
         self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
     def test_hook_pump_is_classified_as_a_mutation_by_both_python_and_shell_guards(self):
-        parsed = cli.parse_cli(["mail", "hook-pump"])
+        parsed = parser_api.parse_cli(["mail", "hook-pump"])
         self.assertFalse(profile_guard.is_read_only_command(parsed))
         shim = Path(__file__).resolve().parents[1] / "bin" / "delegate-profile-shim"
         shim_text = shim.read_text(encoding="utf-8")

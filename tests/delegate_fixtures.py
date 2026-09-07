@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from delegate_agent import run_registry as registry_api
+from delegate_agent import worktree_execution as worktree_execution_api
 from delegate_agent.json_types import JsonObject
 
 GitRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -86,20 +88,20 @@ def seed_plain_run(
     harness: str = "cursor",
     last_activity_at: str | None = None,
 ) -> tuple[str, str]:
-    registry_root = delegate.run_registry.ensure_registry(Path(repo_path), workspace_kind="git")
-    run_id, alias = delegate.run_registry.register_run(
+    registry_root = registry_api.ensure_registry(Path(repo_path), workspace_kind="git")
+    run_id, alias = registry_api.register_run(
         registry_root,
         harness=harness,
         metadata={"mode": "work", "cwd": repo_path},
     )
-    run_path = delegate.run_registry.run_directory(registry_root, run_id)
-    started = delegate.run_registry.utc_now_iso()
+    run_path = registry_api.run_directory(registry_root, run_id)
+    started = registry_api.utc_now_iso()
     if last_activity_at is None:
-        last_activity_at = delegate.run_registry.utc_now_iso()
-    delegate.run_registry.write_json_atomic(
+        last_activity_at = registry_api.utc_now_iso()
+    registry_api.write_json_atomic(
         run_path / "manifest.json",
         {
-            "schema": delegate.run_registry.MANIFEST_SCHEMA,
+            "schema": registry_api.MANIFEST_SCHEMA,
             "runId": run_id,
             "alias": alias,
             "harness": harness,
@@ -110,10 +112,10 @@ def seed_plain_run(
             "startedAt": started,
         },
     )
-    delegate.run_registry.write_json_atomic(
+    registry_api.write_json_atomic(
         run_path / "state.json",
         {
-            "schema": delegate.run_registry.STATE_SCHEMA,
+            "schema": registry_api.STATE_SCHEMA,
             "runId": run_id,
             "alias": alias,
             "status": "succeeded",
@@ -137,14 +139,14 @@ def seed_persistent_worktree_run(
     source_head_ref: str | object | None = object(),
     last_activity_at: str | None = None,
 ) -> tuple[str, str]:
-    registry_root = delegate.run_registry.ensure_registry(Path(repo_path), workspace_kind="git")
-    run_id, allocated_alias = delegate.run_registry.register_run(
+    registry_root = registry_api.ensure_registry(Path(repo_path), workspace_kind="git")
+    run_id, allocated_alias = registry_api.register_run(
         registry_root,
         harness=harness,
         metadata={"mode": "work", "cwd": repo_path},
     )
     if branch is None:
-        branch = f"delegate/cursor-{delegate.worktree_execution.short_run_id(run_id)}"
+        branch = f"delegate/cursor-{worktree_execution_api.short_run_id(run_id)}"
     if execution_cwd is None:
         execution_cwd = str(Path(repo_path).parent / "worktree" / allocated_alias)
     if creation_oid is None:
@@ -174,16 +176,16 @@ def seed_persistent_worktree_run(
         "plannedBranch": branch,
         "plannedExecutionCwd": execution_cwd,
     }
-    run_path = delegate.run_registry.run_directory(registry_root, run_id)
+    run_path = registry_api.run_directory(registry_root, run_id)
     run_path.mkdir(parents=True, exist_ok=True)
     manifest_alias = alias if alias != allocated_alias else allocated_alias
-    started = delegate.run_registry.utc_now_iso()
+    started = registry_api.utc_now_iso()
     if last_activity_at is None:
-        last_activity_at = delegate.run_registry.utc_now_iso()
-    delegate.run_registry.write_json_atomic(
+        last_activity_at = registry_api.utc_now_iso()
+    registry_api.write_json_atomic(
         run_path / "manifest.json",
         {
-            "schema": delegate.run_registry.MANIFEST_SCHEMA,
+            "schema": registry_api.MANIFEST_SCHEMA,
             "runId": run_id,
             "alias": manifest_alias,
             "harness": harness,
@@ -204,10 +206,10 @@ def seed_persistent_worktree_run(
             "startedAt": started,
         },
     )
-    delegate.run_registry.write_json_atomic(
+    registry_api.write_json_atomic(
         run_path / "state.json",
         {
-            "schema": delegate.run_registry.STATE_SCHEMA,
+            "schema": registry_api.STATE_SCHEMA,
             "runId": run_id,
             "alias": manifest_alias,
             "status": "succeeded",
@@ -216,13 +218,13 @@ def seed_persistent_worktree_run(
         },
     )
     if alias != allocated_alias:
-        index = delegate.run_registry.load_index(registry_root)
+        index = registry_api.load_index(registry_root)
         index["aliases"].pop(allocated_alias, None)
         (registry_root / "aliases" / allocated_alias).unlink(missing_ok=True)
         index["aliases"][alias] = run_id
         entry = index["runs"][run_id]
         if isinstance(entry, dict):
             entry["alias"] = alias
-        delegate.run_registry.bind_alias_claim(registry_root, alias, run_id)
-        delegate.run_registry.save_index(registry_root, index)
+        registry_api.bind_alias_claim(registry_root, alias, run_id)
+        registry_api.save_index(registry_root, index)
     return run_id, alias

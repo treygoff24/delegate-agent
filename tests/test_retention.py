@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import command_help as help_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 RETENTION_PATH = ROOT / "src" / "delegate_agent" / "retention.py"
@@ -657,7 +659,7 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((run_path / "stdout.log").exists())
 
     def test_no_delete_commands_exist(self):
-        help_text = self.delegate.HELP
+        help_text = help_api.render_overview_text()
         self.assertIn("worktree prune", help_text.lower())
         self.assertNotIn("retention prune", help_text.lower())
         self.assertNotIn("delete", help_text.lower())

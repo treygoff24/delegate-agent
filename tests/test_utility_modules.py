@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -19,7 +21,6 @@ if SRC not in sys.path:
 
 import delegate_agent.archived_logs as archived_logs  # noqa: E402
 import delegate_agent.argv_utils as argv_utils  # noqa: E402
-import delegate_agent.cli as cli  # noqa: E402
 import delegate_agent.json_types as json_types  # noqa: E402
 import delegate_agent.log_output as log_output  # noqa: E402
 import delegate_agent.private_io as private_io  # noqa: E402
@@ -194,7 +195,7 @@ class UtilityModuleTests(unittest.TestCase):
                 reasoning.normalize_effort(value)
 
     def test_cli_parse_runs_json_mode(self):
-        parsed = cli.parse_cli(["--json", "runs", "--limit", "1", "--structural"])
+        parsed = parser_api.parse_cli(["--json", "runs", "--limit", "1", "--structural"])
 
         self.assertEqual(parsed.subcommand, "runs")
         self.assertTrue(parsed.global_options.json_mode)

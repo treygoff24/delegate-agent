@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
-import inspect
 import io
 import json
 import math
@@ -937,7 +936,9 @@ class WorkflowState:
                 and (self.dry_run or not _is_simulated_event(event))
             ):
                 self.known_agent_keys.add(event_key)
-            if isinstance(event_key, str) and not _is_simulated_event(event):
+            if isinstance(event_key, str) and (
+                not _is_simulated_event(event) or (self.dry_run and event_type == "agent_rejected")
+            ):
                 if event_type == "agent_started":
                     self.started_without_result.add(event_key)
                     if event_key in self.tombstoned_keys:
@@ -3666,32 +3667,16 @@ class WorkflowDsl:
 def _run_child_command_for_state(
     argv: list[str],
     *,
-    state: object,
+    state: WorkflowState,
     timeout: int | float | None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Invoke the child wait with lifecycle callbacks when the seam supports them.
-
-    A few focused tests replace ``_run_child_command`` with a narrow
-    side-effect function.  Filter only those injected callbacks while keeping
-    the real runtime on the cancellation path.
-    """
-    kwargs: dict[str, object] = {"cwd": str(state.workspace), "timeout": timeout}
-    attempt_environment = getattr(state, "attempt_environment", None)
-    if attempt_environment is not None:
-        kwargs["environment"] = attempt_environment
-    cancel_event = getattr(state, "cancel_event", None)
-    if cancel_event is not None and hasattr(cancel_event, "is_set"):
-        kwargs["cancel_event"] = cancel_event
-    side_effect = getattr(_run_child_command, "side_effect", None)
-    if callable(side_effect):
-        try:
-            params = inspect.signature(side_effect).parameters.values()
-        except (TypeError, ValueError):
-            params = ()
-        if not any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
-            accepted = {param.name for param in params}
-            kwargs = {key: value for key, value in kwargs.items() if key in accepted}
-    return _run_child_command(argv, **kwargs)
+    return _run_child_command(
+        argv,
+        cwd=str(state.workspace),
+        timeout=timeout,
+        environment=state.attempt_environment,
+        cancel_event=state.cancel_event,
+    )
 
 
 def _run_child_command(

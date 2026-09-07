@@ -785,7 +785,9 @@ class ValidationTests(unittest.TestCase):
             ):
                 code = cli.main(["--cwd", tmp, "--json", "models"], stdout=stdout, stderr=stderr)
             self.assertEqual(code, error_types.EXIT_OK, stderr.getvalue())
-            self.assertEqual(json.loads(stdout.getvalue())["cursor"]["defaultModel"], "composer-2.5")
+            self.assertEqual(
+                json.loads(stdout.getvalue())["cursor"]["defaultModel"], "composer-2.5"
+            )
 
     def test_load_config_uses_private_embedded_default_copy(self):
         config_mod = load_config_module()

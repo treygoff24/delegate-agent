@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io, run_scratch, run_status, terminal_states
-from delegate_agent.constants import KNOWN_ENGINES
+from delegate_agent import archived_logs, private_io, run_scratch, run_status
+from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
@@ -54,6 +54,7 @@ from delegate_agent.record_io import (  # noqa: F401  # existing registry API
     load_run_snapshot_or_none,
     load_run_state,
     load_run_state_or_none,
+    merge_terminal_record,
     parse_utc_timestamp,
     pending_finalize_wal_exists,
     read_finalize_wal,
@@ -107,7 +108,6 @@ SNAPSHOT_SCHEMA = "delegate.snapshot.v1"
 RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 RUNS_PRUNE_SCHEMA = "delegate.runs-prune.v1"
-DEFAULT_RUN_PRUNE_DAYS = 30
 LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS = 60 * 60
 LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8,}\.json$")
 RUN_PRUNE_ERROR_EXIT_CODE = 1
@@ -474,19 +474,9 @@ def reconcile_finalize_wal_locked(registry_root: Path, run_id: str) -> None:
         if record is None:
             return
         current = read_json_object_or_none(run_path / STATE_FILE)
-        current_status = current.get("status") if isinstance(current, dict) else None
-        if current_status in TERMINAL_STATUSES:
-            wal_path.unlink(missing_ok=True)
-            return
-        published = dict(record)
-        if isinstance(current, dict) and current.get("cancelRequested") is True:
-            published["status"] = STATUS_CANCELLED
-            published["ok"] = False
-            terminal_states.apply_operator_cancel_override(published)
-            for key in ("cancelRequested", "cancelRequestedAt"):
-                if key in current:
-                    published[key] = current[key]
-        publish_terminal_record_locked(registry_root, run_id, published)
+        published = merge_terminal_record(current, record)
+        if published != current:
+            publish_terminal_record_locked(registry_root, run_id, published)
         wal_path.unlink(missing_ok=True)
     except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
         if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":

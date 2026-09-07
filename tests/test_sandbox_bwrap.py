@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import isolation as isolation_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -370,20 +374,20 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
         (self.repo / "secret.env").write_text("s3cret\n", encoding="utf-8")
 
     def _request(self, engine: str = "codex"):
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=str(self.repo),
             resolved_isolation="auto",
             engine=engine,
             mode="safe",
             source_git_root=str(self.repo),
         )
-        return self.delegate.build_request(
+        return request_api.build_request(
             engine,
             "safe",
             None,
-            self.delegate.ResolvedWorkspace(str(self.repo), "git"),
+            request_types.ResolvedWorkspace(str(self.repo), "git"),
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
             isolation_context=iso_ctx,
         )
@@ -506,7 +510,7 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
             {"runId": run_id, "status": "succeeded"},
         )
         resolved = request_build._structured_retry_workspace(
-            self.delegate.ResolvedWorkspace(str(self.repo), "git"),
+            request_types.ResolvedWorkspace(str(self.repo), "git"),
             engine="codex",
             group="wf-test",
             workflow_agent_key="agent",

@@ -27,7 +27,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-from delegate_agent import isolation, run_registry
+from delegate_agent import isolation, run_registry, worktree_remove
+from delegate_agent import worktree_mgmt as wm
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -159,7 +160,7 @@ def prune_worktrees(
         if not dry_run:
             try:
                 removed.append(
-                    wm.remove_worktree(
+                    worktree_remove.remove_worktree(
                         registry_root,
                         handle=str(alias or record.get("runId")),
                         discard_uncommitted=discard_uncommitted,
@@ -707,7 +708,7 @@ def reap_worktrees(
                             if not isinstance(source, str) or not isinstance(execution, str):
                                 errors.append({**entry, "code": "metadata_missing"})
                                 continue
-                            wm._remove_worktree_path(
+                            worktree_remove._remove_worktree_path(
                                 source_git_root=source,
                                 execution_cwd=execution,
                                 discard_uncommitted=force or discard_uncommitted,
@@ -1550,7 +1551,7 @@ def gc_worktrees(
     # having written anything. The pool walk is read-only and the registry pass
     # never deletes worktree paths, so neither ordering changes the result.
     pool = (
-        wm.scan_worktree_pool(pool_data_home, required=pool_required)
+        scan_worktree_pool(pool_data_home, required=pool_required)
         if pool_data_home is not None
         else None
     )
@@ -1689,7 +1690,7 @@ def maybe_auto_prune(
     except TimeoutError:
         return {"ok": False, "skipped": True, "reason": "lock_contended"}
     try:
-        return wm.prune_worktrees(
+        return prune_worktrees(
             registry_root,
             merged=True,
             older_than_days=days,
@@ -1697,11 +1698,3 @@ def maybe_auto_prune(
         )
     except wm.WorktreeManagementError as exc:
         return dict(exc.payload)
-
-
-# Deferred to the bottom to break the worktree_mgmt<->worktree_gc facade cycle:
-# worktree_mgmt re-exports this module's surface (a top-level import here would
-# fail when worktree_gc is imported first). All `wm.<seam>` access above is
-# call-time, so binding the alias after our own definitions is sufficient and
-# keeps the monkeypatch seams (mock.patch.object(worktree_mgmt, ...)) working.
-from delegate_agent import worktree_mgmt as wm  # noqa: E402

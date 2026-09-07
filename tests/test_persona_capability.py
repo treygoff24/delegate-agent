@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import copy
 import unittest
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import harness_discovery as discovery_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -16,12 +17,12 @@ class PersonaCapabilityTests(CommandTestBase):
     def _request(
         self, discovery: dict[str, object], *, force: str | None = None, dry_run: bool = False
     ):
-        config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
+        config = config_api.embedded_default_config()
         config["claude"]["binary"] = "old-claude-binary"
         if force is not None:
             config["personas"]["forceTransport"] = force
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=discovery,
         ):
@@ -62,10 +63,8 @@ class PersonaCapabilityTests(CommandTestBase):
             {"side_effect": probe} if isinstance(probe, BaseException) else {"return_value": probe}
         )
         with (
-            mock.patch.object(
-                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
-            ),
-            mock.patch.object(self.delegate.harness_discovery, "run_metadata_probe", **probe_patch),
+            mock.patch.object(discovery_api, "selector_has_drifted", return_value=False),
+            mock.patch.object(discovery_api, "run_metadata_probe", **probe_patch),
         ):
             return self._request(self._production_discovery(True))
 
@@ -119,12 +118,8 @@ class PersonaCapabilityTests(CommandTestBase):
 
     def test_selector_drift_drops_a_positive_native_capability(self):
         with (
-            mock.patch.object(
-                self.delegate.harness_discovery, "selector_has_drifted", return_value=True
-            ),
-            mock.patch.object(
-                self.delegate.harness_discovery, "cached_version_has_drifted"
-            ) as version,
+            mock.patch.object(discovery_api, "selector_has_drifted", return_value=True),
+            mock.patch.object(discovery_api, "cached_version_has_drifted") as version,
         ):
             request = self._request(self._production_discovery(True))
         version.assert_not_called()
@@ -134,12 +129,8 @@ class PersonaCapabilityTests(CommandTestBase):
 
     def test_version_drift_drops_a_positive_native_capability(self):
         with (
-            mock.patch.object(
-                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
-            ),
-            mock.patch.object(
-                self.delegate.harness_discovery, "cached_version_freshness", return_value="drifted"
-            ),
+            mock.patch.object(discovery_api, "selector_has_drifted", return_value=False),
+            mock.patch.object(discovery_api, "cached_version_freshness", return_value="drifted"),
         ):
             request = self._request(self._production_discovery(True))
         self.assertEqual(request.persona_transport, "prepend")
@@ -149,27 +140,21 @@ class PersonaCapabilityTests(CommandTestBase):
 
     def test_cached_native_dry_run_never_probes_the_claude_binary(self):
         with (
-            mock.patch.object(
-                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
-            ),
-            mock.patch.object(
-                self.delegate.harness_discovery, "cached_version_freshness"
-            ) as version_probe,
+            mock.patch.object(discovery_api, "selector_has_drifted", return_value=False),
+            mock.patch.object(discovery_api, "cached_version_freshness") as version_probe,
         ):
             request = self._request(self._production_discovery(True), dry_run=True)
         version_probe.assert_not_called()
         self.assertEqual(request.persona_transport, "native-file")
 
     def test_production_shaped_false_capability_stays_prepend(self):
-        with mock.patch.object(
-            self.delegate.harness_discovery, "selector_has_drifted", return_value=False
-        ):
+        with mock.patch.object(discovery_api, "selector_has_drifted", return_value=False):
             request = self._request(self._production_discovery(False))
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
 
     def test_native_file_requires_a_positive_cached_identity_probe(self):
-        current = self.delegate.harness_discovery.ProbeResult((), 0, "2.1.220", "", None)
+        current = discovery_api.ProbeResult((), 0, "2.1.220", "", None)
         request = self._production_request_with_probe(current)
 
         self.assertEqual(request.persona_transport, "native-file")
@@ -178,10 +163,8 @@ class PersonaCapabilityTests(CommandTestBase):
     def test_native_file_falls_back_when_cached_identity_is_indeterminate(self):
         cases = {
             "probe_os_error": OSError("spawn refused"),
-            "probe_timeout": self.delegate.harness_discovery.ProbeResult(
-                (), None, "", "", "probe_timeout"
-            ),
-            "unrecognized_banner": self.delegate.harness_discovery.ProbeResult(
+            "probe_timeout": discovery_api.ProbeResult((), None, "", "", "probe_timeout"),
+            "unrecognized_banner": discovery_api.ProbeResult(
                 (), 0, "unrecognized version banner", "", None
             ),
         }
@@ -194,16 +177,14 @@ class PersonaCapabilityTests(CommandTestBase):
     def test_native_file_falls_back_when_cached_record_has_no_version(self):
         discovery = self._production_discovery(True)
         discovery["harnesses"]["claude"]["version"] = None
-        with mock.patch.object(
-            self.delegate.harness_discovery, "selector_has_drifted", return_value=False
-        ):
+        with mock.patch.object(discovery_api, "selector_has_drifted", return_value=False):
             request = self._request(discovery)
 
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
 
     def test_native_file_falls_back_when_cached_identity_has_drifted(self):
-        drifted = self.delegate.harness_discovery.ProbeResult((), 0, "2.1.221", "", None)
+        drifted = discovery_api.ProbeResult((), 0, "2.1.221", "", None)
         request = self._production_request_with_probe(drifted)
 
         self.assertEqual(request.persona_transport, "prepend")

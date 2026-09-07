@@ -66,7 +66,12 @@ class WorkflowWatchdogUnitTests(unittest.TestCase):
         result_hash = workflow_runtime._gate_result_hash(event_result)
         registry.write_status(
             root,
-            {"wfId": wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+            {
+                "wfId": wf_id,
+                "workflowKeyVersion": 2,
+                "status": "running",
+                "budget": {"total": None, "spent": 0},
+            },
         )
         registry.append_jsonl(
             root / registry.JOURNAL_FILE,
@@ -635,6 +640,7 @@ class WorkflowWatchdogUnitTests(unittest.TestCase):
                 "status": "running",
                 "budget": {"total": None, "spent": 0},
                 "notify": "channel:fixture",
+                "workflowKeyVersion": 2,
             },
         )
         cancellation_failure = workflow_runtime.WorkflowChildCancellationError(

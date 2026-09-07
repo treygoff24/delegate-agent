@@ -9,6 +9,10 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -440,7 +444,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
         return fake
 
     def _cursor_config(self, fake: Path) -> dict:
-        config = dict(self.delegate.DEFAULT_CONFIG)
+        config = dict(config_api.embedded_default_config())
         config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
         config["tracking"] = {
             **config["tracking"],
@@ -454,8 +458,8 @@ class CodexProfileExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "initiator.txt"
             config = self._cursor_config(self._env_probe_binary(Path(tmp), log_path))
-            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-            request = self.delegate.build_request(
+            workspace = request_types.ResolvedWorkspace(repo.name, "git")
+            request = request_api.build_request(
                 "cursor", "work", None, workspace, "task", config, dry_run=False
             )
 
@@ -484,8 +488,8 @@ class CodexProfileExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "initiator.txt"
             config = self._cursor_config(self._env_probe_binary(Path(tmp), log_path))
-            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-            request = self.delegate.build_request(
+            workspace = request_types.ResolvedWorkspace(repo.name, "git")
+            request = request_api.build_request(
                 "cursor",
                 "call",
                 None,
@@ -559,11 +563,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config = base_config(work=str(home))
             config["profiles"]["default"] = "work"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
                 config,
                 dry_run=False,
@@ -580,11 +584,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config = base_config(work="relative/codex/home")
             config["profiles"]["default"] = "work"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
                 config,
                 dry_run=False,
@@ -612,11 +616,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], binary=str(fake_bin))
             config["profiles"]["default"] = "work"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                request_types.ResolvedWorkspace(repo.name, "git"),
                 "review",
                 config,
                 dry_run=False,
@@ -629,7 +633,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 request,
                 run_id=run_id,
                 alias=alias,
-                source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+                source_workspace=request_types.ResolvedWorkspace(repo.name, "git"),
             )
             exit_code, _payload = self.runner.execute_tracked(
                 request.argv,
@@ -668,11 +672,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
             config["profiles"]["default"] = "personal"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                request_types.ResolvedWorkspace(repo.name, "git"),
                 "task",
                 config,
                 dry_run=False,
@@ -684,7 +688,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 request,
                 run_id=run_id,
                 alias=alias,
-                source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+                source_workspace=request_types.ResolvedWorkspace(repo.name, "git"),
             )
             exit_code, payload = self.runner.execute_tracked(
                 request.argv,
@@ -733,11 +737,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
             config["profiles"]["default"] = "personal"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                request_types.ResolvedWorkspace(repo.name, "git"),
                 "task",
                 config,
                 dry_run=False,
@@ -749,7 +753,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 request,
                 run_id=run_id,
                 alias=alias,
-                source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+                source_workspace=request_types.ResolvedWorkspace(repo.name, "git"),
             )
             exit_code, payload = self.runner.execute_tracked(
                 request.argv,
@@ -785,18 +789,18 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
             config["profiles"]["detectFrom"] = ["AI_PROFILE"]
             with mock.patch.dict(os.environ, {"AI_PROFILE": "work"}, clear=False):
-                request = self.delegate.build_request(
+                request = request_api.build_request(
                     "codex",
                     "safe",
                     None,
-                    self.delegate.ResolvedWorkspace(repo.name, "git"),
+                    request_types.ResolvedWorkspace(repo.name, "git"),
                     "task",
                     config,
                     dry_run=False,
                 )
             self.delegate._set_child_root_env(
                 request,
-                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                request_types.ResolvedWorkspace(repo.name, "git"),
             )
             registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
             run_id, alias = self.registry.register_run(registry_root, harness="codex")
@@ -805,7 +809,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 request,
                 run_id=run_id,
                 alias=alias,
-                source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+                source_workspace=request_types.ResolvedWorkspace(repo.name, "git"),
             )
             self.assertEqual(ctx.fallback_env_overrides, {})
             self.assertIn("DELEGATE_SOURCE_ROOT", ctx.env_overrides)
@@ -924,11 +928,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ, {"DELEGATE_PROFILE": "work", "AI_PROFILE": "personal"}, clear=False
             ):
-                request = self.delegate.build_request(
+                request = request_api.build_request(
                     "codex",
                     "safe",
                     None,
-                    self.delegate.ResolvedWorkspace(tmp, "directory"),
+                    request_types.ResolvedWorkspace(tmp, "directory"),
                     "review",
                     config,
                     dry_run=True,
@@ -958,11 +962,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
         registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
         build_env = dict(env or {})
         with mock.patch.dict(os.environ, build_env, clear=False):
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 mode,
                 None,
-                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                request_types.ResolvedWorkspace(repo.name, "git"),
                 "task",
                 config,
                 dry_run=False,
@@ -973,7 +977,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
             request,
             run_id=run_id,
             alias=alias,
-            source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+            source_workspace=request_types.ResolvedWorkspace(repo.name, "git"),
         )
         with mock.patch.dict(os.environ, build_env, clear=False):
             exit_code, payload = self.runner.execute_tracked(
@@ -1105,8 +1109,8 @@ class CodexProfileExecutionTests(unittest.TestCase):
                     "DELEGATE_MAIL_SELF": "codex-99",
                 }
             )
-            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
-            request = self.delegate.build_request(
+            workspace = request_types.ResolvedWorkspace(repo.name, "git")
+            request = request_api.build_request(
                 "codex", "work", None, workspace, "task", config, dry_run=False
             )
 
@@ -1239,11 +1243,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config = base_config(work=work)
             config["profiles"]["default"] = "work"
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
                 config,
                 dry_run=True,
@@ -1270,11 +1274,11 @@ class CodexProfileExecutionTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], fallbackProfile="work")
             config["profiles"]["default"] = None
             config["profiles"]["detectFrom"] = []
-            request = self.delegate.build_request(
+            request = request_api.build_request(
                 "codex",
                 "safe",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
                 config,
                 dry_run=True,
@@ -1657,7 +1661,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
             write_json_config(config_path, config)
             code, payload, _stderr = main_json(
                 self.delegate,
-                ["--json", "describe"],
+                ["--json", "describe", "--full"],
                 env={"DELEGATE_CONFIG": str(config_path)},
             )
             self.assertEqual(code, 0)

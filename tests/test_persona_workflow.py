@@ -56,7 +56,7 @@ class PersonaWorkflowTests(unittest.TestCase):
         )
 
     def _child_result(self, calls: list[dict[str, object]]):
-        def run_child(argv, *, cwd, timeout):
+        def run_child(argv, *, cwd, timeout, environment=None, cancel_event=None):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -282,7 +282,9 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def mutate_before_child_resolution(argv, *, cwd, timeout):
+        def mutate_before_child_resolution(
+            argv, *, cwd, timeout, cancel_event=None, environment=None
+        ):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -329,7 +331,9 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def delete_before_child_resolution(argv, *, cwd, timeout):
+        def delete_before_child_resolution(
+            argv, *, cwd, timeout, cancel_event=None, environment=None
+        ):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -394,7 +398,7 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def create_workspace_shadow(argv, *, cwd, timeout):
+        def create_workspace_shadow(argv, *, cwd, timeout, cancel_event=None, environment=None):
             input_path = Path(argv[argv.index("--input-json") + 1])
             calls.append(json.loads(input_path.read_text(encoding="utf-8")))
             workspace_persona.write_text("shadow", encoding="utf-8")

@@ -3317,6 +3317,8 @@ class WorkflowCommandTests(unittest.TestCase):
             {
                 "cli_argv": ["delegate"],
                 "wf_id": "wf_deleted_report",
+                "attempt_environment": None,
+                "cancel_event": None,
                 "workspace": self.workspace,
             },
         )()
@@ -3430,7 +3432,7 @@ class WorkflowCommandTests(unittest.TestCase):
         runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
         self.assertEqual(len(runs), 1)
         run_id = runs[0]["runId"]
-        snapshot_path = self.workspace / ".delegate" / "runs" / run_id / "snapshot.json"
+        snapshot_path = self.workspace / ".delegate" / "runs" / run_id / "state.json"
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
         if tamper == "deleted":
             report = Path(snapshot["completionReport"]["path"])
@@ -4064,7 +4066,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
     def test_describe_and_help_include_workflows(self) -> None:
-        describe = self.run_delegate(["--json", "describe"])
+        describe = self.run_delegate(["--json", "describe", "--full"])
         self.assertEqual(describe.returncode, 0, describe.stderr)
         payload = json.loads(describe.stdout)
         self.assertIn("workflows", payload)
@@ -4107,7 +4109,7 @@ class WorkflowCommandTests(unittest.TestCase):
         runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
         self.assertEqual(len(runs), 1)
         run_id = runs[0]["runId"]
-        snapshot_path = self.workspace / ".delegate" / "runs" / run_id / "snapshot.json"
+        snapshot_path = self.workspace / ".delegate" / "runs" / run_id / "state.json"
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
         snapshot["assistantText"] = '{"ok": "wrong"}'
         snapshot["completionReportSource"] = "delegate_synthesized"

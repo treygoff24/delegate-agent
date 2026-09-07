@@ -882,6 +882,7 @@ def _persist_final_progress(
             record.get("resultQuality"),
             record.get("terminalState"),
         )
+        record = run_registry.merge_terminal_record(current, record)
         return persisted_status, persisted_extra, record
 
     try:
@@ -892,7 +893,10 @@ def _persist_final_progress(
             run_registry.reconcile_finalize_wal_locked(ctx.registry_root, ctx.run_id)
             current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
             current_status = current.get("status") if isinstance(current, dict) else None
-            if current_status in run_registry.TERMINAL_STATUSES:
+            if current_status in run_registry.TERMINAL_STATUSES and (
+                current_status != run_registry.STATUS_CANCELLED
+                and current.get("cancelRequested") is not True
+            ):
                 return existing_terminal_result(current)
             persisted_status, persisted_extra, record = terminal_payloads(current)
             run_registry.publish_terminal_record_locked(ctx.registry_root, ctx.run_id, record)
@@ -904,7 +908,10 @@ def _persist_final_progress(
         # preserving cancel precedence even if cancellation wins this race.
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
-        if current_status in run_registry.TERMINAL_STATUSES:
+        if current_status in run_registry.TERMINAL_STATUSES and (
+            current_status != run_registry.STATUS_CANCELLED
+            and current.get("cancelRequested") is not True
+        ):
             return existing_terminal_result(current)
         persisted_status, persisted_extra, record = terminal_payloads(current)
         run_registry.write_finalize_wal(

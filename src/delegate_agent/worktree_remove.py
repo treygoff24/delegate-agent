@@ -14,10 +14,11 @@ take effect.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from delegate_agent import isolation, run_registry
+from delegate_agent import worktree_mgmt as wm
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
@@ -193,11 +194,11 @@ def _remove_branch_if_requested(
     if status == STATUS_REMOVED and not force_branch:
         return BranchRemovalResult(removed=False)
     if force_branch and isinstance(source_git_root, str) and isinstance(branch, str) and branch:
-        return wm._remove_branch(source_git_root, branch, force=True)
+        return _remove_branch(source_git_root, branch, force=True)
     if status == STATUS_MISSING:
         return BranchRemovalResult(removed=False, kept_reason="path_missing")
     if isinstance(source_git_root, str) and isinstance(branch, str) and branch:
-        return wm._remove_branch(source_git_root, branch, force=False)
+        return _remove_branch(source_git_root, branch, force=False)
     return BranchRemovalResult(removed=False)
 
 
@@ -427,7 +428,7 @@ def remove_worktree(
     keep_branch: bool = False,
     force: bool = False,
     include_detached: bool = False,
-    retirement_ignore_globs: tuple[str, ...] = (),
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -464,12 +465,10 @@ def remove_worktree(
         if plan.status == STATUS_MISSING:
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
-        return _remove_present_worktree_path(registry_root, plan, options=options)
-
-
-# Deferred to the bottom to break the worktree_mgmt<->worktree_remove facade
-# cycle: worktree_mgmt re-exports this module's surface (a top-level import here
-# would fail when worktree_remove is imported first). All `wm.<seam>` access
-# above is call-time, so binding the alias after our own definitions is
-# sufficient and keeps mock.patch.object(worktree_mgmt, ...) seams working.
-from delegate_agent import worktree_mgmt as wm  # noqa: E402
+        # Ignored/seeded dirt needs Git force only after locked policy validation.
+        physical_options = (
+            replace(options, discard_uncommitted=True)
+            if retirement_ignore_globs is not None
+            else options
+        )
+        return _remove_present_worktree_path(registry_root, plan, options=physical_options)

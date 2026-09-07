@@ -140,24 +140,40 @@ def pending_finalize_wal_exists(registry_root: Path, run_id: str) -> bool:
     return (run_directory(registry_root, run_id) / FINALIZE_WAL_FILE).exists()
 
 
-def _overlay_pending_terminal_record(
+def merge_terminal_record(
     current: JsonObject | None,
-    pending: JsonObject | None,
-) -> JsonObject | None:
-    if pending is None:
-        return current
+    pending: JsonObject,
+) -> JsonObject:
     current_status = current.get("status") if isinstance(current, dict) else None
-    if current_status in TERMINAL_STATUSES:
-        return current
-    if isinstance(current, dict) and current.get("cancelRequested") is True:
-        cancelled = dict(pending)
+    if isinstance(current, dict) and (
+        current_status == "cancelled" or current.get("cancelRequested") is True
+    ):
+        # Cancellation owns the outcome, not the finalizer's late output.
+        cancelled = {**current, **pending}
         cancelled["status"] = "cancelled"
         cancelled["ok"] = False
         terminal_states.apply_operator_cancel_override(cancelled)
+        for key in ("stdoutBytes", "stderrBytes"):
+            old = current.get(key)
+            new = pending.get(key)
+            counts = [value for value in (old, new) if type(value) is int and value >= 0]
+            if counts:
+                cancelled[key] = max(counts)
         for key in ("cancelRequested", "cancelRequestedAt"):
             if key in current:
                 cancelled[key] = current[key]
+        warnings: list[str] = []
+        for source in (current, pending):
+            values = source.get("warnings")
+            if isinstance(values, list):
+                warnings.extend(
+                    value for value in values if isinstance(value, str) and value not in warnings
+                )
+        if warnings:
+            cancelled["warnings"] = warnings
         return cancelled
+    if isinstance(current, dict) and current_status in TERMINAL_STATUSES:
+        return current
     return pending
 
 
@@ -174,7 +190,7 @@ def _load_run_state_with_pending_wal(
     if pending is None:
         return current
     fresh = reader(run_path / STATE_FILE)
-    return _overlay_pending_terminal_record(fresh, pending)
+    return merge_terminal_record(fresh, pending)
 
 
 def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
@@ -193,7 +209,9 @@ def _computed_snapshot(
 ) -> JsonObject | None:
     run_path = run_directory(registry_root, run_id)
     state = _load_run_state_with_pending_wal(registry_root, run_id, permissive=permissive)
-    legacy_reader = read_json_object_or_none if permissive else read_json_object
+    legacy_reader = (
+        read_json_object_or_none if permissive or state is not None else read_json_object
+    )
     legacy_snapshot = legacy_reader(run_path / SNAPSHOT_FILE)
     if state is None and legacy_snapshot is None:
         return None

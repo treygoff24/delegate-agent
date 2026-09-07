@@ -17,7 +17,6 @@ through this module so those patches keep taking effect.
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -120,7 +119,7 @@ def inspect_worktree(
     include_detached: bool = False,
     force: bool = False,
     check_merge: bool = True,
-    retirement_ignore_globs: tuple[str, ...] = (),
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> WorktreeInspection:
     """Read worktree facts once; optional globs select effective retirement dirt."""
 
@@ -135,7 +134,7 @@ def inspect_worktree(
     execution = record.get("executionCwd")
     attachments = (
         tuple(worktree_records.live_attachments_for_path(registry_root, execution))
-        if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution, str)
+        if status in (STATUS_PRESENT, STATUS_UNKNOWN, STATUS_MISSING) and isinstance(execution, str)
         else ()
     )
     if attachments:
@@ -146,7 +145,7 @@ def inspect_worktree(
             owner_block=owner_block,
             attachments=attachments,
         )
-    if retirement_ignore_globs:
+    if retirement_ignore_globs is not None:
         dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
             record,
             status,
@@ -338,10 +337,6 @@ def _owner_run_block_reason(
     return None
 
 
-def _ignored_for_retirement(path: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
-
-
 def _retirement_ignore_globs(ctx: object) -> tuple[str, ...]:
     value = getattr(ctx, "retirement_ignore_globs", None)
     if isinstance(value, (tuple, list)):
@@ -415,14 +410,8 @@ def _effective_dirty_for_retirement(
         if isinstance(record.get("creationContext"), dict)
         else None,
         total=total,
+        ignore_globs=ignore_globs,
     )
-    if ignore_globs:
-        effective = [
-            item
-            for item in effective
-            if not _ignored_for_retirement(str(item.get("path") or ""), ignore_globs)
-        ]
-        effective_total = len(effective)
     return effective_total > 0, [str(item.get("path")) for item in effective], warnings
 
 
@@ -465,6 +454,8 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
     auto_prune_days = ctx.worktree_auto_prune_merged_older_than_days
 
     def run_auto_prune() -> None:
+        from delegate_agent.worktree_gc import maybe_auto_prune
+
         if not auto_prune_enabled:
             return
         registry_root = ctx.registry_root
@@ -579,12 +570,13 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
         retain("branch_missing")
         return
 
+    from delegate_agent.worktree_remove import remove_empty_pool_parent, remove_worktree
+
     try:
         result = remove_worktree(
             ctx.registry_root,
             handle=str(record.get("alias") or record.get("runId")),
             keep_branch=True,
-            discard_uncommitted=True,
             retirement_ignore_globs=ctx.retirement_ignore_globs,
         )
     except WorktreeManagementError as exc:
@@ -1335,52 +1327,3 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
             with suppress(OSError):
                 paths.add(str(Path(path).resolve()))
     return paths, None
-
-
-# Re-export the removal pipeline so ``worktree_mgmt.<name>`` keeps resolving and
-# the seam patches that target this module continue to reach the moved
-# functions (which read their cross-module seams back through this module).
-# Re-export the prune/gc pipelines for the same reason.
-from delegate_agent.worktree_gc import (  # noqa: E402, F401  # re-exported
-    BACKLINK_MAX_BYTES,
-    POOL_SETTLE_SECONDS,
-    GcFreshAction,
-    _admin_dir_serves_worktree,
-    _classify_pool_worktree,
-    _entry_ref,
-    _gc_missing_entry,
-    _gc_orphan_entry,
-    _gc_reconcile_list_failure,
-    _gc_reconcile_missing_branch,
-    _gc_reconcile_missing_metadata,
-    _gc_reconcile_missing_path,
-    _older_than,
-    _parse_worktree_backlink,
-    _paths_match,
-    _reload_gc_candidate,
-    _source_root_from_backlink,
-    _with_locked_fresh_gc_candidate,
-    gc_worktrees,
-    maybe_auto_prune,
-    prune_worktrees,
-    reap_worktrees,
-    scan_worktree_pool,
-)
-from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
-    BranchRemovalResult,
-    RemoveWorktreeOptions,
-    RemoveWorktreePlan,
-    _apply_branch_removal_result,
-    _build_remove_worktree_plan,
-    _mark_worktree_removed,
-    _normalize_remove_options,
-    _remove_already_removed,
-    _remove_branch,
-    _remove_branch_if_requested,
-    _remove_missing_worktree_path,
-    _remove_payload,
-    _remove_present_worktree_path,
-    _remove_worktree_path,
-    remove_empty_pool_parent,
-    remove_worktree,
-)
