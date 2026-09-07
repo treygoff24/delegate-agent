@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -690,3 +691,50 @@ class ClaudePermissionPromptsTests(CommandTestBase):
             permission_prompts_supported=True,
         )
         self.assertNotIn("--permission-prompts", argv)
+
+
+class OpencodeClaudeInstructionLeakTests(CommandTestBase):
+    """B5 (made by Lane A on Lane B's behalf): keep ~/.claude out of read-only runs.
+
+    OpenCode reads `~/.claude/CLAUDE.md` and `.claude/skills` by default, so a
+    safe review pulled in the operator's global Claude Code instructions and any
+    skills present in the mirrored workspace. `--pure` does not cover this; it
+    only skips external plugins. The permission deny-all still bound, so no write
+    tool was granted — this is instruction-surface leakage into a boundary the
+    security model describes as locked down.
+    """
+
+    def test_read_only_runs_disable_the_claude_directory(self):
+        request = self.build_git_request(
+            "opencode",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_CLAUDE_CODE"], "1")
+
+    def test_read_only_call_disables_it_too(self):
+        request = request_build.request_from_parsed(
+            parser_api.parse_cli(["opencode", "call", "--read-only", "score"]),
+            delegate_config.embedded_default_config(),
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, request.workspace, ignore_errors=True)
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_CLAUDE_CODE"], "1")
+
+    def test_work_runs_keep_their_instruction_surface(self):
+        # The planted negative: work mode is meant to see the operator's own
+        # instructions, so the override must not leak out of the read-only set.
+        request = self.build_git_request(
+            "opencode",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertNotIn("OPENCODE_DISABLE_CLAUDE_CODE", request.env_overrides)

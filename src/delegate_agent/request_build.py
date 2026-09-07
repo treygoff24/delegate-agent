@@ -3127,6 +3127,12 @@ def _opencode_env_overrides(
         env["OPENCODE_PERMISSION"] = (
             OPENCODE_PURE_PERMISSION_JSON if pure else OPENCODE_SAFE_PERMISSION_JSON
         )
+        # OpenCode reads ~/.claude/CLAUDE.md and .claude/skills by default, so a
+        # read-only review would inherit the operator's global Claude Code
+        # instructions and any skills in the mirrored workspace. --pure does not
+        # cover this: it only skips external plugins. The permission deny-all
+        # still binds, so this is instruction surface, not write capability.
+        env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
     return env
 
 
