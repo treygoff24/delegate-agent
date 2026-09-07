@@ -566,7 +566,11 @@ def _build_pi_family_argv(
         argv.append(f"--resume={resume_session_id}")
     if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN[engine])
-    elif engine == "omp" and mode == MODE_WORK:
+    elif engine == "omp" and mode in (MODE_WORK, MODE_CALL):
+        # A write-capable call is "work minus a repo", so it needs the same
+        # approval mode. In headless `-p` there is no approver, so without it
+        # every write the call attempts is denied and the mode is silently
+        # read-only. Read-only call took the lockdown branch above.
         argv.extend(OMP_WORK_APPROVAL)
     if model:
         argv.extend(["--model", model])

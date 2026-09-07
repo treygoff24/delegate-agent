@@ -135,7 +135,21 @@ class OmpStdinTransportTests(CommandTestBase):
         argv = argv_api.build_omp_argv(
             delegate_config.embedded_default_config()["omp"], "call", None, None, "/ws"
         )
-        self.assertEqual(argv, ["omp", "-p", "--no-session", "--mode", "json", "--cwd", "/ws"])
+        self.assertEqual(
+            argv,
+            [
+                "omp",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--cwd",
+                "/ws",
+                "--approval-mode",
+                "yolo",
+            ],
+        )
+        self.assertNotIn("task", argv)
 
 
 class SharedTransportSurfaceTests(unittest.TestCase):
