@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import contextlib
-import json  # noqa: F401  # re-exported for tests (delegate.json)
 import os
 import re
 import shlex
@@ -11,65 +10,80 @@ import subprocess
 import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from delegate_agent import (
     VERSION,
     account_binding,
     argv_utils,
-    capability_commands,
     command_errors,
     command_help,
-    config_commands,
-    followup_command,
     harness_discovery,
-    inspection_commands,
-    mail,
     personas,
-    profile_commands,
     profile_guard,
     profiles,
     reasoning,
     redaction,
-    resume_command,
-    run_context,
     run_metadata,
-    run_output_commands,
-    run_registry,
-    sandbox_bwrap,
-    setup_commands,
-    wait_cancel_commands,
-    workflow_pinning,
-    worktree_commands,
-    worktree_execution,
-    worktree_mgmt,
     wsl,
 )
+from delegate_agent import (
+    capability_commands as _capability_commands,
+)
+from delegate_agent import cli_parser as _cli_parser
 from delegate_agent import config as delegate_config
+from delegate_agent import (
+    config_commands as _config_commands,
+)
+from delegate_agent import describe_payload as _describe_payload
+from delegate_agent import (
+    followup_command as _followup_command,
+)
+from delegate_agent import git_utils as _git_utils
+from delegate_agent import (
+    inspection_commands as _inspection_commands,
+)
+from delegate_agent import isolation as _isolation
+from delegate_agent import (
+    mail as _mail,
+)
 from delegate_agent import (
     notify as notify_module,
 )
+from delegate_agent import (
+    profile_commands as _profile_commands,
+)
+from delegate_agent import prompt_transport as _prompt_transport
 from delegate_agent import rendering as delegate_rendering
-from delegate_agent import retention as delegate_retention
-from delegate_agent import runner as delegate_runner
-from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for tests / back-compat
-    SAFE_REVIEW_PREFIX_BY_ENGINE,
-    _claude_harness_bypass_enabled,
-    build_claude_argv,
-    build_codex_argv,
-    build_cursor_argv,
-    build_devin_argv,
-    build_droid_argv,
-    build_grok_argv,
-    build_omp_argv,
-    prefix_cursor_safe_prompt,
+from delegate_agent import request_models as _request_models
+from delegate_agent import (
+    resume_command as _resume_command,
+)
+from delegate_agent import retention as _delegate_retention
+from delegate_agent import (
+    run_output_commands as _run_output_commands,
+)
+from delegate_agent import (
+    run_registry as _run_registry,
+)
+from delegate_agent import safe_workspace as _safe_workspace
+from delegate_agent import sandbox_bwrap as _sandbox_bwrap
+from delegate_agent import (
+    setup_commands as _setup_commands,
+)
+from delegate_agent import (
+    wait_cancel_commands as _wait_cancel_commands,
+)
+from delegate_agent import (
+    workflow_pinning as _workflow_pinning,
+)
+from delegate_agent import (
+    worktree_commands as _worktree_commands,
+)
+from delegate_agent import (
+    worktree_mgmt as _worktree_mgmt,
 )
 from delegate_agent.argv_utils import public_argv
-from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests / back-compat
-    infer_global_json,
-    parse_cli,
-    parse_required_positive_int_option,
-)
 from delegate_agent.constants import (
     BINARY_CONFIG_ENGINES,
     KNOWN_ENGINES,
@@ -78,93 +92,18 @@ from delegate_agent.constants import (
     MODE_WORK,
     PROMPT_INSTRUCTION_MODE_SLASH,
 )
-from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
-    _call_overview_text,
-    _claude_runtime_policy,
-    describe_payload,
-    emit_agent_help,
-    emit_command_help,
-    emit_describe,
-    emit_describe_overview,
-    emit_models,
-    models_payload,
-)
 from delegate_agent.errors import (
     EXIT_MISSING_BINARY,
     EXIT_OK,
     EXIT_USAGE,
     DelegateError,
 )
-from delegate_agent.git_utils import capture_git_metadata  # re-exported for tests
-from delegate_agent.isolation import (  # noqa: F401  # re-exported for tests
-    IsolationContext,
-    build_isolation_context,
-    target_contains_source_root,
-)
 from delegate_agent.json_types import JsonObject
-from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_REDACTION re-exported for tests
-    CURSOR_PROMPT_REDACTION,
-    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
-    DEVIN_AGENT_CONFIG_DISPLAY,
-    DROID_PROMPT_FILE_ARG_PLACEHOLDER,
-    DROID_PROMPT_FILE_DISPLAY,
-    PERSONA_FILE_ARG_PLACEHOLDER,
-    PROMPT_FILE_ARG_PLACEHOLDER,
-    PROMPT_FILE_DISPLAY,
-    PROMPT_TRANSPORT_ARGV,
-    PROMPT_TRANSPORT_FILE,
-    PROMPT_TRANSPORT_STDIN,
-)
-from delegate_agent.request_build import (  # noqa: F401  # re-exported for tests / back-compat
-    CALL_TEMP_CWD_PLACEHOLDER,
-    INLINE_OUTPUT_SCHEMA_PLACEHOLDER,
-    RUN_INPUT_KEYS,
-    _load_input_json_object,
-    build_request,
-    effective_prompt,
-    load_config,
-    read_stdin_source,
-    request_from_input_json,
-    request_from_parsed,
-    resolve_completion_report_mode,
-    resolve_prompt,
-    resolve_workspace,
-    validate_config,
-    validate_prompt,
-)
-from delegate_agent.request_models import (  # noqa: F401  # re-exported for tests / back-compat
-    GlobalOptions,
-    InspectionOptions,
-    LaunchOptions,
-    ParsedCommand,
-    Request,
-    ResolvedWorkspace,
-    RunJsonOptions,
-)
-from delegate_agent.safe_workspace import (  # noqa: F401  # re-exported for tests / back-compat
-    CURSOR_SAFE_CLI_CONFIG,
-    SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
-    SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
-    SAFE_UNBORN_GIT_WARNING,
-    cleanup_safe_isolated_workspace,
-    create_directory_safe_workspace,
-    create_git_safe_workspace,
-    external_symlink_warnings,
-    mirror_path_preserving_symlinks,
-    read_git_tracked_diff,
-    safe_isolated_request,
-    write_cursor_safe_project_config,
-)
-from delegate_agent.sandbox_bwrap import (  # re-exported for tests
-    BWRAP_METHOD,
-    requested_safe_backend,
-)
-from delegate_agent.workflows import commands as workflow_commands
 
-_replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
+if TYPE_CHECKING:
+    from delegate_agent.request_models import ParsedCommand, Request
+    from delegate_agent.runner import RunContext
 
-DEFAULT_CONFIG = delegate_config.embedded_default_config()
-CONFIG_ENV = delegate_config.CONFIG_ENV
 
 MISSING_BINARY_PROBE_DIRS = (
     "~/.claude/local",
@@ -176,26 +115,26 @@ MISSING_BINARY_PROBE_DIRS = (
 )
 
 
-HELP = _call_overview_text()
-
 INFERRED_NON_GIT_WORKSPACE_WARNING = (
     "resolved workspace is not a git repository and no --cwd was provided; using the process cwd."
 )
 
 
-def _workspace_origin(parsed: ParsedCommand, global_options: GlobalOptions) -> str:
+def _workspace_origin(parsed: ParsedCommand, global_options: _request_models.GlobalOptions) -> str:
     """Describe how the launch workspace was selected for human output."""
+    from delegate_agent import request_build
+
     if global_options.cwd is not None:
         return "--cwd"
-    if parsed.subcommand == "run" and parsed.run_json is not None:
-        raw = _load_input_json_object(Path(parsed.run_json.input_json).expanduser())
+    if parsed.subcommand == "run" and parsed.payload is not None:
+        raw = request_build._load_input_json_object(Path(parsed.payload.input_json).expanduser())
         if isinstance(raw.get("cwd"), str):
             return "input JSON cwd"
     return "cwd"
 
 
 def _announce_workspace(
-    workspace: ResolvedWorkspace,
+    workspace: _request_models.ResolvedWorkspace,
     *,
     origin: str,
     stdout: TextIO,
@@ -204,29 +143,18 @@ def _announce_workspace(
     print(f"workspace: {workspace.path} ({workspace.kind}, from {origin})", file=stdout, flush=True)
 
 
-def config_path() -> Path:
-    return delegate_config.config_path()
-
-
-def workspace_path_for_config(global_cwd: str | None) -> Path | None:
-    try:
-        return Path(resolve_workspace(global_cwd).path)
-    except DelegateError:
-        return None
-
-
 def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
-    delegate_retention.run_retention_pass(registry_root, config)
+    _delegate_retention.run_retention_pass(registry_root, config)
 
 
 def _launch_registry(
-    source_workspace: ResolvedWorkspace,
+    source_workspace: _request_models.ResolvedWorkspace,
     config: JsonObject,
 ) -> tuple[Path, float]:
     """Acquire the launch registry within budget, before any child exists."""
-    timeout = run_registry.resolve_registry_lock_timeout_seconds(config)
+    timeout = _run_registry.resolve_registry_lock_timeout_seconds(config)
     try:
-        root = run_registry.ensure_registry(
+        root = _run_registry.ensure_registry(
             Path(source_workspace.path),
             workspace_kind=source_workspace.kind,
             timeout_seconds=timeout,
@@ -248,7 +176,7 @@ def _register_launch_run(
 ) -> tuple[str, str]:
     """Publish the alias/run directory only after the launch lock is held."""
     try:
-        return run_registry.register_run(
+        return _run_registry.register_run(
             registry_root,
             harness=harness,
             metadata=metadata,
@@ -261,104 +189,13 @@ def _register_launch_run(
         ) from exc
 
 
-def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    command = parsed.snapshot
-    if command is None:
-        raise DelegateError("invalid_command", "snapshot options are required.")
-    return inspection_commands.emit_snapshot(
-        command,
-        workspace_path=workspace.path,
-        stdout=stdout,
-    )
-
-
-def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    command = parsed.runs
-    if command is None:
-        raise DelegateError("invalid_command", "runs options are required.")
-    return inspection_commands.emit_runs(
-        command,
-        workspace_path=workspace.path,
-        stdout=stdout,
-    )
-
-
-RECOVERY_STDOUT_TAIL_LINES = run_output_commands.RECOVERY_STDOUT_TAIL_LINES
-RECOVERY_STDOUT_TAIL_BYTES = run_output_commands.RECOVERY_STDOUT_TAIL_BYTES
-RUN_OUTPUT_DEFAULT_TAIL_LINES = run_output_commands.RUN_OUTPUT_DEFAULT_TAIL_LINES
-
-
-def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    command = parsed.run_output
-    if command is None:
-        raise DelegateError("invalid_command", "run-output options are required.")
-    return run_output_commands.emit(
-        command,
-        workspace_path=workspace.path,
-        stdout=stdout,
-    )
-
-
-def emit_wait(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    command = parsed.wait_command
-    if command is None:
-        raise DelegateError("invalid_command", "wait options are required.")
-    return wait_cancel_commands.emit_wait(command, workspace_path=workspace.path, stdout=stdout)
-
-
-def emit_cancel(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    command = parsed.cancel_command
-    if command is None:
-        raise DelegateError("invalid_command", "cancel options are required.")
-    return wait_cancel_commands.emit_cancel(command, workspace_path=workspace.path, stdout=stdout)
-
-
-def emit_worktree(
-    parsed: ParsedCommand,
-    workspace: ResolvedWorkspace,
-    config: JsonObject,
-    stdout: TextIO,
-) -> int:
-    command = parsed.worktree
-    if command is None:
-        raise DelegateError("invalid_command", "worktree options are required.")
-    return worktree_commands.emit(
-        command,
-        workspace_path=workspace.path,
-        config=config,
-        stdout=stdout,
-    )
-
-
-def emit_workflow(
-    parsed: ParsedCommand,
-    workspace: ResolvedWorkspace,
-    config: JsonObject,
-    stdout: TextIO,
-    stderr: TextIO,
-    *,
-    config_source: str = "command-config",
-) -> int:
-    command = parsed.workflow_command
-    if command is None:
-        raise DelegateError("invalid_command", "workflow options are required.")
-    return workflow_commands.emit(
-        command,
-        workspace_path=workspace.path,
-        config=config,
-        stdout=stdout,
-        stderr=stderr,
-        config_source=config_source,
-    )
-
-
 def emit_profiles_command(
     parsed: ParsedCommand,
     config: JsonObject,
     config_source: str,
     stdout: TextIO,
 ) -> int:
-    command = parsed.profiles_command
+    command = parsed.payload
     if command is None:
         raise DelegateError("invalid_command", "profiles options are required.")
     resolution = profiles.resolve_active_profile(
@@ -366,7 +203,7 @@ def emit_profiles_command(
         os.environ,
         cli_override=parsed.global_options.auth_profile,
     )
-    return profile_commands.emit(
+    return _profile_commands.emit(
         command,
         resolution=resolution,
         config_source=config_source,
@@ -374,18 +211,11 @@ def emit_profiles_command(
     )
 
 
-def emit_config_command(parsed: ParsedCommand, stdout: TextIO) -> int:
-    command = parsed.config_command
-    if command is None:
-        raise DelegateError("invalid_command", "config options are required.")
-    return config_commands.emit(command, stdout)
-
-
 def emit_promote_command(parsed: ParsedCommand, stdout: TextIO) -> int:
-    options = parsed.promote
+    options = parsed.payload
     if options is None:
         raise DelegateError("invalid_command", "promote options are required.")
-    return workflow_pinning.emit_promote(
+    return _workflow_pinning.emit_promote(
         actor=options.actor,
         source=options.source,
         runtime_digest=options.runtime_digest,
@@ -394,7 +224,9 @@ def emit_promote_command(parsed: ParsedCommand, stdout: TextIO) -> int:
     )
 
 
-def emit_personas(workspace: ResolvedWorkspace, *, json_mode: bool, stdout: TextIO) -> int:
+def emit_personas(
+    workspace: _request_models.ResolvedWorkspace, *, json_mode: bool, stdout: TextIO
+) -> int:
     rows = personas.list_personas(workspace.path)
     if json_mode:
         delegate_rendering.print_json({"schema": "delegate.personas.v1", "personas": rows}, stdout)
@@ -414,6 +246,8 @@ def emit_personas(workspace: ResolvedWorkspace, *, json_mode: bool, stdout: Text
 
 
 def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonObject:
+    from delegate_agent import request_build
+
     payload: JsonObject = {
         "ok": True,
         "dryRun": True,
@@ -433,16 +267,18 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["mailPush"] = True
         payload["mailPushAdapter"] = {
             "harness": request.engine,
-            "status": mail.mail_push_adapter(request.engine),
+            "status": _mail.mail_push_adapter(request.engine),
             "hookCommand": "<launch-pinned delegate> mail hook-pump with nonce fallback",
         }
-        if mail.mail_push_adapter(request.engine) != "verified":
-            payload.setdefault("warnings", []).append(mail.mail_push_warning(request.engine))
+        if _mail.mail_push_adapter(request.engine) != "verified":
+            payload.setdefault("warnings", []).append(_mail.mail_push_warning(request.engine))
     run_metadata.add_selection_payload_fields(payload, request)
     if request.output_schema_text is not None:
         payload["outputSchemaInline"] = True
         payload["argv"] = [
-            "<inline output schema>" if value == INLINE_OUTPUT_SCHEMA_PLACEHOLDER else value
+            "<inline output schema>"
+            if value == request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER
+            else value
             for value in payload["argv"]
         ]
     if request.warnings:
@@ -520,7 +356,9 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
             payload["plannedExecutionCwd"] = planned_cwd
             payload["plannedBranch"] = planned_branch
             # Rewrite argv to show the planned workspace path, not the source.
-            payload["argv"] = _replace_ws_by_engine(request.engine, payload["argv"], planned_cwd)
+            payload["argv"] = argv_utils.replace_workspace_arg_in_argv(
+                request.engine, payload["argv"], planned_cwd
+            )
         else:
             payload["plannedExecutionCwd"] = None
             payload["plannedBranch"] = None
@@ -537,12 +375,12 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
             and ctx.effective_isolation == "worktree"
             and request.engine != "cursor"
             and request.workspace_kind == "git"
-            and requested_safe_backend(config) == delegate_config.SAFE_BACKEND_BWRAP
+            and _sandbox_bwrap.requested_safe_backend(config) == delegate_config.SAFE_BACKEND_BWRAP
         ):
-            payload["safeWorkspaceMethod"] = BWRAP_METHOD
-            payload["argv"] = sandbox_bwrap.bwrap_display_argv(payload["argv"])
+            payload["safeWorkspaceMethod"] = _sandbox_bwrap.BWRAP_METHOD
+            payload["argv"] = _sandbox_bwrap.bwrap_display_argv(payload["argv"])
     else:
-        # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
+        # Fallback when no isolation context is provided (e.g. direct request_build.build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
         if request.mode == MODE_CALL:
             payload["isolatedWorkspace"] = False
@@ -585,7 +423,7 @@ def _binary_config_key(engine: str | None) -> str | None:
 def _binary_config_path(config_source: str | None) -> str:
     if config_source and config_source not in {"embedded-default", "cli-overrides"}:
         return config_source
-    return str(config_path())
+    return str(delegate_config.config_path())
 
 
 def _suggest_binary_path(binary: str) -> str | None:
@@ -712,9 +550,11 @@ def make_run_context(
     *,
     run_id: str,
     alias: str,
-    source_workspace: ResolvedWorkspace,
+    source_workspace: _request_models.ResolvedWorkspace,
     creation_context: JsonObject | None = None,
-) -> delegate_runner.RunContext:
+) -> RunContext:
+    from delegate_agent import run_context
+
     source_cwd = (
         request.isolation_context.source_workspace
         if request.isolation_context is not None
@@ -753,8 +593,8 @@ def make_run_context(
         sandbox = None
 
     if source_workspace.kind == "git":
-        git_root, _git_common_dir, head_oid, head_ref, _branch_name = capture_git_metadata(
-            source_cwd
+        git_root, _git_common_dir, head_oid, head_ref, _branch_name = (
+            _git_utils.capture_git_metadata(source_cwd)
         )
         source_git_root = source_git_root or git_root
         if creation_context is None and head_oid is not None:
@@ -787,7 +627,9 @@ def make_run_context(
     )
 
 
-def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -> None:
+def _set_child_root_env(
+    request: Request, source_workspace: _request_models.ResolvedWorkspace
+) -> None:
     execution_root = str(Path(request.launch_cwd or request.workspace).resolve(strict=False))
     source_root = (
         execution_root
@@ -818,21 +660,21 @@ def _artifact_files(root: Path) -> list[str]:
 
 def _preserve_call_artifacts(
     workspace: Path,
-    source_workspace: ResolvedWorkspace,
+    source_workspace: _request_models.ResolvedWorkspace,
     artifact_id: str | None,
 ) -> tuple[str, list[str], str | None] | None:
     if not any(workspace.iterdir()):
         return None
     try:
-        registry_root = run_registry.ensure_registry(
+        registry_root = _run_registry.ensure_registry(
             Path(source_workspace.path), workspace_kind=source_workspace.kind
         )
         artifacts_root = registry_root / "artifacts"
-        run_registry.ensure_private_dir(artifacts_root)
-        destination = artifacts_root / (artifact_id or run_registry.generate_run_id())
+        _run_registry.ensure_private_dir(artifacts_root)
+        destination = artifacts_root / (artifact_id or _run_registry.generate_run_id())
         shutil.move(str(workspace), destination)
         return str(destination), _artifact_files(destination), None
-    except (OSError, run_registry.RegistryJsonError) as exc:
+    except (OSError, _run_registry.RegistryJsonError) as exc:
         return (
             str(workspace),
             _artifact_files(workspace),
@@ -848,8 +690,10 @@ def _cleanup_untransferred_mail_push_private_homes(
     engine: str,
     stderr: TextIO,
 ) -> None:
+    from delegate_agent import runner as delegate_runner
+
     try:
-        mail.cleanup_mail_push_private_homes(registry_root, run_id)
+        _mail.cleanup_mail_push_private_homes(registry_root, run_id)
     except OSError:
         warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
         print(f"delegate mail: WARNING: {warning}", file=stderr)
@@ -869,7 +713,7 @@ def _execute_attached_worktree(
     config: JsonObject,
     config_source: str | None,
     completion_report_mode: str,
-    source_workspace: ResolvedWorkspace,
+    source_workspace: _request_models.ResolvedWorkspace,
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
@@ -879,6 +723,9 @@ def _execute_attached_worktree(
     (``worktreeAttachment``) and removal paths refuse while the run is
     effectively running. No worktree record is derived for attached runs.
     """
+    from delegate_agent import runner as delegate_runner
+    from delegate_agent import worktree_execution
+
     iso = request.isolation_context
     assert iso is not None and iso.isolation_lifecycle == "attached"
     worktree_path = iso.planned_execution_cwd
@@ -891,7 +738,7 @@ def _execute_attached_worktree(
             f"The source run's worktree path is no longer a directory: {worktree_path}",
         )
 
-    head_probe = capture_git_metadata(worktree_path)
+    head_probe = _git_utils.capture_git_metadata(worktree_path)
     start_head_oid = head_probe[2]
     if not start_head_oid:
         raise DelegateError(
@@ -902,7 +749,7 @@ def _execute_attached_worktree(
     execution_request = worktree_execution._request_for_execution_workspace(request, worktree_path)
     # Re-check the actual argv payload now that the worktree note (and any
     # forbid-commit note) has been prepended.
-    resume_command.enforce_resume_prompt_size(
+    _resume_command.enforce_resume_prompt_size(
         request.engine,
         execution_request.argv[-1],
     )
@@ -918,8 +765,8 @@ def _execute_attached_worktree(
     registry_root, registry_timeout = _launch_registry(source_workspace, config)
     maybe_run_retention_pass(registry_root, config)
     if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-        mail.prepare_mail_storage(registry_root)
-    mail.sanitize_inherited_mail_identity(request.env_overrides)
+        _mail.prepare_mail_storage(registry_root)
+    _mail.sanitize_inherited_mail_identity(request.env_overrides)
     metadata = {
         "mode": request.mode,
         "model": request.model,
@@ -944,9 +791,9 @@ def _execute_attached_worktree(
     )
     child_env = request.env_overrides or {}
     if request.mode == MODE_WORK:
-        mail.bind_mail_identity(child_env, run_id, alias)
+        _mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
-    mail_launch = mail.prepare_work_mail_launch(
+    mail_launch = _mail.prepare_work_mail_launch(
         enabled=request.mode == MODE_WORK and delegate_config.mail_enabled(config),
         mail_push=request.mail_push,
         engine=request.engine,
@@ -995,13 +842,13 @@ def _execute_attached_worktree(
         worktree_attachment=attachment,
     )
     try:
-        resume_command.revalidate_attached_target(
+        _resume_command.revalidate_attached_target(
             registry_root, attachment, expected_branch=iso.planned_branch
         )
     except DelegateError as exc:
         if provision is not None:
             try:
-                mail.cleanup_mail_push_private_homes(registry_root, run_id)
+                _mail.cleanup_mail_push_private_homes(registry_root, run_id)
             except OSError:
                 warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
                 request.warnings = (*request.warnings, warning)
@@ -1009,14 +856,14 @@ def _execute_attached_worktree(
                     ctx_runner, warnings=tuple(dict.fromkeys((*ctx_runner.warnings, warning)))
                 )
                 print(f"delegate mail: WARNING: {warning}", file=stderr)
-        run_path = run_registry.run_directory(registry_root, run_id)
+        run_path = _run_registry.run_directory(registry_root, run_id)
         if ctx_runner.source_prompt is not None:
-            run_registry.write_private_text(
-                run_path / run_registry.PROMPT_TXT_FILE, ctx_runner.source_prompt
+            _run_registry.write_private_text(
+                run_path / _run_registry.PROMPT_TXT_FILE, ctx_runner.source_prompt
             )
         if ctx_runner.persona_text is not None:
-            run_registry.write_private_text(
-                run_path / run_registry.PERSONA_TXT_FILE, ctx_runner.persona_text
+            _run_registry.write_private_text(
+                run_path / _run_registry.PERSONA_TXT_FILE, ctx_runner.persona_text
             )
         delegate_runner.write_manifest(
             run_path,
@@ -1026,7 +873,7 @@ def _execute_attached_worktree(
             run_path,
             delegate_runner.build_state(
                 ctx_runner,
-                status=run_registry.STATUS_FAILED,
+                status=_run_registry.STATUS_FAILED,
                 exit_code=1,
                 extra={
                     "error": "worktree_missing",
@@ -1058,7 +905,7 @@ def _execute_attached_worktree(
         ctx_runner = dc_replace(
             ctx_runner,
             env_overrides=child_env,
-            fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+            fallback_env_overrides=_mail.mail_push_fallback_env_overrides(
                 provision,
                 profiles.codex_fallback_child_env_overrides(
                     request.profile_resolution,
@@ -1087,11 +934,11 @@ def _execute_attached_worktree(
             completion_report_mode=completion_report_mode,
             stdin_text=execution_request.stdin_text,
             prompt_file_text=execution_request.prompt_file_text,
-            prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+            prompt_file_placeholder=_prompt_transport.PROMPT_FILE_ARG_PLACEHOLDER,
             agent_config_text=execution_request.agent_config_text,
-            agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+            agent_config_placeholder=_prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
             persona_file_text=execution_request.persona_file_text,
-            persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
+            persona_file_placeholder=_prompt_transport.PERSONA_FILE_ARG_PLACEHOLDER,
             output_schema_text=request.output_schema_text,
             output_schema_path=request.output_schema,
             manifest_argv=execution_request.display_argv,
@@ -1120,10 +967,13 @@ def execute_request(
     config_source: str | None = None,
     pass_through: bool,
     completion_report_mode: str,
-    source_workspace: ResolvedWorkspace,
+    source_workspace: _request_models.ResolvedWorkspace,
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
+    from delegate_agent import runner as delegate_runner
+    from delegate_agent import worktree_execution
+
     _set_child_root_env(request, source_workspace)
     initiator_root = _apply_initiator_root(request)
     profiles.strip_mail_identity(request.env_overrides)
@@ -1189,15 +1039,15 @@ def execute_request(
                         completion_report_mode=completion_report_mode,
                         stdin_text=request.stdin_text,
                         prompt_file_text=request.prompt_file_text,
-                        prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                        prompt_file_placeholder=_prompt_transport.PROMPT_FILE_ARG_PLACEHOLDER,
                         agent_config_text=request.agent_config_text,
-                        agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                        agent_config_placeholder=_prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                         persona_file_text=(
                             request.persona_text
                             if request.persona_transport == "native-file"
                             else None
                         ),
-                        persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
+                        persona_file_placeholder=_prompt_transport.PERSONA_FILE_ARG_PLACEHOLDER,
                         output_schema_text=request.output_schema_text,
                         output_schema_path=request.output_schema,
                         manifest_argv=public_argv(request),
@@ -1229,9 +1079,9 @@ def execute_request(
                     harness=request.engine,
                     stdin_text=request.stdin_text,
                     prompt_file_text=request.prompt_file_text,
-                    prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                    prompt_file_placeholder=_prompt_transport.PROMPT_FILE_ARG_PLACEHOLDER,
                     agent_config_text=request.agent_config_text,
-                    agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                    agent_config_placeholder=_prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     output_schema_text=request.output_schema_text,
                     output_schema_path=request.output_schema,
                     env_overrides=request.env_overrides,
@@ -1250,11 +1100,11 @@ def execute_request(
             # a child that exited 0 but produced no output is a failed call, not
             # a success with a warning attached. The empty-success retry has
             # already run inside execute_call by this point.
-            empty_failure = result.exit_code == 0 and not run_registry.run_succeeded(
+            empty_failure = result.exit_code == 0 and not _run_registry.run_succeeded(
                 status, result.result_quality
             )
             if empty_failure:
-                status = run_registry.STATUS_FAILED
+                status = _run_registry.STATUS_FAILED
             exit_code = 1 if empty_failure else result.exit_code
             if json_mode:
                 payload: JsonObject = {
@@ -1361,7 +1211,7 @@ def execute_request(
             return call_response
         finally:
             if request.cleanup_workspace:
-                if target_contains_source_root(request.workspace, source_workspace.path):
+                if _isolation.target_contains_source_root(request.workspace, source_workspace.path):
                     raise DelegateError(
                         "source_root_guard",
                         "Refusing to remove a call workspace that is or contains the source root.",
@@ -1425,10 +1275,10 @@ def execute_request(
             )
         except worktree_execution.PersistentWorktreeError as exc:
             raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
-    with safe_isolated_request(request, config=config) as isolated_request:
+    with _safe_workspace.safe_isolated_request(request, config=config) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
         if isolated_request.resumed_from is not None and isolated_request.argv:
-            resume_command.enforce_resume_prompt_size(
+            _resume_command.enforce_resume_prompt_size(
                 isolated_request.engine, isolated_request.argv[-1]
             )
         ensure_binary(
@@ -1464,9 +1314,9 @@ def execute_request(
                     isolated_request.workspace,
                     stdin_text=isolated_request.stdin_text,
                     prompt_file_text=isolated_request.prompt_file_text,
-                    prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                    prompt_file_placeholder=_prompt_transport.PROMPT_FILE_ARG_PLACEHOLDER,
                     agent_config_text=isolated_request.agent_config_text,
-                    agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                    agent_config_placeholder=_prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=isolated_request.env_overrides,
                     process_group_grace_seconds=(
                         isolated_request.process_group_termination_grace_sec
@@ -1478,8 +1328,8 @@ def execute_request(
         registry_root, registry_timeout = _launch_registry(source_workspace, config)
         maybe_run_retention_pass(registry_root, config)
         if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-            mail.prepare_mail_storage(registry_root)
-        mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
+            _mail.prepare_mail_storage(registry_root)
+        _mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
         metadata = {
             "mode": isolated_request.mode,
             "model": isolated_request.model,
@@ -1504,12 +1354,12 @@ def execute_request(
         )
         child_env = isolated_request.env_overrides or {}
         if isolated_request.mode == MODE_WORK:
-            mail.bind_mail_identity(child_env, run_id, alias)
+            _mail.bind_mail_identity(child_env, run_id, alias)
         isolated_request.env_overrides = child_env
-        provision: mail.MailPushProvision | None = None
+        provision: _mail.MailPushProvision | None = None
         mail_push_cleanup_transferred = False
         try:
-            mail_launch = mail.prepare_work_mail_launch(
+            mail_launch = _mail.prepare_work_mail_launch(
                 enabled=isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config),
                 mail_push=isolated_request.mail_push,
                 engine=isolated_request.engine,
@@ -1566,15 +1416,15 @@ def execute_request(
                 completion_report_mode=completion_report_mode,
                 stdin_text=isolated_request.stdin_text,
                 prompt_file_text=isolated_request.prompt_file_text,
-                prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                prompt_file_placeholder=_prompt_transport.PROMPT_FILE_ARG_PLACEHOLDER,
                 agent_config_text=isolated_request.agent_config_text,
-                agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                agent_config_placeholder=_prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                 persona_file_text=(
                     isolated_request.persona_text
                     if isolated_request.persona_transport == "native-file"
                     else None
                 ),
-                persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
+                persona_file_placeholder=_prompt_transport.PERSONA_FILE_ARG_PLACEHOLDER,
                 output_schema_text=isolated_request.output_schema_text,
                 output_schema_path=isolated_request.output_schema,
                 manifest_argv=manifest_argv,
@@ -1595,25 +1445,23 @@ def execute_request(
                 )
 
 
-def shell_join(argv: list[str]) -> str:
-    return " ".join(shlex.quote(arg) for arg in argv)
-
-
 def pre_read_run_json_for_config(
     input_json_path: str,
     cli_cwd: str | None,
     cli_isolation: str | None = None,
     *,
     group: str | None = None,
-) -> tuple[ResolvedWorkspace, JsonObject, str]:
+) -> tuple[_request_models.ResolvedWorkspace, JsonObject, str]:
     """Pre-read run input JSON for config discovery: extract cwd/isolation, resolve workspace,
     load config from that workspace, validate config. Returns (workspace, config, source)."""
+    from delegate_agent import request_build
+
     if wsl.should_reject_windows_path(input_json_path):
         raise DelegateError(
             "windows_path", wsl.windows_path_message("--input-json", input_json_path)
         )
     path = Path(input_json_path).expanduser()
-    raw = _load_input_json_object(path)
+    raw = request_build._load_input_json_object(path)
     if raw.get("mode") == MODE_CALL:
         if cli_isolation is not None:
             raise DelegateError(
@@ -1633,17 +1481,21 @@ def pre_read_run_json_for_config(
         # still executing in a throwaway call cwd. Ungrouped call stays untracked.
         if group is not None:
             if cli_cwd is not None:
-                workspace = resolve_workspace(cli_cwd)
+                workspace = request_build.resolve_workspace(cli_cwd)
             else:
-                workspace = resolve_workspace(None)
-            config, source = load_config(workspace=Path(workspace.path))
-            validate_config(config)
+                workspace = request_build.resolve_workspace(None)
+            config, source = request_build.load_config(workspace=Path(workspace.path))
+            request_build.validate_config(config)
             return workspace, config, source
         if cli_cwd is not None:
             raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
-        config, source = load_config(workspace=None)
-        validate_config(config)
-        return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), config, source
+        config, source = request_build.load_config(workspace=None)
+        request_build.validate_config(config)
+        return (
+            _request_models.ResolvedWorkspace(request_build.CALL_TEMP_CWD_PLACEHOLDER, "directory"),
+            config,
+            source,
+        )
 
     # Read ONLY cwd and isolation for config discovery.
     json_cwd = raw.get("cwd")
@@ -1656,9 +1508,9 @@ def pre_read_run_json_for_config(
             "isolation in input JSON must be auto, none, or worktree (null is not allowed).",
         )
 
-    workspace = resolve_workspace(cli_cwd, json_cwd)
-    config, source = load_config(workspace=Path(workspace.path))
-    validate_config(config)
+    workspace = request_build.resolve_workspace(cli_cwd, json_cwd)
+    config, source = request_build.load_config(workspace=Path(workspace.path))
+    request_build.validate_config(config)
     return workspace, config, source
 
 
@@ -1707,49 +1559,53 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
+    from delegate_agent import request_build
+
     argv = list(sys.argv[1:] if argv is None else argv)
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
-    json_mode = infer_global_json(argv)
+    json_mode = _cli_parser.infer_global_json(argv)
     error_command: str | None = None
     try:
-        parsed = parse_cli(argv)
+        parsed = _cli_parser.parse_cli(argv)
         error_command = parsed.subcommand
-        if parsed.workflow_command is not None:
-            action = parsed.workflow_command.action
+        if parsed.subcommand == "workflow":
+            action = parsed.payload.action
             if action in command_help.WORKFLOW_ACTION_KINDS:
                 error_command = f"workflow {action}"
         global_options = parsed.global_options
         workspace_origin = _workspace_origin(parsed, global_options)
-        workspace: ResolvedWorkspace | None = None
+        workspace: _request_models.ResolvedWorkspace | None = None
         json_mode = global_options.json_mode
         profile_guard.enforce_profile_guard(parsed, stderr=stderr)
         if parsed.subcommand == "help":
-            return emit_command_help(parsed.help_topic, global_options.json_mode, stdout)
+            return _describe_payload.emit_command_help(
+                parsed.help_topic, global_options.json_mode, stdout
+            )
         if parsed.subcommand == "version":
             print(VERSION, file=stdout)
             return EXIT_OK
-        if parsed.subcommand == "describe" and parsed.inspection and parsed.inspection.overview:
-            return emit_describe_overview(global_options.json_mode, stdout)
+        if parsed.subcommand == "describe" and parsed.payload and parsed.payload.overview:
+            return _describe_payload.emit_describe_overview(global_options.json_mode, stdout)
         if parsed.subcommand == "config":
-            return emit_config_command(parsed, stdout)
+            return _config_commands.emit(parsed.payload, stdout=stdout)
         if parsed.subcommand == "setup":
-            return setup_commands.emit(
+            return _setup_commands.emit(
                 json_mode=global_options.json_mode,
                 auth_profile_override=global_options.auth_profile,
                 stdout=stdout,
                 stderr=stderr,
             )
         if parsed.subcommand == "doctor":
-            return workflow_pinning.emit_doctor(stdout=stdout, json_mode=global_options.json_mode)
+            return _workflow_pinning.emit_doctor(stdout=stdout, json_mode=global_options.json_mode)
         if parsed.subcommand == "promote":
             return emit_promote_command(parsed, stdout)
 
         # For run --input-json, pre-read the JSON to discover config from the
         # JSON-resolved workspace before loading/finalizing config.
         if parsed.subcommand == "run":
-            run_json = parsed.run_json
+            run_json = parsed.payload
             if run_json is None:
                 raise DelegateError("invalid_command", "run --input-json options are required.")
             workspace, config, source = pre_read_run_json_for_config(
@@ -1760,25 +1616,28 @@ def main(
             )
             config_workspace = Path(workspace.path)
         else:
-            if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
+            if (
+                isinstance(parsed.payload, _request_models.LaunchOptions)
+                and parsed.payload.mode == MODE_CALL
+            ):
                 if global_options.cwd is not None and global_options.group is None:
                     raise DelegateError(
                         "invalid_option_combination",
                         "call mode does not use --cwd.",
                     )
                 if global_options.group is not None:
-                    workspace = resolve_workspace(global_options.cwd)
+                    workspace = request_build.resolve_workspace(global_options.cwd)
                     config_workspace = Path(workspace.path)
                 else:
                     config_workspace = None
             else:
-                workspace = resolve_workspace(global_options.cwd)
+                workspace = request_build.resolve_workspace(global_options.cwd)
                 config_workspace = Path(workspace.path)
-            config, source = load_config(workspace=config_workspace)
-            validate_config(config)
+            config, source = request_build.load_config(workspace=config_workspace)
+            request_build.validate_config(config)
 
         if parsed.subcommand == "personas":
-            workspace = workspace or resolve_workspace(global_options.cwd)
+            workspace = workspace or request_build.resolve_workspace(global_options.cwd)
             return emit_personas(workspace, json_mode=global_options.json_mode, stdout=stdout)
 
         discovery_profile: profiles.ProfileResolution | None = None
@@ -1791,15 +1650,15 @@ def main(
             )
             capabilities_refresh = (
                 parsed.subcommand == "capabilities"
-                and parsed.capabilities is not None
-                and parsed.capabilities.refresh
+                and parsed.payload is not None
+                and parsed.payload.refresh
             )
             if not capabilities_refresh:
                 discovery_snapshot = harness_discovery.load_discovery_cache(discovery_profile.name)
 
         if parsed.subcommand == "models":
-            inspection = parsed.inspection or InspectionOptions()
-            return emit_models(
+            inspection = parsed.payload or _request_models.InspectionOptions()
+            return _describe_payload.emit_models(
                 config,
                 source,
                 global_options.json_mode,
@@ -1812,30 +1671,31 @@ def main(
                 profile=discovery_profile,
             )
         if parsed.subcommand == "describe":
-            inspection = parsed.inspection or InspectionOptions()
-            return emit_describe(
+            inspection = parsed.payload or _request_models.InspectionOptions()
+            return _describe_payload.emit_describe(
                 config,
                 source,
                 global_options.json_mode,
                 stdout,
                 workspace=config_workspace,
                 summary=inspection.summary,
+                full=inspection.full,
             )
         if parsed.subcommand == "agent-help":
-            return emit_agent_help(stdout)
+            return _describe_payload.emit_agent_help(stdout, json_mode=global_options.json_mode)
 
         if parsed.subcommand != "run":
             if parsed.subcommand == "mail":
-                mail_workspace = mail.resolve_mail_workspace(global_options.cwd)
-                workspace = resolve_workspace(str(mail_workspace))
+                mail_workspace = _mail.resolve_mail_workspace(global_options.cwd)
+                workspace = request_build.resolve_workspace(str(mail_workspace))
             else:
-                workspace = workspace or resolve_workspace(global_options.cwd)
+                workspace = workspace or request_build.resolve_workspace(global_options.cwd)
 
         if parsed.subcommand == "capabilities":
-            command = parsed.capabilities
+            command = parsed.payload
             if command is None:
                 raise DelegateError("invalid_command", "capabilities options are required.")
-            return capability_commands.emit(
+            return _capability_commands.emit(
                 command,
                 config=config,
                 config_source=source,
@@ -1848,10 +1708,10 @@ def main(
             )
 
         if parsed.subcommand == "mail":
-            command = parsed.mail_command
+            command = parsed.payload
             if command is None:
                 raise DelegateError("invalid_command", "mail options are required.")
-            return mail.emit(
+            return _mail.emit(
                 command,
                 workspace=Path(workspace.path),
                 stdin=stdin,
@@ -1865,55 +1725,79 @@ def main(
             "ps",
             "run-output",
             "wait",
-            "cancel",
             "worktree",
             "workflow",
         }:
-            existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
+            existing_registry = _run_registry.registry_root_if_exists(Path(workspace.path))
             pruning_runs = (
                 parsed.subcommand == "runs"
-                and parsed.runs is not None
-                and parsed.runs.action == "prune"
+                and parsed.payload is not None
+                and parsed.payload.action == "prune"
             )
             if existing_registry is not None and not pruning_runs:
                 maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
-            return emit_snapshot(parsed, workspace, stdout)
+            return _inspection_commands.emit_snapshot(
+                parsed.payload, workspace_path=workspace.path, stdout=stdout
+            )
         if parsed.subcommand in {"runs", "ps"}:
-            return emit_runs(parsed, workspace, stdout)
+            return _inspection_commands.emit_runs(
+                parsed.payload, workspace_path=workspace.path, stdout=stdout
+            )
         if parsed.subcommand == "run-output":
-            return emit_run_output(parsed, workspace, stdout)
+            return _run_output_commands.emit(
+                parsed.payload, workspace_path=workspace.path, stdout=stdout
+            )
         if parsed.subcommand == "wait":
-            return emit_wait(parsed, workspace, stdout)
+            return _wait_cancel_commands.emit_wait(
+                parsed.payload, workspace_path=workspace.path, stdout=stdout
+            )
         if parsed.subcommand == "cancel":
-            return emit_cancel(parsed, workspace, stdout)
+            return _wait_cancel_commands.emit_cancel(
+                parsed.payload, workspace_path=workspace.path, stdout=stdout
+            )
         if parsed.subcommand == "worktree":
-            return emit_worktree(parsed, workspace, config, stdout)
+            return _worktree_commands.emit(
+                parsed.payload, workspace_path=workspace.path, config=config, stdout=stdout
+            )
         if parsed.subcommand == "workflow":
-            return emit_workflow(parsed, workspace, config, stdout, stderr, config_source=source)
+            from delegate_agent.workflows import commands as workflow_commands
+
+            return workflow_commands.emit(
+                parsed.payload,
+                workspace_path=workspace.path,
+                config=config,
+                stdout=stdout,
+                stderr=stderr,
+                config_source=source,
+            )
 
         if parsed.subcommand == "profiles":
             return emit_profiles_command(parsed, config, source, stdout)
 
-        resume_plan: resume_command.ResumePlan | None = None
-        followup_plan: followup_command.FollowupPlan | None = None
+        resume_plan: _resume_command.ResumePlan | None = None
+        followup_plan: _followup_command.FollowupPlan | None = None
         if parsed.subcommand == "resume":
-            resume_plan = resume_command.build_resume_plan(parsed, workspace, config, stderr=stderr)
+            resume_plan = _resume_command.build_resume_plan(
+                parsed, workspace, config, stderr=stderr
+            )
             # The plan is a fully ordinary launch; from here on the resume flows
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
             global_options = parsed.global_options
         elif parsed.subcommand == "followup":
-            followup_plan = followup_command.build_followup_plan(
+            followup_plan = _followup_command.build_followup_plan(
                 parsed, workspace, config, stderr=stderr
             )
             parsed = followup_plan.parsed
             global_options = parsed.global_options
-        request = request_from_parsed(parsed, config, stdin, stderr, workspace=workspace)
+        request = request_build.request_from_parsed(
+            parsed, config, stdin, stderr, workspace=workspace
+        )
         if resume_plan is not None:
-            request = resume_command.apply_resume_to_request(request, resume_plan)
+            request = _resume_command.apply_resume_to_request(request, resume_plan)
         if followup_plan is not None:
-            request = followup_command.apply_followup_to_request(request, followup_plan)
+            request = _followup_command.apply_followup_to_request(request, followup_plan)
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (
@@ -1947,7 +1831,7 @@ def main(
                 # Use the payload's rewritten argv (which shows planned paths) when
                 # worktree isolation is active; otherwise use the source request.argv.
                 display_argv = payload.get("argv", request.argv)
-                print(f"argv: {shell_join(display_argv)}", file=stdout)
+                print(f"argv: {shlex.join(display_argv)}", file=stdout)
                 for warning in payload.get("warnings", ()):
                     print(f"warning: {warning}", file=stdout)
             return EXIT_OK
@@ -1955,7 +1839,7 @@ def main(
         if not global_options.json_mode:
             _announce_workspace(workspace, origin=workspace_origin, stdout=stdout)
 
-        completion_report_mode = resolve_completion_report_mode(parsed, config)
+        completion_report_mode = request_build.resolve_completion_report_mode(parsed, config)
         if request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
             # Verbatim prompt carries no completion-report instruction; don't
             # expect (or synthesize around) a report the child was never asked for.
@@ -1980,14 +1864,14 @@ def main(
         if global_options.json_mode and payload is not None:
             delegate_rendering.print_json(payload, stdout)
         return exit_code
-    except worktree_mgmt.WorktreeManagementError as exc:
+    except _worktree_mgmt.WorktreeManagementError as exc:
         if json_mode:
             delegate_rendering.print_json(exc.payload, stdout)
         else:
             print(f"{exc.code}: {exc.message}", file=stderr)
         exit_code = exc.payload.get("exitCode")
         return exit_code if isinstance(exit_code, int) else EXIT_USAGE
-    except run_registry.RegistryJsonError as exc:
+    except _run_registry.RegistryJsonError as exc:
         return emit_error(
             DelegateError("invalid_run_registry", str(exc)),
             json_mode,

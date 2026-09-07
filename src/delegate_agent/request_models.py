@@ -9,25 +9,13 @@ without an import cycle.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-from delegate_agent import (
-    capability_commands,
-    config_commands,
-    inspection_commands,
-    mail,
-    profile_commands,
-    profiles,
-    run_output_commands,
-    stall_watchdog,
-    wait_cancel_commands,
-    worktree_commands,
-)
+from delegate_agent import profiles, stall_watchdog
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
-from delegate_agent.workflows import commands as workflow_commands
 
 CONTINUITY_MODES = frozenset({"pinned", "fungible", "panel"})
 DEFAULT_CONTINUITY_MODE = "fungible"
@@ -122,6 +110,7 @@ class InspectionOptions:
     engine: str | None = None
     live: bool = False
     overview: bool = False
+    full: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,73 +120,46 @@ class PromoteOptions:
     runtime_digest: str | None = None
 
 
-@dataclass(init=False)
+if TYPE_CHECKING:
+    from delegate_agent import (
+        capability_commands,
+        config_commands,
+        inspection_commands,
+        mail,
+        profile_commands,
+        run_output_commands,
+        wait_cancel_commands,
+        worktree_commands,
+    )
+    from delegate_agent.workflows import commands as workflow_commands
+
+    CommandPayload = (
+        LaunchOptions
+        | RunJsonOptions
+        | inspection_commands.SnapshotCommand
+        | inspection_commands.RunsCommand
+        | run_output_commands.RunOutputCommand
+        | wait_cancel_commands.WaitCommand
+        | wait_cancel_commands.CancelCommand
+        | workflow_commands.WorkflowCommand
+        | worktree_commands.WorktreeCommand
+        | config_commands.ConfigCommand
+        | capability_commands.CapabilitiesCommand
+        | profile_commands.ProfilesCommand
+        | InspectionOptions
+        | ResumeOptions
+        | FollowupOptions
+        | mail.MailCommand
+        | PromoteOptions
+    )
+
+
+@dataclass
 class ParsedCommand:
     subcommand: str
-    global_options: GlobalOptions
-    help_topic: str | None = None
-    launch: LaunchOptions | None = None
-    run_json: RunJsonOptions | None = None
-    snapshot: inspection_commands.SnapshotCommand | None = None
-    runs: inspection_commands.RunsCommand | None = None
-    run_output: run_output_commands.RunOutputCommand | None = None
-    wait_command: wait_cancel_commands.WaitCommand | None = None
-    cancel_command: wait_cancel_commands.CancelCommand | None = None
-    workflow_command: workflow_commands.WorkflowCommand | None = None
-    worktree: worktree_commands.WorktreeCommand | None = None
-    config_command: config_commands.ConfigCommand | None = None
-    capabilities: capability_commands.CapabilitiesCommand | None = None
-    profiles_command: profile_commands.ProfilesCommand | None = None
-    inspection: InspectionOptions | None = None
-    resume: ResumeOptions | None = None
-    followup: FollowupOptions | None = None
-    mail_command: mail.MailCommand | None = None
-    promote: PromoteOptions | None = None
-
-    def __init__(
-        self,
-        subcommand: str,
-        *,
-        help_topic: str | None = None,
-        global_options: GlobalOptions | None = None,
-        launch: LaunchOptions | None = None,
-        run_json: RunJsonOptions | None = None,
-        snapshot: inspection_commands.SnapshotCommand | None = None,
-        runs: inspection_commands.RunsCommand | None = None,
-        run_output: run_output_commands.RunOutputCommand | None = None,
-        wait_command: wait_cancel_commands.WaitCommand | None = None,
-        cancel_command: wait_cancel_commands.CancelCommand | None = None,
-        workflow_command: workflow_commands.WorkflowCommand | None = None,
-        worktree: worktree_commands.WorktreeCommand | None = None,
-        config_command: config_commands.ConfigCommand | None = None,
-        capabilities: capability_commands.CapabilitiesCommand | None = None,
-        profiles_command: profile_commands.ProfilesCommand | None = None,
-        inspection: InspectionOptions | None = None,
-        resume: ResumeOptions | None = None,
-        followup: FollowupOptions | None = None,
-        mail_command: mail.MailCommand | None = None,
-        promote: PromoteOptions | None = None,
-    ) -> None:
-        self.subcommand = subcommand
-        self.global_options = global_options or GlobalOptions()
-        self.help_topic = help_topic
-        self.launch = launch
-        self.run_json = run_json
-        self.snapshot = snapshot
-        self.runs = runs
-        self.run_output = run_output
-        self.wait_command = wait_command
-        self.cancel_command = cancel_command
-        self.workflow_command = workflow_command
-        self.worktree = worktree
-        self.config_command = config_command
-        self.capabilities = capabilities
-        self.profiles_command = profiles_command
-        self.inspection = inspection
-        self.resume = resume
-        self.followup = followup
-        self.mail_command = mail_command
-        self.promote = promote
+    global_options: GlobalOptions = field(default_factory=GlobalOptions, kw_only=True)
+    help_topic: str | None = field(default=None, kw_only=True)
+    payload: CommandPayload | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
