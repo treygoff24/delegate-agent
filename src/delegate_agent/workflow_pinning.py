@@ -18,6 +18,7 @@ import re
 import shutil
 import stat
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -824,8 +825,14 @@ def register_active_supervisor(
         return result
 
 
-def doctor(*, home: Path | None = None) -> JsonObject:
-    """Read executing/installed artifact identities, stamp, and pinned supervisors."""
+def doctor(*, home: Path | None = None, extra_warnings: Sequence[str] = ()) -> JsonObject:
+    """Read executing/installed artifact identities, stamp, and pinned supervisors.
+
+    ``extra_warnings`` carries checks this module must not perform itself:
+    ``profiles`` imports ``workflow_pinning``, so config-derived findings such
+    as a missing Codex profile overlay are resolved by the caller and appended
+    here rather than pulling config knowledge into the runtime-identity seam.
+    """
     index = active_supervisors_view(home=home)
     entries = index.get("supervisors")
     promotion = _read_promotion(home=home)
@@ -881,6 +888,7 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         warnings.append(f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes.")
     if not provenance["executingMatchesInstalled"]:
         warnings.append("executing checkout or pinned package is not the installed import root.")
+    warnings.extend(extra_warnings)
     if warnings:
         payload["warnings"] = warnings
     return payload
@@ -955,8 +963,14 @@ def promote(
     return payload
 
 
-def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = False) -> int:
-    payload = doctor(home=home)
+def emit_doctor(
+    *,
+    home: Path | None = None,
+    stdout: TextIO,
+    json_mode: bool = False,
+    extra_warnings: Sequence[str] = (),
+) -> int:
+    payload = doctor(home=home, extra_warnings=extra_warnings)
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
