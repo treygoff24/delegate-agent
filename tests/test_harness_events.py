@@ -151,6 +151,35 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIn("AuthError", acc.terminal_event["reason"])
         self.assertNotIn(secret, json.dumps(acc.bounded_recent_events()[0]))
 
+    def test_a_recovered_error_does_not_supply_a_later_failures_reason(self):
+        """A bodiless turn.failed must not inherit the 429 the run already recovered from."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: recovered"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.terminal_status, "succeeded")
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn("reason", acc.terminal_event)
+
+    def test_an_unrecovered_error_still_supplies_a_later_failures_reason(self):
+        """The planted negative: only a success terminal clears the message."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_event["reason"], "429 rate_limit_exceeded")
+
     def test_error_event_reads_nested_error_message(self):
         """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
         acc = self.events.StreamAccumulator(harness="claude")
