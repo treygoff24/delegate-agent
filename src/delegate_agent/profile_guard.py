@@ -64,18 +64,15 @@ def is_read_only_command(parsed: ParsedCommand) -> bool:
     if subcommand in READ_ONLY_SUBCOMMANDS:
         return True
     if subcommand == "models":
-        return parsed.inspection is not None and not parsed.inspection.live
+        return parsed.payload is not None and not parsed.payload.live
     if subcommand == "capabilities":
-        return parsed.capabilities is not None and not parsed.capabilities.refresh
+        return parsed.payload is not None and not parsed.payload.refresh
     if subcommand == "worktree":
-        return parsed.worktree is not None and parsed.worktree.action in READ_ONLY_WORKTREE_ACTIONS
+        return parsed.payload is not None and parsed.payload.action in READ_ONLY_WORKTREE_ACTIONS
     if subcommand == "workflow":
-        return (
-            parsed.workflow_command is not None
-            and parsed.workflow_command.action in READ_ONLY_WORKFLOW_ACTIONS
-        )
+        return parsed.payload is not None and parsed.payload.action in READ_ONLY_WORKFLOW_ACTIONS
     if subcommand == "mail":
-        command = parsed.mail_command
+        command = parsed.payload
         if command is None:
             return False
         if command.action in {"inbox", "status", "watch"}:

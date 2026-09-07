@@ -34,7 +34,6 @@ from delegate_agent.constants import (
     ENGINE_CAPABILITIES,
     KNOWN_ENGINES,
     MODE_CALL,
-    MODE_ORDER,
     MODE_SAFE,
     MODE_WORK,
     MODEL_SUMMARY_ENGINES,
@@ -56,10 +55,15 @@ from delegate_agent.prompt_transport import (
     devin_display_argv,
     prompt_file_display_argv,
 )
-from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
 from delegate_agent.sandbox_bwrap import SAFE_BACKEND_ENV, bwrap_available
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
+OPENCODE_SAFE_AGENT = "delegate-read-only"
+
+
+def _resolve_default_model(section: JsonObject) -> str | None:
+    value = section.get("defaultModel")
+    return value if isinstance(value, str) and value else None
 
 
 def _text_or_none(value: object) -> str:
@@ -76,7 +80,13 @@ def _global_options() -> list[str]:
     return [option.flag for option in command_help.GLOBAL_OPTIONS]
 
 
-def _commands_catalog() -> list[JsonObject]:
+def _commands_catalog(*, full: bool = True) -> list[JsonObject]:
+    if not full:
+        return [
+            {"command": spec.name, "summary": spec.summary, "helpTopic": spec.name}
+            for spec in command_help.COMMAND_SPECS.values()
+            if not spec.internal
+        ]
     return [
         {
             "name": spec.name,
@@ -1334,7 +1344,7 @@ def describe_summary_payload(
                 command for command in command_help.COMMAND_SPECS if command.startswith("workflow")
             ],
         },
-        "commands": _commands_catalog(),
+        "commands": _commands_catalog(full=False),
         "recommendedDiscovery": [
             "delegate setup",
             "delegate --json describe --summary",
@@ -1555,12 +1565,14 @@ def emit_describe(
     *,
     workspace: Path | None = None,
     summary: bool = False,
+    full: bool = False,
 ) -> int:
-    raw_payload = (
-        describe_summary_payload(config, config_source, workspace)
-        if summary
-        else describe_payload(config, config_source, workspace)
-    )
+    if full:
+        raw_payload = describe_payload(config, config_source, workspace)
+    elif summary:
+        raw_payload = describe_summary_payload(config, config_source, workspace)
+    else:
+        raw_payload = describe_overview_payload()
     payload = redaction.scrub_public_projection(raw_payload)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
@@ -1576,12 +1588,9 @@ def emit_describe(
             print(f"  {command}", file=stdout)
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
-    print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
-    print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
-    print(f"modes: {', '.join(MODE_ORDER)}", file=stdout)
-    print("prompt sources: direct, --prompt-file, stdin", file=stdout)
-    print("global options may appear anywhere before --", file=stdout)
+    print(f"engines: {', '.join(payload['engines'])}", file=stdout)
+    print(f"modes: {', '.join(payload['modes'])}", file=stdout)
+    print("focused help: delegate help <command>", file=stdout)
     return EXIT_OK
 
 
@@ -1607,121 +1616,5 @@ def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int
     return EXIT_OK
 
 
-def emit_agent_help(stdout: TextIO) -> int:
-    print(
-        f"""Use delegate for bounded execution tasks only.
-
-Good defaults:
-  delegate cursor work "Implement the scoped task; report changed files and tests."
-  delegate cursor safe "Review this diff for regressions; report findings with file/line/severity."
-  delegate droid <alias> safe "Investigate this issue; do not edit."
-  delegate droid <alias> work "Implement this bounded change; run the named check."
-  delegate codex safe "Review this workspace. Do not edit files."
-  delegate codex work "Implement the scoped fix, run the named check, and report changed files."
-  delegate codex work --isolation worktree --forbid-commit --prompt-file task.md
-  delegate claude safe "Review this workspace. Do not edit files."
-  delegate claude work "Implement the scoped fix, run the named check, and report changed files."
-  delegate grok safe "Review this workspace. Do not edit files."
-  delegate grok work "Implement the scoped fix, run the named check, and report changed files."
-  delegate devin work "Implement the scoped fix, run the named check, and report changed files."
-  delegate kimi safe "Review this repo for regressions; report file/line/severity."
-  delegate kimi work "Implement the scoped task; report changed files and tests."
-
-Kimi:
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses --model (alias from kimi.models or a raw model ID), optional JSON input model, or kimi.defaultModel in config.
-  - Reasoning effort is unsupported for Kimi in v1.
-  - No CLI workspace flag; Delegate sets subprocess cwd.
-
-Codex:
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses --model (alias from codex.models or a raw model ID), optional JSON input model, or codex.defaultModel in config.
-  - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
-
-Claude:
-  - Uses Claude Code headless mode: claude -p with prompt delivered on stdin.
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Claude safe mode runs with --permission-mode plan, --strict-mcp-config,
-    Read/Grep/Glob, and selected read-only Bash tools.
-    Delegate does not currently prove that Claude Code hooks, plugins, user
-    settings, or other non-MCP customization surfaces are disabled.
-  - Work mode uses claude.workPermissionMode, or bypassPermissions only when
-    Delegate policy explicitly enables policy.harness.claude.work.bypassApprovalsAndSandbox.
-  - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
-
-Grok:
-  - Uses Grok Build CLI with --prompt-file; Delegate materializes the effective prompt in a temp file.
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; not Grok plan mode.
-  - Work mode uses grok.workPermissionMode, or bypassPermissions only when
-    Delegate policy explicitly enables policy.harness.grok.work.bypassApprovalsAndSandbox.
-  - Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).
-  - Tracked runs use streaming-json; pass-through uses plain output.
-  - --output-schema is unsupported in v1 because Grok --json-schema forces final json output.
-
-Devin:
-  - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
-  - Passes --respect-workspace-trust false because Delegate already selects the execution workspace and Devin cannot show its trust prompt in print mode.
-  - Call --read-only passes a Delegate-generated --config deny-list for edit/write/exec and mcp__* plus --sandbox --permission-mode autonomous.
-  - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
-  - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
-  - Reasoning effort is unsupported for Devin in v1.
-
-Droid modes:
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
-  - Uses Factory Droid --skip-permissions-unsafe, not --auto high.
-  - Work mode is intentionally no-prompt; use only for bounded tasks in workspaces you trust.
-  - Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id pass-through. Give one or the other, not both. With neither, droid.defaultModel is used.
-
-Cursor safe mode:
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Uses default Cursor Agent behavior, not plan/ask mode.
-  - The child runs in the isolated copy; tracked runs may still write .delegate metadata in the source workspace.
-
-Profiles (auth/env switching):
-  - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME anywhere before --.
-  - --auth-profile applies to launches, dry-run, run, profiles, models, capabilities, and setup; it remains rejected for run-inspection, worktree, and unrelated diagnostics.
-  - delegate profiles (optionally with --json) reports the resolved profile, source, and non-secret env keys; it never mutates config.
-  - profiles.definitions.<name>.env holds non-secret pointers only (e.g. CODEX_HOME); secret-shaped keys are rejected at config load, and values must not interpolate secrets via $VAR. Export real credentials in the shell instead.
-
-Rules for agents:
-  - Keep prompts bounded: task, scope, verification, report format.
-  - Delegate always prepends a mandatory skill-review instruction before your prompt.
-  - Use --prompt-file or delegate --json run --input-json for long prompts.
-  - Run from the target workspace, or pass --cwd anywhere before --.
-  - Inside Git, --cwd resolves to the repo root; outside Git, the directory is used directly.
-  - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
-  - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.
-  - Launch normally; do not pipe delegate launches through tail just to suppress noise.
-  - For long tracked foreground runs, add --progress before prompt text to get bounded, redacted stderr heartbeats.
-  - After a tracked run, use delegate snapshot/runs/run-output; do not tail launch output or .delegate log files.
-  - Default output is bounded; use --pass-through only when raw harness streaming is required.
-  - If you intentionally pipe delegate output in a shell script, use set -o pipefail.
-
-Run inspection:
-  delegate snapshot <alias-or-runId>
-  delegate runs --active
-  delegate run-output <alias> --completion-report
-  delegate run-output <alias> --stderr --tail 100
-
-Avoid:
-  delegate cursor work --prompt-file task.md 2>&1 | tail -20
-
-Prefer:
-  delegate cursor work --prompt-file task.md
-  delegate snapshot cursor-1
-  delegate run-output cursor-1 --completion-report
-
-Discovery:
-  delegate --json describe --overview
-  delegate --json help <command>
-  delegate --json models --summary
-  delegate --json describe --summary
-  delegate --json models        # full/raw details when needed
-  delegate --json describe      # full/raw details when needed
-  delegate agent-help
-""".rstrip(),
-        file=stdout,
-    )
-    return EXIT_OK
+def emit_agent_help(stdout: TextIO, *, json_mode: bool = False) -> int:
+    return emit_command_help("agent-help", json_mode, stdout)

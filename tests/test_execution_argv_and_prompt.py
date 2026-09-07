@@ -11,6 +11,21 @@ import time
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import (
+    argv_builders,
+    cli,
+    cli_parser,
+    describe_payload,
+    errors,
+    prompt_transport,
+    request_build,
+    request_models,
+    run_registry,
+    runner,
+)
+from delegate_agent import (
+    config as delegate_config,
+)
 from tests.execution_test_base import (
     GIT_TEST_IDENTITY,
     MODULE_PATH,
@@ -23,7 +38,7 @@ from tests.execution_test_base import (
 
 class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def _announcement_config(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
         return config
 
@@ -33,8 +48,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         config = self._announcement_config()
 
         for args, expected_origin, cwd in (
-            (["--cwd", repo.name, "droid", "reviewer", "work", "hello"], "--cwd", None),
-            (["droid", "reviewer", "work", "hello"], "cwd", repo.name),
+            (["--cwd", repo.name, "droid", "work", "--model", "reviewer", "hello"], "--cwd", None),
+            (["droid", "work", "--model", "reviewer", "hello"], "cwd", repo.name),
         ):
             with self.subTest(expected_origin=expected_origin):
                 stdout = io.StringIO()
@@ -54,16 +69,14 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
 
                 with (
                     mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
-                    mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
-                    mock.patch.object(
-                        self.delegate, "execute_request", side_effect=fake_execute_request
-                    ),
+                    mock.patch.object(request_build, "load_config", return_value=(config, "test")),
+                    mock.patch.object(cli, "execute_request", side_effect=fake_execute_request),
                 ):
                     if cwd is None:
-                        code = self.delegate.main(args, stdout=stdout, stderr=stderr)
+                        code = cli.main(args, stdout=stdout, stderr=stderr)
                     else:
                         with contextlib.chdir(cwd):
-                            code = self.delegate.main(args, stdout=stdout, stderr=stderr)
+                            code = cli.main(args, stdout=stdout, stderr=stderr)
 
                 self.assertEqual(code, 0)
                 expected_line = (
@@ -72,9 +85,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 self.assertEqual(stdout.getvalue(), expected_line)
                 self.assertEqual(observed["stdout"], expected_line)
                 request = observed["request"]
-                self.assertIsInstance(request, self.delegate.Request)
+                self.assertIsInstance(request, request_models.Request)
                 self.assertNotIn(
-                    self.delegate.INFERRED_NON_GIT_WORKSPACE_WARNING,
+                    cli.INFERRED_NON_GIT_WORKSPACE_WARNING,
                     request.warnings,
                 )
 
@@ -92,13 +105,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             with (
                 contextlib.chdir(workspace),
                 mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
-                mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
-                mock.patch.object(
-                    self.delegate, "execute_request", side_effect=fake_execute_request
-                ),
+                mock.patch.object(request_build, "load_config", return_value=(config, "test")),
+                mock.patch.object(cli, "execute_request", side_effect=fake_execute_request),
             ):
-                code = self.delegate.main(
-                    ["droid", "reviewer", "work", "hello"],
+                code = cli.main(
+                    ["droid", "work", "--model", "reviewer", "hello"],
                     stdout=stdout,
                     stderr=stderr,
                 )
@@ -109,8 +120,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             stdout.getvalue(),
         )
         request = observed["request"]
-        self.assertIsInstance(request, self.delegate.Request)
-        self.assertIn(self.delegate.INFERRED_NON_GIT_WORKSPACE_WARNING, request.warnings)
+        self.assertIsInstance(request, request_models.Request)
+        self.assertIn(cli.INFERRED_NON_GIT_WORKSPACE_WARNING, request.warnings)
 
     def test_json_launch_does_not_emit_human_workspace_line(self):
         repo = make_git_repo()
@@ -121,11 +132,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
 
         with (
             mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
-            mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
-            mock.patch.object(self.delegate, "execute_request", return_value=(0, None)),
+            mock.patch.object(request_build, "load_config", return_value=(config, "test")),
+            mock.patch.object(cli, "execute_request", return_value=(0, None)),
         ):
-            code = self.delegate.main(
-                ["--json", "--cwd", repo.name, "droid", "reviewer", "work", "hello"],
+            code = cli.main(
+                ["--json", "--cwd", repo.name, "droid", "work", "--model", "reviewer", "hello"],
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -136,7 +147,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_continuity_mode_reaches_request_dry_run_and_run_context(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
-        parsed = self.delegate.parse_cli(
+        parsed = cli_parser.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -148,35 +159,31 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 "x",
             ]
         )
-        request = self.delegate.request_from_parsed(
+        request = request_build.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             io.StringIO(""),
         )
 
         self.assertEqual(request.continuity_mode, "pinned")
-        self.assertEqual(self.delegate.dry_run_payload(request)["continuityMode"], "pinned")
+        self.assertEqual(cli.dry_run_payload(request)["continuityMode"], "pinned")
 
-        default_request = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["--cwd", repo.name, "dry-run", "codex", "work", "x"]),
-            self.delegate.DEFAULT_CONFIG,
+        default_request = request_build.request_from_parsed(
+            cli_parser.parse_cli(["--cwd", repo.name, "dry-run", "codex", "work", "x"]),
+            delegate_config.embedded_default_config(),
             io.StringIO(""),
         )
         self.assertEqual(default_request.continuity_mode, "fungible")
-        self.assertEqual(
-            self.delegate.dry_run_payload(default_request)["continuityMode"], "fungible"
-        )
+        self.assertEqual(cli.dry_run_payload(default_request)["continuityMode"], "fungible")
 
-        registry_root = self.delegate.run_registry.ensure_registry(
-            Path(repo.name), workspace_kind="git"
-        )
-        with mock.patch.object(self.delegate.delegate_runner, "RunContext") as constructor:
-            self.delegate.make_run_context(
+        registry_root = run_registry.ensure_registry(Path(repo.name), workspace_kind="git")
+        with mock.patch.object(runner, "RunContext") as constructor:
+            cli.make_run_context(
                 registry_root,
                 request,
                 run_id="del_20260901T000000Z_abcdef",
                 alias="codex-1",
-                source_workspace=self.delegate.resolve_workspace(repo.name),
+                source_workspace=request_build.resolve_workspace(repo.name),
             )
         self.assertEqual(constructor.call_args.kwargs["continuity_mode"], "pinned")
 
@@ -207,23 +214,23 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_call_json_returns_text_without_registry(self):
         fake_bin = self.make_fake_bin()
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
-        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"])
+        request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
         call_workspace = Path(request.workspace)
         self.assertEqual(request.mode, "call")
         self.assertTrue(request.cleanup_workspace)
         self.assertTrue(call_workspace.is_dir())
 
         with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -241,7 +248,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_call_with_repo_local_tmpdir_cleans_its_workspace(self):
         fake_bin = self.make_fake_bin()
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "source"
@@ -251,18 +258,18 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 mock.patch.dict(os.environ, {"TMPDIR": str(temp_root)}, clear=False),
                 mock.patch.object(tempfile, "tempdir", None),
             ):
-                parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
-                request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+                parsed = cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"])
+                request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
             call_workspace = Path(request.workspace)
             self.assertTrue(call_workspace.is_relative_to(source))
             with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
-                code, _payload = self.delegate.execute_request(
+                code, _payload = cli.execute_request(
                     request,
                     json_mode=True,
                     config=config,
                     pass_through=False,
                     completion_report_mode="none",
-                    source_workspace=self.delegate.ResolvedWorkspace(str(source), "directory"),
+                    source_workspace=request_models.ResolvedWorkspace(str(source), "directory"),
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
                 )
@@ -271,24 +278,24 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             self.assertFalse(call_workspace.exists())
 
     def test_call_missing_binary_cleans_temp_workspace(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
-        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"])
+        request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
         call_workspace = Path(request.workspace)
         self.assertTrue(call_workspace.is_dir())
         with (
             tempfile.TemporaryDirectory() as empty_path,
             mock.patch.dict(os.environ, {"PATH": empty_path}),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors.DelegateError) as ctx,
         ):
-            self.delegate.execute_request(
+            cli.execute_request(
                 request,
                 json_mode=True,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -296,11 +303,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertFalse(call_workspace.exists())
 
     def test_codex_call_json_reports_explicit_fast_choice(self):
-        parsed = self.delegate.parse_cli(["codex", "call", "--no-fast", "hello"])
-        request = self.delegate.request_from_parsed(
-            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        parsed = cli_parser.parse_cli(["codex", "call", "--no-fast", "hello"])
+        request = request_build.request_from_parsed(
+            parsed, delegate_config.embedded_default_config(), io.StringIO("")
         )
-        fake_result = self.delegate.delegate_runner.CallResult(
+        fake_result = runner.CallResult(
             text="ok",
             exit_code=0,
             duration_ms=10,
@@ -311,18 +318,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             warnings=(),
         )
         with (
-            mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(
-                self.delegate.delegate_runner, "execute_call", return_value=fake_result
-            ),
+            mock.patch.object(cli, "ensure_binary"),
+            mock.patch.object(runner, "execute_call", return_value=fake_result),
         ):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -332,11 +337,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(payload["resultQuality"], "ok")
 
     def test_call_json_reports_empty_retry_only_when_attempted(self):
-        parsed = self.delegate.parse_cli(["codex", "call", "hello"])
-        request = self.delegate.request_from_parsed(
-            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        parsed = cli_parser.parse_cli(["codex", "call", "hello"])
+        request = request_build.request_from_parsed(
+            parsed, delegate_config.embedded_default_config(), io.StringIO("")
         )
-        fake_result = self.delegate.delegate_runner.CallResult(
+        fake_result = runner.CallResult(
             text="",
             exit_code=0,
             duration_ms=10,
@@ -349,18 +354,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             empty_retry_resolved=False,
         )
         with (
-            mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(
-                self.delegate.delegate_runner, "execute_call", return_value=fake_result
-            ),
+            mock.patch.object(cli, "ensure_binary"),
+            mock.patch.object(runner, "execute_call", return_value=fake_result),
         ):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -375,11 +378,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
     def test_call_json_no_assistant_text_fails_without_retry_metadata(self):
-        parsed = self.delegate.parse_cli(["codex", "call", "hello"])
-        request = self.delegate.request_from_parsed(
-            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        parsed = cli_parser.parse_cli(["codex", "call", "hello"])
+        request = request_build.request_from_parsed(
+            parsed, delegate_config.embedded_default_config(), io.StringIO("")
         )
-        fake_result = self.delegate.delegate_runner.CallResult(
+        fake_result = runner.CallResult(
             text="",
             exit_code=0,
             duration_ms=10,
@@ -390,18 +393,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             result_quality="no_assistant_text",
         )
         with (
-            mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(
-                self.delegate.delegate_runner, "execute_call", return_value=fake_result
-            ),
+            mock.patch.object(cli, "ensure_binary"),
+            mock.patch.object(runner, "execute_call", return_value=fake_result),
         ):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -419,18 +420,20 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_call_build_failure_cleans_temp_workspace(self):
         # A request-build failure AFTER _call_workspace() (e.g. unknown alias) must
         # not orphan the freshly created temp cwd.
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
-        parsed = self.delegate.parse_cli(["droid", "nonexistent-alias", "call", "hello"])
+        parsed = cli_parser.parse_cli(
+            ["droid", "call", "--model", "replace-with-model-id", "hello"]
+        )
         before = self._call_temp_dirs()
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "invalid_alias")
+        with self.assertRaises(errors.DelegateError) as ctx:
+            request_build.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "unconfigured_model")
         self.assertEqual(self._call_temp_dirs() - before, set())
 
     def test_codex_call_default_is_work_level_sandbox(self):
-        argv = self.delegate.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+        argv = argv_builders.build_codex_argv(
+            delegate_config.embedded_default_config()["codex"],
             "call",
             "/tmp/call",
             None,
@@ -440,13 +443,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         self.assertEqual(
             argv[argv.index("--sandbox") + 1],
-            self.delegate.DEFAULT_CONFIG["codex"]["workSandbox"],
+            delegate_config.embedded_default_config()["codex"]["workSandbox"],
         )
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
     def test_codex_call_read_only_is_read_only_sandbox(self):
-        argv = self.delegate.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+        argv = argv_builders.build_codex_argv(
+            delegate_config.embedded_default_config()["codex"],
             "call",
             "/tmp/call",
             None,
@@ -458,13 +461,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
 
     def test_grok_call_default_vs_read_only(self):
-        default_argv = self.delegate.build_grok_argv(
-            self.delegate.DEFAULT_CONFIG["grok"], "call", "/tmp/call", None, {}
+        default_argv = argv_builders.build_grok_argv(
+            delegate_config.embedded_default_config()["grok"], "call", "/tmp/call", None, {}
         )
         self.assertIn("auto", default_argv)
         self.assertNotIn("read-only", default_argv)
-        ro_argv = self.delegate.build_grok_argv(
-            self.delegate.DEFAULT_CONFIG["grok"],
+        ro_argv = argv_builders.build_grok_argv(
+            delegate_config.embedded_default_config()["grok"],
             "call",
             "/tmp/call",
             None,
@@ -475,44 +478,48 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("dontAsk", ro_argv)
 
     def test_claude_call_default_vs_read_only(self):
-        default_argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"], "call", None, {}
+        default_argv = argv_builders.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"], "call", None, {}
         )
         self.assertIn("auto", default_argv)
         self.assertNotIn("plan", default_argv)
-        ro_argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"], "call", None, {}, call_read_only=True
+        ro_argv = argv_builders.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"],
+            "call",
+            None,
+            {},
+            call_read_only=True,
         )
         self.assertIn("plan", ro_argv)
         self.assertIn("--strict-mcp-config", ro_argv)
 
     def test_cursor_and_droid_call_write_flags_only_when_not_read_only(self):
-        cursor_default = self.delegate.build_cursor_argv(
+        cursor_default = argv_builders.build_cursor_argv(
             ["cursor-agent"], "call", "/ws", "model", "prompt"
         )
         self.assertIn("--force", cursor_default)
-        cursor_ro = self.delegate.build_cursor_argv(
+        cursor_ro = argv_builders.build_cursor_argv(
             ["cursor-agent"], "call", "/ws", "model", "prompt", call_read_only=True
         )
         self.assertNotIn("--force", cursor_ro)
-        droid_default = self.delegate.build_droid_argv("droid", "call", "/ws", "m", "p")
+        droid_default = argv_builders.build_droid_argv("droid", "call", "/ws", "m", "p")
         self.assertIn("--skip-permissions-unsafe", droid_default)
-        droid_ro = self.delegate.build_droid_argv(
+        droid_ro = argv_builders.build_droid_argv(
             "droid", "call", "/ws", "m", "p", call_read_only=True
         )
         self.assertNotIn("--skip-permissions-unsafe", droid_ro)
 
     def test_read_only_call_prepends_neutralizing_preamble_default_call_is_raw(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        ro = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["codex", "call", "--read-only", "Score this diff."]),
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
+        ro = request_build.request_from_parsed(
+            cli_parser.parse_cli(["codex", "call", "--read-only", "Score this diff."]),
             config,
             io.StringIO(""),
         )
         self.addCleanup(shutil.rmtree, ro.workspace, ignore_errors=True)
         self.assertTrue(ro.stdin_text.startswith("You are being called"))
-        raw = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["codex", "call", "Score this diff."]),
+        raw = request_build.request_from_parsed(
+            cli_parser.parse_cli(["codex", "call", "Score this diff."]),
             config,
             io.StringIO(""),
         )
@@ -522,19 +529,19 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_default_call_inherits_work_policy_read_only_call_inherits_safe(self):
         # Default call is work-level, so it must inherit work-tier policy
         # (webSearch); read-only call is safe-level and must not.
-        config = self.delegate.delegate_config.deep_merge(
-            self.delegate.DEFAULT_CONFIG,
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
             {"policy": {"work": {"webSearch": True}}},
         )
-        default_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["codex", "call", "do this"]), config, io.StringIO("")
+        default_req = request_build.request_from_parsed(
+            cli_parser.parse_cli(["codex", "call", "do this"]), config, io.StringIO("")
         )
         self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
         self.assertIn("--search", default_req.argv)
         # ...but never a bypass, even at work-tier policy.
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", default_req.argv)
-        ro_req = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["codex", "call", "--read-only", "score"]),
+        ro_req = request_build.request_from_parsed(
+            cli_parser.parse_cli(["codex", "call", "--read-only", "score"]),
             config,
             io.StringIO(""),
         )
@@ -544,28 +551,28 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_read_only_flag_rejected_outside_call_mode(self):
         for mode in ("safe", "work"):
             with self.subTest(mode=mode):
-                parsed = self.delegate.parse_cli(["codex", mode, "--read-only", "x"])
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.request_from_parsed(
-                        parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+                parsed = cli_parser.parse_cli(["codex", mode, "--read-only", "x"])
+                with self.assertRaises(errors.DelegateError) as ctx:
+                    request_build.request_from_parsed(
+                        parsed, delegate_config.embedded_default_config(), io.StringIO("")
                     )
                 self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_call_json_surfaces_truncation_fields(self):
         fake_bin = self.make_fake_bin()
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
-        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"])
+        request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
         with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -576,7 +583,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertFalse(payload["textTruncated"])
 
     def test_pi_family_call_json_populates_assistant_text(self):
-        fake_result = self.delegate.delegate_runner.CallResult(
+        fake_result = runner.CallResult(
             text="FAMILY_OK",
             exit_code=0,
             duration_ms=10,
@@ -587,30 +594,30 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         for engine in ("pi", "omp"):
             with self.subTest(engine=engine):
-                request = self.delegate.build_request(
+                request = request_build.build_request(
                     engine,
                     "call",
                     None,
-                    self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                    request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                     "hello",
-                    self.delegate.DEFAULT_CONFIG,
+                    delegate_config.embedded_default_config(),
                     False,
                 )
                 with (
-                    mock.patch.object(self.delegate, "ensure_binary"),
+                    mock.patch.object(cli, "ensure_binary"),
                     mock.patch.object(
-                        self.delegate.delegate_runner,
+                        runner,
                         "execute_call",
                         return_value=fake_result,
                     ),
                 ):
-                    code, payload = self.delegate.execute_request(
+                    code, payload = cli.execute_request(
                         request,
                         json_mode=True,
-                        config=self.delegate.DEFAULT_CONFIG,
+                        config=delegate_config.embedded_default_config(),
                         pass_through=False,
                         completion_report_mode="none",
-                        source_workspace=self.delegate.ResolvedWorkspace(
+                        source_workspace=request_models.ResolvedWorkspace(
                             "<call-temp-cwd>", "directory"
                         ),
                         stdout=io.StringIO(),
@@ -635,22 +642,22 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             )
             path.chmod(0o755)
         env_path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
 
-        json_request = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["droid", "reviewer", "call", "hello"]),
+        json_request = request_build.request_from_parsed(
+            cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"]),
             config,
             io.StringIO(""),
         )
         with mock.patch.dict(os.environ, {"PATH": env_path}):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 json_request,
                 json_mode=True,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -658,20 +665,20 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("Authorization: ***", payload["stderrTail"])
         self.assertNotIn("abcdefghijklmnop", payload["stderrTail"])
 
-        text_request = self.delegate.request_from_parsed(
-            self.delegate.parse_cli(["droid", "reviewer", "call", "hello"]),
+        text_request = request_build.request_from_parsed(
+            cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"]),
             config,
             io.StringIO(""),
         )
         stderr = io.StringIO()
         with mock.patch.dict(os.environ, {"PATH": env_path}):
-            code, _payload = self.delegate.execute_request(
+            code, _payload = cli.execute_request(
                 text_request,
                 json_mode=False,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=stderr,
             )
@@ -685,8 +692,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         fake_bin = self.make_fake_bin()
         self.addCleanup(repo.cleanup)
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self.delegate.Request(
+        workspace = request_build.resolve_workspace(repo.name)
+        request = request_models.Request(
             "droid",
             "safe",
             repo.name,
@@ -705,10 +712,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
         with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -736,8 +743,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         fake_bin = self.make_fake_bin()
         self.addCleanup(repo.cleanup)
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self.delegate.Request(
+        workspace = request_build.resolve_workspace(repo.name)
+        request = request_models.Request(
             "droid",
             "safe",
             repo.name,
@@ -746,10 +753,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             "model-id",
         )
         with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_EXIT": "7"}):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -779,13 +786,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 }
             )
         )
-        parsed = self.delegate.ParsedCommand(
+        parsed = request_models.ParsedCommand(
             "run",
-            global_options=self.delegate.GlobalOptions(json_mode=True),
-            run_json=self.delegate.RunJsonOptions(str(task)),
+            global_options=request_models.GlobalOptions(json_mode=True),
+            payload=request_models.RunJsonOptions(str(task)),
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        with self.assertRaises(errors.DelegateError) as ctx:
+            request_build.request_from_input_json(parsed, delegate_config.embedded_default_config())
         self.assertEqual(ctx.exception.error, "unknown_input_key")
 
     def test_static_safety_guards(self):
@@ -813,7 +820,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         fake_bin = self.make_cursor_safe_fake_agent()
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -868,7 +875,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
 
         fake_bin = self.make_cursor_safe_fake_agent()
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -898,7 +905,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             source.write_text("keep-me\n")
             fake_bin = self.make_cursor_safe_fake_agent()
             config = Path(workspace) / "config.json"
-            config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config.write_text(json.dumps(delegate_config.embedded_default_config()))
             env = os.environ.copy()
             env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
             env["DELEGATE_CONFIG"] = str(config)
@@ -942,7 +949,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         (fake_bin / "agent").chmod(0o755)
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -1037,13 +1044,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         return bin_dir
 
     def test_codex_safe_default_argv_uses_read_only_sandbox_without_network_or_bypasses(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="safe",
         )
-        argv = self.delegate.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+        argv = argv_builders.build_codex_argv(
+            delegate_config.embedded_default_config()["codex"],
             "safe",
             "/repo",
             None,
@@ -1063,8 +1070,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         # Config validation rejects bypass flags under safe mode, but the argv
         # builder must also refuse to emit them structurally — safe mode stays
         # read-only no matter what a policy dict carries.
-        argv = self.delegate.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+        argv = argv_builders.build_codex_argv(
+            delegate_config.embedded_default_config()["codex"],
             "safe",
             "/repo",
             None,
@@ -1082,8 +1089,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("read-only", argv)
 
     def test_claude_safe_default_argv_uses_plan_permissions_and_stdin(self):
-        argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+        argv = argv_builders.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"],
             "safe",
             "claude-opus-4-8",
             {"bypassApprovalsAndSandbox": True},
@@ -1116,8 +1123,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("--dangerously-skip-permissions", argv)
 
     def test_claude_work_does_not_bypass_from_global_policy(self):
-        argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+        argv = argv_builders.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"],
             "work",
             None,
             {"bypassApprovalsAndSandbox": True},
@@ -1127,8 +1134,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("bypassPermissions", argv)
 
     def test_claude_work_uses_harness_scoped_policy_bypass(self):
-        argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+        argv = argv_builders.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"],
             "work",
             None,
             {"bypassApprovalsAndSandbox": True},
@@ -1138,7 +1145,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("bypassPermissions", argv)
 
     def test_claude_work_external_sandbox_profile_does_not_bypass(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["policy"]["profile"] = "external-sandbox"
         request = self.build_git_request(
             "claude",
@@ -1155,16 +1162,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
 
     def test_claude_describe_runtime_bypass_no_drift(self):
         def assert_bypass(config, expected):
-            runtime = self.delegate._claude_runtime_policy(config, "work")
-            harness = self.delegate._claude_harness_bypass_enabled(config, "work")
+            runtime = describe_payload._claude_runtime_policy(config, "work")
+            harness = argv_builders._claude_harness_bypass_enabled(config, "work")
             self.assertEqual(runtime["bypassApprovalsAndSandbox"], expected)
             self.assertEqual(harness, expected)
             self.assertEqual(runtime["bypassApprovalsAndSandbox"], harness)
 
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         assert_bypass(config, False)
 
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config.setdefault("policy", {})
         config["policy"].setdefault("harness", {})
         config["policy"]["harness"].setdefault("claude", {})
@@ -1173,7 +1180,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         }
         assert_bypass(config, True)
 
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config.setdefault("policy", {})
         config["policy"]["profile"] = "external-sandbox"
         config["policy"].setdefault("work", {})
@@ -1181,7 +1188,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         assert_bypass(config, False)
 
     def test_claude_work_harness_policy_allows_bypass(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["policy"]["harness"] = {"claude": {"work": {"bypassApprovalsAndSandbox": True}}}
         request = self.build_git_request(
             "claude",
@@ -1196,10 +1203,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("bypassPermissions", request.argv)
 
     def test_claude_config_rejects_bypass_permission_mode(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["claude"]["workPermissionMode"] = "bypassPermissions"
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.validate_config(config)
+        with self.assertRaises(errors.DelegateError) as ctx:
+            request_build.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_claude_config")
         self.assertIn(
             "policy.harness.claude.work.bypassApprovalsAndSandbox",
@@ -1207,7 +1214,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
 
     def test_claude_request_uses_stdin_transport_without_prompt_in_argv(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["claude"]["defaultModel"] = "claude-sonnet-4-6"
         request = self.build_git_request(
             "claude",
@@ -1220,7 +1227,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             reasoning_effort="high",
             reasoning_effort_source="cli",
         )
-        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.prompt_transport, prompt_transport.PROMPT_TRANSPORT_STDIN)
         self.assertEqual(request.stdin_text, "SECRET CLAUDE PROMPT")
         self.assertNotIn("SECRET CLAUDE PROMPT", request.argv)
         self.assertEqual(request.reasoning_effort, "high")
@@ -1241,7 +1248,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         fake_bin = self.make_codex_safe_fake()
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -1286,7 +1293,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         fake_bin = self.make_claude_safe_fake()
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -1342,7 +1349,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         fake_bin = self.make_kimi_safe_fake()
         config = Path(repo.name) / "config.json"
-        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.write_text(json.dumps(delegate_config.embedded_default_config()))
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
@@ -1375,7 +1382,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
 
     def test_effective_prompt_codex_safe_order(self):
         user = "review the diff"
-        p = self.delegate.effective_prompt(
+        p = request_build.effective_prompt(
             user, engine="codex", mode="safe", completion_report_mode="markdown"
         )
         self.assertIn("Delegate sub-agent skill review", p)
@@ -1392,13 +1399,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         # effective_prompt run twice on the same string must not double-inject the
         # codex safe prefix. prepend_skill_review_instructions is already idempotent;
         # the codex inject must be too.
-        once = self.delegate.effective_prompt(
+        once = request_build.effective_prompt(
             "review the diff",
             engine="codex",
             mode="safe",
             completion_report_mode="none",
         )
-        twice = self.delegate.effective_prompt(
+        twice = request_build.effective_prompt(
             once,
             engine="codex",
             mode="safe",
@@ -1408,13 +1415,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(once.count("Delegate Codex safe mode"), 1)
 
     def test_effective_prompt_claude_safe_order_and_idempotence(self):
-        once = self.delegate.effective_prompt(
+        once = request_build.effective_prompt(
             "review the diff",
             engine="claude",
             mode="safe",
             completion_report_mode="none",
         )
-        twice = self.delegate.effective_prompt(
+        twice = request_build.effective_prompt(
             once,
             engine="claude",
             mode="safe",
@@ -1428,13 +1435,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(once.count("Delegate Claude safe mode"), 1)
 
     def test_effective_prompt_droid_safe_order_and_idempotence(self):
-        once = self.delegate.effective_prompt(
+        once = request_build.effective_prompt(
             "review the diff",
             engine="droid",
             mode="safe",
             completion_report_mode="none",
         )
-        twice = self.delegate.effective_prompt(
+        twice = request_build.effective_prompt(
             once,
             engine="droid",
             mode="safe",
@@ -1448,7 +1455,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(once.count("Delegate Droid safe mode"), 1)
 
     def test_effective_prompt_codex_work_omits_safe_prefix(self):
-        p = self.delegate.effective_prompt(
+        p = request_build.effective_prompt(
             "ship the fix",
             engine="codex",
             mode="work",
@@ -1457,7 +1464,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("Delegate Codex safe mode", p)
 
     def test_effective_prompt_cursor_safe_omits_codex_prefix(self):
-        p = self.delegate.effective_prompt(
+        p = request_build.effective_prompt(
             "review the diff",
             engine="cursor",
             mode="safe",
@@ -1466,7 +1473,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("Delegate Codex safe mode", p)
 
     def test_codex_missing_binary_exit_3(self):
-        request = self.delegate.Request(
+        request = request_models.Request(
             "codex",
             "work",
             "/repo",
@@ -1474,21 +1481,21 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             ["delegate-definitely-missing-codex", "exec", "hello"],
             None,
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.ensure_binary(request.argv)
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli.ensure_binary(request.argv)
         self.assertEqual(ctx.exception.exit_code, 3)
 
     def test_missing_binary_error_includes_config_fix_diagnostics(self):
         config_path = "/tmp/delegate-config.json"
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.ensure_binary(
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli.ensure_binary(
                 ["delegate-definitely-missing-claude", "-p"],
                 engine="claude",
                 config_source=config_path,
             )
         error = ctx.exception
         self.assertEqual(error.error, "missing_binary")
-        self.assertEqual(error.exit_code, self.delegate.EXIT_MISSING_BINARY)
+        self.assertEqual(error.exit_code, errors.EXIT_MISSING_BINARY)
         self.assertIn("searched PATH of the delegate process", error.message)
         self.assertIn("claude.binary", error.message)
         self.assertEqual(error.diagnostics["configPath"], config_path)
@@ -1506,16 +1513,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             binary.chmod(0o755)
 
             with mock.patch.dict(os.environ, {"PATH": str(empty_path)}):
-                self.delegate.ensure_binary(
+                cli.ensure_binary(
                     ["profile-agent"],
                     env_overrides={"PATH": str(bin_dir)},
                 )
 
             with (
                 mock.patch.dict(os.environ, {"PATH": str(bin_dir)}),
-                self.assertRaises(self.delegate.DelegateError) as ctx,
+                self.assertRaises(errors.DelegateError) as ctx,
             ):
-                self.delegate.ensure_binary(
+                cli.ensure_binary(
                     ["profile-agent"],
                     env_overrides={"PATH": str(empty_path)},
                 )
@@ -1551,13 +1558,13 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                     "PATH": str(empty_path),
                 },
             ):
-                code = self.delegate.main(
+                code = cli.main(
                     ["--json", "--cwd", home, "kimi", "safe", "hello"],
                     stdout=stdout_buf,
                 )
 
         payload = json.loads(stdout_buf.getvalue())
-        self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+        self.assertEqual(code, errors.EXIT_MISSING_BINARY)
         self.assertEqual(payload["error"], "missing_binary")
         self.assertEqual(payload["configPath"], str(config_path))
         self.assertEqual(payload["configKey"], "kimi.binary")
@@ -1567,17 +1574,17 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def test_call_mode_warning_merge_dedupes_preserving_order(self):
         # F7: call-mode warning merge dedupes while preserving order. A warning
         # present in both request.warnings and result.warnings is emitted once.
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
-        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = cli_parser.parse_cli(["droid", "call", "--model", "reviewer", "hello"])
+        request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
         duplicate_warning = "shared warning from both channels"
         request = dataclasses.replace(
             request,
             warnings=(duplicate_warning, "request-only warning"),
             cleanup_workspace=False,
         )
-        fake_result = self.delegate.delegate_runner.CallResult(
+        fake_result = runner.CallResult(
             text="ok",
             exit_code=0,
             duration_ms=10,
@@ -1588,18 +1595,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             warnings=(duplicate_warning, "result-only warning"),
         )
         with (
-            mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(
-                self.delegate.delegate_runner, "execute_call", return_value=fake_result
-            ),
+            mock.patch.object(cli, "ensure_binary"),
+            mock.patch.object(runner, "execute_call", return_value=fake_result),
         ):
-            code, payload = self.delegate.execute_request(
+            code, payload = cli.execute_request(
                 request,
                 json_mode=True,
                 config=config,
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                source_workspace=request_models.ResolvedWorkspace("<call-temp-cwd>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
