@@ -7,6 +7,9 @@ importing ``cli``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from delegate_agent.errors import DelegateError
 
 MODE_SAFE = "safe"
@@ -189,3 +192,21 @@ def claude_alias_base(model: str) -> str:
     """Strip a documented `[...]` context-window suffix from a Claude selector."""
     head, separator, _ = model.partition("[")
     return head if separator else model
+
+
+# Cursor reports a model DISPLAY NAME, never the id passed to `--model`, and the
+# name is the selector's documented `<family>-<effort>[-fast]` shape rendered as
+# "<Family> <Effort Label>[ Fast]". Discovery builds the expected label when it
+# parses a catalog; the event parser rebuilds it when a pinned run compares the
+# requested selector against the served name. Both read this one table, so the
+# rendering cannot drift between the write side and the read side.
+CURSOR_EFFORT_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        "none": "None",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Extra High",
+        "max": "Max",
+    }
+)

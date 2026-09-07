@@ -1262,7 +1262,8 @@ def describe_payload(
                 "work": pi_work_argv,
                 "workNotes": [
                     "All modes use --no-session; Delegate run tracking is the durable record.",
-                    f"Reasoning effort maps directly to pi --thinking ({', '.join(reasoning.PI_NATIVE_EFFORTS)}).",
+                    "Reasoning effort maps directly to pi --thinking "
+                    f"({', '.join(reasoning.PI_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
                 ],
             },
@@ -1277,7 +1278,8 @@ def describe_payload(
                 "work": omp_work_argv,
                 "workNotes": [
                     "All modes use --no-session; Delegate run tracking is the durable record.",
-                    f"Reasoning effort maps directly to omp --thinking ({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
+                    "Reasoning effort maps directly to omp --thinking "
+                    f"({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
                 ],
             },

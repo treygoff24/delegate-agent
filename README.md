@@ -14,12 +14,13 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
-Prompt handling is provider-specific: Codex, Claude, OpenCode, and Pi prompts are delivered to the child
-runtime over stdin; Droid, Grok, and Devin prompts are delivered through private
-temporary prompt files; Cursor Agent, Oh My Pi, and Kimi Code currently
-require prompt argv. Delegate redacts Cursor, Oh My Pi, and Kimi prompt argv in
-dry-run output and run manifests, but true process-argv hiding for those Harnesses
-depends on the child CLIs exposing stdin or prompt-file transport.
+Prompt handling is provider-specific: Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi
+prompts are delivered to the child runtime over stdin; Droid, Grok, and Devin prompts
+are delivered through private temporary prompt files; Kimi Code is the only Harness
+that still requires prompt argv, and the only one whose prompt Delegate redacts in
+dry-run output and run manifests. Redaction hides the prompt from Delegate's own
+output, not from the child's process argv, so true hiding for Kimi depends on Kimi
+Code exposing stdin or prompt-file transport.
 
 Work runs have a workspace-local mailbox by default: use `delegate mail inbox`
 and `delegate mail read <id>` to check it. Global `--no-mail` or
@@ -412,7 +413,7 @@ Defaults are intentionally conservative for review paths:
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Pi safe mode and `pi call --read-only` use only the built-in `read` tool and disable extension, skill, prompt-template, and project-approval discovery. All Pi modes use `--no-session`; Delegate's run registry is the durable record.
-- Oh My Pi safe mode and `omp call --read-only` use only `read`, disable extension, skill, rules, and LSP discovery, and enforce `--approval-mode always-ask` so headless write and exec requests are denied. All Oh My Pi modes use `--no-session`; Delegate passes prompts as positional arguments because the verified 17.0.4 stdin path exited without processing piped input.
+- Oh My Pi safe mode and `omp call --read-only` use only `read`, disable extension, skill, rules, and LSP discovery, and enforce `--approval-mode always-ask` so headless write and exec requests are denied. All Oh My Pi modes use `--no-session`; prompts are piped on stdin, verified against 18.1.13.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 

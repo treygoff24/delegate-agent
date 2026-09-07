@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, TextIO, cast
 
 from delegate_agent import (
     account_binding,
@@ -663,6 +663,7 @@ def build_run_record(
         recent_events, events_meta = accumulator.bounded_recent_events()
         record.update(assistant_meta)
         record.update(events_meta)
+        record.update(accumulator.stream_diagnostics())
         record["recentEvents"] = recent_events
         display_current = accumulator.current if current is None else current
         if display_current:
@@ -956,7 +957,21 @@ def _aggregate_usage(*usages: JsonObject) -> JsonObject:
                 if all(is_non_negative_int(usage.get(key)) for usage in usages)
                 else None
             )
+    # Grok's `end` event is the only source of a provider-priced cost, and it is
+    # a float, so the token rules above would drop it on every merged capture.
+    # It survives only when every merged usage carries one; a partial sum would
+    # understate the run's cost while looking authoritative.
+    if any("costUsd" in usage for usage in usages):
+        result["costUsd"] = (
+            sum(float(cast(float, usage["costUsd"])) for usage in usages)
+            if all(_is_non_negative_number(usage.get("costUsd")) for usage in usages)
+            else None
+        )
     return result
+
+
+def _is_non_negative_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and value >= 0
 
 
 # Delegate to the shared helper in harness_events so the runner (write-time) and
@@ -3478,6 +3493,32 @@ def _merge_tracked_attempt_captures(
         prior_capture.accumulator.structured_events_seen
         + current_capture.accumulator.structured_events_seen
     )
+    # The stream diagnostics are per-attempt counters. A retry or auth fallback
+    # replaces the accumulator, so anything not carried here is lost: a run whose
+    # first attempt hit malformed stdout or an unknown event type would report a
+    # clean stream after the retry, which is the exact silence these counters
+    # exist to break.
+    accumulator.malformed_lines = (
+        prior_capture.accumulator.malformed_lines + current_capture.accumulator.malformed_lines
+    )
+    accumulator.malformed_samples = [
+        *prior_capture.accumulator.malformed_samples,
+        *current_capture.accumulator.malformed_samples,
+    ][: harness_events.MALFORMED_SAMPLE_LIMIT]
+    merged_unhandled = dict(prior_capture.accumulator.unhandled_event_types)
+    truncated = (
+        prior_capture.accumulator.unhandled_event_types_truncated
+        or current_capture.accumulator.unhandled_event_types_truncated
+    )
+    for name, count in current_capture.accumulator.unhandled_event_types.items():
+        if name in merged_unhandled:
+            merged_unhandled[name] += count
+        elif len(merged_unhandled) >= harness_events.UNHANDLED_EVENT_TYPE_LIMIT:
+            truncated = True
+        else:
+            merged_unhandled[name] = count
+    accumulator.unhandled_event_types = merged_unhandled
+    accumulator.unhandled_event_types_truncated = truncated
     return replace(
         current_capture,
         accumulator=accumulator,

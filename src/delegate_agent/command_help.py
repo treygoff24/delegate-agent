@@ -16,15 +16,11 @@ from dataclasses import dataclass, field, replace
 from delegate_agent import VERSION, reasoning
 from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
-
-
-def _effort_prose(efforts: tuple[str, ...]) -> str:
-    """Render an effort vocabulary as help prose, derived from the enum itself.
-
-    The audit found these strings advertising an effort the harness rejects,
-    because the list was typed out beside the enum instead of read from it.
-    """
-    return f"{', '.join(efforts[:-1])}, or {efforts[-1]}"
+from delegate_agent.reasoning import (
+    OMP_NATIVE_EFFORTS,
+    PI_NATIVE_EFFORTS,
+    thinking_vocabulary_prose,
+)
 
 
 @dataclass(frozen=True)
@@ -633,7 +629,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only pi's read tool and disable extension, skill, prompt-template, and project-approval discovery.",
             "All modes are stateless at pi's session layer; Delegate run tracking remains available.",
-            f"Reasoning effort maps directly to pi --thinking: {_effort_prose(reasoning.PI_NATIVE_EFFORTS)}.",
+            "Reasoning effort maps directly to pi --thinking: "
+            f"{thinking_vocabulary_prose(PI_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("opencode", "codex", "models", "agent-help"),
@@ -672,7 +669,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only omp's read tool and disable extension, skill, rules, and LSP discovery.",
             "All modes are stateless at omp's session layer; Delegate run tracking remains available.",
-            f"Reasoning effort maps directly to omp --thinking: {_effort_prose(reasoning.OMP_NATIVE_EFFORTS)}.",
+            "Reasoning effort maps directly to omp --thinking: "
+            f"{thinking_vocabulary_prose(OMP_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("pi", "opencode", "codex", "models", "agent-help"),
