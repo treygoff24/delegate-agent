@@ -54,6 +54,7 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
+    CLAUDE_UNPINNABLE_ALIASES,
     DRY_RUN_HINT,
     ENGINES_PROSE,
     KNOWN_ENGINES,
@@ -65,6 +66,7 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
+    claude_alias_base,
     validate_mode,
     validate_pure_call,
 )
@@ -3266,6 +3268,29 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mode: str) -> None:
+    """Refuse a pinned Claude run whose selector can never be verified as served.
+
+    Claude answers with a fully-dated served model id, so pinned continuity
+    compares the requested selector against that id. `opus`, `sonnet`, `haiku`,
+    and `fable` still name a family segment the served id carries, so they stay
+    checkable. `best`, `opusplan`, and `default` name no family at all: whichever
+    model they resolve to is the provider's choice, so the run could only end as
+    a mid-launch continuity failure after the workspace and prompt were prepared.
+    """
+    if engine != "claude" or continuity_mode != "pinned" or not model:
+        return
+    if claude_alias_base(model) not in CLAUDE_UNPINNABLE_ALIASES:
+        return
+    raise DelegateError(
+        "unsupported_continuity_mode",
+        f"--continuity-mode pinned cannot verify the Claude alias {model!r}: it names no "
+        "model family, and Claude reports a dated served id rather than the alias. Pin a "
+        "concrete model id (for example claude-opus-5), use a family alias (opus, sonnet, "
+        "haiku, fable), or run with --continuity-mode fungible." + DRY_RUN_HINT,
+    )
+
+
 def _omp_catalog_absence_warning(
     model: str | None, discovery: JsonObject | None
 ) -> tuple[str, ...]:
@@ -3618,6 +3643,7 @@ def _build_request_for_workspace(
             resume_session_id=resume_session_id,
         ),
     )
+    _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})
     if isolation_context is not None and isolation_context.isolation_lifecycle == "persistent":

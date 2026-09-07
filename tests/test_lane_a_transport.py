@@ -22,6 +22,7 @@ from delegate_agent import (
     config as delegate_config,
 )
 from delegate_agent import describe_payload as describe_api
+from delegate_agent import errors as errors_api
 from delegate_agent import prompt_transport as transport_api
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
@@ -564,3 +565,64 @@ class OptionAfterPromptWarningTests(CommandTestBase):
     def test_an_option_before_the_prompt_does_not_warn(self):
         warnings = self._warnings(["claude", "safe", "--model", "claude-opus-5", "x"])
         self.assertEqual(warnings, ())
+
+
+class PinnedClaudeAliasPreflightTests(CommandTestBase):
+    """A10: a pinned run started with an unmappable Claude alias fails up front.
+
+    Claude reports a fully-dated served model id, never the alias. `opus`,
+    `sonnet`, `haiku`, and `fable` still carry an evidenced family segment that
+    the served id can be matched against; `best`, `opusplan`, and `default` name
+    no family at all, so a pinned run using them can only end as a mid-run
+    continuity failure that costs the whole launch.
+    """
+
+    def _build(self, model, continuity_mode="pinned"):
+        return self.build_git_request(
+            "claude",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            model_override=model,
+            continuity_mode=continuity_mode,
+        )
+
+    def test_unmappable_alias_is_refused_before_launch(self):
+        for alias in ("best", "opusplan", "default", "best[1m]"):
+            with self.subTest(alias=alias):
+                with self.assertRaises(errors_api.DelegateError) as caught:
+                    self._build(alias)
+                self.assertEqual(caught.exception.error, "unsupported_continuity_mode")
+                self.assertIn(alias, caught.exception.message)
+
+    def test_family_aliases_and_concrete_ids_still_build(self):
+        # The planted negative: the family aliases resolve to a served id whose
+        # family segment matches, so pinning them is legitimate and must not be
+        # swept up by the same check.
+        for model in ("opus", "sonnet", "haiku", "fable", "opus[1m]", "claude-opus-5"):
+            with self.subTest(model=model):
+                request = self._build(model)
+                self.assertEqual(request.model, model)
+
+    def test_fungible_runs_accept_every_alias(self):
+        for alias in ("best", "opusplan", "default"):
+            with self.subTest(alias=alias):
+                request = self._build(alias, continuity_mode="fungible")
+                self.assertEqual(request.model, alias)
+
+    def test_other_engines_are_untouched(self):
+        request = self.build_git_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            model_override="best",
+            continuity_mode="pinned",
+        )
+        self.assertEqual(request.model, "best")
