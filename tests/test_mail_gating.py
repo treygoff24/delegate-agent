@@ -43,6 +43,29 @@ class MailGatingTests(CommandTestBase):
                     delegate_config.validate_config(config)
                 self.assertEqual(caught.exception.error, "invalid_mail_config")
 
+    def test_dry_run_without_a_config_does_not_wire_mail(self):
+        """`config=None` means the machine's mail setting is unknown, not enabled."""
+        request = self.build_git_request(
+            "codex",
+            "work",
+            None,
+            "/repo",
+            "prompt",
+            self._config(True),
+            True,
+            frame_prompt=True,
+        )
+
+        with_config = self.delegate.dry_run_payload(request, config=self._config(True))
+        without_config = self.delegate.dry_run_payload(request)
+
+        off_config = self.delegate.dry_run_payload(request, config=self._config(False))
+
+        self.assertIn("mailPromptSuffix", with_config)
+        self.assertNotIn("mailPromptSuffix", without_config)
+        self.assertNotEqual(with_config, off_config)
+        self.assertEqual(without_config, off_config)
+
     def test_mail_commands_work_when_injection_flag_is_disabled(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-command-") as tmp:
             workspace = Path(tmp)
