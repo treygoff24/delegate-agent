@@ -12,7 +12,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli, runner
 from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as delegate_config
 from delegate_agent import errors as error_types
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
@@ -21,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 CONFIG_PATH = ROOT / "src" / "delegate_agent" / "config.py"
+DEFAULT_CONFIG = delegate_config.embedded_default_config()
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -56,7 +59,7 @@ def make_git_repo():
 
 
 def droid_test_config(delegate):
-    config = json.loads(json.dumps(delegate.DEFAULT_CONFIG))
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
     config["droid"]["models"] = {"minimax": "model-id"}
     return config
 
@@ -123,7 +126,7 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(error_types.DelegateError) as ctx:
                 request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    DEFAULT_CONFIG,
                     TtyStdin(),
                 )
         self.assertEqual(ctx.exception.error, "output_schema_not_found")
@@ -136,7 +139,7 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(error_types.DelegateError) as ctx:
                 request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    DEFAULT_CONFIG,
                     TtyStdin(),
                 )
         self.assertEqual(ctx.exception.error, "invalid_output_schema")
@@ -147,7 +150,7 @@ class ValidationTests(unittest.TestCase):
             schema.write_text("{}", encoding="utf-8")
             cases = (
                 ["cursor", "safe", "--output-schema", str(schema), "review"],
-                ["droid", "minimax", "safe", "--output-schema", str(schema), "review"],
+                ["droid", "safe", "--model", "minimax", "--output-schema", str(schema), "review"],
             )
             for argv in cases:
                 with self.subTest(argv=argv):
@@ -155,7 +158,7 @@ class ValidationTests(unittest.TestCase):
                     with self.assertRaises(error_types.DelegateError) as ctx:
                         request_api.request_from_parsed(
                             parsed,
-                            self.delegate.DEFAULT_CONFIG,
+                            DEFAULT_CONFIG,
                             TtyStdin(),
                         )
                     self.assertEqual(ctx.exception.error, "unsupported_output_schema")
@@ -175,7 +178,7 @@ class ValidationTests(unittest.TestCase):
                     )
                     request = request_api.request_from_parsed(
                         parsed,
-                        self.delegate.DEFAULT_CONFIG,
+                        DEFAULT_CONFIG,
                         TtyStdin(),
                     )
                     argv = request.argv
@@ -184,7 +187,7 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
                     self.assertEqual(argv[argv.index("--json-schema") + 1], contents)
                     self.assertNotIn(
-                        self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(),
+                        runner.COMPLETION_REPORT_SUFFIX.strip(),
                         request.prompt,
                     )
                     # The manifest carries the raw text so resume can inherit it.
@@ -197,7 +200,7 @@ class ValidationTests(unittest.TestCase):
                 None,
                 request_types.ResolvedWorkspace(tmp, "directory"),
                 "review",
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
                 True,
                 output_schema="<delegate-inline-output-schema>",
                 output_schema_text=contents,
@@ -211,7 +214,7 @@ class ValidationTests(unittest.TestCase):
                 None,
                 request_types.ResolvedWorkspace(tmp, "directory"),
                 "answer",
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
                 True,
                 output_schema=str(schema),
             )
@@ -226,12 +229,10 @@ class ValidationTests(unittest.TestCase):
             )
             request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
                 TtyStdin(),
             )
-        self.assertNotIn(
-            self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt
-        )
+        self.assertNotIn(runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt)
         self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
 
     def test_codex_output_schema_preflight_normalizes_without_mutating_source(self):
@@ -247,9 +248,7 @@ class ValidationTests(unittest.TestCase):
                 ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
             )
 
-            request = request_api.request_from_parsed(
-                parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
-            )
+            request = request_api.request_from_parsed(parsed, DEFAULT_CONFIG, TtyStdin())
             self.assertEqual(json.loads(schema.read_text()), original)
             self.assertIs(json.loads(request.output_schema_text)["additionalProperties"], False)
             self.assertTrue(any("auto-injected" in warning for warning in request.warnings))
@@ -271,7 +270,7 @@ class ValidationTests(unittest.TestCase):
                 ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+                request_api.request_from_parsed(parsed, DEFAULT_CONFIG, TtyStdin())
 
         self.assertEqual(ctx.exception.error, "invalid_output_schema")
         self.assertIn("schema.required", ctx.exception.message)
@@ -284,13 +283,11 @@ class ValidationTests(unittest.TestCase):
                 ["claude", "call", "--output-schema", str(schema), "return json"]
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+                request_api.request_from_parsed(parsed, DEFAULT_CONFIG, TtyStdin())
             self.assertEqual(ctx.exception.error, "invalid_output_schema")
 
             schema.write_text('{"type":"object"}', encoding="utf-8")
-            request = request_api.request_from_parsed(
-                parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
-            )
+            request = request_api.request_from_parsed(parsed, DEFAULT_CONFIG, TtyStdin())
             self.assertIsNone(request.output_schema_record_text)
 
     def test_stdin_works(self):
@@ -399,14 +396,12 @@ class ValidationTests(unittest.TestCase):
         parsed = request_types.ParsedCommand(
             "run",
             global_options=request_types.GlobalOptions(json_mode=True, cwd=str(nested)),
-            run_json=request_types.RunJsonOptions(str(task)),
+            payload=request_types.RunJsonOptions(str(task)),
         )
         request = request_api.request_from_input_json(parsed, droid_test_config(self.delegate))
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
         self.assertEqual(request.workspace_kind, "git")
-        self.assertTrue(
-            request.prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX)
-        )
+        self.assertTrue(request.prompt.startswith(runner.SKILL_REVIEW_PREFIX))
 
     def test_run_input_json_non_git_cwd_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -425,7 +420,7 @@ class ValidationTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             request = request_api.request_from_input_json(parsed, droid_test_config(self.delegate))
             self.assertEqual(Path(request.workspace).resolve(), Path(tmp).resolve())
@@ -451,10 +446,10 @@ class ValidationTests(unittest.TestCase):
         parsed = request_types.ParsedCommand(
             "run",
             global_options=request_types.GlobalOptions(json_mode=True, cwd=repo2.name),
-            run_json=request_types.RunJsonOptions(str(task)),
+            payload=request_types.RunJsonOptions(str(task)),
         )
         with self.assertRaises(error_types.DelegateError) as ctx:
-            request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
     def test_workspace_local_config_cannot_override_global(self):
@@ -780,21 +775,17 @@ class ValidationTests(unittest.TestCase):
             (delegate_dir / "config.json").write_text(
                 json.dumps({"cursor": {"defaultModel": "from-workspace"}})
             )
-            parsed = request_types.ParsedCommand(
-                "models",
-                global_options=request_types.GlobalOptions(cwd=tmp),
-            )
+            stdout, stderr = io.StringIO(), io.StringIO()
             with (
                 mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"),
                 mock.patch.object(
-                    self.delegate.delegate_config, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"
+                    delegate_config, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"
                 ),
                 mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
             ):
-                config, _source = request_api.load_config(
-                    workspace=self.delegate.workspace_path_for_config(parsed.global_options.cwd)
-                )
-            self.assertEqual(config["cursor"]["defaultModel"], "composer-2.5")
+                code = cli.main(["--cwd", tmp, "--json", "models"], stdout=stdout, stderr=stderr)
+            self.assertEqual(code, error_types.EXIT_OK, stderr.getvalue())
+            self.assertEqual(json.loads(stdout.getvalue())["cursor"]["defaultModel"], "composer-2.5")
 
     def test_load_config_uses_private_embedded_default_copy(self):
         config_mod = load_config_module()
@@ -1322,7 +1313,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(config_mod.resolve_process_group_termination_grace_sec(config), 0.0)
 
     def test_request_carries_configured_process_group_grace(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["tracking"]["processGroupTerminationGraceSec"] = 0.25
         parsed = parser_api.parse_cli(["codex", "safe", "review"])
         request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
@@ -1526,13 +1517,13 @@ class ValidationTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=delegate.GlobalOptions(json_mode=True),
-                run_json=delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(delegate.DelegateError) as ctx:
-                delegate.request_from_input_json(parsed, droid_test_config(delegate))
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, droid_test_config(delegate))
             self.assertEqual(ctx.exception.error, "invalid_isolation")
             self.assertIn("null", ctx.exception.message.lower())
 
@@ -1555,12 +1546,12 @@ class ValidationTests(unittest.TestCase):
                 }
             )
         )
-        parsed = delegate.ParsedCommand(
+        parsed = request_types.ParsedCommand(
             "run",
-            global_options=delegate.GlobalOptions(json_mode=True),
-            run_json=delegate.RunJsonOptions(str(task)),
+            global_options=request_types.GlobalOptions(json_mode=True),
+            payload=request_types.RunJsonOptions(str(task)),
         )
-        request = delegate.request_from_input_json(parsed, droid_test_config(delegate))
+        request = request_api.request_from_input_json(parsed, droid_test_config(delegate))
         # Implied worktree isolation.
         self.assertIsNotNone(request.isolation_context)
         self.assertEqual(request.isolation_context.effective_isolation, "worktree")
@@ -1591,13 +1582,13 @@ class ValidationTests(unittest.TestCase):
                 }
             )
         )
-        parsed = delegate.ParsedCommand(
+        parsed = request_types.ParsedCommand(
             "run",
-            global_options=delegate.GlobalOptions(json_mode=True),
-            run_json=delegate.RunJsonOptions(str(task)),
+            global_options=request_types.GlobalOptions(json_mode=True),
+            payload=request_types.RunJsonOptions(str(task)),
         )
-        with self.assertRaises(delegate.DelegateError) as ctx:
-            delegate.request_from_input_json(parsed, droid_test_config(delegate))
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            request_api.request_from_input_json(parsed, droid_test_config(delegate))
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
         self.assertIn("none", ctx.exception.message.lower())
 
@@ -1705,7 +1696,7 @@ class DryRunHintScopeTests(unittest.TestCase):
         self.assertEqual(argv[0], "delegate")
         reparsed = parser_api.parse_cli(argv[1:])
         self.assertEqual(reparsed.subcommand, "codex")
-        self.assertTrue(reparsed.launch.dry_run)
+        self.assertTrue(reparsed.payload.dry_run)
 
     def test_a_non_launch_error_is_not_told_to_use_a_launch_only_verb(self):
         message = self._message(["--notify", "channel:x", "runs"])

@@ -7,7 +7,17 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import harness_events, request_build, run_metadata, runner, worktree_execution
+from delegate_agent import (
+    cli,
+    cli_parser,
+    errors,
+    harness_events,
+    request_build,
+    run_metadata,
+    runner,
+    worktree_execution,
+)
+from delegate_agent import config as delegate_config
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import Request, ResolvedWorkspace
 from tests.execution_test_base import ExecutionTestBase
@@ -100,7 +110,7 @@ class LaunchMappingTests(ExecutionTestBase):
                         execution = worktree_execution.PersistentWorktreeExecution(
                             current,
                             True,
-                            self.delegate.DEFAULT_CONFIG,
+                            delegate_config.embedded_default_config(),
                             False,
                             "none",
                             workspace,
@@ -136,7 +146,7 @@ class LaunchMappingTests(ExecutionTestBase):
                         self.assertEqual(ctx.synced_files, 2)
                         self.assertEqual(ctx.env_overrides["WORKSPACE_ROOT"], current.launch_cwd)
                     else:
-                        ctx = self.delegate.make_run_context(
+                        ctx = cli.make_run_context(
                             root,
                             current,
                             run_id="run-a",
@@ -189,19 +199,19 @@ class LaunchMappingTests(ExecutionTestBase):
                 if isolation is not None:
                     common.extend(["--isolation", isolation])
                     raw["isolation"] = isolation
-                cli = self.delegate.parse_cli(
+                cli = cli_parser.parse_cli(
                     [*common, "codex", mode, "--continuity-mode", "panel", *extra, "task"]
                 )
                 path = Path(temp) / "request.json"
                 path.write_text(json.dumps(raw), encoding="utf-8")
-                json_command = self.delegate.parse_cli(["run", "--input-json", str(path)])
+                json_command = cli_parser.parse_cli(["run", "--input-json", str(path)])
                 with mock.patch.object(request_build, "build_request") as build:
-                    self.delegate.request_from_parsed(
-                        cli, self.delegate.DEFAULT_CONFIG, io.StringIO()
+                    request_build.request_from_parsed(
+                        cli, delegate_config.embedded_default_config(), io.StringIO()
                     )
                     cli_call = build.call_args
-                    self.delegate.request_from_input_json(
-                        json_command, self.delegate.DEFAULT_CONFIG
+                    request_build.request_from_input_json(
+                        json_command, delegate_config.embedded_default_config()
                     )
                     json_call = build.call_args
                 # Both inputs reach the same final launch builder and resolved
@@ -241,20 +251,20 @@ class LaunchMappingTests(ExecutionTestBase):
             for isolation in (None, "worktree"):
                 with self.subTest(isolation=isolation):
                     path.write_text(json.dumps({**raw, "isolation": isolation}), encoding="utf-8")
-                    parsed = self.delegate.parse_cli(
+                    parsed = cli_parser.parse_cli(
                         ["--isolation", "none", "run", "--input-json", str(path)]
                     )
                     with mock.patch.object(request_build, "build_request") as build:
                         if isolation is None:
-                            with self.assertRaises(self.delegate.DelegateError) as error:
-                                self.delegate.request_from_input_json(
-                                    parsed, self.delegate.DEFAULT_CONFIG
+                            with self.assertRaises(errors.DelegateError) as error:
+                                request_build.request_from_input_json(
+                                    parsed, delegate_config.embedded_default_config()
                                 )
                             self.assertEqual(error.exception.error, "invalid_isolation")
                             build.assert_not_called()
                         else:
-                            self.delegate.request_from_input_json(
-                                parsed, self.delegate.DEFAULT_CONFIG
+                            request_build.request_from_input_json(
+                                parsed, delegate_config.embedded_default_config()
                             )
                             self.assertEqual(
                                 build.call_args.kwargs["isolation_context"].effective_isolation,
@@ -275,10 +285,10 @@ class LaunchMappingTests(ExecutionTestBase):
                 self.subTest(args=args),
                 mock.patch.object(request_build, "build_request") as build,
             ):
-                with self.assertRaises(self.delegate.DelegateError) as error:
-                    parsed = self.delegate.parse_cli(["--cwd", repo.name, *args])
-                    self.delegate.request_from_parsed(
-                        parsed, self.delegate.DEFAULT_CONFIG, io.StringIO()
+                with self.assertRaises(errors.DelegateError) as error:
+                    parsed = cli_parser.parse_cli(["--cwd", repo.name, *args])
+                    request_build.request_from_parsed(
+                        parsed, delegate_config.embedded_default_config(), io.StringIO()
                     )
                 self.assertEqual(error.exception.error, expected)
                 build.assert_not_called()
@@ -293,7 +303,7 @@ class LaunchMappingTests(ExecutionTestBase):
         ):
             with self.subTest(persona=persona, filename=filename):
                 request.persona_name, request.persona_file = persona, filename
-                dry = self.delegate.dry_run_payload(request)
+                dry = cli.dry_run_payload(request)
                 tracked = {}
                 run_metadata.add_persona_payload_fields(
                     tracked, request, default_file=runner.PERSONA_TXT_FILE
@@ -322,7 +332,7 @@ class LaunchMappingTests(ExecutionTestBase):
                         requested_reasoning_effort=effort,
                         fast=fast,
                     )
-                    ctx = self.delegate.make_run_context(
+                    ctx = cli.make_run_context(
                         Path(source),
                         request,
                         run_id="run-a",
@@ -330,7 +340,7 @@ class LaunchMappingTests(ExecutionTestBase):
                         source_workspace=ResolvedWorkspace(source, "directory"),
                     )
                     projections = (
-                        self.delegate.dry_run_payload(request),
+                        cli.dry_run_payload(request),
                         runner.build_manifest(ctx, []),
                         runner.build_snapshot(
                             ctx, accumulator=harness_events.StreamAccumulator(harness="codex")

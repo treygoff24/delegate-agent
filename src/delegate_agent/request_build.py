@@ -1198,24 +1198,27 @@ def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str
     positional, a droid --model value that hits the alias map, or the modeless
     --model selection token.
     """
-    alias, _ = _classify_cli_model(launch)
-    if launch.engine == "droid" and launch.model is not None:
-        models = config.get("droid", {}).get("models")
-        if isinstance(models, dict) and launch.model in models:
-            return launch.model
+    alias, _ = _classify_cli_model(launch, config)
     return alias
 
 
-def _classify_cli_model(launch: LaunchOptions) -> tuple[str | None, str | None]:
+def _classify_cli_model(
+    launch: LaunchOptions, config: JsonObject | None = None
+) -> tuple[str | None, str | None]:
     """Split a CLI launch's model selection into (model_alias, model_override).
 
     Modeless engines route --model through the model_alias channel — the same
     one input-JSON uses — so manifests record modelAlias identically for both
     (``codex:fast`` selectors keep working) while resolution stays alias-or-id.
-    Droid keeps its positional in model_alias (strict) and --model in
-    model_override (alias-or-id, classified inside _droid_request_parts).
+    Droid --model values that match its configured map retain alias provenance;
+    raw model IDs use the override channel.
     """
     if launch.engine == "droid":
+        if launch.model is None:
+            return launch.model_alias, None
+        models = config.get("droid", {}).get("models") if isinstance(config, dict) else None
+        if isinstance(models, dict) and launch.model in models:
+            return launch.model, None
         return launch.model_alias, launch.model
     if launch.model is not None:
         return launch.model, None
@@ -1520,7 +1523,10 @@ def _launch_progress(
 
 def _validate_cli_model(launch: LaunchOptions, config: JsonObject) -> None:
     if launch.engine == "droid":
-        _reject_droid_model_conflict(launch.model_alias, launch.model)
+        # Positional Droid aliases are rejected by cli_parser.  Input JSON may
+        # still provide a model alias through the shared model_alias channel.
+        if launch.model_alias is not None and launch.model is not None:
+            _reject_droid_model_conflict(launch.model_alias, launch.model)
         if launch.model_alias is not None:
             _validate_droid_model_alias(config, launch.model_alias)
 
@@ -1670,8 +1676,12 @@ def request_from_parsed(
     validate_config(config)
     if parsed.subcommand == "run":
         return request_from_input_json(parsed, config, stderr=stderr, workspace=workspace)
-    launch, global_options = parsed.launch, parsed.global_options
-    if launch is None or launch.engine not in KNOWN_ENGINES or launch.mode is None:
+    launch, global_options = parsed.payload, parsed.global_options
+    if (
+        not isinstance(launch, LaunchOptions)
+        or launch.engine not in KNOWN_ENGINES
+        or launch.mode is None
+    ):
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
@@ -1723,7 +1733,7 @@ def request_from_parsed(
             prompt=prompt,
             workspace=workspace,
             output_schema=output_schema,
-            model_selection=_classify_cli_model(launch),
+            model_selection=_classify_cli_model(launch, config),
             planning_model_alias=_effective_cli_model_alias(launch, config),
             progress=progress,
             forbid_commit_note=(
@@ -1852,7 +1862,7 @@ def request_from_input_json(
     stderr: TextIO | None = None,
     workspace: ResolvedWorkspace | None = None,
 ) -> Request:
-    run_json = parsed.run_json
+    run_json = parsed.payload
     if run_json is None:
         raise DelegateError("invalid_command", "run --input-json options are required.")
     global_options = parsed.global_options
@@ -2795,7 +2805,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         if model is None:
             raise DelegateError(
                 "missing_model",
-                "droid requires a positional model alias, --model, or droid.defaultModel; "
+                "droid requires --model or droid.defaultModel; "
                 "captured help does not prove that --model may be omitted.",
             )
         else:

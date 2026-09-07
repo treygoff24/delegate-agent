@@ -10,13 +10,25 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import argv_builders as argv_api
+from delegate_agent import (
+    cli,
+    harness_discovery,
+    prompt_instructions,
+    request_build,
+)
 from delegate_agent import cli_parser as parser_api
+from delegate_agent import (
+    config as delegate_config,
+)
 from delegate_agent import describe_payload as describe_api
 from delegate_agent import errors as error_types
-from delegate_agent import prompt_instructions, request_build
+from delegate_agent import (
+    profiles as profiles_api,
+)
 from delegate_agent import prompt_transport as transport_api
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
+from delegate_agent import runner as runner_api
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 from tests.discovery_fakes import write_version_harness
 
@@ -56,7 +68,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "hello",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
             frame_prompt=True,
         )
@@ -95,15 +107,15 @@ class EngineArgvTests(CommandTestBase):
                 }
             }
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = None
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
-            mock.patch.object(self.delegate.harness_discovery, "probe_harness") as probe,
+            mock.patch.object(harness_discovery, "probe_harness") as probe,
         ):
             request = self.build_git_request(
                 "codex",
@@ -121,18 +133,18 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.capability_model_source, "discovery")
         self.assertNotIn("--model", request.argv)
         self.assertEqual(request.reasoning_capability_source, "discovery")
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertIsNone(payload["modelResolved"])
         self.assertEqual(payload["capabilityModel"], "gpt-live")
         self.assertEqual(payload["reasoningCapabilityEvidence"], "exact")
-        context = self.delegate.make_run_context(
+        context = cli.make_run_context(
             Path("/tmp/delegate-registry"),
             request,
             run_id="run-test",
             alias="quiet-otter",
             source_workspace=request_types.ResolvedWorkspace("/repo", "git"),
         )
-        manifest = self.delegate.delegate_runner.build_manifest(context, request.argv)
+        manifest = runner_api.build_manifest(context, request.argv)
         self.assertEqual(manifest["modelRequested"], None)
         self.assertEqual(manifest["modelResolved"], None)
         self.assertEqual(manifest["capabilityModel"], "gpt-live")
@@ -158,11 +170,11 @@ class EngineArgvTests(CommandTestBase):
             "capturedAt": "2026-08-27T09:00:01Z",
             "harnesses": {},
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-context"
 
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            harness_discovery,
             "load_discovery_cache",
             side_effect=[base, contextual],
         ):
@@ -193,19 +205,19 @@ class EngineArgvTests(CommandTestBase):
                 }
             }
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=True,
             ) as drifted,
-            mock.patch.object(self.delegate.harness_discovery, "probe_harness") as probe,
+            mock.patch.object(harness_discovery, "probe_harness") as probe,
             self.assertRaises(error_types.DelegateError),
         ):
             self.build_git_request(
@@ -259,7 +271,7 @@ class EngineArgvTests(CommandTestBase):
         version_drifted: bool = False,
         effort_from_config: bool = False,
     ):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         # The model has to be named by config, not only by the discovery record.
         # Invalidating the record drops its `defaultModel` along with its stale
         # reasoning declaration, and a run with no model at all falls to codex's
@@ -271,17 +283,17 @@ class EngineArgvTests(CommandTestBase):
             effort = None
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=self._upgraded_codex_discovery(cached_supported),
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=selector_drifted,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "cached_version_has_drifted",
                 return_value=version_drifted,
             ) as probe,
@@ -413,12 +425,12 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual([note for note in request.warnings if "capabilities refresh" in note], [])
 
     def test_a_foreign_version_banner_refuses_the_launch(self):
-        """A configured codex path answering as grok must never reach a runner.
+        """A configured codex path answering as grok must never reach a runner_api.
 
         Dropping the cached record is not enough: the argv builder and the
         safety policy behind it are still codex's, aimed at the same binary.
         """
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -434,18 +446,18 @@ class EngineArgvTests(CommandTestBase):
 
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=False,
             ),
             mock.patch.object(subprocess, "run", side_effect=record),
             mock.patch.multiple(
-                self.delegate.delegate_runner,
+                runner_api,
                 execute_tracked=mock.DEFAULT,
                 execute_call=mock.DEFAULT,
                 execute_passthrough=mock.DEFAULT,
@@ -461,7 +473,7 @@ class EngineArgvTests(CommandTestBase):
         error = caught.exception
         self.assertEqual(error.error, "harness_identity_mismatch")
         self.assertEqual(error.exit_code, 2)
-        cache_path = self.delegate.harness_discovery.discovery_cache_path(
+        cache_path = harness_discovery.discovery_cache_path(
             None, home=Path(self._config_env["HOME"])
         )
         self.assertEqual(
@@ -500,7 +512,7 @@ class EngineArgvTests(CommandTestBase):
         """
         inline_secret = "sk-live-INLINESECRET"
         flagged_secret = "sk-live-FLAGGEDSECRET"
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -516,19 +528,19 @@ class EngineArgvTests(CommandTestBase):
 
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=False,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "cached_version_has_drifted",
-                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                side_effect=harness_discovery.HarnessIdentityMismatchError(
                     "codex", "grok", tuple(discovery["harnesses"]["codex"]["selector"])
                 ),
             ),
@@ -558,32 +570,32 @@ class EngineArgvTests(CommandTestBase):
         clears nothing and the next launch refuses again -- the same loop the
         path was added to break.
         """
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
         discovery = self._upgraded_codex_discovery(["low"])
         selector = tuple(discovery["harnesses"]["codex"]["selector"])
-        resolution = self.delegate.profiles.ProfileResolution(name="work", source="flag")
+        resolution = profiles_api.ProfileResolution(name="work", source="flag")
 
         with (
             mock.patch.object(
-                self.delegate.profiles,
+                profiles_api,
                 "resolve_active_profile",
                 return_value=resolution,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=False,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "cached_version_has_drifted",
-                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                side_effect=harness_discovery.HarnessIdentityMismatchError(
                     "codex", "grok", selector
                 ),
             ),
@@ -594,8 +606,8 @@ class EngineArgvTests(CommandTestBase):
             )
 
         home = Path(self._config_env["HOME"])
-        expected = self.delegate.harness_discovery.discovery_cache_path("work", home=home)
-        default = self.delegate.harness_discovery.discovery_cache_path(None, home=home)
+        expected = harness_discovery.discovery_cache_path("work", home=home)
+        default = harness_discovery.discovery_cache_path(None, home=home)
         error = caught.exception
         self.assertEqual(error.diagnostics["cachePath"], str(expected))
         self.assertNotEqual(str(expected), str(default))
@@ -606,7 +618,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_dry_run_never_executes_the_harness_binary(self):
         """Dry run promises no child runtime, and a version probe is one."""
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = None
         real_run = subprocess.run
         spawned: list[tuple[str, ...]] = []
@@ -617,17 +629,17 @@ class EngineArgvTests(CommandTestBase):
 
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=self._upgraded_codex_discovery(),
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=False,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "run_metadata_probe",
                 side_effect=AssertionError("dry run must not probe the harness"),
             ),
@@ -649,20 +661,20 @@ class EngineArgvTests(CommandTestBase):
 
     def test_a_drifted_selector_short_circuits_before_the_version_probe(self):
         """The free comparison decides first; a dead selector never spawns."""
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=self._upgraded_codex_discovery(),
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=True,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "cached_version_has_drifted",
                 side_effect=AssertionError("a drifted selector must not spawn a version probe"),
             ),
@@ -688,7 +700,7 @@ class EngineArgvTests(CommandTestBase):
                     None,
                     "/repo",
                     "review",
-                    self.delegate.DEFAULT_CONFIG,
+                    delegate_config.embedded_default_config(),
                     True,
                 )
                 self.assertIsNone(request.model)
@@ -706,11 +718,11 @@ class EngineArgvTests(CommandTestBase):
                 }
             }
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["opencode"]["defaultModel"] = "provider/model"
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=discovery,
             ),
@@ -729,7 +741,7 @@ class EngineArgvTests(CommandTestBase):
 
         config["opencode"]["defaultModel"] = "provider/unknown"
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            harness_discovery,
             "load_discovery_cache",
             return_value=discovery,
         ):
@@ -759,10 +771,10 @@ class EngineArgvTests(CommandTestBase):
                 }
             }
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["opencode"]["models"] = {"turbo": {"model": "provider/model", "variant": "turbo"}}
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            harness_discovery,
             "load_discovery_cache",
             return_value=discovery,
         ):
@@ -774,19 +786,19 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_evidence, "exact")
 
     def test_request_resolves_profile_once_and_reuses_it_for_cache_and_child_env(self):
-        resolution = self.delegate.profiles.ProfileResolution(
+        resolution = profiles_api.ProfileResolution(
             name="work",
             source="flag",
             env={"PROFILE_MARKER": "work-value"},
         )
         with (
             mock.patch.object(
-                self.delegate.profiles,
+                profiles_api,
                 "resolve_active_profile",
                 return_value=resolution,
             ) as resolve_profile,
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 return_value=None,
             ) as load_cache,
@@ -797,7 +809,7 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/temporary-call-cwd",
                 "answer",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 True,
                 auth_profile_override="work",
             )
@@ -808,10 +820,10 @@ class EngineArgvTests(CommandTestBase):
 
     def test_profile_specific_discovery_snapshots_select_different_capability_models(self):
         profiles = [
-            self.delegate.profiles.ProfileResolution(
+            profiles_api.ProfileResolution(
                 name="personal", source="flag", codex_home="/tmp/personal-codex"
             ),
-            self.delegate.profiles.ProfileResolution(
+            profiles_api.ProfileResolution(
                 name="work", source="flag", codex_home="/tmp/work-codex"
             ),
         ]
@@ -829,16 +841,16 @@ class EngineArgvTests(CommandTestBase):
                 }
             }
 
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = None
         with (
             mock.patch.object(
-                self.delegate.profiles,
+                profiles_api,
                 "resolve_active_profile",
                 side_effect=profiles,
             ),
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "load_discovery_cache",
                 side_effect=snapshot,
             ),
@@ -902,11 +914,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(cursor[cursor.index("--resume") + 1], "cursor-session")
 
         claude = argv_api.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+            delegate_config.embedded_default_config()["claude"],
             "safe",
             None,
-            self.delegate.delegate_config.effective_policy(
-                self.delegate.DEFAULT_CONFIG, engine="claude", mode="safe"
+            delegate_config.effective_policy(
+                delegate_config.embedded_default_config(), engine="claude", mode="safe"
             ),
             persist_session=True,
             resume_session_id="claude-session",
@@ -915,7 +927,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--no-session-persistence", claude)
 
         omp = argv_api.build_omp_argv(
-            self.delegate.DEFAULT_CONFIG["omp"],
+            delegate_config.embedded_default_config()["omp"],
             "safe",
             None,
             None,
@@ -927,13 +939,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--no-session", omp)
 
         codex = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "safe",
             "/repo",
             None,
             "fix output",
-            self.delegate.delegate_config.effective_policy(
-                self.delegate.DEFAULT_CONFIG, engine="codex", mode="safe"
+            delegate_config.effective_policy(
+                delegate_config.embedded_default_config(), engine="codex", mode="safe"
             ),
             workspace_kind="git",
             prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
@@ -1014,7 +1026,13 @@ class EngineArgvTests(CommandTestBase):
     def test_invalid_alias_rejected_before_argv(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request(
-                "droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
+                "droid",
+                "safe",
+                "nope",
+                "/repo",
+                "hello",
+                delegate_config.embedded_default_config(),
+                True,
             )
         self.assertEqual(ctx.exception.error, "invalid_alias")
 
@@ -1026,12 +1044,12 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "hello",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 True,
             )
 
     def test_placeholder_droid_model_rejected_before_argv(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"my-model": "replace-with-your-droid-model-id"}
         with self.assertRaises(error_types.DelegateError) as ctx:
             self.build_git_request("droid", "safe", "my-model", "/repo", "hello", config, True)
@@ -1044,13 +1062,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "unconfigured_model")
 
     def test_codex_work_default_argv_uses_workspace_sandbox_with_network(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="work",
         )
         argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             None,
@@ -1072,11 +1090,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
     def test_codex_work_trusted_hooks_argv_adds_hook_bypass_only(self):
-        config = self.delegate.delegate_config.deep_merge(
-            self.delegate.DEFAULT_CONFIG,
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
             {"policy": {"profile": "trusted-hooks"}},
         )
-        policy = self.delegate.delegate_config.effective_policy(
+        policy = delegate_config.effective_policy(
             config,
             engine="codex",
             mode="work",
@@ -1097,11 +1115,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--ask-for-approval", argv[:exec_index])
 
     def test_codex_work_web_search_argv_when_enabled(self):
-        config = self.delegate.delegate_config.deep_merge(
-            self.delegate.DEFAULT_CONFIG,
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
             {"policy": {"work": {"webSearch": True}}},
         )
-        policy = self.delegate.delegate_config.effective_policy(
+        policy = delegate_config.effective_policy(
             config,
             engine="codex",
             mode="work",
@@ -1118,13 +1136,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--search", argv[: argv.index("exec")])
 
     def test_codex_default_model_null_omits_model_flag(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="work",
         )
         argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             None,
@@ -1135,13 +1153,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--model", argv)
 
     def test_codex_output_schema_argv_after_exec(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="safe",
         )
         argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "safe",
             "/repo",
             None,
@@ -1156,13 +1174,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(argv[schema_index + 1], "/tmp/schema.json")
 
     def test_codex_resumable_argv_omits_ephemeral(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="work",
         )
         default_argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             None,
@@ -1173,7 +1191,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--ephemeral", default_argv)
 
         resumable_argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             None,
@@ -1185,13 +1203,13 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--ephemeral", resumable_argv)
 
     def test_claude_resumable_argv_omits_no_session_persistence(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="claude",
             mode="work",
         )
         default_argv = argv_api.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+            delegate_config.embedded_default_config()["claude"],
             "work",
             None,
             policy,
@@ -1199,7 +1217,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--no-session-persistence", default_argv)
 
         resumable_argv = argv_api.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+            delegate_config.embedded_default_config()["claude"],
             "work",
             None,
             policy,
@@ -1208,14 +1226,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--no-session-persistence", resumable_argv)
 
     def test_codex_followup_argv_exact_tokens(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="work",
         )
         session_id = "th_0123456789abcdef"
         argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             "gpt-5",
@@ -1259,7 +1277,7 @@ class EngineArgvTests(CommandTestBase):
             "claude-opus-4-8-thinking-high": "high",
         }
         for fixed_model, fixed_effort in fixed_efforts.items():
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = json.loads(json.dumps(delegate_config.embedded_default_config()))
             config["cursor"]["defaultModel"] = fixed_model
             with self.subTest(model=fixed_model, effort=fixed_effort):
                 with self.assertRaises(error_types.DelegateError) as matching:
@@ -1280,7 +1298,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertIn("cursor.reasoningEffortModels", matching.exception.message)
 
         fixed_model = "cursor-grok-4.6-xhigh-fast"
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["cursor"]["defaultModel"] = fixed_model
         with self.assertRaises(error_types.DelegateError) as mismatched:
             self.build_git_request(
@@ -1326,14 +1344,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(non_fixed.exception.error, "unsupported_reasoning_effort")
 
     def test_cursor_fixed_effort_capability_helper_has_same_typed_outcome(self):
-        cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
+        cursor = json.loads(json.dumps(delegate_config.embedded_default_config()["cursor"]))
         cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
         with self.assertRaises(error_types.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
 
     def test_cursor_fixed_effort_capability_helper_without_mapping_has_typed_outcome(self):
-        cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
+        cursor = json.loads(json.dumps(delegate_config.embedded_default_config()["cursor"]))
         cursor.pop("reasoningEffortModels")
         cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
         with self.assertRaises(error_types.DelegateError) as caught:
@@ -1345,13 +1363,13 @@ class EngineArgvTests(CommandTestBase):
         # are rejected after the `resume` subcommand token. Sandbox is accepted
         # both top-level and between `exec` and `resume`; this pins the contract,
         # not a single placement. Pre-fix builders emitted sandbox after resume.
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="codex",
             mode="work",
         )
         argv = argv_api.build_codex_argv(
-            self.delegate.DEFAULT_CONFIG["codex"],
+            delegate_config.embedded_default_config()["codex"],
             "work",
             "/repo",
             "gpt-5",
@@ -1368,14 +1386,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--json", argv)
 
     def test_claude_followup_argv_resume_token(self):
-        policy = self.delegate.delegate_config.effective_policy(
-            self.delegate.DEFAULT_CONFIG,
+        policy = delegate_config.effective_policy(
+            delegate_config.embedded_default_config(),
             engine="claude",
             mode="work",
         )
         session_id = "550e8400-e29b-41d4-a716-446655440000"
         argv = argv_api.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+            delegate_config.embedded_default_config()["claude"],
             "work",
             "claude-3-7-sonnet",
             policy,
@@ -1393,15 +1411,15 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "hello",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertIsNone(payload["model"])
         self.assertNotIn("--model", payload["argv"])
 
     def test_codex_reasoning_effort_argv_uses_config_override(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         request = self.build_git_request(
             "codex",
@@ -1419,7 +1437,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_transport, "codex-config")
 
     def test_codex_sol_max_reasoning_effort_is_forwarded(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.6-sol"
         request = self.build_git_request(
             "codex",
@@ -1444,7 +1462,7 @@ class EngineArgvTests(CommandTestBase):
                     None,
                     "/repo",
                     "hello",
-                    self.delegate.DEFAULT_CONFIG,
+                    delegate_config.embedded_default_config(),
                     True,
                     fast=fast,
                 )
@@ -1459,7 +1477,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_codex_omitted_fast_inherits_without_service_tier_override(self):
         request = self.build_git_request(
-            "codex", "safe", None, "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
+            "codex", "safe", None, "/repo", "hello", delegate_config.embedded_default_config(), True
         )
         self.assertFalse(any(item.startswith("service_tier=") for item in request.argv))
         self.assertIsNone(request.fast)
@@ -1471,7 +1489,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "hello",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             True,
             reasoning_effort="high",
         )
@@ -1488,7 +1506,7 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "hello",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 True,
                 reasoning_effort="max",
             )
@@ -1496,7 +1514,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("Supported values: low, medium, high, xhigh", ctx.exception.message)
 
     def test_droid_reasoning_effort_argv_uses_flag(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         request = self.build_git_request(
             "droid",
@@ -1514,7 +1532,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_codex_and_droid_requests_keep_prompt_out_of_argv(self):
         secret_prompt = "TOP-SECRET-PROMPT"
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
 
@@ -1532,7 +1550,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn(secret_prompt, codex.stdin_text)
         self.assertEqual(codex.argv[-1], "-")
         self.assertNotIn(secret_prompt, json.dumps(codex.argv))
-        codex_payload = self.delegate.dry_run_payload(codex)
+        codex_payload = cli.dry_run_payload(codex)
         self.assertEqual(codex_payload["promptTransport"], "stdin")
         self.assertNotIn(secret_prompt, json.dumps(codex_payload["argv"]))
 
@@ -1554,7 +1572,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--file", droid.argv)
         self.assertIn(transport_api.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
         self.assertNotIn(secret_prompt, json.dumps(droid.argv))
-        droid_payload = self.delegate.dry_run_payload(droid)
+        droid_payload = cli.dry_run_payload(droid)
         self.assertEqual(droid_payload["promptTransport"], "file")
         self.assertIn("--file", droid_payload["argv"])
         self.assertIn(transport_api.DROID_PROMPT_FILE_DISPLAY, droid_payload["argv"])
@@ -1563,12 +1581,12 @@ class EngineArgvTests(CommandTestBase):
     def test_droid_safe_request_injects_safe_prefix_once_after_skill_prompt(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         parsed = request_types.ParsedCommand(
             "droid",
             global_options=request_types.GlobalOptions(cwd=repo.name),
-            launch=request_types.LaunchOptions(
+            payload=request_types.LaunchOptions(
                 "droid",
                 "safe",
                 model_alias="reviewer",
@@ -1581,7 +1599,7 @@ class EngineArgvTests(CommandTestBase):
         prompt = request.prompt_file_text
         self.assertIsNotNone(prompt)
         assert prompt is not None
-        self.assertTrue(prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
+        self.assertTrue(prompt.startswith(runner_api.SKILL_REVIEW_PREFIX))
         self.assertEqual(prompt.count(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]), 1)
         self.assertGreater(
             prompt.find(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]),
@@ -1597,20 +1615,20 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             secret_prompt,
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             True,
         )
         self.assertEqual(request.prompt_transport, "argv")
         self.assertIn(secret_prompt, request.argv[-1])
 
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
 
         self.assertEqual(payload["promptTransport"], "argv")
         self.assertEqual(payload["argv"][-1], transport_api.CURSOR_PROMPT_REDACTION)
         self.assertNotIn(secret_prompt, json.dumps(payload["argv"]))
 
     def test_build_request_uses_cache_declared_custom_model_capability(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "custom:cached"}
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / ".delegate" / "capabilities" / "reasoning.json"
@@ -1654,14 +1672,14 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "hello",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 True,
                 reasoning_effort="high",
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_cursor_reasoning_effort_uses_configured_model_mapping(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
         request = self.build_git_request(
             "cursor",
@@ -1679,7 +1697,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_transport, "cursor-model-selection")
 
     def test_codex_default_reasoning_effort_is_used_when_request_omits_effort(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["codex"]["defaultReasoningEffort"] = "medium"
         request = self.build_git_request(
@@ -1697,7 +1715,7 @@ class EngineArgvTests(CommandTestBase):
     def test_codex_config_default_effort_degrades_to_warning_without_model(self):
         # A config defaultReasoningEffort must not brick the engine when no
         # model resolves; the run proceeds without effort and carries a warning.
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultReasoningEffort"] = "medium"
         self.assertIsNone(config["codex"]["defaultModel"])
         request = self.build_git_request(
@@ -1713,12 +1731,12 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
         self.assertEqual(len(request.warnings), 1)
         self.assertIn("defaultReasoningEffort", request.warnings[0])
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertNotIn("requestedReasoningEffort", payload)
         self.assertIn("warnings", payload)
 
     def test_malformed_config_default_effort_warns_and_is_omitted(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["codex"]["defaultReasoningEffort"] = "bad effort"
         request = self.build_git_request(
@@ -1733,12 +1751,12 @@ class EngineArgvTests(CommandTestBase):
         self.assertIsNone(request.reasoning_effort)
         self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
         self.assertTrue(any("defaultReasoningEffort" in warning for warning in request.warnings))
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertNotIn("requestedReasoningEffort", payload)
         self.assertNotIn("resolvedReasoningEffort", payload)
 
     def test_cursor_config_default_effort_degrades_to_warning_without_mapping(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["cursor"]["defaultReasoningEffort"] = "high"
         request = self.build_git_request(
             "cursor",
@@ -1755,7 +1773,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("defaultReasoningEffort", request.warnings[0])
 
     def test_explicit_effort_without_model_uses_harness_default(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         self.assertIsNone(config["codex"]["defaultModel"])
         request = self.build_git_request(
             "codex",
@@ -1771,7 +1789,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "harness-default")
 
     def test_corrupt_capability_cache_does_not_block_bundled_resolution(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         with tempfile.TemporaryDirectory() as workspace:
             cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
@@ -1803,7 +1821,7 @@ class EngineArgvTests(CommandTestBase):
             cache_path.write_bytes(original)
             result = self._successful_discovery_refresh("/user/discovery/default.json")
             with mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 return_value=result,
             ):
@@ -1815,20 +1833,20 @@ class EngineArgvTests(CommandTestBase):
             self.assertEqual(json.loads(out)["cachePath"], "/user/discovery/default.json")
 
     def test_request_from_parsed_threads_cli_reasoning_effort(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         with tempfile.TemporaryDirectory() as tmp:
             parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "codex", "safe", "--reasoning-effort", "high", "review"]
             )
             request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
-            payload = self.delegate.dry_run_payload(request)
+            payload = cli.dry_run_payload(request)
         self.assertEqual(payload["requestedReasoningEffort"], "high")
         self.assertEqual(payload["reasoningEffortSource"], "cli")
         self.assertIn('model_reasoning_effort="high"', payload["argv"])
 
     def test_request_from_input_json_threads_reasoning_effort(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
             task.write_text(
@@ -1847,7 +1865,7 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             request = request_api.request_from_input_json(parsed, config)
         self.assertEqual(request.reasoning_effort_source, "input-json")
@@ -1873,15 +1891,15 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(
+                parsed, delegate_config.embedded_default_config()
+            )
         self.assertEqual(request.output_schema, str(schema.resolve()))
         schema_index = request.argv.index("--output-schema")
         self.assertEqual(request.argv[schema_index + 1], str(schema.resolve()))
-        self.assertNotIn(
-            self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt
-        )
+        self.assertNotIn(runner_api.COMPLETION_REPORT_SUFFIX.strip(), request.prompt)
         self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
 
     def test_normalized_output_schema_preserves_property_order(self):
@@ -1918,9 +1936,11 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(
+                parsed, delegate_config.embedded_default_config()
+            )
         assert request.output_schema_text is not None
         emitted = json.loads(request.output_schema_text)
         self.assertEqual(list(emitted["properties"]), ["reasoning", "answer"])
@@ -1945,14 +1965,16 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(
+                    parsed, delegate_config.embedded_default_config()
+                )
         self.assertEqual(ctx.exception.error, "unsupported_output_schema")
 
     def test_input_json_effort_overrides_provider_default(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultReasoningEffort"] = "medium"
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
@@ -1972,14 +1994,14 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             request = request_api.request_from_input_json(parsed, config)
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertNotIn('model_reasoning_effort="medium"', request.argv)
 
     def test_per_run_effort_overrides_provider_default(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["codex"]["defaultReasoningEffort"] = "medium"
         with tempfile.TemporaryDirectory() as tmp:
@@ -2045,7 +2067,7 @@ class EngineArgvTests(CommandTestBase):
         )
 
         def snapshot(model: str) -> dict:
-            value = self.delegate.harness_discovery.empty_snapshot(profile="default")
+            value = harness_discovery.empty_snapshot(profile="default")
             value["harnesses"] = {
                 "codex": {
                     "installed": True,
@@ -2068,17 +2090,13 @@ class EngineArgvTests(CommandTestBase):
             }
             return value
 
-        self.delegate.harness_discovery.write_discovery_cache(
-            None, snapshot("implicit-model"), home=home
-        )
-        self.delegate.harness_discovery.write_discovery_cache(
-            "default", snapshot("literal-model"), home=home
-        )
+        harness_discovery.write_discovery_cache(None, snapshot("implicit-model"), home=home)
+        harness_discovery.write_discovery_cache("default", snapshot("literal-model"), home=home)
 
         with mock.patch.object(
-            self.delegate.profiles,
+            profiles_api,
             "resolve_active_profile",
-            wraps=self.delegate.profiles.resolve_active_profile,
+            wraps=profiles_api.resolve_active_profile,
         ) as resolve:
             models_code, models_out, models_err = self.run_main(["--json", "models", "codex"])
         self.assertEqual(models_code, 0, models_err)
@@ -2089,14 +2107,14 @@ class EngineArgvTests(CommandTestBase):
 
         with (
             mock.patch.object(
-                self.delegate.profiles,
+                profiles_api,
                 "resolve_active_profile",
-                wraps=self.delegate.profiles.resolve_active_profile,
+                wraps=profiles_api.resolve_active_profile,
             ) as resolve,
             # This fixture's selector cannot resolve in the test environment;
             # drift exclusion is covered separately and is not what this asserts.
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "selector_has_drifted",
                 return_value=False,
             ),
@@ -2109,14 +2127,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("implicit-model", codex_models)
         self.assertEqual(
             json.loads(caps_out)["cachePath"],
-            str(self.delegate.harness_discovery.discovery_cache_path("default", home=home)),
+            str(harness_discovery.discovery_cache_path("default", home=home)),
         )
 
     def test_capabilities_refresh_projects_unified_discovery_result(self):
         with tempfile.TemporaryDirectory() as workspace:
             result = self._successful_discovery_refresh("/user/discovery/default.json")
             with mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 return_value=result,
             ):
@@ -2175,12 +2193,12 @@ class EngineArgvTests(CommandTestBase):
                     clear=False,
                 ),
                 mock.patch.object(
-                    self.delegate.harness_discovery,
+                    harness_discovery,
                     "refresh_discovery",
                     side_effect=refresh,
                 ),
             ):
-                code = self.delegate.main(
+                code = cli.main(
                     [
                         "--cwd",
                         workspace,
@@ -2224,7 +2242,7 @@ class EngineArgvTests(CommandTestBase):
             before = cache_path.read_bytes()
             result = self._successful_discovery_refresh("/user/discovery/default.json")
             with mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 return_value=result,
             ):
@@ -2260,7 +2278,7 @@ class EngineArgvTests(CommandTestBase):
                 "cachePath": "/user/discovery/default.json",
             }
             with mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 return_value=result,
             ):
@@ -2287,7 +2305,7 @@ class EngineArgvTests(CommandTestBase):
                 "cachePath": "/user/discovery/default.json",
             }
             with mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 return_value=result,
             ):
@@ -2305,7 +2323,7 @@ class EngineArgvTests(CommandTestBase):
         with (
             tempfile.TemporaryDirectory() as workspace,
             mock.patch.object(
-                self.delegate.harness_discovery,
+                harness_discovery,
                 "refresh_discovery",
                 side_effect=failure,
             ),
@@ -2340,9 +2358,11 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(
+                parsed, delegate_config.embedded_default_config()
+            )
             self.assertIsNone(request.model)
             self.assertNotIn("--model", request.argv)
 
@@ -2363,15 +2383,17 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(
+                    parsed, delegate_config.embedded_default_config()
+                )
             self.assertEqual(ctx.exception.error, "invalid_input_key")
             self.assertIn("profile", ctx.exception.message)
 
     def test_describe_preserves_safe_read_only_modes(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["pi"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
         config["pi"]["defaultReasoningEffort"] = "high"
         config["omp"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
@@ -2470,7 +2492,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["omp"])
 
     def test_describe_kimi_argv_includes_pinned_default_model(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["kimi"]["defaultModel"] = "kimi-code/pinned-model"
         payload = describe_api.describe_payload(config, "test")
 
@@ -2482,7 +2504,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertEqual(argv[model_index + 1], "kimi-code/pinned-model")
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         prompt = request_api.effective_prompt(
             "review task",
             engine="grok",
@@ -2518,7 +2540,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "review task",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
             reasoning_effort="high",
         )
@@ -2526,11 +2548,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("high", request.argv)
         self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
         self.assertEqual(request.reasoning_capability_evidence, "harness")
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertEqual(payload["reasoningCapabilitySource"], "harness-compatibility")
 
     def test_claude_config_default_uses_new_discovered_harness_effort(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["claude"]["defaultReasoningEffort"] = "future-level"
         discovery = {
             "harnesses": {
@@ -2543,7 +2565,7 @@ class EngineArgvTests(CommandTestBase):
             }
         }
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            harness_discovery,
             "load_discovery_cache",
             return_value=discovery,
         ):
@@ -2555,7 +2577,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.argv[request.argv.index("--effort") + 1], "future-level")
 
     def test_grok_config_default_uses_manual_exact_model_capability(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["grok"]["defaultModel"] = "future-grok"
         config["grok"]["defaultReasoningEffort"] = "future-level"
         config["reasoning"]["capabilities"] = {
@@ -2569,7 +2591,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.argv[request.argv.index("--effort") + 1], "future-level")
 
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["policy"]["profile"] = "external-sandbox"
         request = request_api.build_request(
             "grok",
@@ -2595,7 +2617,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--always-approve", request.argv)
 
     def test_grok_work_bypass_also_requires_effective_policy_true(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         argv = argv_api.build_grok_argv(
             config["grok"],
             "work",
@@ -2617,7 +2639,7 @@ class EngineArgvTests(CommandTestBase):
             with self.assertRaises(error_types.DelegateError) as ctx:
                 request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    delegate_config.embedded_default_config(),
                     io.StringIO(""),
                 )
         self.assertEqual(ctx.exception.error, "unsupported_output_schema")
@@ -2631,7 +2653,7 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "review task",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 dry_run=True,
             )
         self.assertEqual(ctx.exception.error, "unsupported_mode")
@@ -2640,7 +2662,9 @@ class EngineArgvTests(CommandTestBase):
 
     def test_devin_unknown_mode_fails_closed(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
-            argv_api.build_devin_argv(self.delegate.DEFAULT_CONFIG["devin"], "bogus", None)
+            argv_api.build_devin_argv(
+                delegate_config.embedded_default_config()["devin"], "bogus", None
+            )
         self.assertEqual(ctx.exception.error, "invalid_mode")
 
     def test_devin_safe_cli_fails_before_binary_launch(self):
@@ -2669,10 +2693,12 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(
+                    parsed, delegate_config.embedded_default_config()
+                )
         self.assertEqual(ctx.exception.error, "unsupported_mode")
 
     def test_devin_work_uses_dangerous_permission_without_agent_config(self):
@@ -2682,7 +2708,7 @@ class EngineArgvTests(CommandTestBase):
             "gpt-5.4",
             "/repo",
             "implement",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
         self.assertEqual(request.model, "gpt-5.4")
@@ -2696,7 +2722,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIsNone(request.agent_config_text)
 
     def test_devin_call_default_vs_read_only_permissions(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         default_req = request_api.request_from_parsed(
             parser_api.parse_cli(["devin", "call", "answer"]),
             config,
@@ -2730,11 +2756,11 @@ class EngineArgvTests(CommandTestBase):
                 encoding="utf-8",
             )
             binary.chmod(0o755)
-            self.delegate.validate_devin_read_only_transport([str(binary)])
+            cli.validate_devin_read_only_transport([str(binary)])
             binary.write_text("#!/bin/sh\necho 'devin 3000.3.27'\n", encoding="utf-8")
             binary.chmod(0o755)
             with self.assertRaises(error_types.DelegateError) as ctx:
-                self.delegate.validate_devin_read_only_transport([str(binary)])
+                cli.validate_devin_read_only_transport([str(binary)])
         self.assertEqual(ctx.exception.error, "devin_read_only_transport_unverified")
 
     def test_devin_reasoning_effort_is_rejected(self):
@@ -2745,7 +2771,7 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "review",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 dry_run=True,
                 reasoning_effort="high",
             )
@@ -2758,7 +2784,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "review task",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
         self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
@@ -2802,7 +2828,7 @@ class EngineArgvTests(CommandTestBase):
             self.assertNotIn(flag, request.argv)
 
     def test_opencode_work_uses_auto_default_agent_model_and_config_variant(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["opencode"]["defaultModel"] = "anthropic/claude-sonnet"
         config["opencode"]["defaultAgent"] = "builder"
         config["opencode"]["defaultReasoningEffort"] = "high"
@@ -2828,7 +2854,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_effort_source, "config")
 
     def test_opencode_call_default_vs_read_only_env(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         default_req = request_api.request_from_parsed(
             parser_api.parse_cli(["opencode", "call", "answer"]),
             config,
@@ -2858,7 +2884,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "review task",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
         self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
@@ -2889,7 +2915,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "review task",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
         self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_ARGV)
@@ -2949,18 +2975,18 @@ class EngineArgvTests(CommandTestBase):
             with self.subTest(prompt=bad):
                 with self.assertRaises(error_types.DelegateError) as ctx:
                     argv_api.build_omp_argv(
-                        self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, bad
+                        delegate_config.embedded_default_config()["omp"], "work", None, None, bad
                     )
                 self.assertEqual(ctx.exception.error, "pi_family_prompt_flag_like")
         # A normal prompt still builds, and safe-mode omp (prefix prepended upstream)
         # is never flag-shaped, so the guard does not false-positive on real prompts.
         ok = argv_api.build_omp_argv(
-            self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, "do the task"
+            delegate_config.embedded_default_config()["omp"], "work", None, None, "do the task"
         )
         self.assertEqual(ok[-1], "do the task")
 
     def test_omp_never_emits_fork_role_flags(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["omp"]["models"] = {
             "builder": {"model": "openai-codex/gpt-5.6-sol", "thinking": "minimal"}
         }
@@ -2998,7 +3024,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("private/", json.dumps(describe_api.describe_payload(config, "test")))
 
     def test_omp_work_resolves_structured_alias_and_cli_thinking(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["omp"]["models"] = {
             "builder": {
                 "model": "openai-codex/gpt-5.6-sol",
@@ -3037,7 +3063,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_evidence, "harness-partial")
 
     def test_pi_work_resolves_structured_alias_and_cli_thinking(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["pi"]["models"] = {
             "builder": {
                 "model": "openai-codex/gpt-5.6-sol",
@@ -3075,7 +3101,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_evidence, "model-partial")
 
     def test_pi_alias_can_pin_minimal_thinking(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["pi"]["models"] = {
             "quick": {"model": "openai-codex/gpt-5.6-sol", "thinking": "minimal"}
         }
@@ -3101,7 +3127,7 @@ class EngineArgvTests(CommandTestBase):
                 None,
                 "/repo",
                 "answer",
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 dry_run=True,
                 model_override="openai-codex/gpt-5.6-sol:off",
             )
@@ -3116,7 +3142,7 @@ class EngineArgvTests(CommandTestBase):
         ):
             request = request_api.request_from_parsed(
                 parser_api.parse_cli(["pi", "call", "--read-only", "--timeout", "17", "score"]),
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 io.StringIO(""),
             )
             self.assertEqual(request.workspace, temp_cwd)
@@ -3140,7 +3166,7 @@ class EngineArgvTests(CommandTestBase):
             "external_directory": "deny",
             "webfetch": "deny",
         }
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["opencode"]["defaultAgent"] = "configured-reviewer"
         configured = self.build_git_request(
             "opencode", "safe", None, "/repo", "review", config, dry_run=True
@@ -3169,7 +3195,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(explicit_lockdown["agent"][explicit_name], {"permission": permissions})
 
     def test_opencode_alias_object_variant_and_explicit_effort_precedence(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["opencode"]["defaultReasoningEffort"] = "low"
         config["opencode"]["models"] = {"fast": {"model": "openai/gpt-5.5", "variant": "high"}}
         request = self.build_git_request(
@@ -3202,7 +3228,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(explicit.argv[explicit.argv.index("--variant") + 1], "xhigh")
 
     def test_opencode_profile_cannot_clobber_read_only_lockdown_env(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["profiles"]["definitions"] = {
             "hostile": {
                 "env": {
@@ -3233,12 +3259,12 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotEqual(request.env_overrides["OPENCODE_CONFIG_CONTENT"], "{}")
         self.assertNotEqual(request.env_overrides["OPENCODE_PERMISSION"], '{"edit":"allow"}')
         self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertNotIn("env", payload)
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", payload["argv"])
 
     def test_opencode_profile_cannot_clobber_disable_autoupdate_on_work(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["profiles"]["definitions"] = {
             "hostile": {
                 "env": {
@@ -3266,7 +3292,7 @@ class EngineArgvTests(CommandTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             dry_run=True,
         )
         from delegate_agent import safe_workspace
@@ -3296,9 +3322,11 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(
+                parsed, delegate_config.embedded_default_config()
+            )
             self.assertIn("--agent", request.argv)
             self.assertEqual(request.argv[request.argv.index("--agent") + 1], "reviewer")
 
@@ -3315,7 +3343,9 @@ class EngineArgvTests(CommandTestBase):
                 encoding="utf-8",
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(
+                    parsed, delegate_config.embedded_default_config()
+                )
             self.assertEqual(ctx.exception.error, "unsupported_agent")
 
     def test_opencode_input_json_rejects_leading_dash_agent_and_model(self):
@@ -3324,7 +3354,7 @@ class EngineArgvTests(CommandTestBase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             cases = (
                 ({"agent": "--auto"}, "invalid_agent"),
@@ -3342,25 +3372,27 @@ class EngineArgvTests(CommandTestBase):
                     }
                     task.write_text(json.dumps(payload), encoding="utf-8")
                     with self.assertRaises(error_types.DelegateError) as ctx:
-                        request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                        request_api.request_from_input_json(
+                            parsed, delegate_config.embedded_default_config()
+                        )
                     self.assertEqual(ctx.exception.error, error)
                     self.assertIn("does not start with '-'", ctx.exception.message)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")
         describe = describe_api.describe_payload(
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             "embedded-default",
             workspace,
         )
         models = describe_api.models_payload(
-            self.delegate.DEFAULT_CONFIG,
+            delegate_config.embedded_default_config(),
             "embedded-default",
             workspace,
         )
         for payload in (describe, models):
             self.assertIn("runtime", payload)
-            self.assertEqual(payload["runtime"]["version"], self.delegate.VERSION)
+            self.assertEqual(payload["runtime"]["version"], cli.VERSION)
             self.assertTrue(payload["runtime"]["modulePath"].endswith("cli.py"))
             self.assertIn("configResolution", payload)
             resolution = payload["configResolution"]
@@ -3370,8 +3402,8 @@ class EngineArgvTests(CommandTestBase):
             self.assertTrue(any(layer.get("name") == "workspace" for layer in resolution["layers"]))
 
     def test_describe_codex_work_argv_matches_effective_network_policy(self):
-        config = self.delegate.delegate_config.deep_merge(
-            self.delegate.DEFAULT_CONFIG,
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
             {"policy": {"work": {"networkAccess": False}}},
         )
         payload = describe_api.describe_payload(config, "test-config")
@@ -3383,7 +3415,7 @@ class EngineArgvTests(CommandTestBase):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
         stdout = io.StringIO()
-        code = self.delegate.main(["--cwd", str(repo.name), "runs"], stdout=stdout)
+        code = cli.main(["--cwd", str(repo.name), "runs"], stdout=stdout)
         self.assertEqual(code, error_types.EXIT_OK)
         self.assertFalse((Path(repo.name) / ".delegate").exists())
         output = stdout.getvalue()

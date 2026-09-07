@@ -20,6 +20,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli, command_help
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as delegate_config
+from delegate_agent import errors as error_types
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -27,7 +32,7 @@ if SRC not in sys.path:
 
 
 def load_delegate():
-    return importlib.reload(importlib.import_module("delegate_agent.cli"))
+    return importlib.reload(cli)
 
 
 # Top-level commands that must support `<cmd> --help`.
@@ -65,7 +70,9 @@ class HelpCliTestBase(unittest.TestCase):
         config_dir = tempfile.TemporaryDirectory()
         self.addCleanup(config_dir.cleanup)
         config_path = Path(config_dir.name) / "config.json"
-        config_path.write_text(json.dumps(self.delegate.DEFAULT_CONFIG), encoding="utf-8")
+        config_path.write_text(
+            json.dumps(delegate_config.embedded_default_config()), encoding="utf-8"
+        )
         self._config_env = {"DELEGATE_CONFIG": str(config_path)}
 
     def run_main(self, argv):
@@ -84,7 +91,7 @@ class TopLevelHelpTests(HelpCliTestBase):
         for command in TOP_LEVEL_COMMANDS:
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertTrue(out.strip(), f"{command} --help printed nothing")
                 self.assertIn(command, out, f"{command} --help missing command name")
 
@@ -95,8 +102,8 @@ class MultiLevelHelpTests(HelpCliTestBase):
     CASES = (
         (["cursor", "safe", "--help"], "cursor"),
         (["claude", "safe", "--help"], "claude"),
-        (["droid", "x", "--help"], "droid"),
-        (["droid", "x", "safe", "--help"], "droid"),
+        (["droid", "safe", "--help"], "droid"),
+        (["droid", "safe", "--model", "x", "--help"], "droid"),
         (["dry-run", "cursor", "--help"], "dry-run"),
         (["dry-run", "droid", "--help"], "dry-run"),
         (["worktree", "remove", "--help"], "worktree remove"),
@@ -113,18 +120,18 @@ class MultiLevelHelpTests(HelpCliTestBase):
         for argv, topic in self.CASES:
             with self.subTest(argv=argv):
                 code, out, _err = self.run_main(argv)
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertTrue(out.strip(), f"{argv} printed nothing")
                 self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
 
     def test_workflow_wait_and_result_focused_contracts(self):
         code, out, err = self.run_main(["workflow", "wait", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         self.assertIn("workflow wait [<wfId>]", out)
         self.assertIn("resolutionKind", out)
 
         code, out, err = self.run_main(["workflow", "result", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         self.assertIn("workflow result [<wfId>] [--field KEY]", out)
         self.assertIn("--field KEY", out)
 
@@ -139,19 +146,19 @@ class FocusedCallHelpTests(HelpCliTestBase):
         (["pi", "call", "--help"], "pi call"),
         (["omp", "call", "--help"], "omp call"),
         (["droid", "call", "--help"], "droid call"),
-        (["droid", "reviewer", "call", "--help"], "droid call"),
+        (["droid", "call", "--model", "reviewer", "--help"], "droid call"),
         (["dry-run", "cursor", "call", "--help"], "dry-run call"),
         (["dry-run", "codex", "call", "--help"], "dry-run call"),
-        (["dry-run", "droid", "reviewer", "call", "--help"], "dry-run call"),
+        (["dry-run", "droid", "call", "--model", "reviewer", "--help"], "dry-run call"),
     )
 
     def test_call_help_routes_to_focused_mode_spec(self):
         for argv, topic in self.CASES:
             with self.subTest(argv=argv):
-                parsed = self.delegate.parse_cli(argv)
+                parsed = parser_api.parse_cli(argv)
                 self.assertEqual(parsed.help_topic, topic)
                 code, out, err = self.run_main(argv)
-                self.assertEqual(code, self.delegate.EXIT_OK, err)
+                self.assertEqual(code, error_types.EXIT_OK, err)
                 self.assertIn(f"delegate {topic} --", out)
                 for option in (
                     "--isolation",
@@ -170,7 +177,7 @@ class FocusedCallHelpTests(HelpCliTestBase):
 
     def test_json_call_help_exposes_same_filtered_contract(self):
         code, out, err = self.run_main(["--json", "codex", "call", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         payload = json.loads(out)
         self.assertEqual(payload["command"], "codex call")
         self.assertEqual(
@@ -196,7 +203,7 @@ class DashHAliasTests(HelpCliTestBase):
         for argv, topic in self.CASES:
             with self.subTest(argv=argv):
                 code, out, _err = self.run_main(argv)
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
 
 
@@ -236,7 +243,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         for argv, topic in self.CASES:
             with self.subTest(argv=argv):
                 code, out, _err = self.run_main(argv)
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 payload = json.loads(out)
                 self.assertIs(payload["ok"], True)
                 self.assertEqual(payload["command"], topic)
@@ -247,19 +254,19 @@ class HelpSubcommandTests(HelpCliTestBase):
 
     def test_help_overview(self):
         code, out, _err = self.run_main(["help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertTrue(out.strip())
         # Overview enumerates the worktree actions on their own lines (I1).
         self.assertIn("worktree prune", out)
 
     def test_help_focused_topic(self):
         code, out, _err = self.run_main(["help", "worktree", "remove"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("worktree remove", out)
 
     def test_json_help_index(self):
         code, out, _err = self.run_main(["--json", "help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("ok", payload)
         self.assertIs(payload["ok"], True)
@@ -271,7 +278,7 @@ class HelpSubcommandTests(HelpCliTestBase):
         for command in ("models", "describe"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertIn("--summary", out)
                 self.assertNotIn("--redacted", out)
                 self.assertIn(f"delegate --json {command} --summary", out)
@@ -289,7 +296,7 @@ class HelpSubcommandTests(HelpCliTestBase):
         ):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertIn("--progress", out)
                 self.assertIn("stderr", out)
                 self.assertIn("--forbid-commit", out)
@@ -297,7 +304,7 @@ class HelpSubcommandTests(HelpCliTestBase):
 
     def test_describe_summary_lists_launch_options(self):
         code, out, _err = self.run_main(["--json", "describe", "--summary"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("--progress", payload["launchOptions"])
         self.assertIn("--no-progress", payload["launchOptions"])
@@ -305,13 +312,13 @@ class HelpSubcommandTests(HelpCliTestBase):
 
     def test_describe_summary_catalog_includes_setup(self):
         code, out, err = self.run_main(["--json", "describe", "--summary"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         payload = json.loads(out)
         self.assertIn("setup", {entry["command"] for entry in payload["commands"]})
 
     def test_setup_help_advertises_only_supported_global_options(self):
         code, out, err = self.run_main(["--json", "setup", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         payload = json.loads(out)
         supported = {option["flag"] for option in payload["globalOptions"]}
         unsupported = set(payload["unsupportedGlobalOptions"])
@@ -331,14 +338,14 @@ class HelpSubcommandTests(HelpCliTestBase):
 
     def test_describe_summary_text_renders_without_full_payload_keys(self):
         code, out, _err = self.run_main(["describe", "--summary"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("delegate", out)
         self.assertIn("launch options:", out)
         self.assertIn("recommended discovery:", out)
 
     def test_agent_help_includes_canonical_review_before_commit_example(self):
         code, out, err = self.run_main(["agent-help"])
-        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertEqual(code, error_types.EXIT_OK, err)
         self.assertIn(
             "delegate codex work --isolation worktree --forbid-commit --prompt-file task.md",
             out,
@@ -358,7 +365,7 @@ class JsonPositionIndependenceTests(HelpCliTestBase):
         for argv in variants:
             with self.subTest(argv=argv):
                 code, out, _err = self.run_main(argv)
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 payload = json.loads(out)
                 self.assertIs(payload["ok"], True)
                 self.assertEqual(payload["command"], "worktree")
@@ -373,17 +380,17 @@ class HelpShortCircuitsValidationTests(HelpCliTestBase):
 
     def test_droid_help_without_alias(self):
         code, out, _err = self.run_main(["droid", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("droid", out)
 
     def test_cursor_help_without_mode(self):
         code, out, _err = self.run_main(["cursor", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("cursor", out)
 
     def test_run_help_without_input_json(self):
         code, out, _err = self.run_main(["run", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("run", out)
 
 
@@ -391,16 +398,16 @@ class DestructiveSafetyTests(HelpCliTestBase):
     """A help token in a worktree action prints help and removes nothing (M2)."""
 
     def test_worktree_remove_with_help_builds_no_removal(self):
-        parsed = self.delegate.parse_cli(["worktree", "remove", "cursor", "--help"])
+        parsed = parser_api.parse_cli(["worktree", "remove", "cursor", "--help"])
         self.assertEqual(parsed.subcommand, "help")
         self.assertEqual(parsed.help_topic, "worktree remove")
         # No removal path is constructed: the worktree action is never set, so
         # emit_worktree's removal branch is unreachable.
-        self.assertIsNone(parsed.worktree)
+        self.assertIsNone(parsed.payload)
 
     def test_worktree_remove_with_help_main_prints_help(self):
         code, out, _err = self.run_main(["worktree", "remove", "cursor", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("worktree remove", out)
 
 
@@ -408,34 +415,36 @@ class PromptBoundaryTests(HelpCliTestBase):
     """`cursor work explain --help` is a RUN; --help is captured prompt text (M4)."""
 
     def test_help_after_prompt_positional_is_prompt_text(self):
-        parsed = self.delegate.parse_cli(["cursor", "work", "explain", "--help"])
+        parsed = parser_api.parse_cli(["cursor", "work", "explain", "--help"])
         # This is a run, NOT help. A naive "grep argv for --help" impl fails here.
         self.assertEqual(parsed.subcommand, "cursor")
         self.assertIsNone(parsed.help_topic)
-        self.assertEqual(parsed.launch.engine, "cursor")
-        self.assertEqual(parsed.launch.mode, "work")
-        self.assertEqual(parsed.launch.prompt_parts, ["explain", "--help"])
+        self.assertEqual(parsed.payload.engine, "cursor")
+        self.assertEqual(parsed.payload.mode, "work")
+        self.assertEqual(parsed.payload.prompt_parts, ["explain", "--help"])
 
 
 class RegressionGuardTests(HelpCliTestBase):
     """Help wiring must not disturb existing parse outcomes (I4/I5)."""
 
     def test_prompt_file_still_parses_as_run(self):
-        parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
+        parsed = parser_api.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
         self.assertEqual(parsed.subcommand, "cursor")
         self.assertIsNone(parsed.help_topic)
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
-        self.assertEqual(parsed.launch.prompt_parts, [])
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_parts, [])
 
     def test_true_usage_error_exits_with_exit_usage(self):
         code, _out, err = self.run_main(["definitely-not-a-command"])
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, error_types.EXIT_USAGE)
         self.assertIn("unknown_subcommand", err)
 
     def test_trailing_json_after_prompt_is_global(self):
-        parsed = self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
+        parsed = parser_api.parse_cli(
+            ["dry-run", "droid", "work", "--model", "minimax", "hello", "--json"]
+        )
         self.assertTrue(parsed.global_options.json_mode)
-        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+        self.assertEqual(parsed.payload.prompt_parts, ["hello"])
 
     def test_trailing_json_is_accepted_for_inspection_commands(self):
         cases = (
@@ -450,7 +459,7 @@ class RegressionGuardTests(HelpCliTestBase):
         )
         for argv in cases:
             with self.subTest(argv=argv):
-                parsed = self.delegate.parse_cli(argv)
+                parsed = parser_api.parse_cli(argv)
                 self.assertTrue(parsed.global_options.json_mode)
 
 
@@ -459,7 +468,7 @@ class RunOutputHelpTests(HelpCliTestBase):
 
     def test_run_output_help_mentions_max_chars_and_raw_limits(self):
         code, out, _err = self.run_main(["run-output", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("--max-chars", out)
         self.assertIn("60000", out)
         self.assertIn("--raw", out)
@@ -469,7 +478,7 @@ class RunOutputHelpTests(HelpCliTestBase):
 
     def test_run_output_json_help_documents_max_chars(self):
         code, out, _err = self.run_main(["--json", "run-output", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         flags = {opt["flag"] for opt in payload["options"]}
         self.assertIn("--max-chars", flags)
@@ -480,7 +489,7 @@ class RunOutputHelpTests(HelpCliTestBase):
 class DevinHelpTests(HelpCliTestBase):
     def test_devin_help_omits_unsupported_reasoning_effort(self):
         code, out, _err = self.run_main(["devin", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertNotIn("--reasoning-effort", out)
 
 
@@ -489,22 +498,22 @@ class UnknownTopicTests(HelpCliTestBase):
 
     def test_unknown_topic_text(self):
         code, _out, err = self.run_main(["help", "bogus"])
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, error_types.EXIT_USAGE)
         self.assertIn("unknown_help_topic", err)
 
     def test_unknown_topic_json_envelope(self):
         code, out, _err = self.run_main(["--json", "help", "bogus"])
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, error_types.EXIT_USAGE)
         payload = json.loads(out)
         self.assertIs(payload["ok"], False)
         self.assertEqual(payload["error"], "unknown_help_topic")
 
     def test_malformed_launch_exits_nonzero(self):
         code, out, _err = self.run_main(["--json", "codex", "safe", "--unknown"])
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, error_types.EXIT_USAGE)
         payload = json.loads(out)
         self.assertIs(payload["ok"], False)
-        self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+        self.assertEqual(payload["exitCode"], error_types.EXIT_USAGE)
 
 
 class SparseArgsNoIndexErrorTests(HelpCliTestBase):
@@ -522,53 +531,53 @@ class SparseArgsNoIndexErrorTests(HelpCliTestBase):
 
     def test_sparse_args_raise_delegate_error(self):
         for argv in self.CASES:
-            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError):
-                self.delegate.parse_cli(argv)
+            with self.subTest(argv=argv), self.assertRaises(error_types.DelegateError):
+                parser_api.parse_cli(argv)
 
 
 class ErgonomicsParserTests(HelpCliTestBase):
     def test_list_alias_maps_to_runs(self):
-        parsed = self.delegate.parse_cli(["list", "--recent"])
+        parsed = parser_api.parse_cli(["list", "--recent"])
         self.assertEqual(parsed.subcommand, "runs")
-        self.assertIsNotNone(parsed.runs)
+        self.assertIsNotNone(parsed.payload)
 
     def test_ps_maps_to_active_runs(self):
-        parsed = self.delegate.parse_cli(["ps"])
+        parsed = parser_api.parse_cli(["ps"])
 
         self.assertEqual(parsed.subcommand, "ps")
-        self.assertIsNotNone(parsed.runs)
-        self.assertTrue(parsed.runs.active)
+        self.assertIsNotNone(parsed.payload)
+        self.assertTrue(parsed.payload.active)
 
     def test_unknown_subcommand_suggests_known_forms(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["kill", "codex-1"])
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["kill", "codex-1"])
         self.assertEqual(ctx.exception.error, "unknown_subcommand")
         self.assertIn("delegate cancel", ctx.exception.message)
 
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["droid-glm", "safe", "review"])
-        self.assertIn("delegate droid glm", ctx.exception.message)
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["droid-glm", "safe", "review"])
+        self.assertIn("delegate droid --model glm", ctx.exception.message)
 
     def test_unknown_run_output_option_suggests_raw_for_full(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["run-output", "codex-1", "--full"])
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["run-output", "codex-1", "--full"])
         self.assertEqual(ctx.exception.error, "unknown_option")
         self.assertIn("--raw", ctx.exception.message)
 
     def test_run_output_latest_parser_path(self):
-        parsed = self.delegate.parse_cli(["run-output", "--latest", "droid:glm"])
+        parsed = parser_api.parse_cli(["run-output", "--latest", "droid:glm"])
         self.assertEqual(parsed.subcommand, "run-output")
-        self.assertIsNone(parsed.run_output.handle)
-        self.assertEqual(parsed.run_output.latest_harness, "droid:glm")
+        self.assertIsNone(parsed.payload.handle)
+        self.assertEqual(parsed.payload.latest_harness, "droid:glm")
 
     def test_wait_latest_parser_path(self):
-        parsed = self.delegate.parse_cli(["wait", "codex-1", "--latest", "droid:glm"])
-        self.assertEqual(parsed.wait_command.handles, ("codex-1",))
-        self.assertEqual(parsed.wait_command.latest_harness, "droid:glm")
+        parsed = parser_api.parse_cli(["wait", "codex-1", "--latest", "droid:glm"])
+        self.assertEqual(parsed.payload.handles, ("codex-1",))
+        self.assertEqual(parsed.payload.latest_harness, "droid:glm")
 
     def test_ambiguous_prompt_source_includes_corrected_command(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["cursor", "work", "prompt text", "--prompt-file", "task.md"])
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["cursor", "work", "prompt text", "--prompt-file", "task.md"])
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
         self.assertIn("Corrected command:", ctx.exception.message)
         self.assertIn("--prompt-file task.md", ctx.exception.message)
@@ -582,16 +591,16 @@ class ErgonomicsParserTests(HelpCliTestBase):
         corrected = corrected.split(". ", 1)[0].removesuffix(".")
         corrected_argv = shlex.split(corrected)
         self.assertEqual(corrected_argv[0], "delegate")
-        reparsed = self.delegate.parse_cli(corrected_argv[1:])
+        reparsed = parser_api.parse_cli(corrected_argv[1:])
         # And the corrected command must be the caller's invocation reordered,
         # not merely one that parses: this error is about placement, so both
         # sources survive, and no advice is smuggled in as prompt text.
-        self.assertEqual(reparsed.launch.prompt_parts, ["prompt text"])
-        self.assertEqual(reparsed.launch.prompt_file, "task.md")
+        self.assertEqual(reparsed.payload.prompt_parts, ["prompt text"])
+        self.assertEqual(reparsed.payload.prompt_file, "task.md")
 
     def test_unknown_launch_option_wins_before_prompt_source_validation(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(
                 [
                     "--group",
                     "research",
@@ -609,13 +618,13 @@ class ErgonomicsParserTests(HelpCliTestBase):
         self.assertNotIn("Corrected command:", ctx.exception.message)
 
     def test_forbid_commit_implies_worktree_when_isolation_omitted(self):
-        parsed = self.delegate.parse_cli(["cursor", "work", "--forbid-commit", "do it"])
+        parsed = parser_api.parse_cli(["cursor", "work", "--forbid-commit", "do it"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
-        self.assertTrue(parsed.launch.forbid_commit_implied_isolation)
+        self.assertTrue(parsed.payload.forbid_commit_implied_isolation)
 
     def test_forbid_commit_with_explicit_none_errors_with_corrected_command(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(
                 ["--isolation", "none", "cursor", "work", "--forbid-commit", "do it"]
             )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
@@ -628,79 +637,84 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_kimi_help_matches_no_yolo_argv_policy(self):
         code, out, _err = self.run_main(["kimi", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertNotIn("--yolo by default", out)
         self.assertIn("does not emit --yolo", out)
 
     def test_kimi_in_describe_engines(self):
-        code, out, _err = self.run_main(["--json", "describe"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        code, out, _err = self.run_main(["--json", "describe", "--full"])
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("kimi", payload["engines"])
 
     def test_kimi_in_describe_mode_mapping(self):
-        code, out, _err = self.run_main(["--json", "describe"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        code, out, _err = self.run_main(["--json", "describe", "--full"])
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("kimi", payload["modeMapping"])
         self.assertIn("safe", payload["modeMapping"]["kimi"])
         self.assertIn("work", payload["modeMapping"]["kimi"])
 
-    def test_kimi_in_agent_help(self):
+    def test_kimi_is_discoverable_from_agent_guidance(self):
         code, out, _err = self.run_main(["agent-help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
-        self.assertIn("kimi", out)
+        self.assertEqual(code, error_types.EXIT_OK)
+        self.assertIn("describe", out)
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, error_types.EXIT_OK)
+        self.assertIn("kimi", {row["command"] for row in json.loads(out)["commands"]})
 
     def test_kimi_in_models(self):
         code, out, _err = self.run_main(["--json", "models"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("kimi", payload)
-        self.assertEqual(payload["kimi"]["binary"], self.delegate.DEFAULT_CONFIG["kimi"]["binary"])
+        self.assertEqual(
+            payload["kimi"]["binary"], delegate_config.embedded_default_config()["kimi"]["binary"]
+        )
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
-        note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
+        note = command_help.SAFE_WORKSPACE_SYNC_NOTE
         for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "omp", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
-                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertEqual(code, error_types.EXIT_OK)
                 self.assertIn(note, out)
                 if command == "droid":
                     self.assertIn(
-                        "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+                        "Model selection uses --model",
                         out,
                     )
 
-        code, out, _err = self.run_main(["--json", "describe"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        code, out, _err = self.run_main(["--json", "describe", "--full"])
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "omp", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
 
         code, out, _err = self.run_main(["devin", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("Execution mode: work", out)
         self.assertNotIn("safe (read-only review)", out)
         self.assertNotIn(note, out)
 
         code, out, _err = self.run_main(["agent-help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn(note, out)
         self.assertIn(
-            "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+            "Model selection uses --model",
             out,
         )
 
     def test_worktree_dirty_auto_include_is_documented_in_help_and_describe(self):
-        note = self.delegate.command_help.WORKTREE_DIRTY_SYNC_NOTE
+        note = command_help.WORKTREE_DIRTY_SYNC_NOTE
         code, out, _err = self.run_main(["cursor", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn(note, out)
         self.assertIn("Dirty source files are auto-included", out)
 
-        code, out, _err = self.run_main(["--json", "describe"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        code, out, _err = self.run_main(["--json", "describe", "--full"])
+        self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("auto-include", payload["worktrees"]["dirtySource"]["behavior"])
         self.assertIn("emptyRetry", payload["completionEnvelope"])
@@ -710,23 +724,22 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_devin_help_advertises_only_work_and_call_modes(self):
         code, out, _err = self.run_main(["devin", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("work (may edit the workspace) or call", out)
         self.assertNotIn("safe (read-only review)", out)
         self.assertNotIn("Devin safe mode", out)
 
-        code, out, _err = self.run_main(["agent-help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
-        devin_section = out.split("Devin:", 1)[1].split("Droid modes:", 1)[0]
-        self.assertNotIn("safe", devin_section.lower())
+        code, out, _err = self.run_main(["--json", "help", "devin"])
+        self.assertEqual(code, error_types.EXIT_OK)
+        self.assertNotIn(" safe ", " ".join(json.loads(out)["usage"]))
 
         code, out, _err = self.run_main(["cursor", "--help"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         self.assertIn("safe (read-only review)", out)
 
     def test_models_summary_derives_devin_modes_from_registry(self):
         code, out, _err = self.run_main(["--json", "models", "--summary"])
-        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertEqual(code, error_types.EXIT_OK)
         devin = next(item for item in json.loads(out)["aliases"] if item["provider"] == "devin")
         self.assertEqual(devin["command"], "delegate devin {work,call}")
         self.assertFalse(devin["safeSupported"])

@@ -11,15 +11,19 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as delegate_config
 from delegate_agent import describe_payload as describe_api
 from delegate_agent import errors as error_types
 from delegate_agent import prompt_transport as transport_api
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
+from delegate_agent import run_output_commands, runner
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+
+DEFAULT_CONFIG = delegate_config.embedded_default_config()
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -55,8 +59,8 @@ class ParserTests(unittest.TestCase):
             ["cursor", "work", "fix this"],
             ["claude", "safe", "analyze this"],
             ["claude", "work", "fix this"],
-            ["droid", "minimax", "safe", "analyze this"],
-            ["droid", "minimax", "work", "fix this"],
+            ["droid", "safe", "--model", "minimax", "analyze this"],
+            ["droid", "work", "--model", "minimax", "fix this"],
             ["--json", "run", "--input-json", "task.json"],
             ["models"],
             ["--json", "models"],
@@ -76,7 +80,16 @@ class ParserTests(unittest.TestCase):
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
-            ["--json", "dry-run", "droid", "minimax", "safe", "--prompt-file", "task.md"],
+            [
+                "--json",
+                "dry-run",
+                "droid",
+                "safe",
+                "--model",
+                "minimax",
+                "--prompt-file",
+                "task.md",
+            ],
             ["snapshot", "cursor"],
             ["--json", "snapshot", "--latest", "cursor"],
             ["runs", "--active", "--limit", "5"],
@@ -137,28 +150,28 @@ class ParserTests(unittest.TestCase):
             with self.subTest(option=attribute, argv=argv):
                 parsed = parser_api.parse_cli(argv)
                 self.assertEqual(getattr(parsed.global_options, attribute), expected)
-                self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+                self.assertEqual(parsed.payload.prompt_parts, ["hello"])
 
     def test_group_stays_local_for_commands_that_own_it(self):
         cases = (
-            (["runs", "--group", "local"], lambda parsed: parsed.runs.group),
-            (["ps", "--group", "local"], lambda parsed: parsed.runs.group),
-            (["wait", "--group", "local"], lambda parsed: parsed.wait_command.group),
+            (["runs", "--group", "local"], lambda parsed: parsed.payload.group),
+            (["ps", "--group", "local"], lambda parsed: parsed.payload.group),
+            (["wait", "--group", "local"], lambda parsed: parsed.payload.group),
             (
                 ["mail", "send", "--group", "local", "body"],
-                lambda parsed: parsed.mail_command.group,
+                lambda parsed: parsed.payload.group,
             ),
             (
                 ["worktree", "list", "--group", "local"],
-                lambda parsed: parsed.worktree.group,
+                lambda parsed: parsed.payload.group,
             ),
             (
                 ["worktree", "remove", "--group", "local"],
-                lambda parsed: parsed.worktree.group,
+                lambda parsed: parsed.payload.group,
             ),
             (
                 ["worktree", "prune", "--group", "local"],
-                lambda parsed: parsed.worktree.group,
+                lambda parsed: parsed.payload.group,
             ),
         )
         for argv, local_group in cases:
@@ -170,16 +183,16 @@ class ParserTests(unittest.TestCase):
     def test_group_is_global_for_a_launch(self):
         parsed = parser_api.parse_cli(["codex", "safe", "hello", "--group", "launch-group"])
         self.assertEqual(parsed.global_options.group, "launch-group")
-        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+        self.assertEqual(parsed.payload.prompt_parts, ["hello"])
 
     def test_completion_report_stays_local_for_commands_that_own_it(self):
         run_output = parser_api.parse_cli(["run-output", "run-1", "--completion-report"])
         self.assertIsNone(run_output.global_options.completion_report)
-        self.assertTrue(run_output.run_output.completion_report)
+        self.assertTrue(run_output.payload.completion_report)
 
         wait = parser_api.parse_cli(["wait", "run-1", "--completion-report"])
         self.assertIsNone(wait.global_options.completion_report)
-        self.assertTrue(wait.wait_command.completion_report)
+        self.assertTrue(wait.payload.completion_report)
 
     def test_option_terminator_keeps_global_tokens_literal(self):
         parsed = parser_api.parse_cli(
@@ -187,7 +200,7 @@ class ParserTests(unittest.TestCase):
         )
         self.assertFalse(parsed.global_options.json_mode)
         self.assertIsNone(parsed.global_options.group)
-        self.assertEqual(parsed.launch.prompt_parts, ["hello", "--json", "--group", "literal"])
+        self.assertEqual(parsed.payload.prompt_parts, ["hello", "--json", "--group", "literal"])
 
     def test_setup_accepts_only_json_and_auth_profile(self):
         parsed = parser_api.parse_cli(["--json", "--auth-profile", "work", "setup"])
@@ -202,8 +215,8 @@ class ParserTests(unittest.TestCase):
         import dataclasses
 
         fields = {field.name for field in dataclasses.fields(request_types.ParsedCommand)}
-        self.assertIn("promote", fields)
-        options = parser_api.parse_cli(["promote", "--actor", "a", "--source", "b"]).promote
+        self.assertEqual(fields, {"subcommand", "global_options", "help_topic", "payload"})
+        options = parser_api.parse_cli(["promote", "--actor", "a", "--source", "b"]).payload
         with self.assertRaises(dataclasses.FrozenInstanceError):
             options.actor = "c"
 
@@ -215,9 +228,9 @@ class ParserTests(unittest.TestCase):
             ["promote", "--source", "main", "--actor", "hq", "--runtime-digest", "b" * 64]
         )
         self.assertEqual(parsed.subcommand, "promote")
-        self.assertEqual(parsed.promote.actor, "hq")
-        self.assertEqual(parsed.promote.source, "main")
-        self.assertEqual(parsed.promote.runtime_digest, "b" * 64)
+        self.assertEqual(parsed.payload.actor, "hq")
+        self.assertEqual(parsed.payload.source, "main")
+        self.assertEqual(parsed.payload.runtime_digest, "b" * 64)
         self.assertEqual(parser_api.parse_cli(["promote", "--help"]).subcommand, "help")
         failures = [
             (["doctor", "extra"], "unexpected_argument"),
@@ -278,9 +291,9 @@ class ParserTests(unittest.TestCase):
         fast = parser_api.parse_cli(["codex", "safe", "--fast", "review"])
         standard = parser_api.parse_cli(["codex", "safe", "--no-fast", "review"])
         inherited = parser_api.parse_cli(["codex", "safe", "review"])
-        self.assertIs(fast.launch.fast, True)
-        self.assertIs(standard.launch.fast, False)
-        self.assertIsNone(inherited.launch.fast)
+        self.assertIs(fast.payload.fast, True)
+        self.assertIs(standard.payload.fast, False)
+        self.assertIsNone(inherited.payload.fast)
 
     def test_codex_fast_flags_are_mutually_exclusive_and_codex_only(self):
         cases = (
@@ -311,7 +324,7 @@ class ParserTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 parsed = parser_api.parse_cli(["run", "--input-json", str(path)])
-                request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
                 self.assertIs(request.fast, expected)
 
     def test_run_input_json_fast_rejects_invalid_type_and_non_codex(self):
@@ -338,7 +351,7 @@ class ParserTests(unittest.TestCase):
                 )
                 parsed = parser_api.parse_cli(["run", "--input-json", str(path)])
                 with self.assertRaises(error_types.DelegateError) as ctx:
-                    request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                    request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
                 self.assertEqual(ctx.exception.error, error)
 
     def test_run_input_json_agent_rejected_by_presence_for_non_opencode(self):
@@ -365,7 +378,7 @@ class ParserTests(unittest.TestCase):
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 parsed = parser_api.parse_cli(["run", "--input-json", str(path)])
                 with self.assertRaises(error_types.DelegateError) as ctx:
-                    request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                    request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
                 self.assertEqual(ctx.exception.error, "unsupported_agent")
 
     def test_run_input_json_opencode_null_agent_matches_omission(self):
@@ -378,9 +391,7 @@ class ParserTests(unittest.TestCase):
                 path = Path(tmp) / f"task-{suffix}.json"
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 parsed = parser_api.parse_cli(["run", "--input-json", str(path)])
-                requests.append(
-                    request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
-                )
+                requests.append(request_api.request_from_input_json(parsed, DEFAULT_CONFIG))
 
         normalized_argv = []
         for request in requests:
@@ -401,7 +412,7 @@ class ParserTests(unittest.TestCase):
         for subcommand in ("models", "describe"):
             with self.subTest(subcommand=subcommand):
                 parsed = parser_api.parse_cli([subcommand, "--summary"])
-                self.assertTrue(parsed.inspection.summary)
+                self.assertTrue(parsed.payload.summary)
 
     def test_models_unknown_option_fails_clearly(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -421,13 +432,13 @@ class ParserTests(unittest.TestCase):
     def test_auth_profile_accepted_for_capabilities_refresh(self):
         parsed = parser_api.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
-        self.assertTrue(parsed.capabilities.refresh)
-        self.assertIsNone(parsed.capabilities.engines)
+        self.assertTrue(parsed.payload.refresh)
+        self.assertIsNone(parsed.payload.engines)
 
     def test_capabilities_refresh_accepts_engine_subset(self):
         parsed = parser_api.parse_cli(["capabilities", "refresh", "codex", "claude", "codex"])
-        self.assertTrue(parsed.capabilities.refresh)
-        self.assertEqual(parsed.capabilities.engines, ("codex", "claude"))
+        self.assertTrue(parsed.payload.refresh)
+        self.assertEqual(parsed.payload.engines, ("codex", "claude"))
 
     def test_capabilities_refresh_rejects_unknown_engine(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -437,7 +448,7 @@ class ParserTests(unittest.TestCase):
     def test_capabilities_refresh_accepts_trailing_auth_profile(self):
         parsed = parser_api.parse_cli(["capabilities", "refresh", "--auth-profile", "work"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
-        self.assertTrue(parsed.capabilities.refresh)
+        self.assertTrue(parsed.payload.refresh)
 
     def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
         for flag in ("--running", "--stale", "--recent"):
@@ -451,7 +462,7 @@ class ParserTests(unittest.TestCase):
     def test_ps_tolerates_explicit_active_flag(self):
         parsed = parser_api.parse_cli(["ps", "--active"])
         self.assertEqual(parsed.subcommand, "ps")
-        self.assertTrue(parsed.runs.active)
+        self.assertTrue(parsed.payload.active)
 
     def test_ps_errors_name_ps_not_the_delegated_runs_command(self):
         cases = (
@@ -491,7 +502,7 @@ class ParserTests(unittest.TestCase):
     def test_auth_profile_accepted_for_grok_launch(self):
         parsed = parser_api.parse_cli(["--auth-profile", "work", "grok", "safe", "x"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
-        self.assertEqual(parsed.launch.engine, "grok")
+        self.assertEqual(parsed.payload.engine, "grok")
 
     def test_infer_global_json_after_value_taking_globals(self):
         cases = [
@@ -510,37 +521,39 @@ class ParserTests(unittest.TestCase):
         )
 
     def test_json_after_inline_prompt_text_is_global(self):
-        parsed = parser_api.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
+        parsed = parser_api.parse_cli(
+            ["dry-run", "droid", "work", "--model", "minimax", "hello", "--json"]
+        )
         self.assertTrue(parsed.global_options.json_mode)
-        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+        self.assertEqual(parsed.payload.prompt_parts, ["hello"])
 
     def test_json_in_launch_tail_before_prompt_text_is_accepted(self):
         # Agents reflexively append --json; before inline prompt text it is unambiguous.
         for argv in (
             ["codex", "work", "--prompt-file", "task.md", "--json"],
             ["codex", "work", "--json", "--prompt-file", "task.md"],
-            ["droid", "minimax", "safe", "--json"],
+            ["droid", "safe", "--model", "minimax", "--json"],
             ["dry-run", "codex", "work", "--prompt-file", "task.md", "--json"],
         ):
             with self.subTest(argv=argv):
                 parsed = parser_api.parse_cli(argv)
                 self.assertTrue(parsed.global_options.json_mode)
-                self.assertEqual(parsed.launch.prompt_parts, [])
+                self.assertEqual(parsed.payload.prompt_parts, [])
 
     def test_json_before_prompt_text_keeps_prompt_intact(self):
         parsed = parser_api.parse_cli(["cursor", "safe", "--json", "review", "the", "diff"])
         self.assertTrue(parsed.global_options.json_mode)
-        self.assertEqual(parsed.launch.prompt_parts, ["review", "the", "diff"])
+        self.assertEqual(parsed.payload.prompt_parts, ["review", "the", "diff"])
 
     def test_prompt_file_before_prompt_text(self):
         parsed = parser_api.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
-        self.assertEqual(parsed.launch.prompt_parts, [])
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_parts, [])
 
     def test_output_schema_before_prompt_text(self):
         parsed = parser_api.parse_cli(["codex", "safe", "--output-schema", "schema.json", "x"])
-        self.assertEqual(parsed.launch.output_schema, "schema.json")
-        self.assertEqual(parsed.launch.prompt_parts, ["x"])
+        self.assertEqual(parsed.payload.output_schema, "schema.json")
+        self.assertEqual(parsed.payload.prompt_parts, ["x"])
 
     def test_output_schema_duplicate_rejected(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -558,8 +571,8 @@ class ParserTests(unittest.TestCase):
         parsed = parser_api.parse_cli(
             ["claude", "call", "--pure", "--timeout", "12", "answer this"]
         )
-        self.assertTrue(parsed.launch.pure)
-        self.assertEqual(parsed.launch.timeout, 12)
+        self.assertTrue(parsed.payload.pure)
+        self.assertEqual(parsed.payload.timeout, 12)
 
     def test_pure_rejects_non_call_conflict_and_unsupported_engine(self):
         cases = (
@@ -616,7 +629,7 @@ class ParserTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv):
                 parsed = parser_api.parse_cli(argv)
-                self.assertEqual(parsed.launch.timeout, 12)
+                self.assertEqual(parsed.payload.timeout, 12)
 
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -625,22 +638,22 @@ class ParserTests(unittest.TestCase):
 
     def test_codex_reasoning_effort_before_prompt(self):
         parsed = parser_api.parse_cli(["codex", "safe", "--reasoning-effort", "high", "review"])
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_droid_reasoning_effort_after_alias_and_mode(self):
         parsed = parser_api.parse_cli(
-            ["droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
+            ["droid", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
         )
-        self.assertEqual(parsed.launch.engine, "droid")
-        self.assertEqual(parsed.launch.model_alias, "reviewer")
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.engine, "droid")
+        self.assertEqual(parsed.payload.model, "reviewer")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_progress_launch_option_before_prompt(self):
         parsed = parser_api.parse_cli(["codex", "safe", "--progress", "review"])
-        self.assertEqual(parsed.launch.progress_intent, "on")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.progress_intent, "on")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_continuity_mode_is_parsed_before_prompt(self):
         for continuity_mode in ("pinned", "fungible", "panel"):
@@ -654,8 +667,8 @@ class ParserTests(unittest.TestCase):
                         "implement",
                     ]
                 )
-                self.assertEqual(parsed.launch.continuity_mode, continuity_mode)
-                self.assertEqual(parsed.launch.prompt_parts, ["implement"])
+                self.assertEqual(parsed.payload.continuity_mode, continuity_mode)
+                self.assertEqual(parsed.payload.prompt_parts, ["implement"])
 
     def test_continuity_mode_rejects_missing_and_unknown_values(self):
         for args in (
@@ -668,18 +681,18 @@ class ParserTests(unittest.TestCase):
 
     def test_progress_after_prompt_is_prompt_text(self):
         parsed = parser_api.parse_cli(["codex", "safe", "review", "--progress"])
-        self.assertIsNone(parsed.launch.progress_intent)
-        self.assertEqual(parsed.launch.prompt_parts, ["review", "--progress"])
+        self.assertIsNone(parsed.payload.progress_intent)
+        self.assertEqual(parsed.payload.prompt_parts, ["review", "--progress"])
 
     def test_no_progress_launch_option_before_prompt(self):
         parsed = parser_api.parse_cli(["codex", "safe", "--no-progress", "review"])
-        self.assertEqual(parsed.launch.progress_intent, "off")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.progress_intent, "off")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_no_progress_after_prompt_is_prompt_text(self):
         parsed = parser_api.parse_cli(["codex", "safe", "review", "--no-progress"])
-        self.assertIsNone(parsed.launch.progress_intent)
-        self.assertEqual(parsed.launch.prompt_parts, ["review", "--no-progress"])
+        self.assertIsNone(parsed.payload.progress_intent)
+        self.assertEqual(parsed.payload.prompt_parts, ["review", "--no-progress"])
 
     def test_progress_and_no_progress_cannot_combine(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -688,27 +701,27 @@ class ParserTests(unittest.TestCase):
 
     def test_forbid_commit_launch_option_before_prompt(self):
         parsed = parser_api.parse_cli(["cursor", "work", "--forbid-commit", "fix"])
-        self.assertTrue(parsed.launch.forbid_commit)
-        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+        self.assertTrue(parsed.payload.forbid_commit)
+        self.assertEqual(parsed.payload.prompt_parts, ["fix"])
 
     def test_forbid_commit_after_prompt_is_prompt_text(self):
         parsed = parser_api.parse_cli(["cursor", "work", "fix", "--forbid-commit"])
-        self.assertFalse(parsed.launch.forbid_commit)
-        self.assertEqual(parsed.launch.prompt_parts, ["fix", "--forbid-commit"])
+        self.assertFalse(parsed.payload.forbid_commit)
+        self.assertEqual(parsed.payload.prompt_parts, ["fix", "--forbid-commit"])
 
     def test_progress_with_pass_through_is_invalid(self):
         parsed = parser_api.parse_cli(["--pass-through", "codex", "safe", "--progress", "x"])
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
                 io.StringIO(""),
             )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_config_enabled_progress_conflicts_with_pass_through(self):
         parsed = parser_api.parse_cli(["--pass-through", "codex", "safe", "x"])
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.request_from_parsed(parsed, config, io.StringIO(""))
@@ -718,14 +731,14 @@ class ParserTests(unittest.TestCase):
         parsed = parser_api.parse_cli(
             ["codex", "safe", "--no-progress", "review"],
         )
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
         request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertFalse(request.progress)
 
     def test_config_enabled_progress_applies_when_intent_unset(self):
         parsed = parser_api.parse_cli(["codex", "safe", "review"])
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"enabled": True, "initialDelaySec": 45, "intervalSec": 90}
         request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertTrue(request.progress)
@@ -733,28 +746,28 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(request.progress_interval_sec, 90.0)
 
     def test_malformed_progress_config_hard_fails(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"enabled": "yes"}
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_progress_config")
 
     def test_progress_config_rejects_boolean_timing_values(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"initialDelaySec": True}
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_progress_config")
 
     def test_progress_config_rejects_nan_initial_delay(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"initialDelaySec": float("nan")}
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_progress_config")
 
     def test_progress_config_rejects_infinite_interval(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["progress"] = {"intervalSec": float("inf")}
         with self.assertRaises(error_types.DelegateError) as ctx:
             request_api.validate_config(config)
@@ -762,16 +775,25 @@ class ParserTests(unittest.TestCase):
 
     def test_dry_run_droid_reasoning_effort(self):
         parsed = parser_api.parse_cli(
-            ["dry-run", "droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
+            [
+                "dry-run",
+                "droid",
+                "safe",
+                "--model",
+                "reviewer",
+                "--reasoning-effort",
+                "high",
+                "review",
+            ]
         )
-        self.assertTrue(parsed.launch.dry_run)
-        self.assertEqual(parsed.launch.engine, "droid")
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.engine, "droid")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
 
     def test_reasoning_effort_after_prompt_is_prompt_text(self):
         parsed = parser_api.parse_cli(["codex", "safe", "review", "--reasoning-effort", "high"])
-        self.assertIsNone(parsed.launch.reasoning_effort)
-        self.assertEqual(parsed.launch.prompt_parts, ["review", "--reasoning-effort", "high"])
+        self.assertIsNone(parsed.payload.reasoning_effort)
+        self.assertEqual(parsed.payload.prompt_parts, ["review", "--reasoning-effort", "high"])
 
     def test_reasoning_effort_requires_value(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -807,8 +829,8 @@ class ParserTests(unittest.TestCase):
     def test_codex_direct_commands_parse(self):
         parsed = parser_api.parse_cli(["codex", "work", "implement"])
         self.assertEqual(parsed.subcommand, "codex")
-        self.assertEqual(parsed.launch.engine, "codex")
-        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.payload.engine, "codex")
+        self.assertEqual(parsed.payload.mode, "work")
 
     def test_modeless_call_mode_parses(self):
         for engine in (
@@ -825,20 +847,20 @@ class ParserTests(unittest.TestCase):
             with self.subTest(engine=engine):
                 parsed = parser_api.parse_cli([engine, "call", "summarize"])
                 self.assertEqual(parsed.subcommand, engine)
-                self.assertEqual(parsed.launch.engine, engine)
-                self.assertEqual(parsed.launch.mode, "call")
-                self.assertEqual(parsed.launch.prompt_parts, ["summarize"])
+                self.assertEqual(parsed.payload.engine, engine)
+                self.assertEqual(parsed.payload.mode, "call")
+                self.assertEqual(parsed.payload.prompt_parts, ["summarize"])
 
-    def test_droid_call_mode_parses_with_model_alias(self):
-        parsed = parser_api.parse_cli(["droid", "reviewer", "call", "summarize"])
-        self.assertEqual(parsed.launch.engine, "droid")
-        self.assertEqual(parsed.launch.model_alias, "reviewer")
-        self.assertEqual(parsed.launch.mode, "call")
+    def test_droid_call_mode_parses_with_model_option(self):
+        parsed = parser_api.parse_cli(["droid", "call", "--model", "reviewer", "summarize"])
+        self.assertEqual(parsed.payload.engine, "droid")
+        self.assertEqual(parsed.payload.model, "reviewer")
+        self.assertEqual(parsed.payload.mode, "call")
 
     def test_dry_run_call_mode_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "codex", "call", "summarize"])
-        self.assertTrue(parsed.launch.dry_run)
-        self.assertEqual(parsed.launch.mode, "call")
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.mode, "call")
 
     def test_run_input_json_call_rejects_global_isolation_in_pre_read(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -859,10 +881,10 @@ class ParserTests(unittest.TestCase):
 
     def test_call_read_only_flag_parses_in_tail(self):
         parsed = parser_api.parse_cli(["codex", "call", "--read-only", "score"])
-        self.assertEqual(parsed.launch.mode, "call")
-        self.assertTrue(parsed.launch.read_only)
+        self.assertEqual(parsed.payload.mode, "call")
+        self.assertTrue(parsed.payload.read_only)
         default = parser_api.parse_cli(["codex", "call", "score"])
-        self.assertFalse(default.launch.read_only)
+        self.assertFalse(default.payload.read_only)
 
     def test_call_run_input_json_read_only_accepted_and_validated(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -873,12 +895,12 @@ class ParserTests(unittest.TestCase):
                 return request_types.ParsedCommand(
                     "run",
                     global_options=request_types.GlobalOptions(json_mode=True),
-                    run_json=request_types.RunJsonOptions(str(task)),
+                    payload=request_types.RunJsonOptions(str(task)),
                 )
 
             ok = request_api.request_from_input_json(
                 parsed_for({"engine": "codex", "mode": "call", "prompt": "s", "readOnly": True}),
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
             )
             self.addCleanup(shutil.rmtree, ok.workspace, ignore_errors=True)
             self.assertTrue(ok.stdin_text.startswith("You are being called"))
@@ -888,7 +910,7 @@ class ParserTests(unittest.TestCase):
                     parsed_for(
                         {"engine": "codex", "mode": "call", "prompt": "s", "readOnly": "yes"}
                     ),
-                    self.delegate.DEFAULT_CONFIG,
+                    DEFAULT_CONFIG,
                 )
             self.assertEqual(bad_type.exception.error, "invalid_read_only")
 
@@ -897,7 +919,7 @@ class ParserTests(unittest.TestCase):
                     parsed_for(
                         {"engine": "codex", "mode": "work", "prompt": "s", "readOnly": True}
                     ),
-                    self.delegate.DEFAULT_CONFIG,
+                    DEFAULT_CONFIG,
                 )
             self.assertEqual(bad_mode.exception.error, "invalid_option_combination")
 
@@ -917,14 +939,13 @@ class ParserTests(unittest.TestCase):
             )
             for argv, message in cases:
                 with self.subTest(argv=argv):
-                    parsed = parser_api.parse_cli(argv)
+                    try:
+                        parsed = parser_api.parse_cli(argv)
+                    except error_types.DelegateError as ctx:
+                        self.assertIn(message, ctx.message)
+                        continue
                     with self.assertRaises(error_types.DelegateError) as ctx:
-                        request_api.request_from_parsed(
-                            parsed,
-                            self.delegate.DEFAULT_CONFIG,
-                            io.StringIO(""),
-                        )
-                    self.assertEqual(ctx.exception.error, "invalid_option_combination")
+                        request_api.request_from_parsed(parsed, DEFAULT_CONFIG, io.StringIO(""))
                     self.assertIn(message, ctx.exception.message)
 
     def test_call_run_input_json_rejects_incompatible_options(self):
@@ -937,7 +958,7 @@ class ParserTests(unittest.TestCase):
                 return request_types.ParsedCommand(
                     "run",
                     global_options=global_options or request_types.GlobalOptions(json_mode=True),
-                    run_json=request_types.RunJsonOptions(str(task)),
+                    payload=request_types.RunJsonOptions(str(task)),
                 )
 
             cases = (
@@ -956,7 +977,7 @@ class ParserTests(unittest.TestCase):
                     base,
                     request_types.GlobalOptions(
                         json_mode=True,
-                        completion_report=self.delegate.delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+                        completion_report=delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
                     ),
                     "--completion-report",
                 ),
@@ -971,7 +992,7 @@ class ParserTests(unittest.TestCase):
                     with self.assertRaises(error_types.DelegateError) as ctx:
                         request_api.request_from_input_json(
                             parsed_for(raw, global_options),
-                            self.delegate.DEFAULT_CONFIG,
+                            DEFAULT_CONFIG,
                         )
                     self.assertEqual(ctx.exception.error, "invalid_option_combination")
                     self.assertIn(message, ctx.exception.message)
@@ -983,7 +1004,7 @@ class ParserTests(unittest.TestCase):
             )
             request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                DEFAULT_CONFIG,
                 io.StringIO(""),
             )
             self.assertEqual(request.isolation_context.effective_isolation, "worktree")
@@ -994,39 +1015,39 @@ class ParserTests(unittest.TestCase):
     def test_claude_direct_commands_parse(self):
         parsed = parser_api.parse_cli(["claude", "safe", "--reasoning-effort", "high", "review"])
         self.assertEqual(parsed.subcommand, "claude")
-        self.assertEqual(parsed.launch.engine, "claude")
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.engine, "claude")
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_grok_direct_commands_parse(self):
         parsed = parser_api.parse_cli(["grok", "safe", "review"])
         self.assertEqual(parsed.subcommand, "grok")
-        self.assertEqual(parsed.launch.engine, "grok")
-        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.payload.engine, "grok")
+        self.assertEqual(parsed.payload.mode, "safe")
         parsed = parser_api.parse_cli(
             ["grok", "safe", "--prompt-file", "task.md"],
         )
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_dry_run_grok_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "grok", "work", "fix"])
         self.assertEqual(parsed.subcommand, "grok")
-        self.assertTrue(parsed.launch.dry_run)
+        self.assertTrue(parsed.payload.dry_run)
         parsed = parser_api.parse_cli(
             ["dry-run", "grok", "safe", "--prompt-file", "task.md"],
         )
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_devin_direct_commands_parse(self):
         parsed = parser_api.parse_cli(["devin", "safe", "review"])
         self.assertEqual(parsed.subcommand, "devin")
-        self.assertEqual(parsed.launch.engine, "devin")
-        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.payload.engine, "devin")
+        self.assertEqual(parsed.payload.mode, "safe")
         parsed = parser_api.parse_cli(
             ["devin", "safe", "--prompt-file", "task.md"],
         )
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_missing_mode_lists_each_engine_supported_modes(self):
         for engine, expected in (
@@ -1041,68 +1062,68 @@ class ParserTests(unittest.TestCase):
     def test_dry_run_devin_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "devin", "work", "fix"])
         self.assertEqual(parsed.subcommand, "devin")
-        self.assertTrue(parsed.launch.dry_run)
+        self.assertTrue(parsed.payload.dry_run)
         parsed = parser_api.parse_cli(
             ["dry-run", "devin", "safe", "--prompt-file", "task.md"],
         )
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_opencode_direct_commands_parse(self):
         parsed = parser_api.parse_cli(
             ["opencode", "safe", "--model", "openai/gpt-5.5", "--agent", "reviewer", "review"]
         )
         self.assertEqual(parsed.subcommand, "opencode")
-        self.assertEqual(parsed.launch.engine, "opencode")
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.model, "openai/gpt-5.5")
-        self.assertEqual(parsed.launch.agent, "reviewer")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.engine, "opencode")
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.model, "openai/gpt-5.5")
+        self.assertEqual(parsed.payload.agent, "reviewer")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
         parsed = parser_api.parse_cli(["opencode", "work", "--agent", "builder", "fix"])
-        self.assertEqual(parsed.launch.mode, "work")
-        self.assertEqual(parsed.launch.agent, "builder")
+        self.assertEqual(parsed.payload.mode, "work")
+        self.assertEqual(parsed.payload.agent, "builder")
 
         parsed = parser_api.parse_cli(["opencode", "call", "--agent", "judge", "score"])
-        self.assertEqual(parsed.launch.mode, "call")
-        self.assertEqual(parsed.launch.agent, "judge")
+        self.assertEqual(parsed.payload.mode, "call")
+        self.assertEqual(parsed.payload.agent, "judge")
 
     def test_dry_run_opencode_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "opencode", "work", "--agent", "builder", "fix"])
         self.assertEqual(parsed.subcommand, "opencode")
-        self.assertTrue(parsed.launch.dry_run)
-        self.assertEqual(parsed.launch.agent, "builder")
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.agent, "builder")
         parsed = parser_api.parse_cli(
             ["dry-run", "opencode", "safe", "--prompt-file", "task.md"],
         )
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_pi_direct_and_prompt_file_commands_parse(self):
         parsed = parser_api.parse_cli(
             ["pi", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
         )
         self.assertEqual(parsed.subcommand, "pi")
-        self.assertEqual(parsed.launch.engine, "pi")
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.model, "reviewer")
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        self.assertEqual(parsed.payload.engine, "pi")
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.model, "reviewer")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
         parsed = parser_api.parse_cli(["dry-run", "pi", "work", "--prompt-file", "task.md"])
-        self.assertTrue(parsed.launch.dry_run)
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_omp_direct_and_prompt_file_commands_parse(self):
         parsed = parser_api.parse_cli(
             ["omp", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
         )
         self.assertEqual(parsed.subcommand, "omp")
-        self.assertEqual(parsed.launch.engine, "omp")
-        self.assertEqual(parsed.launch.model, "reviewer")
-        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.engine, "omp")
+        self.assertEqual(parsed.payload.model, "reviewer")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
 
         parsed = parser_api.parse_cli(["dry-run", "omp", "work", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.launch.engine, "omp")
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.engine, "omp")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_agent_flag_rejected_for_non_opencode_engines(self):
         for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin"):
@@ -1118,15 +1139,15 @@ class ParserTests(unittest.TestCase):
     def test_dry_run_codex_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "codex", "safe", "review"])
         self.assertEqual(parsed.subcommand, "codex")
-        self.assertTrue(parsed.launch.dry_run)
+        self.assertTrue(parsed.payload.dry_run)
 
     def test_dry_run_claude_parses(self):
         parsed = parser_api.parse_cli(["dry-run", "claude", "work", "ship"])
         self.assertEqual(parsed.subcommand, "claude")
-        self.assertTrue(parsed.launch.dry_run)
+        self.assertTrue(parsed.payload.dry_run)
 
     def test_json_describe_shape(self):
-        payload = describe_api.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
+        payload = describe_api.describe_payload(DEFAULT_CONFIG, "embedded-default")
         self.assertTrue(payload["ok"])
         self.assertIn("safe", payload["modes"])
         self.assertIn("work", payload["modes"])
@@ -1147,14 +1168,14 @@ class ParserTests(unittest.TestCase):
         self.assertIn("passThrough", payload)
 
     def test_describe_claude_effective_policy_masks_global_external_sandbox_bypass(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["policy"]["profile"] = "external-sandbox"
         payload = describe_api.describe_payload(config, "test")
         self.assertFalse(payload["effectivePolicy"]["claude"]["work"]["bypassApprovalsAndSandbox"])
         self.assertNotIn("bypassPermissions", payload["modeMapping"]["claude"]["work"])
 
     def test_describe_claude_effective_policy_reports_harness_scoped_bypass(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config["policy"]["harness"] = {"claude": {"work": {"bypassApprovalsAndSandbox": True}}}
         payload = describe_api.describe_payload(config, "test")
         self.assertTrue(payload["effectivePolicy"]["claude"]["work"]["bypassApprovalsAndSandbox"])
@@ -1202,20 +1223,20 @@ class ParserTests(unittest.TestCase):
 
     def test_pass_through_skips_completion_report_injection(self):
         parsed = parser_api.parse_cli(["--pass-through", "cursor", "safe", "hello"])
-        mode = request_api.resolve_completion_report_mode(parsed, self.delegate.DEFAULT_CONFIG)
+        mode = request_api.resolve_completion_report_mode(parsed, DEFAULT_CONFIG)
         self.assertEqual(mode, "none")
         effective = request_api.effective_prompt("hello", completion_report_mode=mode)
-        self.assertTrue(effective.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
+        self.assertTrue(effective.startswith(runner.SKILL_REVIEW_PREFIX))
         self.assertNotIn("Delegate completion report requirement", effective)
 
     def test_effective_prompt_always_prepends_skill_review(self):
         effective = request_api.effective_prompt("hello", completion_report_mode="none")
-        self.assertTrue(effective.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
+        self.assertTrue(effective.startswith(runner.SKILL_REVIEW_PREFIX))
         self.assertTrue(effective.endswith("hello"))
         self.assertIn("mandatory for every Delegate Agent run", effective)
 
     def test_effective_prompt_does_not_duplicate_skill_review(self):
-        original = self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+        original = runner.SKILL_REVIEW_PREFIX + "hello"
         effective = request_api.effective_prompt(original, completion_report_mode="none")
         self.assertEqual(effective, original)
 
@@ -1225,7 +1246,7 @@ class ParserTests(unittest.TestCase):
             prompt_path.write_text("original prompt\n")
             parsed = parser_api.parse_cli(["cursor", "safe", "--prompt-file", str(prompt_path)])
             prompt = request_api.resolve_prompt(
-                parsed.launch.prompt_parts, parsed.launch.prompt_file, io.StringIO()
+                parsed.payload.prompt_parts, parsed.payload.prompt_file, io.StringIO()
             )
             effective = request_api.effective_prompt(
                 prompt,
@@ -1257,9 +1278,9 @@ class ParserTests(unittest.TestCase):
     def test_run_output_without_selector_defaults_to_completion_report(self):
         parsed = parser_api.parse_cli(["run-output", "cursor"])
         self.assertEqual(parsed.subcommand, "run-output")
-        self.assertEqual(parsed.run_output.handle, "cursor")
-        self.assertTrue(parsed.run_output.completion_report)
-        self.assertTrue(parsed.run_output.default)
+        self.assertEqual(parsed.payload.handle, "cursor")
+        self.assertTrue(parsed.payload.completion_report)
+        self.assertTrue(parsed.payload.default)
 
     def test_runs_limit_must_be_positive(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1280,10 +1301,10 @@ class ParserTests(unittest.TestCase):
             ]
         )
         self.assertEqual(parsed.subcommand, "runs")
-        self.assertEqual(parsed.runs.action, "prune")
-        self.assertEqual(parsed.runs.older_than_days, 14)
-        self.assertTrue(parsed.runs.dry_run)
-        self.assertTrue(parsed.runs.json_mode)
+        self.assertEqual(parsed.payload.action, "prune")
+        self.assertEqual(parsed.payload.older_than_days, 14)
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertTrue(parsed.payload.json_mode)
 
     def test_runs_prune_rejects_negative_age(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1355,7 +1376,7 @@ class ParserTests(unittest.TestCase):
 
     def test_run_output_max_chars_is_parsed(self):
         parsed = parser_api.parse_cli(["run-output", "cursor", "--stdout", "--max-chars", "12000"])
-        self.assertEqual(parsed.run_output.max_chars, 12000)
+        self.assertEqual(parsed.payload.max_chars, 12000)
 
     def test_run_output_tail_and_max_chars_require_stream_selector(self):
         for flag in ("--tail", "--max-chars"):
@@ -1366,8 +1387,8 @@ class ParserTests(unittest.TestCase):
 
     def test_run_output_stdout_without_tail_defaults_to_bounded_tail(self):
         parsed = parser_api.parse_cli(["run-output", "cursor", "--stdout"])
-        self.assertTrue(parsed.run_output.stdout)
-        self.assertEqual(parsed.run_output.tail, self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES)
+        self.assertTrue(parsed.payload.stdout)
+        self.assertEqual(parsed.payload.tail, run_output_commands.RUN_OUTPUT_DEFAULT_TAIL_LINES)
 
     def test_worktree_trailing_json_is_global(self):
         parsed = parser_api.parse_cli(["worktree", "list", "--json"])
@@ -1393,23 +1414,23 @@ class ParserTests(unittest.TestCase):
     def test_parse_kimi_safe(self):
         parsed = parser_api.parse_cli(["kimi", "safe", "review this"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.launch.engine, "kimi")
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.prompt_parts, ["review this"])
+        self.assertEqual(parsed.payload.engine, "kimi")
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.prompt_parts, ["review this"])
 
     def test_parse_kimi_work(self):
         parsed = parser_api.parse_cli(["kimi", "work", "fix this"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.launch.engine, "kimi")
-        self.assertEqual(parsed.launch.mode, "work")
-        self.assertEqual(parsed.launch.prompt_parts, ["fix this"])
+        self.assertEqual(parsed.payload.engine, "kimi")
+        self.assertEqual(parsed.payload.mode, "work")
+        self.assertEqual(parsed.payload.prompt_parts, ["fix this"])
 
     def test_parse_kimi_dry_run(self):
         parsed = parser_api.parse_cli(["dry-run", "kimi", "safe", "review"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertTrue(parsed.launch.dry_run)
-        self.assertEqual(parsed.launch.engine, "kimi")
-        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.engine, "kimi")
+        self.assertEqual(parsed.payload.mode, "safe")
 
     def test_parse_kimi_help(self):
         parsed = parser_api.parse_cli(["kimi", "--help"])
@@ -1419,10 +1440,10 @@ class ParserTests(unittest.TestCase):
     def test_parse_kimi_prompt_file(self):
         parsed = parser_api.parse_cli(["kimi", "safe", "--prompt-file", "task.md"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.launch.engine, "kimi")
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.prompt_file, "task.md")
-        self.assertEqual(parsed.launch.prompt_parts, [])
+        self.assertEqual(parsed.payload.engine, "kimi")
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.prompt_file, "task.md")
+        self.assertEqual(parsed.payload.prompt_parts, [])
 
     def test_parse_kimi_unknown_mode(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1436,9 +1457,9 @@ class ParserTests(unittest.TestCase):
 
     def test_worktree_prune_requires_filter_at_execution_time(self):
         parsed = parser_api.parse_cli(["worktree", "prune"])
-        self.assertEqual(parsed.worktree.action, "prune")
-        self.assertFalse(parsed.worktree.merged)
-        self.assertIsNone(parsed.worktree.older_than_days)
+        self.assertEqual(parsed.payload.action, "prune")
+        self.assertFalse(parsed.payload.merged)
+        self.assertIsNone(parsed.payload.older_than_days)
 
     def test_load_config_cli_overrides_win(self):
         config_path = ROOT / "src" / "delegate_agent" / "config.py"
@@ -1463,20 +1484,22 @@ class ParserTests(unittest.TestCase):
     def test_isolation_worktree_cursor_work_parses(self):
         parsed = parser_api.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
-        self.assertEqual(parsed.launch.engine, "cursor")
-        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.payload.engine, "cursor")
+        self.assertEqual(parsed.payload.mode, "work")
 
     def test_isolation_none_codex_work_parses(self):
         parsed = parser_api.parse_cli(["--isolation", "none", "codex", "work", "implement"])
         self.assertEqual(parsed.global_options.isolation, "none")
-        self.assertEqual(parsed.launch.engine, "codex")
-        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.payload.engine, "codex")
+        self.assertEqual(parsed.payload.mode, "work")
 
     def test_isolation_auto_droid_safe_parses(self):
-        parsed = parser_api.parse_cli(["--isolation", "auto", "droid", "minimax", "safe", "review"])
+        parsed = parser_api.parse_cli(
+            ["--isolation", "auto", "droid", "safe", "--model", "minimax", "review"]
+        )
         self.assertEqual(parsed.global_options.isolation, "auto")
-        self.assertEqual(parsed.launch.engine, "droid")
-        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.payload.engine, "droid")
+        self.assertEqual(parsed.payload.mode, "safe")
 
     def test_isolation_unknown_value_raises(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1491,12 +1514,12 @@ class ParserTests(unittest.TestCase):
     def test_isolation_in_launch_tail_before_prompt_text_is_accepted(self):
         parsed = parser_api.parse_cli(["cursor", "work", "--isolation", "worktree", "fix"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
-        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+        self.assertEqual(parsed.payload.prompt_parts, ["fix"])
 
     def test_isolation_after_inline_prompt_text_is_global(self):
         parsed = parser_api.parse_cli(["cursor", "work", "fix", "--isolation", "worktree"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
-        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+        self.assertEqual(parsed.payload.prompt_parts, ["fix"])
 
     def test_isolation_launch_tail_rejects_unknown_value(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1543,11 +1566,9 @@ class ParserTests(unittest.TestCase):
                     parsed = request_types.ParsedCommand(
                         "run",
                         global_options=request_types.GlobalOptions(json_mode=True),
-                        run_json=request_types.RunJsonOptions(str(task)),
+                        payload=request_types.RunJsonOptions(str(task)),
                     )
-                    request = request_api.request_from_input_json(
-                        parsed, self.delegate.DEFAULT_CONFIG
-                    )
+                    request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
                     self.assertEqual(request.continuity_mode, expected)
 
     def test_run_input_json_rejects_invalid_continuity_mode(self):
@@ -1567,10 +1588,10 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_continuity_mode")
 
     def test_run_input_json_unknown_key_still_fails(self):
@@ -1592,15 +1613,15 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "unknown_input_key")
             self.assertIn("bogus", ctx.exception.message)
 
     def test_resolve_isolation_cli_wins_over_json_and_config(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value="none",
             input_json_value="worktree",
             loaded_config={"isolation": {"work": "auto"}},
@@ -1610,7 +1631,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result, "none")
 
     def test_resolve_isolation_json_wins_over_config(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value=None,
             input_json_value="worktree",
             loaded_config={"isolation": {"work": "auto"}},
@@ -1620,7 +1641,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result, "worktree")
 
     def test_resolve_isolation_config_wins_over_embedded_default(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value=None,
             input_json_value=None,
             loaded_config={"isolation": {"work": "worktree"}},
@@ -1630,7 +1651,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result, "worktree")
 
     def test_resolve_isolation_embedded_default_safe_is_auto(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value=None,
             input_json_value=None,
             loaded_config=None,
@@ -1640,7 +1661,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result, "auto")
 
     def test_resolve_isolation_embedded_default_work_is_none(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value=None,
             input_json_value=None,
             loaded_config=None,
@@ -1650,7 +1671,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result, "none")
 
     def test_resolve_isolation_cli_auto_bypasses_config_worktree(self):
-        result = self.delegate.delegate_config.resolve_isolation(
+        result = delegate_config.resolve_isolation(
             cli_value="auto",
             input_json_value=None,
             loaded_config={"isolation": {"work": "worktree"}},
@@ -1677,10 +1698,10 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
 
     def test_run_input_json_claude_safe_uses_stdin_and_model_override(self):
@@ -1701,9 +1722,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(request.engine, "claude")
             self.assertEqual(request.mode, "safe")
             self.assertEqual(request.model, "claude-sonnet-4-6")
@@ -1730,9 +1751,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg = json.loads(json.dumps(DEFAULT_CONFIG))
             cfg["droid"]["models"] = {"minimax": "model-id"}
             request = request_api.request_from_input_json(parsed, cfg)
             self.assertTrue(request.progress)
@@ -1754,9 +1775,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg = json.loads(json.dumps(DEFAULT_CONFIG))
             cfg["droid"]["models"] = {"minimax": "model-id"}
             cfg["progress"] = {"enabled": True, "initialDelaySec": 12, "intervalSec": 34}
             request = request_api.request_from_input_json(parsed, cfg)
@@ -1782,9 +1803,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg = json.loads(json.dumps(DEFAULT_CONFIG))
             cfg["droid"]["models"] = {"minimax": "model-id"}
             cfg["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
             request = request_api.request_from_input_json(parsed, cfg)
@@ -1834,9 +1855,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertTrue(request.forbid_commit)
             self.assertEqual(request.isolation_context.isolation_lifecycle, "persistent")
 
@@ -1858,10 +1879,10 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_progress")
 
     def test_run_input_json_forbid_commit_must_be_boolean(self):
@@ -1882,10 +1903,10 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_forbid_commit")
 
     def test_run_input_json_claude_safe_none_normalizes_to_temporary_isolation(self):
@@ -1905,9 +1926,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(request.isolation_context.effective_isolation, "worktree")
             self.assertIn("isolation none", request.warnings[0])
             self.assertNotIn("--isolation", request.warnings[0])
@@ -1929,9 +1950,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(request.engine, "claude")
             self.assertEqual(request.mode, "work")
             self.assertEqual(request.model, "claude-opus-4-8")
@@ -1954,9 +1975,9 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            request = request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertTrue(request.pure)
             self.assertEqual(request.timeout, 12)
 
@@ -1979,10 +2000,10 @@ class ParserTests(unittest.TestCase):
                     json_mode=True,
                     group="g",
                 ),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             with self.assertRaises(error_types.DelegateError) as ctx:
-                request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "pure_conflicts_group")
 
     def test_run_input_json_workspace_config_resolves_isolation(self):
@@ -2014,7 +2035,7 @@ class ParserTests(unittest.TestCase):
             parsed = request_types.ParsedCommand(
                 "run",
                 global_options=request_types.GlobalOptions(json_mode=True),
-                run_json=request_types.RunJsonOptions(str(task)),
+                payload=request_types.RunJsonOptions(str(task)),
             )
             # Workspace config is deliberately ignored during config discovery.
             _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
@@ -2043,10 +2064,10 @@ class ParserTests(unittest.TestCase):
         parsed = request_types.ParsedCommand(
             "run",
             global_options=request_types.GlobalOptions(json_mode=True, cwd=repo2.name),
-            run_json=request_types.RunJsonOptions(str(task)),
+            payload=request_types.RunJsonOptions(str(task)),
         )
         with self.assertRaises(error_types.DelegateError) as ctx:
-            request_api.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
     def test_isolation_after_subcommand_codex_work_is_accepted(self):
@@ -2055,7 +2076,7 @@ class ParserTests(unittest.TestCase):
 
     def test_isolation_after_subcommand_droid_work_is_accepted(self):
         parsed = parser_api.parse_cli(
-            ["droid", "minimax", "work", "--isolation", "worktree", "fix"]
+            ["droid", "work", "--model", "minimax", "--isolation", "worktree", "fix"]
         )
         self.assertEqual(parsed.global_options.isolation, "worktree")
 
@@ -2144,7 +2165,7 @@ class ParserTests(unittest.TestCase):
                     "Repository config must not override explicitly trusted config",
                 )
 
-                result = self.delegate.delegate_config.resolve_isolation(
+                result = delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value=None,
                     loaded_config=cfg,
@@ -2153,7 +2174,7 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "none")
 
-                result = self.delegate.delegate_config.resolve_isolation(
+                result = delegate_config.resolve_isolation(
                     cli_value="auto",
                     input_json_value=None,
                     loaded_config=cfg,
@@ -2162,7 +2183,7 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "auto")
 
-                result = self.delegate.delegate_config.resolve_isolation(
+                result = delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value="none",
                     loaded_config=cfg,
@@ -2174,7 +2195,7 @@ class ParserTests(unittest.TestCase):
                 parsed = request_types.ParsedCommand(
                     "run",
                     global_options=request_types.GlobalOptions(json_mode=False),
-                    run_json=request_types.RunJsonOptions(str(task)),
+                    payload=request_types.RunJsonOptions(str(task)),
                 )
                 request = request_api.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")

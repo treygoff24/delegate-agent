@@ -1,4 +1,3 @@
-import importlib.util
 import os
 import subprocess
 import sys
@@ -6,6 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from delegate_agent import (
+    cli,
+    git_utils,
+    isolation,
+    request_build,
+    request_models,
+)
+from delegate_agent import (
+    config as delegate_config,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -17,12 +27,7 @@ if SRC not in sys.path:
 
 
 def load_delegate():
-    spec = importlib.util.spec_from_file_location("delegate_cli_under_test", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return cli
 
 
 def make_git_repo():
@@ -76,11 +81,11 @@ class ExecutionTestBase(unittest.TestCase):
         **kwargs,
     ):
         with mock.patch.dict(os.environ, {"HOME": self._test_home}, clear=False):
-            return self.delegate.build_request(
+            return request_build.build_request(
                 engine,
                 mode,
                 model_alias,
-                self.delegate.ResolvedWorkspace(workspace, "git"),
+                request_models.ResolvedWorkspace(workspace, "git"),
                 prompt,
                 config,
                 dry_run,
@@ -100,14 +105,14 @@ class ExecutionTestBase(unittest.TestCase):
         isolation: str | None = None,
         json_mode: bool = True,
     ):
-        return self.delegate.ParsedCommand(
+        return request_models.ParsedCommand(
             subcommand,
-            global_options=self.delegate.GlobalOptions(
+            global_options=request_models.GlobalOptions(
                 json_mode=json_mode,
                 cwd=cwd,
                 isolation=isolation,
             ),
-            launch=self.delegate.LaunchOptions(
+            payload=request_models.LaunchOptions(
                 engine=engine,
                 mode=mode,
                 model_alias=model_alias,
@@ -202,17 +207,17 @@ class ExecutionTestBase(unittest.TestCase):
 
     def _make_persistent_worktree_request(self, engine, mode, repo_dir, config, model_alias=None):
         """Build a Request with persistent worktree isolation context."""
-        workspace = self.delegate.resolve_workspace(repo_dir)
-        effective_isolation = self.delegate.delegate_config.resolve_isolation(
+        workspace = request_build.resolve_workspace(repo_dir)
+        effective_isolation = delegate_config.resolve_isolation(
             cli_value="worktree",
             loaded_config=config,
             engine=engine,
             mode=mode,
         )
-        git_root, git_common_dir, head_oid, head_ref, branch_name = (
-            self.delegate.capture_git_metadata(repo_dir)
+        git_root, git_common_dir, head_oid, head_ref, branch_name = git_utils.capture_git_metadata(
+            repo_dir
         )
-        isolation_context = self.delegate.build_isolation_context(
+        isolation_context = isolation.build_isolation_context(
             source_workspace=workspace.path,
             resolved_isolation=effective_isolation,
             engine=engine,
@@ -226,7 +231,7 @@ class ExecutionTestBase(unittest.TestCase):
             source_head_ref=head_ref,
             source_branch=branch_name,
         )
-        return self.delegate.build_request(
+        return request_build.build_request(
             engine,
             mode,
             model_alias,
