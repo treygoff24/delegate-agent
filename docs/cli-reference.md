@@ -193,7 +193,11 @@ prompt text begins. The value is resolved against `<engine>.models` when it
 matches an alias key; otherwise it is passed through verbatim as a raw model ID
 (the harness validates unknown IDs). Droid uses this same grammar; its former
 positional alias is rejected. Without `--model`, Droid uses `droid.defaultModel`
-when set. Discover aliases
+when set. A Droid custom model is now named the way Factory documents it,
+`custom:<Display-Name>-<index>`, where the display name has its spaces replaced
+by hyphens and the index is the entry's position in Factory's settings. The
+older id-based selectors no longer resolve, so re-read `delegate models droid`
+and update any `droid.models` alias that pinned one. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
