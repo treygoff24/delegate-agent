@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
+from delegate_agent.redaction import redact_string
 from delegate_agent.run_metadata import clean_harness_session_id
 from delegate_agent.terminal_states import (
     PROVIDER_CANCELLED,
@@ -169,6 +170,15 @@ EVENT_HEAD = 100
 EVENT_TAIL = 400
 EVENT_TEXT_LIMIT = 500
 
+# kimi, opencode and pi must never have a raw stdout line promoted to an
+# answer: their tool results carry arbitrary command output. Dropping such a
+# line silently, which is what used to happen, loses a CLI banner, an auth error
+# printed to stdout, or the truncated tail of a killed child. These bounds keep
+# a diagnostic without turning the event stream into a copy of the child's
+# stdout.
+MALFORMED_SAMPLE_LIMIT = 3
+MALFORMED_SAMPLE_CHARS = 200
+
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
     """Bound retained event text for raw and normalized event surfaces.
@@ -202,6 +212,13 @@ def _add_bounded_event_field(payload: JsonObject, key: str, value: str) -> None:
 ASSISTANT_RECOVERY_HARNESSES = frozenset(
     {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
+
+# Engines whose stdout may carry arbitrary tool output, so a line that is not a
+# JSON object is recorded as a diagnostic rather than becoming a text event.
+# `omp` shares pi's parser but not this list: it reaches the same handler
+# through `_ingest_pi_event`, and its stdout is a serialized event stream with
+# no raw passthrough.
+MALFORMED_LINE_PROTECTED_HARNESSES = frozenset({"kimi", "opencode", "pi"})
 
 
 @dataclass
@@ -614,6 +631,8 @@ class StreamAccumulator:
     usage: JsonObject | None = None
     session_id: str | None = None
     structured_events_seen: int = 0
+    malformed_lines: int = 0
+    malformed_samples: list[str] = field(default_factory=list)
 
     def _record_terminal_event(
         self,
@@ -648,9 +667,10 @@ class StreamAccumulator:
             payload: JsonValue = json.loads(stripped)
         except RecursionError:
             # Kimi tool results can contain arbitrary command output. If an
-            # excessively nested envelope cannot be classified, dropping it is
-            # safer than exposing the raw line as a text event.
-            if self.harness in ("kimi", "opencode", "pi"):
+            # excessively nested envelope cannot be classified, exposing the raw
+            # line as a text event would let it become the answer.
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
@@ -658,17 +678,38 @@ class StreamAccumulator:
             # The interpreter's integer-digit limit raises plain ValueError,
             # not JSONDecodeError. Malformed child data must not kill the drain
             # thread and hide a later valid completion.
-            if self.harness in ("kimi", "opencode", "pi"):
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
         if not isinstance(payload, dict):
-            if self.harness in ("kimi", "opencode", "pi"):
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
         self.structured_events_seen += 1
         self._ingest_object(payload)
+
+    def _record_malformed_line(self, text: str) -> None:
+        """Keep a bounded, redacted trace of a stdout line that is not an event.
+
+        The line is never surfaced as assistant text, so the protection against
+        promoting a raw tool envelope to an answer is unchanged. What changes is
+        that the run stops looking clean: `structured_events_seen` is what the
+        runner reads to decide whether the parser owned this child's stdout, so
+        counting a malformed line there is what routes an otherwise textless run
+        onto the no-assistant-text quality verdict instead of the raw-stdout
+        fallback that must not fire for these engines.
+        """
+        self.malformed_lines += 1
+        self.structured_events_seen += 1
+        if len(self.malformed_samples) >= MALFORMED_SAMPLE_LIMIT:
+            return
+        sample = redact_string(text)[:MALFORMED_SAMPLE_CHARS]
+        self.malformed_samples.append(sample)
+        self.events.append(NormalizedEvent(kind="stream.malformed", message=sample))
 
     def _ingest_text_fallback(self, text: str) -> None:
         bounded, truncated, original_chars = bounded_event_text(text)
