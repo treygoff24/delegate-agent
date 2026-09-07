@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
+from delegate_agent.constants import CLAUDE_FAMILY_ALIASES, CURSOR_EFFORT_LABELS, claude_alias_base
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 from delegate_agent.redaction import redact_string
 from delegate_agent.run_metadata import clean_harness_session_id
@@ -466,26 +467,16 @@ def _served_model(payload: JsonObject) -> str | None:
 # for each selector; `requested_model_display_name` carries it when a caller has
 # the catalog to hand. Without one, the selector's own documented shape
 # (`<family>-<effort>[-fast]`, rendered as "<Family> <Effort Label>[ Fast]") is
-# enough to reconstruct the expected label. Kept in step with
-# `harness_discovery._CURSOR_EFFORT_LABELS` by
-# test_cursor_effort_labels_match_harness_discovery.
-_CURSOR_EFFORT_LABELS = {
-    "none": "None",
-    "low": "Low",
-    "medium": "Medium",
-    "high": "High",
-    "xhigh": "Extra High",
-    "max": "Max",
-}
+# enough to reconstruct the expected label, from the same table discovery uses.
 _CURSOR_SELECTOR_PATTERN = re.compile(
     r"(?P<family>.+)-(?P<effort>none|low|medium|high|xhigh|max)(?P<fast>-fast)?$"
 )
 
 # Claude reports the fully dated served id, so every documented alias trips a
 # pinned run. The two evidenced equivalences are the dated suffix on a concrete
-# id and the family segment of a family alias. `best` and `opusplan` map to no
-# single family and are deliberately absent: they fail pinned preflight.
-_CLAUDE_FAMILY_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
+# id and the family segment of a family alias. The unpinnable aliases
+# (`best`, `opusplan`, `default`) map to no single family and are deliberately
+# absent from CLAUDE_FAMILY_ALIASES: they fail pinned preflight.
 _CLAUDE_SERVED_FAMILY_PATTERN = re.compile(r"^claude-(?P<family>[a-z]+)-")
 
 
@@ -497,7 +488,7 @@ def _cursor_expected_label_keys(requested: str) -> set[str]:
     keys = {_label_key(requested)}
     match = _CURSOR_SELECTOR_PATTERN.fullmatch(requested)
     if match is not None:
-        label = _CURSOR_EFFORT_LABELS[match.group("effort")]
+        label = CURSOR_EFFORT_LABELS[match.group("effort")]
         suffix = "fast" if match.group("fast") else ""
         keys.add(_label_key(match.group("family")) + _label_key(label) + suffix)
     keys.discard("")
@@ -515,13 +506,14 @@ def _cursor_pin_matches(requested: str, served: str, display_name: str | None) -
 
 def _claude_pin_matches(requested: str, served: str) -> bool:
     # `opus[1m]` and `claude-opus-5[1m]` name a context-window variant of the
-    # same model, so the documented bracket suffix is stripped before comparing.
-    base = requested.split("[", 1)[0].strip()
+    # same model, so the documented bracket suffix is stripped before comparing,
+    # by the same helper the request-build preflight uses.
+    base = claude_alias_base(requested).strip()
     if not base:
         return False
     if served == base:
         return True
-    if base.lower() in _CLAUDE_FAMILY_ALIASES:
+    if base.lower() in CLAUDE_FAMILY_ALIASES:
         match = _CLAUDE_SERVED_FAMILY_PATTERN.match(served)
         return match is not None and match.group("family") == base.lower()
     return re.fullmatch(rf"{re.escape(base)}-\d{{8}}", served) is not None

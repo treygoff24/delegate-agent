@@ -486,3 +486,65 @@ class IsHelpTokenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingVocabularyTests(unittest.TestCase):
+    """Help and describe must quote the vocabulary the resolver accepts.
+
+    Pi 3.5.0 and Oh My Pi 18.1.13 accept `off` and `minimal`, and omp also
+    accepts `auto`; the prose used to list five levels for both, so an operator
+    reading `delegate help omp` was told `auto` was invalid and `off` unavailable.
+    The strings are derived from `reasoning`'s tuples rather than transcribed.
+    """
+
+    def setUp(self):
+        from delegate_agent import config as delegate_config
+        from delegate_agent import describe_payload, reasoning
+
+        self.reasoning = reasoning
+        self.describe_payload = describe_payload
+        self.config = delegate_config.embedded_default_config()
+
+    def _note(self, notes, engine):
+        matches = [note for note in notes if f"{engine} --thinking" in note]
+        self.assertEqual(len(matches), 1, f"expected one {engine} --thinking note")
+        return matches[0]
+
+    def _levels(self, note):
+        _, _, tail = note.partition("--thinking")
+        return tuple(
+            level
+            for level in re.findall(r"[a-z]+", tail.replace("or ", " "))
+            if level not in {"maps", "directly", "to"}
+        )
+
+    def test_help_notes_list_the_resolver_vocabulary(self):
+        for engine, efforts in (
+            ("pi", self.reasoning.PI_NATIVE_EFFORTS),
+            ("omp", self.reasoning.OMP_NATIVE_EFFORTS),
+        ):
+            with self.subTest(engine=engine):
+                note = self._note(command_help.COMMAND_SPECS[engine].notes, engine)
+                self.assertEqual(self._levels(note), tuple(efforts))
+
+    def test_describe_notes_list_the_resolver_vocabulary(self):
+        payload = self.describe_payload.describe_payload(self.config, "embedded-default")
+        harnesses = payload["modeMapping"]
+        for engine, efforts in (
+            ("pi", self.reasoning.PI_NATIVE_EFFORTS),
+            ("omp", self.reasoning.OMP_NATIVE_EFFORTS),
+        ):
+            with self.subTest(engine=engine):
+                note = self._note(harnesses[engine]["workNotes"], engine)
+                self.assertEqual(self._levels(note), tuple(efforts))
+
+    def test_omp_is_no_longer_documented_as_an_argv_prompt_engine(self):
+        """omp moved to stdin; only kimi keeps the argv carve-out."""
+        from delegate_agent.prompt_transport import ARGV_PROMPT_TRANSPORT_ENGINES
+
+        self.assertEqual(ARGV_PROMPT_TRANSPORT_ENGINES, ("kimi",))
+        notes = command_help.COMMAND_SPECS["omp"].notes
+        transport = [note for note in notes if note.startswith("Uses omp ")]
+        self.assertEqual(len(transport), 1)
+        self.assertIn("stdin", transport[0])
+        self.assertNotIn("positional argument", transport[0])

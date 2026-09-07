@@ -5446,3 +5446,125 @@ class RunnerCaptureTests(unittest.TestCase):
         with mock.patch.object(os, "killpg") as kill_group:
             self.runner._terminate_call_process(process, pgid=own_pgid, grace_seconds=0)
         kill_group.assert_not_called()
+
+
+class MergedAttemptDiagnosticsTests(unittest.TestCase):
+    """A retry must not erase the first attempt's stream diagnostics."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_merge_under_test")
+
+    def _capture(self, accumulator):
+        return self.runner.TrackedCaptureResult(
+            accumulator=accumulator,
+            exit_code=0,
+            duration_ms=1,
+            stdout_bytes=1,
+            stderr_bytes=0,
+            stdin_failures=(),
+            pid=1,
+            pgid=None,
+        )
+
+    def _accumulator(self, **fields):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        for name, value in fields.items():
+            setattr(accumulator, name, value)
+        return accumulator
+
+    def test_merge_carries_malformed_and_unhandled_diagnostics(self):
+        prior = self._accumulator(
+            malformed_lines=2,
+            malformed_samples=["first", "second"],
+            unhandled_event_types={"session.resume_hint": 2, "only_prior": 1},
+        )
+        current = self._accumulator(
+            malformed_lines=1,
+            malformed_samples=["third"],
+            unhandled_event_types={"session.resume_hint": 3, "only_current": 4},
+        )
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertEqual(merged.malformed_lines, 3)
+        self.assertEqual(merged.malformed_samples, ["first", "second", "third"])
+        self.assertEqual(
+            merged.unhandled_event_types,
+            {"session.resume_hint": 5, "only_prior": 1, "only_current": 4},
+        )
+        self.assertFalse(merged.unhandled_event_types_truncated)
+
+    def test_merged_samples_and_types_stay_within_their_bounds(self):
+        limit = self.runner.harness_events.UNHANDLED_EVENT_TYPE_LIMIT
+        prior = self._accumulator(
+            malformed_samples=["a", "b", "c"],
+            unhandled_event_types={f"prior.{index}": 1 for index in range(limit)},
+        )
+        current = self._accumulator(
+            malformed_samples=["d"],
+            unhandled_event_types={"current.new": 1},
+        )
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertEqual(
+            len(merged.malformed_samples), self.runner.harness_events.MALFORMED_SAMPLE_LIMIT
+        )
+        self.assertEqual(len(merged.unhandled_event_types), limit)
+        self.assertNotIn("current.new", merged.unhandled_event_types)
+        self.assertTrue(merged.unhandled_event_types_truncated)
+
+    def test_prior_truncation_flag_survives_a_clean_retry(self):
+        prior = self._accumulator(unhandled_event_types_truncated=True)
+        current = self._accumulator()
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertTrue(merged.unhandled_event_types_truncated)
+
+
+class AggregatedUsageCostTests(unittest.TestCase):
+    """grok's `end` event prices the run; merging attempts must not drop it."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_usage_under_test")
+
+    def _reported(self, **extra):
+        return {"basis": "reported", "inputTokens": 10, "outputTokens": 2, **extra}
+
+    def test_cost_is_summed_across_merged_captures(self):
+        aggregated = self.runner._aggregate_usage(
+            self._reported(costUsd=0.01234574),
+            self._reported(costUsd=0.5),
+        )
+
+        self.assertAlmostEqual(aggregated["costUsd"], 0.51234574)
+        self.assertEqual(aggregated["inputTokens"], 20)
+
+    def test_partial_cost_is_reported_as_unknown_rather_than_understated(self):
+        aggregated = self.runner._aggregate_usage(
+            self._reported(costUsd=0.5),
+            self._reported(),
+        )
+
+        self.assertIn("costUsd", aggregated)
+        self.assertIsNone(aggregated["costUsd"])
+
+    def test_engines_that_never_price_a_run_gain_no_cost_key(self):
+        aggregated = self.runner._aggregate_usage(self._reported(), self._reported())
+
+        self.assertNotIn("costUsd", aggregated)
+
+    def test_a_negative_or_boolean_cost_is_not_summed(self):
+        for bad in (-1.0, True):
+            with self.subTest(cost=bad):
+                aggregated = self.runner._aggregate_usage(
+                    self._reported(costUsd=bad), self._reported(costUsd=0.5)
+                )
+                self.assertIsNone(aggregated["costUsd"])
