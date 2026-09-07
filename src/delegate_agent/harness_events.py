@@ -681,13 +681,15 @@ class StreamAccumulator:
     ) -> None:
         self.terminal_status = status
         payload: JsonObject = {"event": event, "status": status}
-        if reason:
-            # The reason is child-supplied text and `terminalEvent` is persisted
-            # to the run record, so it is redacted here. `recentEvents` is the
-            # deliberate raw diagnostic mirror and keeps the original.
-            _add_bounded_event_field(payload, "reason", redact_string(reason))
+        # The reason is child-supplied text and both sinks below are persisted to
+        # the run record: `terminalEvent` directly and the `run.completed` event
+        # through `recentEvents`. Redact once and use the redacted text for both;
+        # a raw mirror of a credential-bearing message is a leak, not a diagnostic.
+        redacted = redact_string(reason) if reason else None
+        if redacted:
+            _add_bounded_event_field(payload, "reason", redacted)
         self.terminal_event = payload
-        self.events.append(NormalizedEvent(kind="run.completed", status=status, message=reason))
+        self.events.append(NormalizedEvent(kind="run.completed", status=status, message=redacted))
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -1019,7 +1021,10 @@ class StreamAccumulator:
             if isinstance(error, dict):
                 message = _string_field(error, "message")
         if message:
-            self._last_error_message = message
+            # Redact at the source: `_last_error_message` feeds the terminal
+            # reason, the failover classifier and the synthesized completion
+            # report, and both the `error` event and `current` are persisted.
+            self._last_error_message = redact_string(message)
             self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
             self.current = _bounded_current_line(self._last_error_message)
 
