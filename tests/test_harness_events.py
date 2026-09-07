@@ -108,6 +108,15 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.terminal_status, "succeeded")
         self.assertEqual(acc.completion_text, "Status: completed after reconnect.")
 
+    def test_a_terminal_reason_is_redacted_before_it_is_persisted(self):
+        """terminalEvent reaches the run record; recentEvents is the raw mirror."""
+        secret = "Authorization: Bearer sk-abcdef1234567890"
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": f"Usage limit for {secret}"}))
+
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        self.assertIn("Usage limit for", acc.terminal_event["reason"])
+
     def test_error_event_reads_nested_error_message(self):
         """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
         acc = self.events.StreamAccumulator(harness="claude")
