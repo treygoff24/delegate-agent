@@ -11,6 +11,7 @@ reconcile the active-supervisor index.
 from __future__ import annotations
 
 import compileall
+import errno
 import hashlib
 import json
 import os
@@ -18,7 +19,7 @@ import re
 import shutil
 import stat
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,8 +31,6 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry as workflow_registry
 
 if TYPE_CHECKING:
-    from types import TracebackType
-
     from delegate_agent.workflow_attempts import WorkflowAttempt
 
 PIN_SCHEMA = "delegate.workflow-pin.v1"
@@ -405,18 +404,27 @@ def _runtime_directory_digest(root: Path) -> str:
     return _runtime_digest(files)
 
 
-def _retry_readonly_runtime_removal(
-    function: Callable[[str], object],
-    path: str,
-    exc_info: tuple[type[BaseException], BaseException, TracebackType | None],
-) -> None:
-    if not isinstance(exc_info[1], PermissionError) or function not in (os.unlink, os.rmdir):
-        raise exc_info[1]
-    # Unlink/rmdir require a writable parent, not a writable file. Never chmod
-    # the entry itself: it may be a symlink pointing outside the stale tree.
-    parent = Path(path).parent
-    parent.chmod(parent.stat().st_mode | stat.S_IWUSR)
-    function(path)
+def _make_runtime_directories_writable(root: Path) -> None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(root, flags)
+    try:
+        for directory, _directories, _files in os.walk(root, topdown=True):
+            fd = os.dup(root_fd)
+            try:
+                # O_NOFOLLOW protects only the final component. Anchor every
+                # component to a descriptor so a swapped ancestor cannot escape.
+                for part in Path(directory).relative_to(root).parts:
+                    child_fd = os.open(part, flags, dir_fd=fd)
+                    os.close(fd)
+                    fd = child_fd
+                os.fchmod(fd, os.fstat(fd).st_mode | stat.S_IWUSR)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTDIR, errno.ELOOP):
+                    raise
+            finally:
+                os.close(fd)
+    finally:
+        os.close(root_fd)
 
 
 def _write_runtime_snapshot(
@@ -446,7 +454,8 @@ def _write_runtime_snapshot(
                         "runtime_snapshot_collision",
                         f"runtime snapshot temporary path is unsafe: {temporary_root}",
                     )
-                shutil.rmtree(temporary_root, onerror=_retry_readonly_runtime_removal)
+                _make_runtime_directories_writable(temporary_root)
+                shutil.rmtree(temporary_root)
             for relative, content in files:
                 target = temporary_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)

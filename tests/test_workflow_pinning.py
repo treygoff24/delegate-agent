@@ -347,6 +347,106 @@ class WorkflowPinningTests(unittest.TestCase):
         self.assertFalse((runtime / "src" / "partial.py").exists())
         self.assertEqual(workflow_pinning._runtime_directory_digest(runtime), digest)
 
+    def test_runtime_temporary_symlink_swap_does_not_touch_external_files(self) -> None:
+        digest = workflow_pinning._runtime_digest(workflow_pinning._runtime_source_files())
+        pool = self.home / workflow_pinning.PIN_ROOT_DIRNAME / workflow_pinning.RUNTIME_DIR
+        partial = pool / f"{digest}.tmp"
+        nested = partial / "nested"
+        nested.mkdir(parents=True)
+        (nested / "keep.txt").write_text("stale", encoding="utf-8")
+        (nested / "keep.txt").chmod(0o400)
+        nested.chmod(0o500)
+        external = self.root / "external"
+        external.mkdir()
+        external_file = external / "keep.txt"
+        external_file.write_text("external", encoding="utf-8")
+        external_file.chmod(0o400)
+        external.chmod(0o500)
+        (partial / "link").symlink_to(external, target_is_directory=True)
+        partial.chmod(0o500)
+        parked = partial / "parked"
+        unlink, rmdir = os.unlink, os.rmdir
+        swapped = False
+
+        def swap_before_unlink(path, *, dir_fd=None):
+            nonlocal swapped
+            if path == "keep.txt" and dir_fd is not None and not swapped:
+                # Keep rmtree's descriptor on the original directory, but
+                # redirect the pathname an onerror callback would reconstruct.
+                mode = nested.stat().st_mode
+                partial.chmod(0o700)
+                nested.chmod(0o700)
+                nested.rename(parked)
+                parked.chmod(mode)
+                nested.symlink_to(external, target_is_directory=True)
+                swapped = True
+            return unlink(path, dir_fd=dir_fd)
+
+        def restore_before_rmdir(path, *, dir_fd=None):
+            if path == "nested" and dir_fd is not None and swapped:
+                # Restore the entry before rmtree removes the emptied inode.
+                # Only a descriptor-relative unlink emptied the original tree.
+                nested.unlink()
+                mode = parked.stat().st_mode
+                parked.chmod(0o700)
+                parked.rename(nested)
+                nested.chmod(mode)
+            return rmdir(path, dir_fd=dir_fd)
+
+        with (
+            mock.patch.object(os, "unlink", side_effect=swap_before_unlink),
+            mock.patch.object(os, "rmdir", side_effect=restore_before_rmdir),
+        ):
+            try:
+                workflow_pinning._write_runtime_snapshot(self.workspace, home=self.home)
+            finally:
+                # Inspect the external tree even if the racing cleanup fails;
+                # never suppress the underlying filesystem error.
+                self.assertTrue(swapped)
+                with self.subTest("external file retained"):
+                    self.assertTrue(external_file.exists())
+                with self.subTest("external file mode"):
+                    self.assertEqual(stat.S_IMODE(external_file.stat().st_mode), 0o400)
+                with self.subTest("external directory mode"):
+                    self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o500)
+                with self.subTest("stale tree removed"):
+                    self.assertFalse(partial.exists())
+
+    def test_runtime_directory_prepass_rejects_swapped_ancestors(self) -> None:
+        root = self.root / "stale"
+        nested = root / "nested"
+        child = nested / "child"
+        child.mkdir(parents=True)
+        for path in (root, nested, child):
+            path.chmod(0o500)
+        external = self.root / "external"
+        external_child = external / "child"
+        external_child.mkdir(parents=True)
+        external_child.chmod(0o500)
+        parked = root / "parked"
+        walk = os.walk
+        swapped = False
+
+        def swap_after_walk(*args, **kwargs):
+            nonlocal swapped
+            for directory, directories, files in walk(*args, **kwargs):
+                if Path(directory) != child:
+                    yield directory, directories, files
+                    continue
+                nested.rename(parked)
+                nested.symlink_to(external, target_is_directory=True)
+                swapped = True
+                try:
+                    yield directory, directories, files
+                finally:
+                    nested.unlink()
+                    parked.rename(nested)
+
+        with mock.patch.object(os, "walk", side_effect=swap_after_walk):
+            workflow_pinning._make_runtime_directories_writable(root)
+
+        self.assertEqual((swapped, stat.S_IMODE(external_child.stat().st_mode)), (True, 0o500))
+
     def test_partial_runtime_temporary_directory_is_rebuilt_before_publish(self) -> None:
         files = workflow_pinning._runtime_source_files()
         digest = workflow_pinning._runtime_digest(files)
