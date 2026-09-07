@@ -65,7 +65,7 @@ DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
 CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
-TRACKED_STREAM_MAX_BYTES = 16 * 1024 * 1024
+TRACKED_STREAM_MAX_BYTES = delegate_config.DEFAULT_TRACKED_STREAM_MAX_BYTES
 STREAM_READ_CHUNK_BYTES = 64 * 1024
 TRACKED_PROCESS_POLL_SEC = 0.05
 TERMINAL_EXIT_GRACE_SEC = 1.0
@@ -169,6 +169,7 @@ class RunContext:
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
     stall_seconds: float = STALL_SECONDS_DEFAULT
     process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
+    tracked_stream_max_bytes: int | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
     fallback_env_overrides: dict[str, str] = field(default_factory=dict)
     auth_profile: str | None = None
@@ -252,6 +253,21 @@ def _registry_lock_timeout(ctx: RunContext) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return run_registry.resolve_registry_lock_timeout_seconds()
     return max(float(value), 0.0)
+
+
+def _tracked_stream_max_bytes(ctx: RunContext) -> int:
+    if ctx.tracked_stream_max_bytes is not None:
+        return ctx.tracked_stream_max_bytes
+    try:
+        config, _source = delegate_config.load_config(workspace=Path(ctx.source_cwd))
+        delegate_config.validate_config(config)
+    except (delegate_config.ConfigError, OSError):
+        # Direct runner callers may intentionally supply an ambient config that
+        # is unavailable to the parent (for example, a child-only profile path).
+        # The engine default is finite and safer than turning that late lookup
+        # into an untracked launch failure.
+        return delegate_config.default_tracked_stream_max_bytes(ctx.engine)
+    return delegate_config.resolve_tracked_stream_max_bytes(config, ctx.engine)
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -588,6 +604,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["progressRequested"] = ctx.progress_requested
     if ctx.timeout_seconds is not None:
         payload["timeoutSeconds"] = ctx.timeout_seconds
+    if ctx.tracked_stream_max_bytes is not None:
+        payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes
     if ctx.output_schema_text is not None:
         payload["outputSchema"] = ctx.output_schema_text
     if ctx.agent is not None:
@@ -2183,6 +2201,9 @@ def _capture_tracked_process(
     process_group_pgid: int | None = None,
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> TrackedCaptureResult:
+    tracked_stream_max_bytes = ctx.tracked_stream_max_bytes
+    if tracked_stream_max_bytes is None:
+        raise AssertionError("tracked stream limit must be resolved before child launch")
     accumulator = harness_events.StreamAccumulator(
         harness=ctx.harness,
         requested_model=ctx.model_resolved or ctx.model or _requested_model(ctx),
@@ -2324,7 +2345,7 @@ def _capture_tracked_process(
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
             kwargs={
                 "on_line": handle_stdout_line,
-                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "max_bytes": tracked_stream_max_bytes,
                 "limit_signal": limit_signal,
                 "stream": "stdout",
                 "capture_info": stdout_capture,
@@ -2337,7 +2358,7 @@ def _capture_tracked_process(
             args=(process.stderr, files.stderr_log, stderr_bytes_counter),
             kwargs={
                 "on_line": handle_stderr_line,
-                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "max_bytes": tracked_stream_max_bytes,
                 "limit_signal": limit_signal,
                 "stream": "stderr",
             },
@@ -2533,10 +2554,29 @@ def _capture_tracked_process(
             message = "Child command exceeded the configured timeout."
         elif output_limited:
             error = "output_limit_exceeded"
-            message = (
-                f"Child {limit_signal.stream or 'output'} exceeded the tracked output limit "
-                f"of {limit_signal.limit or TRACKED_STREAM_MAX_BYTES} bytes."
+            actual_limit = limit_signal.limit or tracked_stream_max_bytes
+            limit_kind = (
+                stdout_capture.get("limitKind")
+                if limit_signal.stream == "stdout" and stdout_capture is not None
+                else None
             )
+            if limit_kind == "transport":
+                message = (
+                    f"Child engine {ctx.engine} {limit_signal.stream or 'output'} exceeded the "
+                    f"hard transport limit of {actual_limit} bytes; its configured tracked "
+                    f"stream limit is {tracked_stream_max_bytes} bytes."
+                )
+            elif limit_kind == "record":
+                message = (
+                    f"Child engine {ctx.engine} {limit_signal.stream or 'output'} exceeded the "
+                    f"per-record limit of {actual_limit} bytes; its configured tracked stream "
+                    f"limit is {tracked_stream_max_bytes} bytes."
+                )
+            else:
+                message = (
+                    f"Child engine {ctx.engine} {limit_signal.stream or 'output'} exceeded its "
+                    f"configured tracked stream limit of {tracked_stream_max_bytes} bytes."
+                )
     return TrackedCaptureResult(
         accumulator=accumulator,
         exit_code=exit_code,
@@ -2550,7 +2590,7 @@ def _capture_tracked_process(
         error=error,
         message=message,
         output_limit_stream=limit_signal.stream if output_limited else None,
-        output_limit_bytes=(limit_signal.limit or TRACKED_STREAM_MAX_BYTES)
+        output_limit_bytes=(limit_signal.limit or tracked_stream_max_bytes)
         if output_limited
         else None,
         stopped_after_completion=stopped_after_completion,
@@ -3692,6 +3732,7 @@ def _execute_tracked(
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
+    ctx = replace(ctx, tracked_stream_max_bytes=_tracked_stream_max_bytes(ctx))
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
     for warning in _mail_push_warnings(ctx):
         _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)

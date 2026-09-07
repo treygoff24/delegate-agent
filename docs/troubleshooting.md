@@ -465,12 +465,16 @@ and a result warning disclose the omission; `stdoutCapture` in the result or
 snapshot reports byte counts, omitted records, limits, and a transport digest.
 These counters cover the final attempt, not all retries combined.
 
-The limits remain finite: 16 MiB retained stdout, 16 MiB per record, and 256 MiB
-total OMP stdout transport per attempt. Stderr stays capped at 16 MiB. Unknown
-records, malformed JSON, useful output, and metadata-bearing events still count
-against the retained cap. Check `stdoutCapture.limitKind` to distinguish a
-retained-output, record, or transport limit; an endlessly verbose child still
-fails and is terminated. `--raw` cannot recover omitted thinking diagnostics.
+The limits remain finite: OMP retains 64 MiB per tracked stream by default,
+allows 16 MiB per JSON record, and accepts at most 256 MiB of total stdout
+transport per attempt. Pi also defaults to 64 MiB per tracked stream; other
+engines default to 16 MiB. Override a tracked-run limit with
+`<engine>.trackedStreamMaxBytes`; call mode keeps its separate 16 MiB caps.
+Unknown records, malformed JSON, useful output, and metadata-bearing events
+still count against the retained cap. Check `stdoutCapture.limitKind` to
+distinguish a retained-output, record, or transport limit; an endlessly verbose
+child still fails and is terminated. `--raw` cannot recover omitted thinking
+diagnostics.
 
 ## Parsing `events.jsonl` nested JSON
 
