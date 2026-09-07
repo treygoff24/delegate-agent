@@ -1,16 +1,4 @@
-"""Workspace-scoped run Registry and its advisory-lock durability contract.
-
-Registry mutations serialize through ``registry_lock``. Terminal finalization
-first tries that lock for the configured bounded budget
-(``DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`` or
-``tracking.registryLockTimeoutSec``). If contention outlives the budget, the
-runner atomically publishes ``runs/<runId>/finalize-wal.json`` containing a
-complete state/snapshot pair and returns the child's real result. Direct
-readers continue to see the last canonical pair until the next successful lock
-holder replays the WAL. Replay is owned only by ``registry_lock``, is
-idempotent, and quarantines malformed records; a cancellation marker or
-cancelled state always takes precedence over a WAL success.
-"""
+"""Workspace-scoped run registry and targeted finalization durability."""
 
 from __future__ import annotations
 
@@ -50,10 +38,13 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     write_text_atomic,
 )
 from delegate_agent.record_io import (  # noqa: F401  # existing registry API
+    FINALIZE_WAL_FILE,
+    FINALIZE_WAL_SCHEMA,
     MANIFEST_FILE,
     RUN_ID_RE,
     SNAPSHOT_FILE,
     STATE_FILE,
+    STATE_SCHEMA,
     STDERR_LOG,
     STDOUT_LOG,
     index_run_entries,
@@ -64,11 +55,14 @@ from delegate_agent.record_io import (  # noqa: F401  # existing registry API
     load_run_state,
     load_run_state_or_none,
     parse_utc_timestamp,
+    pending_finalize_wal_exists,
+    read_finalize_wal,
     run_directory,
     run_output_command,
     runs_dir,
     snapshot_command,
     timestamp_from_run_id,
+    validate_finalize_wal,
 )
 from delegate_agent.run_status import (  # noqa: F401  # existing registry API
     DEFAULT_RUNS_LIMIT,
@@ -109,7 +103,6 @@ PROMPT_TXT_FILE = "prompt.txt"
 PERSONA_TXT_FILE = "persona.txt"
 INDEX_VERSION = 1
 MANIFEST_SCHEMA = "delegate.manifest.v1"
-STATE_SCHEMA = "delegate.state.v1"
 SNAPSHOT_SCHEMA = "delegate.snapshot.v1"
 RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
@@ -127,8 +120,8 @@ RETENTION_LOCK_NAME = ".retention.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 120.0
 REGISTRY_LOCK_TIMEOUT_ENV = "DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS"
 REGISTRY_LOCK_POLL_SECONDS = 0.05
-FINALIZE_WAL_FILE = "finalize-wal.json"
-FINALIZE_WAL_SCHEMA = "delegate.finalize-wal.v1"
+TERMINAL_SELECTION_KEY = "terminalSelection"
+FINALIZE_WAL_ENVELOPE_RESERVE_BYTES = 4 * 1024
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
 PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
@@ -240,11 +233,15 @@ def load_index(registry_root: Path) -> JsonObject:
     runs = data.get("runs")
     if not isinstance(aliases, dict) or not isinstance(runs, dict):
         raise RegistryJsonError(f"{path} must contain aliases and runs objects")
-    return {
+    result: JsonObject = {
         "version": data.get("version", INDEX_VERSION),
         "aliases": aliases,
         "runs": runs,
     }
+    retention = data.get("retention")
+    if isinstance(retention, dict):
+        result["retention"] = retention
+    return result
 
 
 def _serialized_json_size(payload: JsonObject) -> int:
@@ -270,8 +267,16 @@ def save_index(registry_root: Path, index: JsonObject) -> None:
     _write_bounded_json(index_path(registry_root), index, record_name="index")
 
 
-def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
-    _write_bounded_json(run_path / SNAPSHOT_FILE, snapshot, record_name="snapshot")
+def write_run_state(run_path: Path, state: JsonObject) -> None:
+    serialized = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    size = len(serialized.encode("utf-8"))
+    limit = PRIVATE_RECORD_READ_MAX_BYTES - FINALIZE_WAL_ENVELOPE_RESERVE_BYTES
+    if size > limit:
+        raise RegistryJsonError(
+            f"state exceeds the {limit}-byte canonical record limit ({size} bytes); "
+            "reserve is required for a single-record finalization WAL"
+        )
+    write_private_text_atomic(run_path / STATE_FILE, serialized)
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
@@ -354,29 +359,23 @@ def write_finalize_wal(
     run_id: str,
     *,
     status: str,
-    state: JsonObject,
-    snapshot: JsonObject,
+    record: JsonObject,
 ) -> None:
-    """Publish a terminal finalization record without taking the registry lock.
-
-    The record is a complete replacement for ``state.json`` and
-    ``snapshot.json``. ``write_json_atomic`` serializes a temporary file and
-    publishes it with one rename, so readers see either the old record or the
-    complete WAL, never a partial JSON document. Readers intentionally continue to see the prior
-    canonical state until a future successful ``registry_lock`` acquisition
-    replays this record.
-    """
     if not RUN_ID_RE.fullmatch(run_id):
         raise ValueError(f"run id does not match expected format: {run_id}")
+    if status not in TERMINAL_STATUSES or record.get("status") != status:
+        raise ValueError("finalization WAL must contain a matching terminal record")
     payload: JsonObject = {
         "schema": FINALIZE_WAL_SCHEMA,
         "runId": run_id,
         "status": status,
         "createdAt": utc_now_iso(),
-        "state": state,
-        "snapshot": snapshot,
+        "record": record,
     }
-    write_json_atomic(finalize_wal_path(registry_root, run_id), payload)
+    validate_finalize_wal(payload, run_id)
+    _write_bounded_json(
+        finalize_wal_path(registry_root, run_id), payload, record_name="finalize WAL"
+    )
 
 
 def _quarantine_finalize_wal(path: Path, reason: str) -> None:
@@ -391,77 +390,108 @@ def _quarantine_finalize_wal(path: Path, reason: str) -> None:
         write_private_text_atomic(quarantine.with_suffix(quarantine.suffix + ".reason"), reason)
 
 
-def _replay_finalize_wal_locked(registry_root: Path) -> None:
-    """Fold pending terminal WAL records while ``registry_lock`` is held.
-
-    Replay is deliberately owned here, at the one lock seam shared by every
-    mutator.  It is idempotent: a terminal canonical state wins over a stale
-    duplicate WAL, and successful publication removes the WAL.  A cancelled
-    state or ``cancelRequested`` marker always wins over a WAL success record.
-    Malformed records are quarantined and never abort the caller's mutation.
-    """
-    runs = runs_dir(registry_root)
+def _state_identity(path: Path) -> JsonObject | None:
     try:
-        candidates = list(runs.iterdir())
+        info = path.lstat()
     except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtimeNs": info.st_mtime_ns,
+        "ctimeNs": info.st_ctime_ns,
+    }
+
+
+def _terminal_selection(state: JsonObject, state_path: Path) -> JsonObject | None:
+    status = state.get("status")
+    activity = run_status.activity_timestamp(state, None)
+    identity = _state_identity(state_path)
+    if status not in TERMINAL_STATUSES or not activity or identity is None:
+        return None
+    return {"status": status, "activityAt": activity, "stateIdentity": identity}
+
+
+def update_terminal_selection_locked(
+    registry_root: Path,
+    run_id: str,
+    state: JsonObject,
+) -> None:
+    index = load_index(registry_root)
+    entries = index.get("runs")
+    entry = entries.get(run_id) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict):
         return
-    for run_path in candidates:
-        if run_path.is_symlink() or not run_path.is_dir():
-            continue
-        run_id = run_path.name
-        if not RUN_ID_RE.fullmatch(run_id):
-            continue
-        wal_path = run_path / FINALIZE_WAL_FILE
-        if not wal_path.exists() or wal_path.is_symlink():
-            continue
-        try:
-            wal = read_json_object(wal_path)
-            if not isinstance(wal, dict):
-                raise RegistryJsonError("WAL root is not an object")
-            wal_status = wal.get("status")
-            if (
-                wal.get("schema") != FINALIZE_WAL_SCHEMA
-                or wal.get("runId") != run_id
-                or wal_status not in TERMINAL_STATUSES
-            ):
-                raise RegistryJsonError("WAL schema or run id is invalid")
-            state = wal.get("state")
-            snapshot = wal.get("snapshot")
-            if not isinstance(state, dict) or not isinstance(snapshot, dict):
-                raise RegistryJsonError("WAL state and snapshot must be objects")
-            if state.get("status") != wal_status or snapshot.get("status") != wal_status:
-                raise RegistryJsonError("WAL status does not match state and snapshot")
-            current = load_run_state_or_none(registry_root, run_id)
-            current_status = current.get("status") if isinstance(current, dict) else None
-            if current_status in TERMINAL_STATUSES and current_status != STATUS_CANCELLED:
-                # A crash can land state.json before snapshot.json.  Do not
-                # treat a terminal state alone as publication: only both WAL
-                # payloads are the finalized projection.
-                current_snapshot = load_run_snapshot_or_none(registry_root, run_id)
-                if current == state and current_snapshot == snapshot:
-                    wal_path.unlink(missing_ok=True)
-                    continue
-            if current_status == STATUS_CANCELLED or (
-                isinstance(current, dict) and current.get("cancelRequested") is True
-            ):
-                state = dict(state)
-                snapshot = dict(snapshot)
-                state["status"] = STATUS_CANCELLED
-                terminal_states.apply_operator_cancel_override(state)
-                if isinstance(current, dict):
-                    for key in ("cancelRequested", "cancelRequestedAt"):
-                        if key in current:
-                            state[key] = current[key]
-                snapshot["status"] = STATUS_CANCELLED
-                snapshot["ok"] = False
-                terminal_states.apply_operator_cancel_override(snapshot)
-            write_json_atomic(run_path / STATE_FILE, state)
-            write_snapshot(run_path, snapshot)
+    selection = _terminal_selection(state, run_directory(registry_root, run_id) / STATE_FILE)
+    if selection is None:
+        entry.pop(TERMINAL_SELECTION_KEY, None)
+    else:
+        entry[TERMINAL_SELECTION_KEY] = selection
+    save_index(registry_root, index)
+
+
+def terminal_selection_state(
+    registry_root: Path,
+    run_id: str,
+    index_entry: JsonObject,
+) -> JsonObject | None:
+    selection = index_entry.get(TERMINAL_SELECTION_KEY)
+    if not isinstance(selection, dict) or pending_finalize_wal_exists(registry_root, run_id):
+        return None
+    status = selection.get("status")
+    activity = selection.get("activityAt")
+    identity = selection.get("stateIdentity")
+    current_identity = _state_identity(run_directory(registry_root, run_id) / STATE_FILE)
+    if (
+        status not in TERMINAL_STATUSES
+        or not isinstance(activity, str)
+        or not isinstance(identity, dict)
+        or identity != current_identity
+    ):
+        return None
+    return {"status": status, "finishedAt": activity, "lastActivityAt": activity}
+
+
+def publish_terminal_record_locked(registry_root: Path, run_id: str, record: JsonObject) -> None:
+    run_path = run_directory(registry_root, run_id)
+    write_run_state(run_path, record)
+    try:
+        update_terminal_selection_locked(registry_root, run_id, record)
+    except (OSError, RegistryJsonError):
+        return
+
+
+def reconcile_finalize_wal_locked(registry_root: Path, run_id: str) -> None:
+    run_path = run_directory(registry_root, run_id)
+    wal_path = run_path / FINALIZE_WAL_FILE
+    if not wal_path.exists() or wal_path.is_symlink():
+        return
+    try:
+        record = read_finalize_wal(run_path, run_id, suppress_malformed=False)
+        if record is None:
+            return
+        current = read_json_object_or_none(run_path / STATE_FILE)
+        current_status = current.get("status") if isinstance(current, dict) else None
+        if current_status in TERMINAL_STATUSES:
             wal_path.unlink(missing_ok=True)
-        except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
-            if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":
-                continue
-            _quarantine_finalize_wal(wal_path, str(exc))
+            return
+        published = dict(record)
+        if isinstance(current, dict) and current.get("cancelRequested") is True:
+            published["status"] = STATUS_CANCELLED
+            published["ok"] = False
+            terminal_states.apply_operator_cancel_override(published)
+            for key in ("cancelRequested", "cancelRequestedAt"):
+                if key in current:
+                    published[key] = current[key]
+        publish_terminal_record_locked(registry_root, run_id, published)
+        wal_path.unlink(missing_ok=True)
+    except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
+        if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":
+            return
+        _quarantine_finalize_wal(wal_path, str(exc))
 
 
 @contextmanager
@@ -501,15 +531,7 @@ def registry_lock(
     *,
     timeout_seconds: float | None = None,
 ) -> Iterator[None]:
-    """Serialize registry mutations and replay pending finalization WALs.
-
-    Finalizers that cannot acquire this lock within their bounded budget publish
-    ``runs/<runId>/finalize-wal.json`` instead.  Every later successful lock
-    holder replays those records before its own mutation; direct readers retain
-    the last canonical state until that replay occurs.
-    """
     with file_lock(registry_lock_path(registry_root), timeout_seconds=timeout_seconds):
-        _replay_finalize_wal_locked(registry_root)
         yield
 
 
@@ -1008,7 +1030,10 @@ def _write_worktree_status(
         state["worktreeRemovedAt"] = removed_at
     if discarded_dirty_paths is not None:
         state["discardedDirtyPaths"] = discarded_dirty_paths
-    write_json_atomic(state_path, state)
+    if state.get("status") in TERMINAL_STATUSES:
+        publish_terminal_record_locked(registry_root, run_id, state)
+    else:
+        write_run_state(run_path, state)
     return state
 
 
@@ -1027,7 +1052,10 @@ def set_worktree_status(
 
     Status must be one of: 'present', 'removed', 'missing', 'unknown'.
     """
+    if status not in {"present", "removed", "missing", "unknown"}:
+        raise ValueError("worktree status must be one of: missing, present, removed, unknown")
     with registry_lock(registry_root):
+        reconcile_finalize_wal_locked(registry_root, run_id)
         return _write_worktree_status(
             registry_root,
             run_id,
@@ -1046,6 +1074,7 @@ def set_worktree_status_locked(
     discarded_dirty_paths: list[str] | None = None,
 ) -> JsonObject:
     """Set worktree status when the caller already holds the registry lock."""
+    reconcile_finalize_wal_locked(registry_root, run_id)
     return _write_worktree_status(
         registry_root,
         run_id,
@@ -1290,6 +1319,7 @@ def prune_runs(
                     )
                 )
                 continue
+            reconcile_finalize_wal_locked(registry_root, run_id)
             state = load_run_state_or_none(registry_root, run_id)
             effective_status = run_status.effective_status(state)
             attached_runs = live_attachments_by_owner_id.get(run_id)

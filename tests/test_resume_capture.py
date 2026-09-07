@@ -160,6 +160,12 @@ class ResumeCaptureTests(unittest.TestCase):
             with (
                 mock.patch.object(run_registry, "write_private_text", side_effect=write_prompt),
                 mock.patch.object(runner, "write_manifest", side_effect=write_manifest),
+                mock.patch.object(
+                    worktree_execution.delegate_runner,
+                    "build_state",
+                    runner.build_run_record,
+                    create=True,
+                ),
             ):
                 registration = worktree_execution._register_persistent_worktree_run(
                     execution, preflight
@@ -184,10 +190,11 @@ class ResumeCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             run = json.loads(runs_stdout.getvalue())["runs"][0]
             self.assertEqual(run["workflowAgentKey"], "root/agent@0")
-            runner.write_snapshot(
+            runner.write_state(
                 registration.run_path,
-                runner.build_snapshot(
+                runner.build_run_record(
                     registration.pre_ctx,
+                    status="creating_isolation",
                     accumulator=runner.harness_events.StreamAccumulator(harness="cursor"),
                 ),
             )

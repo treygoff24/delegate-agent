@@ -452,7 +452,6 @@ def _persist_cancelled_terminal_locked(
     warnings: list[str],
 ) -> None:
     """Persist the canonical cancelled outcome while registry_lock is held."""
-    run_path = run_registry.run_directory(registry_root, target.run_id)
     stdout_bytes, stderr_bytes = run_registry.effective_log_byte_sizes(
         registry_root, target.run_id, state
     )
@@ -491,12 +490,9 @@ def _persist_cancelled_terminal_locked(
             *existing,
             *(warning for warning in warnings if warning not in existing),
         ]
-    run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, updated)
-
-    snapshot = dict(run_registry.load_run_snapshot_or_none(registry_root, target.run_id) or {})
-    snapshot.update(
+    updated.update(
         {
-            "schema": run_registry.SNAPSHOT_SCHEMA,
+            "schema": run_registry.STATE_SCHEMA,
             "ok": False,
             "runId": target.run_id,
             "alias": target.alias,
@@ -506,14 +502,8 @@ def _persist_cancelled_terminal_locked(
             "stderrBytes": stderr_bytes,
         }
     )
-    terminal_states.apply_operator_cancel_override(snapshot)
-    if warnings:
-        existing = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
-        snapshot["warnings"] = [
-            *existing,
-            *(warning for warning in warnings if warning not in existing),
-        ]
-    run_registry.write_snapshot(run_path, snapshot)
+    terminal_states.apply_operator_cancel_override(updated)
+    run_registry.publish_terminal_record_locked(registry_root, target.run_id, updated)
 
 
 def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
@@ -521,6 +511,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
     # the initial selection under it too, so cancel waits for a primary Popen to
     # publish pid/pgid instead of racing the temporary no-state window.
     with run_registry.registry_lock(registry_root):
+        run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
         state = run_registry.load_run_state_or_none(registry_root, target.run_id)
         fields = run_registry.status_fields(state)
         effective = fields.get("effectiveStatus")
@@ -545,6 +536,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         already_terminal = False
         generation_changed = False
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
             pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
             pre_fields = run_registry.status_fields(pre_signal)
             pre_effective = pre_fields.get("effectiveStatus")
@@ -560,10 +552,8 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
                 stamped["cancelRequested"] = True
                 if not isinstance(stamped.get("cancelRequestedAt"), str):
                     stamped["cancelRequestedAt"] = run_registry.utc_now_iso()
-                run_registry.write_json_atomic(
-                    run_registry.run_directory(registry_root, target.run_id)
-                    / run_registry.STATE_FILE,
-                    stamped,
+                run_registry.write_run_state(
+                    run_registry.run_directory(registry_root, target.run_id), stamped
                 )
                 cancel_marker_written = True
 
@@ -607,6 +597,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         # live generation goes through the same identity/marker/signal protocol.
         follow_generation = False
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
             latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
             latest_fields = run_registry.status_fields(latest)
             latest_effective = latest_fields.get("effectiveStatus")

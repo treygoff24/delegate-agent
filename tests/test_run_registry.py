@@ -526,21 +526,57 @@ class RunRegistryTests(unittest.TestCase):
             self.assertFalse(claim_path.exists())
             self.assertFalse(run_path.exists())
 
-    def test_snapshot_write_refuses_oversize_without_replacing_prior_snapshot(self):
+    def test_canonical_state_write_refuses_oversize_without_replacing_prior_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             run_id, _alias = self.registry.register_run(root, harness="cursor")
             run_path = self.registry.run_directory(root, run_id)
-            self.registry.write_snapshot(run_path, {"status": "running"})
-            original = (run_path / "snapshot.json").read_bytes()
+            self.registry.write_run_state(run_path, {"status": "running"})
+            original = (run_path / self.registry.STATE_FILE).read_bytes()
 
-            with self.assertRaisesRegex(self.registry.RegistryJsonError, "snapshot exceeds"):
-                self.registry.write_snapshot(
+            with self.assertRaisesRegex(self.registry.RegistryJsonError, "state exceeds"):
+                self.registry.write_run_state(
                     run_path,
                     {"assistantText": "x" * (self.registry.PRIVATE_RECORD_READ_MAX_BYTES + 1)},
                 )
 
-            self.assertEqual((run_path / "snapshot.json").read_bytes(), original)
+            self.assertEqual((run_path / self.registry.STATE_FILE).read_bytes(), original)
+
+    def test_canonical_state_write_preserves_prior_record_when_durable_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_run_state(run_path, {"status": "running"})
+            original = (run_path / self.registry.STATE_FILE).read_bytes()
+
+            with (
+                mock.patch.object(
+                    self.registry,
+                    "write_private_text_atomic",
+                    side_effect=OSError("injected durable write failure"),
+                ),
+                self.assertRaisesRegex(OSError, "injected durable write failure"),
+            ):
+                self.registry.write_run_state(run_path, {"status": "succeeded"})
+
+            self.assertEqual((run_path / self.registry.STATE_FILE).read_bytes(), original)
+
+    def test_canonical_state_serializes_once_before_atomic_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            with mock.patch.object(
+                self.registry.json, "dumps", wraps=self.registry.json.dumps
+            ) as dumps:
+                self.registry.write_run_state(run_path, {"status": "running"})
+
+            self.assertEqual(dumps.call_count, 1)
+            self.assertEqual(
+                json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
+                {"status": "running"},
+            )
 
     def test_allocate_alias_uses_exclusive_create(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -629,7 +665,7 @@ class RunRegistryTests(unittest.TestCase):
                 if sleeper is not None:
                     sleeper.wait(timeout=5)
 
-    def test_registry_lock_replays_finalize_wal_and_cancel_wins(self):
+    def test_targeted_wal_reconciliation_and_cancel_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             run_id, _alias = self.registry.register_run(root, harness="cursor")
@@ -637,46 +673,58 @@ class RunRegistryTests(unittest.TestCase):
             self.registry.write_json_atomic(
                 run_path / self.registry.STATE_FILE, {"status": "running"}
             )
-            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
             self.registry.write_finalize_wal(
                 root,
                 run_id,
                 status="succeeded",
-                state={"status": "succeeded", "exitCode": 0, "resultQuality": "ok"},
-                snapshot={"status": "succeeded", "ok": True, "resultQuality": "ok"},
+                record={
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "status": "succeeded",
+                    "exitCode": 0,
+                    "ok": True,
+                    "resultQuality": "ok",
+                },
             )
             self.registry.write_json_atomic(
                 run_path / self.registry.STATE_FILE,
                 {"status": "running", "cancelRequested": True},
             )
             with self.registry.registry_lock(root, timeout_seconds=1):
-                pass
+                self.registry.reconcile_finalize_wal_locked(root, run_id)
             persisted = json.loads((run_path / self.registry.STATE_FILE).read_text())
-            snapshot = json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text())
+            snapshot = self.registry.load_run_snapshot(root, run_id)
+            self.assertIsInstance(snapshot, dict)
             self.assertEqual(persisted["status"], self.registry.STATUS_CANCELLED)
             self.assertEqual(snapshot["status"], self.registry.STATUS_CANCELLED)
             self.assertFalse(snapshot["ok"])
             self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
 
-    def test_registry_lock_repairs_snapshot_before_removing_terminal_wal(self):
+    def test_targeted_wal_reconciliation_preserves_terminal_canonical_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             run_id, _alias = self.registry.register_run(root, harness="cursor")
             run_path = self.registry.run_directory(root, run_id)
             state = {"status": "succeeded", "exitCode": 0}
-            snapshot = {"status": "succeeded", "ok": True}
             self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, state)
-            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
             self.registry.write_finalize_wal(
-                root, run_id, status="succeeded", state=state, snapshot=snapshot
+                root,
+                run_id,
+                status="succeeded",
+                record={
+                    **state,
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "ok": True,
+                },
             )
 
             with self.registry.registry_lock(root, timeout_seconds=1):
-                pass
+                self.registry.reconcile_finalize_wal_locked(root, run_id)
 
-            self.assertEqual(
-                json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text()), snapshot
-            )
+            snapshot = self.registry.load_run_snapshot(root, run_id)
+            self.assertIsInstance(snapshot, dict)
+            self.assertEqual(snapshot["status"], "succeeded")
             self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
 
     def test_corrupt_finalize_wal_is_quarantined_without_blocking_lock(self):
@@ -687,7 +735,7 @@ class RunRegistryTests(unittest.TestCase):
                 wal = self.registry.finalize_wal_path(root, run_id)
                 wal.write_text(contents, encoding="utf-8")
                 with self.registry.registry_lock(root, timeout_seconds=1):
-                    pass
+                    self.registry.reconcile_finalize_wal_locked(root, run_id)
                 self.assertFalse(wal.exists())
                 self.assertTrue(list(wal.parent.glob(wal.name + ".corrupt.*")))
 
@@ -700,13 +748,17 @@ class RunRegistryTests(unittest.TestCase):
             self.registry.write_json_atomic(
                 run_path / self.registry.STATE_FILE, {"status": "running"}
             )
-            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
             self.registry.write_finalize_wal(
                 root,
                 run_id,
                 status="succeeded",
-                state={"status": "succeeded", "exitCode": 0},
-                snapshot={"status": "succeeded", "ok": True},
+                record={
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "status": "succeeded",
+                    "exitCode": 0,
+                    "ok": True,
+                },
             )
             wal = self.registry.finalize_wal_path(root, run_id)
             calls = 0
@@ -733,14 +785,14 @@ class RunRegistryTests(unittest.TestCase):
                 ),
                 self.registry.registry_lock(root, timeout_seconds=1),
             ):
-                pass
+                self.registry.reconcile_finalize_wal_locked(root, run_id)
 
             self.assertGreaterEqual(calls, 2)
             self.assertTrue(wal.exists())
             self.assertEqual(list(wal.parent.glob(wal.name + ".corrupt.*")), [])
 
             with self.registry.registry_lock(root, timeout_seconds=1):
-                pass
+                self.registry.reconcile_finalize_wal_locked(root, run_id)
 
             self.assertFalse(wal.exists())
             self.assertEqual(
@@ -1270,6 +1322,25 @@ class RunRegistryTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 self.registry.set_worktree_status(root, "del_nonexistent", "invalid_status")
             self.assertIn("must be one of", str(ctx.exception))
+
+    def test_terminal_worktree_metadata_update_refreshes_selection_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            record = {
+                "schema": self.registry.STATE_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
+                "status": "succeeded",
+                "finishedAt": "2026-09-07T00:00:00Z",
+            }
+            with self.registry.registry_lock(root):
+                self.registry.publish_terminal_record_locked(root, run_id, record)
+            self.registry.set_worktree_status(root, run_id, "removed")
+
+            entry = self.registry.load_index(root)["runs"][run_id]
+            projection = self.registry.terminal_selection_state(root, run_id, entry)
+            self.assertEqual(projection["status"], "succeeded")
 
     def test_set_worktree_status_invalid_status_raises(self):
         """set_worktree_status with an invalid status raises ValueError."""

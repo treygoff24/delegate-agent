@@ -13,6 +13,46 @@ from delegate_agent import run_registry, snapshot_view  # noqa: E402
 
 
 class SnapshotViewTests(unittest.TestCase):
+    def test_load_run_snapshot_projects_canonical_state_without_snapshot_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+            run_id, alias = run_registry.register_run(registry_root, harness="codex")
+            run_path = run_registry.run_directory(registry_root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {
+                    "schema": run_registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "succeeded",
+                    "assistantText": "canonical output",
+                    "recentEvents": [{"kind": "completed"}],
+                },
+            )
+            run_registry.write_json_atomic(
+                run_path / run_registry.MANIFEST_FILE,
+                {
+                    "schema": run_registry.MANIFEST_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "harness": "codex",
+                    "cwd": str(workspace),
+                    "mode": "work",
+                    "model": "gpt-5.5",
+                    "startedAt": "2026-05-20T12:00:00Z",
+                },
+            )
+
+            view = run_registry.load_run_snapshot(registry_root, run_id)
+
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view["schema"], run_registry.SNAPSHOT_SCHEMA)
+        self.assertEqual(view["assistantText"], "canonical output")
+        self.assertEqual(view["recentEvents"], [{"kind": "completed"}])
+        self.assertFalse((run_path / run_registry.SNAPSHOT_FILE).exists())
+
     def test_merge_snapshot_view_writes_schema_contract_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

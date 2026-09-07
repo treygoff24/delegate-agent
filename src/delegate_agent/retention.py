@@ -17,6 +17,29 @@ ARCHIVE_MEMBER_NAMES = (
     run_registry.EVENTS_JSONL,
 )
 DEFAULT_RAW_LOG_RETENTION_DAYS = 7
+RETENTION_CADENCE_SECONDS = 60
+
+
+def _retention_completed_at(index: JsonObject) -> datetime | None:
+    retention = index.get("retention")
+    value = retention.get("completedAt") if isinstance(retention, dict) else None
+    return run_registry.parse_utc_timestamp(value if isinstance(value, str) else None)
+
+
+def _mark_retention_completed(
+    registry_root: Path,
+    completed_at: datetime,
+    run_count: int,
+) -> None:
+    with run_registry.registry_lock(registry_root):
+        index = run_registry.load_index(registry_root)
+        retention = index.get("retention")
+        if not isinstance(retention, dict):
+            retention = {}
+            index["retention"] = retention
+        retention["completedAt"] = completed_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        retention["completedRunCount"] = run_count
+        run_registry.save_index(registry_root, index)
 
 
 def archive_dir(registry_root: Path) -> Path:
@@ -164,14 +187,13 @@ def _mark_raw_logs_archived(
     stdout_bytes: int = 0,
     stderr_bytes: int = 0,
 ) -> None:
-    state_path = run_path / run_registry.STATE_FILE
-    state = run_registry.read_json_object_or_none(state_path)
+    state = run_registry.read_json_object_or_none(run_path / run_registry.STATE_FILE)
     if state is None:
         state = {}
     state["rawLogsArchivedAt"] = run_registry.utc_now_iso()
     state["stdoutBytes"] = stdout_bytes
     state["stderrBytes"] = stderr_bytes
-    run_registry.write_json_atomic(state_path, state)
+    run_registry.write_run_state(run_path, state)
 
 
 def _remove_archived_raw_logs(run_path: Path, members: list[str]) -> None:
@@ -210,6 +232,7 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
     destination = archive_path(registry_root, run_id)
     if destination.exists():
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
             return _complete_archival_after_archive(
                 registry_root,
                 run_id,
@@ -230,6 +253,7 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
         if not _verify_archive_members(temp_destination, expected_sizes):
             return False
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
             if _member_identities(run_path, members) != source_identities:
                 return False
             if not destination.exists():
@@ -267,6 +291,20 @@ def run_retention_pass(
             timeout_seconds=0,
         ):
             index = run_registry.load_index(registry_root)
+            moment = now or datetime.now(UTC)
+            completed_at = _retention_completed_at(index)
+            runs = index.get("runs")
+            run_count = len(runs) if isinstance(runs, dict) else 0
+            retention = index.get("retention")
+            completed_run_count = (
+                retention.get("completedRunCount") if isinstance(retention, dict) else None
+            )
+            if (
+                completed_at is not None
+                and completed_run_count == run_count
+                and moment - completed_at < timedelta(seconds=RETENTION_CADENCE_SECONDS)
+            ):
+                return {"scanned": 0, "archived": 0, "skipped": 0}
             scanned = 0
             archived = 0
             skipped = 0
@@ -289,6 +327,7 @@ def run_retention_pass(
                         skipped += 1
                 except OSError:
                     skipped += 1
+            _mark_retention_completed(registry_root, moment, run_count)
             return {"scanned": scanned, "archived": archived, "skipped": skipped}
     except TimeoutError:
         return {"scanned": 0, "archived": 0, "skipped": 0}

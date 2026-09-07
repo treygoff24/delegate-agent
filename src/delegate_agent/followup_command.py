@@ -9,7 +9,7 @@ plain-text continuation (original prompt + output digest) and stays
 ephemeral / cross-engine. `followup` continues the native harness conversation
 directly on supported engines (Codex and Claude) and supports work-mode runs.
 
-Trust model: the session ID is read from state.json / snapshot.json /
+Trust model: the session ID is read from the canonical state view /
 manifest.json. Because work-mode children can modify workspace files, the
 session ID is treated as attacker-controlled input entering subprocess argv.
 All record reads use bounded no-follow readers, and session IDs are strictly
@@ -102,6 +102,13 @@ def _read_record_json(path: Path, allow_missing: bool = False) -> JsonObject | N
     if not isinstance(data, dict):
         raise _record_invalid(f"record file {path.name} must contain a JSON object")
     return data
+
+
+def _load_snapshot_record(registry_root: Path, run_id: str) -> JsonObject | None:
+    try:
+        return run_registry.load_run_snapshot(registry_root, run_id)
+    except run_registry.RegistryJsonError as exc:
+        raise _record_invalid(str(exc)) from exc
 
 
 def _manifest_str(manifest: JsonObject, key: str) -> str | None:
@@ -227,16 +234,9 @@ def build_followup_plan(
             "The source run's cwd does not match the workspace containing its Registry."
         )
 
-    with run_registry.registry_lock(registry_root):
-        source_state = _read_record_json(
-            run_path / run_registry.STATE_FILE,
-            allow_missing=True,
-        )
-        source_snapshot = _read_record_json(
-            run_path / run_registry.SNAPSHOT_FILE,
-            allow_missing=True,
-        )
-        effective_status = run_registry.effective_status(source_state)
+    source_state = run_registry.load_run_state_or_none(registry_root, run_id)
+    source_snapshot = _load_snapshot_record(registry_root, run_id)
+    effective_status = run_registry.effective_status(source_state)
 
     if effective_status not in RESUMABLE_STATUSES:
         raise DelegateError(
