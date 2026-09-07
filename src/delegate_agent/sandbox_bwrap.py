@@ -14,7 +14,8 @@ with parity masks. The probed-working shape on lxcfs/containers is deliberate:
 
 ``$HOME`` is a tmpfs so ambient credentials (e.g. ``~/.ai-profiles/*``
 secret files) are invisible while the one engine home directory named by the
-child env (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``) is rw-bound on top of it.
+child env (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``, ``KIMI_CODE_HOME``) is
+rw-bound on top of it.
 """
 
 from __future__ import annotations
@@ -47,7 +48,12 @@ REGISTRY_DIR_NAME = ".delegate"
 
 # Engine home override per engine: only the SELECTED engine's home is rw-bound
 # (a Codex child must never receive Claude's credential home or vice versa).
-_ENGINE_HOME_ENV_VAR = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
+_ENGINE_HOME_ENV_VAR = {
+    "codex": "CODEX_HOME",
+    "claude": "CLAUDE_CONFIG_DIR",
+    "kimi": "KIMI_CODE_HOME",
+}
+_ENGINE_HOME_DEFAULT_DIR = {"kimi": ".kimi-code"}
 
 # Engine config directories that live directly under $HOME. They are ro-bound
 # whenever they exist; an explicit env override (CODEX_HOME,
@@ -56,7 +62,6 @@ _OPTIONAL_ENGINE_DOT_DIRS = {
     "codex": ".codex",
     "claude": ".claude",
     "droid": ".factory",
-    "kimi": ".kimi",
     "grok": ".grok",
     "pi": ".pi",
     "omp": ".omp",
@@ -68,6 +73,16 @@ _OPTIONAL_HOME_RO_BINDS = (".local", ".cargo/bin", ".bun")
 # /run/systemd/resolve backs /etc/resolv.conf on systemd-resolved hosts, and
 # without it DNS fails inside the boundary.
 _OPTIONAL_SYSTEM_RO_BINDS = ("/opt", "/run/systemd/resolve")
+
+
+def _engine_home_path(engine: str, env: Mapping[str, str], home: str) -> str | None:
+    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
+    if home_var:
+        override = env.get(home_var, "")
+        if override.strip():
+            return os.path.expanduser(override)
+    default_dir = _ENGINE_HOME_DEFAULT_DIR.get(engine)
+    return os.path.join(home, default_dir) if default_dir else None
 
 
 class Mask(NamedTuple):
@@ -371,7 +386,8 @@ def build_bwrap_argv(
     Mount targets are deduplicated keep-first across every bind/tmpfs/mask so
     no mount point is declared twice. Only the selected ``engine``'s home
     override from the child env (``CODEX_HOME`` for codex, ``CLAUDE_CONFIG_DIR``
-    for claude) is appended to ``rw_roots``; sibling engine homes stay hidden.
+    for claude, ``KIMI_CODE_HOME`` for kimi) is appended to ``rw_roots``;
+    Kimi falls back to ``$HOME/.kimi-code`` and sibling engine homes stay hidden.
     Emission order matters: core system roots first, then ``$HOME`` tmpfs,
     then the optional read-only roots (several live under ``$HOME``), then the
     read-only workspace, then masks stacked on top of the workspace, then
@@ -416,10 +432,8 @@ def build_bwrap_argv(
             bind("--tmpfs", target)
         else:
             bind("--ro-bind", "/dev/null", target)
-    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
-    engine_homes = (
-        [os.path.expanduser(env[home_var])] if home_var and env.get(home_var, "").strip() else []
-    )
+    engine_home = _engine_home_path(engine, env, home)
+    engine_homes = [engine_home] if engine_home else []
     for root in [*rw_roots, *engine_homes]:
         bind("--bind", root, root)
     argv.extend(("--chdir", workspace))
@@ -460,6 +474,7 @@ def wrap_engine_argv(
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())
+    engine_home = _engine_home_path(engine, environment, resolved_home)
     ro_roots: list[str] = []
     candidates = [
         *(os.path.join(resolved_home, rel) for rel in _OPTIONAL_HOME_RO_BINDS),
@@ -471,10 +486,10 @@ def wrap_engine_argv(
         *_OPTIONAL_SYSTEM_RO_BINDS,
     ]
     for candidate in candidates:
-        if candidate not in ro_roots and os.path.isdir(candidate):
+        if candidate != engine_home and candidate not in ro_roots and os.path.isdir(candidate):
             ro_roots.append(candidate)
     for root in extra_ro_roots or []:
-        if root not in ro_roots:
+        if root != engine_home and root not in ro_roots:
             ro_roots.append(root)
     for engine_file in _engine_binary_files(engine_argv, environment):
         if not _visible_inside(engine_file, ro_roots) and engine_file not in ro_roots:
@@ -483,12 +498,6 @@ def wrap_engine_argv(
     for root in extra_rw_roots or []:
         if root not in rw_roots:
             rw_roots.append(root)
-    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
-    engine_home = (
-        os.path.expanduser(environment[home_var])
-        if home_var and environment.get(home_var, "").strip()
-        else None
-    )
     registry = os.path.join(cwd, REGISTRY_DIR_NAME)
     _refuse_rw_roots_intersecting_workspace(
         cwd,
