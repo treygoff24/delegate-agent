@@ -86,6 +86,29 @@ class GateApprovalBindingTests(unittest.TestCase):
             self._run_gated_child(result)
         return raised.exception
 
+    def _park_replay(
+        self,
+        args: object,
+        *,
+        replay_attempt: int,
+        supervisor_token: str,
+        sequence_offset: int,
+    ) -> runtime.GateExit:
+        state = self._state()
+        state.replay_attempt = replay_attempt
+        state.supervisor_token = supervisor_token
+        state.attempt_config = {"startedAt": f"attempt-{replay_attempt}"}
+        state.attempt_environment = {"TMPDIR": f"/tmp/replay-{replay_attempt}"}
+        state.sequence += sequence_offset
+        state.thread_local.last_run_id = f"run_replay_{replay_attempt}"
+        dsl = runtime.WorkflowDsl(state, {})
+        with (
+            mock.patch.object(runtime, "execute_workflow", return_value={"ok": False}),
+            self.assertRaises(runtime.GateExit) as raised,
+        ):
+            dsl.workflow("child.py", args=args, gate="on-failure")
+        return raised.exception
+
     def _resume_auto_approve(self) -> None:
         self.assertEqual(self._resume(), 0)
 
@@ -181,6 +204,40 @@ class GateApprovalBindingTests(unittest.TestCase):
         self.assertEqual(first.gate_key, changed.gate_key)
         self.assertNotEqual(first.result_hash, changed.result_hash)
         self.assertFalse(registry.approval_allows(self.root, changed.gate_key, changed.result_hash))
+
+    def test_checkpoint_key_is_byte_identical_across_fresh_replays(self) -> None:
+        first = self._park_replay(
+            {
+                "checkpoint": "wave-2-close",
+                "evidence": {"commit": "a1a92de", "tests": 320},
+            },
+            replay_attempt=1,
+            supervisor_token="supervisor-one",
+            sequence_offset=100,
+        )
+        replayed = self._park_replay(
+            {
+                "evidence": {"tests": 320, "commit": "a1a92de"},
+                "checkpoint": "wave-2-close",
+            },
+            replay_attempt=9,
+            supervisor_token="supervisor-nine",
+            sequence_offset=900,
+        )
+
+        self.assertEqual(first.gate_key.encode("ascii"), replayed.gate_key.encode("ascii"))
+        self.assertEqual(first.result_hash, replayed.result_hash)
+
+        changed = self._park_replay(
+            {
+                "checkpoint": "wave-2-close",
+                "evidence": {"commit": "a1a92de", "tests": 321},
+            },
+            replay_attempt=10,
+            supervisor_token="supervisor-ten",
+            sequence_offset=1000,
+        )
+        self.assertNotEqual(first.gate_key, changed.gate_key)
 
     def test_same_red_replay_uses_its_result_bound_approval(self) -> None:
         red = {"ok": False, "reason": "same"}
