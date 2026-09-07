@@ -277,6 +277,18 @@ def _prepare_persona_transport(
     )
 
 
+def _claude_permission_prompts_supported(discovery: JsonObject | None) -> bool:
+    """True only when discovery observed --permission-prompts in claude --help.
+
+    An unknown flag is an immediate Claude usage error, so an unproven capability
+    must stay unused rather than be guessed from a version number.
+    """
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("claude") if isinstance(harnesses, dict) else None
+    capabilities = record.get("capabilities") if isinstance(record, dict) else None
+    return isinstance(capabilities, dict) and capabilities.get("permissionPrompts") is True
+
+
 def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
     harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
     record = harnesses.get("claude") if isinstance(harnesses, dict) else None
@@ -2977,6 +2989,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
         output_schema=schema_contents,
         persona_file=build.persona_transport == "native-file",
+        permission_prompts_supported=_claude_permission_prompts_supported(build.discovery),
         resumable=build.resumable,
         persist_session=build.persist_session,
         resume_session_id=build.resume_session_id,
