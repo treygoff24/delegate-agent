@@ -9,8 +9,9 @@ from pathlib import Path
 
 
 def _owned_delegate_processes(temp_root: Path) -> list[tuple[int, int]]:
+    # -ww keeps ownership roots visible when CI exports a narrow COLUMNS.
     result = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,command="],
+        ["ps", "-ww", "-axo", "pid=,pgid=,command="],
         capture_output=True,
         text=True,
         check=False,
