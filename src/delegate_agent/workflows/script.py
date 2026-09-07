@@ -182,7 +182,9 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
     defaults = meta.get("defaults") if isinstance(meta.get("defaults"), dict) else {}
     default_engine = defaults.get("engine") if isinstance(defaults, dict) else None
     default_mode = defaults.get("mode") if isinstance(defaults, dict) else None
-    _validate_literal_effort(defaults.get("effort") if isinstance(defaults, dict) else None)
+    _validate_literal_effort(
+        defaults.get("effort") if isinstance(defaults, dict) else None, default_engine
+    )
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _name_of(node.func) != "agent":
             continue
@@ -193,7 +195,7 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
             raise WorkflowScriptError("agent mode must be safe, work, or call")
         if any(item is not None and item not in KNOWN_ENGINES for item in engines):
             raise WorkflowScriptError("agent engine must be a real delegate engine")
-        _validate_literal_effort(_literal_keyword(node, "effort"))
+        _validate_literal_effort(_literal_keyword(node, "effort"), engines)
         passthrough = _literal_keyword(node, "passthrough") is True
         if passthrough:
             if mode == MODE_CALL:
@@ -230,23 +232,67 @@ def _validate_literal_judge_efforts(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _name_of(node.func) != "judges":
             continue
-        _validate_literal_effort(_literal_keyword(node, "effort"))
         engines = _literal_keyword(node, "engines")
         if engines is None and len(node.args) >= 3:
             try:
                 engines = ast.literal_eval(node.args[2])
             except (ValueError, TypeError):
                 engines = None
+        # A judge stage's `effort=` applies to every engine it names, and an
+        # engine entry may override it for itself.
+        judge_engines = (
+            [_judge_engine_name(item) for item in engines] if isinstance(engines, list) else None
+        )
+        _validate_literal_effort(_literal_keyword(node, "effort"), judge_engines)
         if not isinstance(engines, list):
             continue
         for item in engines:
             if isinstance(item, dict) and "effort" in item:
-                _validate_literal_effort(item.get("effort"))
+                _validate_literal_effort(item.get("effort"), _judge_engine_name(item))
 
 
-def _validate_literal_effort(value: object) -> None:
+def _judge_engine_name(item: object) -> object:
+    """The engine a `judges(engines=[...])` entry selects, or None when unknowable.
+
+    A bare string is either an engine name or a droid model selector; only the
+    former pins the effort vocabulary.
+    """
+    if isinstance(item, dict):
+        return item.get("engine")
+    if isinstance(item, str) and item in KNOWN_ENGINES:
+        return item
+    return None
+
+
+def _engine_effort_values(engine: object) -> tuple[str, ...]:
+    """The efforts an engine accepts, when that is knowable at parse time.
+
+    A static-enum engine's vocabulary is fixed, so the parser can check it. The
+    model-table and effort-routing engines resolve theirs from capability data
+    that config and the workspace cache can extend, so those keep the
+    family-wide superset and are still checked at run time.
+    """
+    profile = reasoning.REASONING_PROFILES.get(engine) if isinstance(engine, str) else None
+    if profile is not None and profile.static_efforts:
+        return profile.static_efforts
+    return tuple(reasoning.PI_THINKING_LEVELS)
+
+
+def _validate_literal_effort(value: object, engine: object = None) -> None:
+    """Reject an effort the named engine cannot take.
+
+    Checking against the family-wide superset let `auto`, which is omp's alone,
+    parse on a pi, claude or codex stage and fail in the child instead. When a
+    stage names several engines the effort is applied to each, so it has to be
+    valid for all of them.
+    """
     if value is None:
         return
-    if not isinstance(value, str) or value not in reasoning.PI_THINKING_LEVELS:
-        allowed = ", ".join(reasoning.PI_THINKING_LEVELS)
-        raise WorkflowScriptError(f"effort must be one of: {allowed}")
+    engines = engine if isinstance(engine, list) else [engine]
+    allowed = tuple(
+        candidate
+        for candidate in reasoning.PI_THINKING_LEVELS
+        if all(candidate in _engine_effort_values(item) for item in engines)
+    )
+    if not isinstance(value, str) or value not in allowed:
+        raise WorkflowScriptError(f"effort must be one of: {', '.join(allowed)}")
