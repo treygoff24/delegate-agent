@@ -137,6 +137,6 @@
     "intervalSec": 60
   },
   "mail": {
-    "enabled": false
+    "enabled": true
   }
 }
