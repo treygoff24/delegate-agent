@@ -1,0 +1,32 @@
+# Overnight run: harness compatibility audit → plan → ship (2026-09-07)
+
+Operator: this Claude session (Fable). Trey asleep; authorized 2026-09-07 evening to fully ship:
+audit → plan → Astra medium review → patch plan → implement (delegate fleet + native subagents,
+any models) → cross-model review → full gate → commit + push Forgejo. **Not** authorized: promote to
+the live runtime, GitHub push, force/amend, `--no-verify`.
+
+Also in scope (Trey, mid-turn): put the auto-injected skill-review preamble
+(`prompt_instructions.py:SKILL_REVIEW_PREFIX`) behind a config toggle, default **off**.
+
+## State
+- Branch `feat/harness-compat-audit` off `main` @ 12fe7ac (main pushed to Forgejo).
+- Bead: dlg-? (created 2026-09-07 "Harness compatibility audit + minimal-change plan").
+- Audit reports: `docs/audits/2026-09-07-harness-compat/{claude,codex,cursor,droid,grok,devin,opencode,pi,omp,kimi,shared}.md`
+  written by 11 native Opus subagents (names `audit-<harness>`). Brief: `BRIEF.md` there.
+- Plan (to write): `docs/audits/2026-09-07-harness-compat/PLAN.md`.
+
+## Phases
+1. [running] audits
+2. [ ] synthesize plan
+3. [ ] Astra medium review (`delegate codex safe --model astra --reasoning-effort medium`), patch
+4. [ ] implement in waves (disjoint files per lane), each lane verified
+5. [ ] cross-model review + fix loop
+6. [ ] gate: `tests/acceptance.sh` / `python3 -m pytest -q` + ruff
+7. [ ] commit, push origin, final report + PushNotification
+
+## Rulings
+(none yet)
+
+## Re-arm
+ScheduleWakeup fallback 1500s with prompt "babysit tick: overnight harness-compat run". Subagent
+completions re-invoke the session automatically.
