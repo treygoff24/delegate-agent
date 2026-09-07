@@ -954,11 +954,11 @@ class EngineArgvTests(CommandTestBase):
             codex,
             [
                 "codex",
-                "--ask-for-approval",
-                "never",
                 "exec",
                 "--sandbox",
                 "read-only",
+                "-c",
+                'approval_policy="never"',
                 "resume",
                 "codex-thread",
                 "--output-schema",
@@ -1074,11 +1074,7 @@ class EngineArgvTests(CommandTestBase):
             workspace_kind="git",
         )
         exec_index = argv.index("exec")
-        self.assertIn("--ask-for-approval", argv[:exec_index])
-        self.assertEqual(
-            argv[argv.index("--ask-for-approval") + 1],
-            "never",
-        )
+        self.assertIn('approval_policy="never"', argv[exec_index:])
         self.assertIn("--sandbox", argv[exec_index:])
         self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
         self.assertIn("-c", argv[exec_index:])
@@ -1109,7 +1105,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--dangerously-bypass-hook-trust", argv[exec_index:])
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
         self.assertIn("--sandbox", argv[exec_index:])
-        self.assertIn("--ask-for-approval", argv[:exec_index])
+        self.assertIn('approval_policy="never"', argv[exec_index:])
 
     def test_codex_work_web_search_argv_when_enabled(self):
         config = delegate_config.deep_merge(
@@ -1130,7 +1126,7 @@ class EngineArgvTests(CommandTestBase):
             policy,
             workspace_kind="git",
         )
-        self.assertIn("--search", argv[: argv.index("exec")])
+        self.assertIn('web_search="live"', argv[argv.index("exec") :])
 
     def test_codex_default_model_null_omits_model_flag(self):
         policy = delegate_config.effective_policy(
@@ -1243,8 +1239,6 @@ class EngineArgvTests(CommandTestBase):
             argv,
             [
                 "codex",
-                "--ask-for-approval",
-                "never",
                 "--model",
                 "gpt-5",
                 "exec",
@@ -1252,6 +1246,8 @@ class EngineArgvTests(CommandTestBase):
                 "workspace-write",
                 "-c",
                 "sandbox_workspace_write.network_access=true",
+                "-c",
+                'approval_policy="never"',
                 "resume",
                 "--json",
                 session_id,
@@ -1263,7 +1259,7 @@ class EngineArgvTests(CommandTestBase):
         # sandbox flags between `exec` and `resume` are accepted.
         resume_idx = argv.index("resume")
         resume_tail = argv[resume_idx + 1 :]
-        for exec_only_flag in ("--color", "--sandbox", "--ask-for-approval"):
+        for exec_only_flag in ("--color", "--sandbox", "-c"):
             self.assertNotIn(exec_only_flag, resume_tail)
 
     def test_cursor_fixed_effort_default_has_typed_outcome(self):
@@ -1378,7 +1374,7 @@ class EngineArgvTests(CommandTestBase):
         )
         resume_idx = argv.index("resume")
         self.assertIn("--sandbox", argv[:resume_idx])
-        self.assertIn("--ask-for-approval", argv[:resume_idx])
+        self.assertIn('approval_policy="never"', argv[:resume_idx])
         self.assertNotIn("--color", argv)
         self.assertIn("--json", argv)
 

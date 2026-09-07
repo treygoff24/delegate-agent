@@ -1157,12 +1157,12 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Always uses --sandbox read-only; safe sandbox is not configurable in v1.",
-                    "Non-interactive: --ask-for-approval never.",
+                    'Non-interactive: -c approval_policy="never" inside the exec scope.',
                 ],
                 "work": codex_work_argv,
                 "workNotes": [
                     "networkAccess enables -c sandbox_workspace_write.network_access=true when workSandbox is workspace-write.",
-                    "webSearch enables global --search before exec.",
+                    'webSearch enables -c web_search="live" inside the exec scope.',
                     "profile is config-only (codex.profile); not accepted in run input JSON.",
                 ],
             },

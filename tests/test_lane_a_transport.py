@@ -8,6 +8,7 @@ that came with it — is gone.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -221,3 +222,104 @@ class CursorReadOnlyModeTests(CommandTestBase):
         self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--mode", payload["modeMapping"]["cursor"]["work"])
+
+
+class CodexExecScopedOverrideTests(CommandTestBase):
+    """A3: codex exec never saw --search or --ask-for-approval.
+
+    Both flags are declared on the interactive TUI parser, and the exec arm
+    forwards only the shared options, so codex parsed and dropped them. The
+    equivalent config overrides ride `-c` after `exec`, where exec does read them.
+    """
+
+    @staticmethod
+    def _policy(mode, **overrides):
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
+            {"policy": {mode: overrides}} if overrides else {},
+        )
+        return config, delegate_config.effective_policy(config, engine="codex", mode=mode)
+
+    def _argv(self, mode, **overrides):
+        config, policy = self._policy(mode, **overrides)
+        return argv_api.build_codex_argv(
+            config["codex"],
+            mode,
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
+        )
+
+    def test_web_search_rides_a_config_override_after_exec(self):
+        argv = self._argv("work", webSearch=True)
+        exec_index = argv.index("exec")
+        self.assertNotIn("--search", argv)
+        self.assertIn('web_search="live"', argv[exec_index:])
+        self.assertEqual(argv[argv.index('web_search="live"') - 1], "-c")
+
+    def test_web_search_override_is_absent_when_the_policy_does_not_ask_for_it(self):
+        # The planted negative: the safe default must not turn live web search on.
+        argv = self._argv("safe")
+        self.assertNotIn('web_search="live"', argv)
+        self.assertNotIn("--search", argv)
+
+    def test_approval_policy_rides_a_config_override_after_exec(self):
+        argv = self._argv("safe")
+        exec_index = argv.index("exec")
+        self.assertNotIn("--ask-for-approval", argv)
+        self.assertIn('approval_policy="never"', argv[exec_index:])
+        self.assertEqual(argv[argv.index('approval_policy="never"') - 1], "-c")
+
+    def test_bypass_work_still_omits_the_approval_override(self):
+        # The bypass flag conflicts with an approval policy; work runs that carry
+        # --dangerously-bypass-approvals-and-sandbox must not also pin one.
+        config = delegate_config.deep_merge(
+            delegate_config.embedded_default_config(),
+            {"policy": {"profile": "external-sandbox"}},
+        )
+        policy = delegate_config.effective_policy(config, engine="codex", mode="work")
+        self.assertIs(policy.get("bypassApprovalsAndSandbox"), True)
+        argv = argv_api.build_codex_argv(
+            config["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
+        )
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertNotIn('approval_policy="never"', argv)
+
+    def test_resume_path_also_places_the_overrides_after_exec(self):
+        config, policy = self._policy("work", webSearch=True)
+        argv = argv_api.build_codex_argv(
+            config["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
+            persist_session=True,
+            resume_session_id="codex-thread",
+        )
+        exec_index = argv.index("exec")
+        resume_index = argv.index("resume")
+        for override in ('web_search="live"', 'approval_policy="never"'):
+            with self.subTest(override=override):
+                self.assertIn(override, argv[exec_index:resume_index])
+
+    def test_describe_text_no_longer_advertises_the_dropped_flags(self):
+        payload = describe_api.describe_payload(
+            delegate_config.embedded_default_config(), "embedded default"
+        )
+        notes = json.dumps(payload["modeMapping"]["codex"])
+        self.assertNotIn("--search", notes)
+        self.assertNotIn("--ask-for-approval", notes)
+        self.assertIn("approval_policy", notes)
