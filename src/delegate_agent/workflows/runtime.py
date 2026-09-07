@@ -1837,6 +1837,7 @@ class WorkflowDsl:
         bypass_item_cap = self.state.inside_item_thread()
         cap = _item_thread_cap(self.state.config)
         owner_scope = self.state.current_scope()
+        parent_invocation = self.state.current_invocation()
 
         def run_item(
             index: int,
@@ -1847,7 +1848,11 @@ class WorkflowDsl:
         ) -> None:
             request: _SoftParkRequest | None = None
             gate_error: GateExit | None = None
-            with self.state.item_slot(bypass=bypass_item_cap), self.state.scope(scope):
+            with (
+                self.state.invocation(parent_invocation),
+                self.state.item_slot(bypass=bypass_item_cap),
+                self.state.scope(scope),
+            ):
                 try:
                     result = callback()
                     if isinstance(result, _SoftParkRequest):
@@ -1955,6 +1960,7 @@ class WorkflowDsl:
             raise ValueError("pipeline() item limit is 4096")
         if any(not callable(stage) for stage in stages):
             raise TypeError("pipeline() stages must be functions")
+        parent_invocation = self.state.current_invocation()
         base_scope = self.state.next_child_scope("pipeline")
         results: list[object] = [None] * len(items)
         threads: list[threading.Thread] = []
@@ -1970,7 +1976,10 @@ class WorkflowDsl:
         def run_item(index: int, item: object, pre_acquired: bool) -> None:
             # Nested primitives bypass the item-thread cap so an outer callback
             # cannot hold every slot while waiting for its child item threads.
-            with self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired):
+            with (
+                self.state.invocation(parent_invocation),
+                self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
+            ):
                 if start_barrier is not None:
                     start_barrier.wait()
                 previous = item
@@ -2062,6 +2071,7 @@ class WorkflowDsl:
                 except (BudgetExceeded, GateExit):
                     results.append(None)
             return results
+        parent_invocation = self.state.current_invocation()
         base_scope = self.state.next_child_scope("parallel")
         results: list[object] = [None] * len(thunks)
         threads: list[threading.Thread] = []
@@ -2076,6 +2086,7 @@ class WorkflowDsl:
 
         def run_thunk(index: int, thunk: Callable[[], object], pre_acquired: bool) -> None:
             with (
+                self.state.invocation(parent_invocation),
                 self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
                 self.state.scope(f"{base_scope}/thunk#{index}"),
             ):
