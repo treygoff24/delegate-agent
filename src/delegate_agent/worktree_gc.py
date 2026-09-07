@@ -63,12 +63,6 @@ def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -
     return entry
 
 
-def _owner_run_block_reason(registry_root: Path, record: PersistentWorktreeRecord) -> str | None:
-    """Compatibility seam delegating to the shared management predicate."""
-
-    return wm._owner_run_block_reason(registry_root, record)
-
-
 def prune_worktrees(
     registry_root: Path,
     *,
@@ -104,18 +98,20 @@ def prune_worktrees(
         if group is not None and record.get("group") != group:
             skipped.append(_entry_ref(record, reason="group_filter"))
             continue
-        execution_cwd = record.get("executionCwd")
-        if isinstance(execution_cwd, str):
-            attachments = live_attachments_for_path(registry_root, execution_cwd)
-            if attachments:
-                skipped.append(_entry_ref(record, reason="live_attachment"))
-                continue
-        if not force:
-            owner_block = wm._owner_run_block_reason(registry_root, record)
-            if owner_block is not None:
-                skipped.append(_entry_ref(record, reason=owner_block))
-                continue
-        status, _warnings = wm.detect_worktree_status(record)
+        inspection = wm.inspect_worktree(
+            registry_root,
+            record,
+            include_detached=include_detached,
+            force=force,
+            check_merge=merged and not force_branch,
+        )
+        if inspection.attachments:
+            skipped.append(_entry_ref(record, reason="live_attachment"))
+            continue
+        if inspection.owner_block is not None and not force:
+            skipped.append(_entry_ref(record, reason=inspection.owner_block))
+            continue
+        status = inspection.status
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):
             # Not candidates — filter silently (spec L678).
             continue
@@ -131,33 +127,17 @@ def prune_worktrees(
         ):
             skipped.append(_entry_ref(record, reason="detached_source"))
             continue
-        # Compute dirty before the merged check so the merged branch path
-        # can test dirty state without rebinding a later assignment.
-        dirty, _dirty_paths, _dirty_total, _dirty_warnings = wm.dirty_info(record, status)
-        if dirty is None and not discard_uncommitted:
-            skipped.append(_entry_ref(record, reason="dirty_check_failed"))
+        decision = wm.evaluate_worktree_safety(
+            inspection,
+            discard_uncommitted=discard_uncommitted,
+            force_branch=force_branch,
+            force=force,
+            require_merged=merged,
+            allow_unmerged_clean_keep=merged,
+        )
+        if decision.reason is not None:
+            skipped.append(_entry_ref(record, reason=decision.reason))
             continue
-        if dirty is True and not discard_uncommitted:
-            skipped.append(_entry_ref(record, reason="dirty"))
-            continue
-        keep_branch_for_prune = False
-        merged_check_already_passed = False
-        if merged:
-            merged_value, _merge_warnings = wm.merged_into_source(
-                record,
-                status,
-                include_detached=include_detached,
-            )
-            merged_check_already_passed = merged_value is True
-            if merged_value is None:
-                skipped.append(_entry_ref(record, reason="merge_check_failed"))
-                continue
-            if merged_value is False and not force_branch:
-                if dirty is not True:
-                    keep_branch_for_prune = True
-                else:
-                    skipped.append(_entry_ref(record, reason="unmerged_branch"))
-                    continue
         if older_than_days is not None:
             old_enough = _older_than(record, older_than_days)
             if old_enough is None:
@@ -173,7 +153,7 @@ def prune_worktrees(
             "executionCwd": record.get("executionCwd"),
             "sourceGitRoot": record.get("sourceGitRoot"),
         }
-        if keep_branch_for_prune:
+        if decision.keep_branch:
             candidate["keep_branch"] = True
         planned.append(candidate)
         if not dry_run:
@@ -186,7 +166,7 @@ def prune_worktrees(
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
                         force=force,
-                        _merged_check_already_passed=merged_check_already_passed,
+                        include_detached=include_detached,
                     )
                 )
                 if removed[-1].get("ok") is False:
@@ -369,6 +349,43 @@ def _reap_entry(
     if reason is not None:
         entry["reason"] = reason
     return entry
+
+
+def _reap_record_safety(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    *,
+    force: bool,
+    discard_uncommitted: bool,
+) -> tuple[wm.WorktreeInspection, wm.WorktreeSafetyDecision]:
+    inspection = wm.inspect_worktree(registry_root, record, force=force, check_merge=False)
+    return inspection, wm.evaluate_worktree_safety(
+        inspection,
+        discard_uncommitted=discard_uncommitted,
+        force=force,
+    )
+
+
+def _reap_block_code(
+    inspection: wm.WorktreeInspection,
+    decision: wm.WorktreeSafetyDecision,
+    *,
+    source_gone: bool,
+) -> str | None:
+    if decision.reason in {
+        "run_active",
+        "run_not_terminal",
+        "process_group_alive",
+        "live_attachment",
+    }:
+        return decision.reason
+    if source_gone:
+        return None
+    if inspection.status in (STATUS_MISSING, STATUS_REMOVED):
+        return "path_missing" if inspection.status == STATUS_MISSING else "already_removed"
+    if decision.reason in {"dirty_check_failed", "dirty"}:
+        return "dirty_unknown" if decision.reason == "dirty_check_failed" else "dirty"
+    return None
 
 
 def _reap_pool_orphans(pool_data_home: Path) -> dict[str, JsonObject]:
@@ -560,38 +577,35 @@ def reap_worktrees(
             entry["reason"] = "not_yet_old_enough"
             skipped.append(entry)
             continue
+        inspection = None
         if record is not None and registry_root is not None:
-            owner_block = wm._owner_run_block_reason(registry_root, record)
-            if owner_block is not None and not force:
-                entry["reason"] = owner_block
-                skipped.append(entry)
-                continue
-            attachments = live_attachments_for_path(registry_root, str(candidate_path))
-            if attachments:
-                entry["reason"] = "live_attachment"
-                entry["attachedRuns"] = attachments
-                skipped.append(entry)
-                continue
+            inspection, decision = _reap_record_safety(
+                registry_root,
+                record,
+                force=force,
+                discard_uncommitted=discard_uncommitted,
+            )
         elif record is None and not source_gone:
             # A path that is not an orphan and has no reachable owner record is
             # conservatively treated as live (most commonly a live backlink).
             entry["reason"] = pool_warnings_by_path.get(str(candidate_path), "live_backlink")
             skipped.append(entry)
             continue
-        if not source_gone and record is not None:
-            status, _status_warnings = wm.detect_worktree_status(record)
-            if status in (STATUS_MISSING, STATUS_REMOVED):
-                entry["reason"] = "path_missing" if status == STATUS_MISSING else "already_removed"
+        if inspection is not None:
+            entry["dirty"] = inspection.dirty
+            block_code = _reap_block_code(inspection, decision, source_gone=source_gone)
+            if block_code is not None:
+                entry["reason"] = block_code
+                if block_code == "live_attachment":
+                    entry["attachedRuns"] = list(inspection.attachments)
+                if inspection.dirty_paths:
+                    entry["dirtyPaths"] = list(inspection.dirty_paths)
+                if inspection.dirty_warnings:
+                    entry["warnings"] = list(inspection.dirty_warnings)
                 skipped.append(entry)
                 continue
-            dirty, dirty_paths, _total, dirty_warnings = wm.dirty_info(record, status)
-            entry["dirty"] = dirty
-            if (dirty is None or dirty is True) and not (force or discard_uncommitted):
-                entry["reason"] = "dirty_unknown" if dirty is None else "dirty"
-                if dirty_paths:
-                    entry["dirtyPaths"] = dirty_paths
-                if dirty_warnings:
-                    entry["warnings"] = dirty_warnings
+            if source_gone and not (force or discard_uncommitted):
+                entry["reason"] = "dirty_unknown"
                 skipped.append(entry)
                 continue
         elif source_gone and not (force or discard_uncommitted):
@@ -668,27 +682,20 @@ def reap_worktrees(
                         if fresh_record is None:
                             errors.append({**entry, "code": "toctou_changed"})
                             continue
-                        owner_block = wm._owner_run_block_reason(registry_root, fresh_record)
-                        if owner_block is not None and not force:
-                            errors.append({**entry, "code": owner_block})
+                        fresh_inspection, decision = _reap_record_safety(
+                            registry_root,
+                            fresh_record,
+                            force=force,
+                            discard_uncommitted=discard_uncommitted,
+                        )
+                        block_code = _reap_block_code(
+                            fresh_inspection,
+                            decision,
+                            source_gone=entry.get("sourceGone") is True,
+                        )
+                        if block_code is not None:
+                            errors.append({**entry, "code": block_code})
                             continue
-                        attached = live_attachments_for_path(registry_root, str(target))
-                        if attached:
-                            errors.append({**entry, "code": "live_attachment"})
-                            continue
-                        if entry.get("sourceGone") is not True:
-                            status, _ = wm.detect_worktree_status(fresh_record)
-                            dirty, _paths, _total, _warnings = wm.dirty_info(fresh_record, status)
-                            if (dirty is None or dirty is True) and not (
-                                force or discard_uncommitted
-                            ):
-                                errors.append(
-                                    {
-                                        **entry,
-                                        "code": "dirty_unknown" if dirty is None else "dirty",
-                                    }
-                                )
-                                continue
                     if target.is_symlink() or not target.is_dir():
                         errors.append({**entry, "code": "toctou_changed"})
                         continue

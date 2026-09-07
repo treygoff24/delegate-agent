@@ -858,20 +858,19 @@ def _cleanup_partial_worktree(
             manual = " && ".join(commands)
         snapshot_path = run_path / run_registry.SNAPSHOT_FILE
         metadata_warning: str | None = None
-        if snapshot_path.exists():
-            try:
-                existing = run_registry.read_json_object(snapshot_path)
-                if existing is not None:
-                    existing["cleanupFailed"] = True
-                    existing["manualCleanup"] = manual
-                    if guarded:
-                        existing["cleanupRefused"] = "source_root_guard"
-                    run_registry.write_snapshot(run_path, existing)
-            except (OSError, ValueError) as exc:
-                metadata_warning = (
-                    "warning: partial worktree cleanup failed, and Delegate could not "
-                    f"record cleanup metadata in {snapshot_path}: {exc}"
-                )
+        try:
+            existing = run_registry.load_run_snapshot(run_path.parent.parent, run_path.name)
+            if existing is not None:
+                existing["cleanupFailed"] = True
+                existing["manualCleanup"] = manual
+                if guarded:
+                    existing["cleanupRefused"] = "source_root_guard"
+                run_registry.write_snapshot(run_path, existing)
+        except (OSError, ValueError) as exc:
+            metadata_warning = (
+                "warning: partial worktree cleanup failed, and Delegate could not "
+                f"record cleanup metadata in {snapshot_path}: {exc}"
+            )
         if metadata_warning is not None:
             print(metadata_warning, file=stderr)
         print(
