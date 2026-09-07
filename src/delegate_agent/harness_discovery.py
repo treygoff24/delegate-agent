@@ -611,7 +611,7 @@ def resolve_harness_selector(
                 return SelectorResolution(None, None, probe.error, tuple(warnings))
             continue
         output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
-        identity = _identify_version(harness, selector, output)
+        identity = _identify_version(harness, selector, output, explicit=explicit)
         if identity.status == _VERSION_KNOWN_OTHER:
             identified = identity.identified or "unknown"
             warning = (
@@ -654,8 +654,18 @@ def _normalize_selector(
     return (str(Path(binary).absolute()), *selector[1:])
 
 
-def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> VersionIdentity:
+def _identify_version(
+    harness: str,
+    selector: tuple[str, ...],
+    output: str,
+    *,
+    explicit: bool = False,
+) -> VersionIdentity:
     """Classify a ``--version`` banner as this harness, another one, or unreadable.
+
+    An explicitly configured selector may use a wrapper name that is not one
+    of the harness's ordinary PATH candidates, so its non-ambiguous bare
+    version is accepted as the user's identity assertion.
 
     The middle case has to stay separate from the last one. A banner that names
     another harness outright is positive evidence that the selector now resolves
@@ -681,7 +691,7 @@ def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> V
       routinely print their own build IDs.
     """
     text = _ANSI_RE.sub("", output)
-    expected = _expected_version(harness, selector, text)
+    expected = _expected_version(harness, selector, text, explicit=explicit)
     if expected is not None:
         return VersionIdentity(_VERSION_EXPECTED, expected, harness)
     for identified_harness, pattern in _BRANDED_VERSION_PATTERNS:
@@ -690,7 +700,13 @@ def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> V
     return VersionIdentity(_VERSION_UNRECOGNIZED)
 
 
-def _expected_version(harness: str, selector: tuple[str, ...], text: str) -> str | None:
+def _expected_version(
+    harness: str,
+    selector: tuple[str, ...],
+    text: str,
+    *,
+    explicit: bool = False,
+) -> str | None:
     """Read ``harness``'s own version out of a banner, or return None."""
     pattern = _CANONICAL_VERSION_PATTERNS.get(harness)
     if pattern is not None:
@@ -698,7 +714,9 @@ def _expected_version(harness: str, selector: tuple[str, ...], text: str) -> str
         if match is not None:
             return match.group(0)
     binary_name = Path(selector[0]).name
-    if binary_name not in _PATH_CANDIDATES[harness] or binary_name in _AMBIGUOUS_VERSION_BASENAMES:
+    if binary_name in _AMBIGUOUS_VERSION_BASENAMES:
+        return None
+    if not explicit and binary_name not in _PATH_CANDIDATES[harness]:
         return None
     for line in text.splitlines():
         candidate = line.strip()
