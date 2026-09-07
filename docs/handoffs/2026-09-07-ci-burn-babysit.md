@@ -61,9 +61,15 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - Astra major 1 fixed: eb2d185 merged 3e2ce06. Opus #2 done by operator 2e6609c. Luna minors merged ffac99f. All review findings closed.
 
 ## Gate
-- Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Final gate at 2e6609c: see runs/gate-final.log.
+- Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Final gate at 2e6609c (run as systemd unit dlg-gate-final after the harness memory heuristic reaped two background attempts): 3301 passed, 15 skipped, GATE PASS ruff 0.15.15.
+
+## Outcome
+All seven beads landed on main with two review rounds (Astra xhigh: 2 majors, both fixed; Opus high: SHIP, 9 minors, 7 fixed, #8/#9 accepted). Closed: dlg-y5c, dlg-3em, dlg-cjz.4, dlg-j0q, dlg-o7i, dlg-278.2. Open pending macOS/Linux CI on the next gated GitHub push: dlg-278, dlg-278.1. Lane worktrees retired. Pushed to Forgejo.
 
 ## Rulings
+- Ruling: closed dlg-278.2 on local 20/20 reproduction under COLUMNS=80 PYTHON_CPU_COUNT=4 without a GitHub rerun — the reproducer matches the CI symptom exactly; cost if wrong: one more CI red on the next push.
+- Ruling: accepted Opus #8 (0o700 window between rename and seal) as forced by macOS rename semantics, same-uid only; cost if wrong: a same-user process could write into a snapshot during a sub-millisecond window.
+- Ruling: Opus #2 fixed as a typed error only, not recovery of unsearchable (0o400) stale dirs — Delegate never writes that mode; cost if wrong: an externally-mangled pin store needs a manual chmod.
 - Ruling: extended dlg-278.1's write boundary to workflow_attempts.py via followup rather than a new bead — same defect, same lane context; cost if wrong: a slightly larger diff to review in one merge.
 
 ## Re-arm
