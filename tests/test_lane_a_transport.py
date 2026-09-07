@@ -8,6 +8,7 @@ that came with it — is gone.
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -15,13 +16,14 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import argv_builders as argv_api
-from delegate_agent import argv_utils, command_help, harness_discovery, mail_core
+from delegate_agent import argv_utils, command_help, harness_discovery, mail_core, request_build
+from delegate_agent import cli_parser as parser_api
 from delegate_agent import (
     config as delegate_config,
 )
 from delegate_agent import describe_payload as describe_api
 from delegate_agent import prompt_transport as transport_api
-from tests.delegate_commands_test_base import CommandTestBase
+from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 
 class CursorStdinTransportTests(CommandTestBase):
@@ -513,3 +515,52 @@ class GrokEffortHelpStringTests(unittest.TestCase):
         self.assertTrue(notes)
         for note in notes:
             self.assertNotIn("max", note)
+
+
+class OptionAfterPromptWarningTests(CommandTestBase):
+    """A7: a command-local option typed after the prompt is absorbed as prompt text.
+
+    `delegate claude safe --model X "p"` pins the model; `delegate claude safe "p"
+    --model X` silently runs the default model with exit 0 and no signal, because
+    the trailing prompt is variadic. An unknown option there is already rejected;
+    a recognized one is the silent case.
+    """
+
+    def _warnings(self, argv):
+        parsed = parser_api.parse_cli(argv)
+        return tuple(parsed.payload.warnings)
+
+    def test_recognized_option_after_the_prompt_warns(self):
+        warnings = self._warnings(["claude", "safe", "x", "--model", "claude-opus-5"])
+        self.assertTrue(any("--model" in warning for warning in warnings), warnings)
+        self.assertTrue(any("prompt text" in warning for warning in warnings), warnings)
+
+    def test_the_warning_reaches_the_request(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        request = request_build.request_from_parsed(
+            parser_api.parse_cli(
+                ["--cwd", repo.name, "dry-run", "claude", "safe", "x", "--model", "claude-opus-5"]
+            ),
+            delegate_config.embedded_default_config(),
+            io.StringIO(""),
+        )
+        self.assertIsNone(request.model_requested)
+        self.assertTrue(
+            any("option after the prompt" in warning for warning in request.warnings),
+            request.warnings,
+        )
+
+    def test_prose_mentioning_an_option_does_not_warn(self):
+        # The planted negative: matching is per token, not substring, so a prompt
+        # that talks about a flag stays quiet.
+        warnings = self._warnings(["claude", "safe", "explain what --model does"])
+        self.assertEqual(warnings, ())
+
+    def test_tokens_after_an_explicit_separator_do_not_warn(self):
+        warnings = self._warnings(["claude", "safe", "x", "--", "--model", "literal"])
+        self.assertEqual(warnings, ())
+
+    def test_an_option_before_the_prompt_does_not_warn(self):
+        warnings = self._warnings(["claude", "safe", "--model", "claude-opus-5", "x"])
+        self.assertEqual(warnings, ())
