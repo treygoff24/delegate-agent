@@ -167,3 +167,7 @@ DRY_RUN_HINT = " Validate without launching: `delegate dry-run <engine> <mode> .
 WORKFLOW_DRY_RUN_HINT = (
     " Validate a workflow without running it: `delegate workflow run <script> --dry-run`."
 )
+
+# Shared execution/help defaults; keep discovery imports free of registry I/O.
+DEFAULT_RUN_PRUNE_DAYS = 30
+RUN_OUTPUT_DEFAULT_TAIL_LINES = 80

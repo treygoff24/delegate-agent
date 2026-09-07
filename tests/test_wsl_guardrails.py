@@ -88,13 +88,13 @@ class WslGuardrailTests(unittest.TestCase):
 
     def test_drivefs_workspace_warning_is_attached_to_request(self):
         with mock.patch("delegate_agent.wsl.is_wsl", return_value=True):
-            request = self.cli.build_request(
+            request = self.request_build.build_request(
                 "cursor",
                 "safe",
                 None,
-                self.cli.ResolvedWorkspace("/mnt/c/Users/user/repo", "directory"),
+                self.request_build.ResolvedWorkspace("/mnt/c/Users/user/repo", "directory"),
                 "review",
-                self.cli.DEFAULT_CONFIG,
+                self.config.embedded_default_config(),
                 dry_run=True,
             )
         self.assertTrue(any("/mnt/c" in warning for warning in request.warnings))

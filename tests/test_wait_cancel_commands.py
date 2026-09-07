@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock as unittest_mock
 
+from delegate_agent import errors as errors_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -228,7 +230,7 @@ class WaitCancelCommandTests(unittest.TestCase):
 
         code, out, err = self.run_cli(["--json", "wait", "--group", "missing"])
 
-        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         payload = json.loads(out)
         self.assertEqual(payload["error"], "no_matching_runs")
         self.assertIn("No runs found for group: missing", payload["message"])
@@ -311,7 +313,7 @@ class WaitCancelCommandTests(unittest.TestCase):
     def test_cancel_refuses_terminal_run(self):
         _run_id, alias = self.write_run(status="succeeded")
         code, out, err = self.run_cli(["cancel", alias])
-        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
 
     def test_cancel_process_group_marks_cancelled(self):
@@ -813,17 +815,17 @@ class WaitCancelCommandTests(unittest.TestCase):
         run_path = run_registry.run_directory(self.registry_root, run_id)
         target = run_registry.RunTarget(run_id=run_id, alias=alias)
         # Capture the state written by the pre-signal marker stamp by hooking
-        # write_json_atomic: record every state.json write.
+        # write_run_state: record every state.json write.
         state_writes: list[dict] = []
-        original_write = run_registry.write_json_atomic
+        original_write = run_registry.write_run_state
 
         def capturing_write(path, data):
-            if str(path).endswith(run_registry.STATE_FILE):
+            if path.name == target.run_id:
                 state_writes.append(dict(data) if isinstance(data, dict) else data)
             return original_write(path, data)
 
         with unittest_mock.patch.object(
-            run_registry, "write_json_atomic", side_effect=capturing_write
+            run_registry, "write_run_state", side_effect=capturing_write
         ):
             payload = wait_cancel_commands._cancel_target(self.registry_root, target)
         self.assertEqual(payload["status"], "cancelled")
@@ -851,17 +853,17 @@ class WaitCancelCommandTests(unittest.TestCase):
         """
         _run_id, alias = self.write_run(status="succeeded")
         target = run_registry.RunTarget(run_id=_run_id, alias=alias)
-        original_write = run_registry.write_json_atomic
+        original_write = run_registry.write_run_state
         state_writes: list[dict] = []
 
         def capturing_write(path, data):
-            if str(path).endswith(run_registry.STATE_FILE):
+            if path.name == target.run_id:
                 state_writes.append(dict(data) if isinstance(data, dict) else data)
             return original_write(path, data)
 
         with (
             unittest_mock.patch.object(
-                run_registry, "write_json_atomic", side_effect=capturing_write
+                run_registry, "write_run_state", side_effect=capturing_write
             ),
             self.assertRaises(wait_cancel_commands.WaitCancelError) as ctx,
         ):
@@ -1191,20 +1193,20 @@ class WaitCancelCommandTests(unittest.TestCase):
         """A running run with a dead pid is stale and cancel refuses it."""
         _run_id, alias = self.write_run(status="running", pid=999999999)
         code, out, err = self.run_cli(["cancel", alias])
-        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
 
     def test_cancel_refuses_stale_missing_pid_run(self):
         """A running run with no pid is stale (missing_pid) and cancel refuses."""
         _run_id, alias = self.write_run(status="running")
         code, out, err = self.run_cli(["cancel", alias])
-        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
 
     def test_cancel_refuses_pid_le_one(self):
         _run_id, alias = self.write_run(status="running", pid=1, pgid=1)
         code, out, err = self.run_cli(["cancel", alias])
-        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("unsafe_signal_target", err or out)
 
     def test_cancel_legacy_pid_only_emits_warning(self):

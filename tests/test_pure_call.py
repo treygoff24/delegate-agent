@@ -7,13 +7,21 @@ import time
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import argv_builders as argv_builders_api
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import profiles as profiles_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import runner as runner_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
 class PureCallTests(CommandTestBase):
     def test_claude_pure_argv_is_exact_boundary(self):
-        argv = self.delegate.build_claude_argv(
-            self.delegate.DEFAULT_CONFIG["claude"],
+        argv = argv_builders_api.build_claude_argv(
+            config_api.embedded_default_config()["claude"],
             "call",
             "requested-model",
             {},
@@ -44,14 +52,14 @@ class PureCallTests(CommandTestBase):
         self.assertNotIn("--bare", argv)
 
     def test_opencode_pure_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request(
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            request_api.build_request(
                 "opencode",
                 "call",
                 None,
-                self.delegate.ResolvedWorkspace("/tmp/empty", "directory"),
+                request_types.ResolvedWorkspace("/tmp/empty", "directory"),
                 "hostile prompt",
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 True,
                 pure=True,
             )
@@ -59,9 +67,9 @@ class PureCallTests(CommandTestBase):
 
     def test_call_pure_prompt_uses_stdin_not_argv(self):
         prompt = "HOSTILE_PROMPT_SENTINEL"
-        parsed = self.delegate.parse_cli(["claude", "call", "--pure", prompt])
-        request = self.delegate.request_from_parsed(
-            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        parsed = parser_api.parse_cli(["claude", "call", "--pure", prompt])
+        request = request_api.request_from_parsed(
+            parsed, config_api.embedded_default_config(), io.StringIO("")
         )
         self.addCleanup(lambda: Path(request.workspace).exists() and os.rmdir(request.workspace))
         self.assertEqual(request.stdin_text, prompt)
@@ -69,14 +77,14 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(request.prompt, prompt)
 
     def test_call_pure_uses_empty_temporary_cwd_and_cleans_it(self):
-        parsed = self.delegate.parse_cli(["claude", "call", "--pure", "answer"])
-        request = self.delegate.request_from_parsed(
-            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        parsed = parser_api.parse_cli(["claude", "call", "--pure", "answer"])
+        request = request_api.request_from_parsed(
+            parsed, config_api.embedded_default_config(), io.StringIO("")
         )
         workspace = Path(request.workspace)
         self.assertTrue(workspace.is_dir())
         self.assertEqual(list(workspace.iterdir()), [])
-        fake = self.delegate.delegate_runner.CallResult(
+        fake = runner_api.CallResult(
             text="ok",
             exit_code=0,
             duration_ms=1,
@@ -87,15 +95,15 @@ class PureCallTests(CommandTestBase):
         )
         with (
             mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(self.delegate.delegate_runner, "execute_call", return_value=fake),
+            mock.patch.object(runner_api, "execute_call", return_value=fake),
         ):
             code, _ = self.delegate.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=config_api.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call>", "directory"),
+                source_workspace=request_types.ResolvedWorkspace("<call>", "directory"),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
@@ -104,12 +112,12 @@ class PureCallTests(CommandTestBase):
 
     def test_call_preserves_child_created_files_in_result_envelope(self):
         with tempfile.TemporaryDirectory() as source:
-            parsed = self.delegate.parse_cli(["cursor", "call", "write memo"])
-            request = self.delegate.request_from_parsed(
-                parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+            parsed = parser_api.parse_cli(["cursor", "call", "write memo"])
+            request = request_api.request_from_parsed(
+                parsed, config_api.embedded_default_config(), io.StringIO("")
             )
             workspace = Path(request.workspace)
-            fake = self.delegate.delegate_runner.CallResult(
+            fake = runner_api.CallResult(
                 text="done",
                 exit_code=0,
                 duration_ms=1,
@@ -128,7 +136,7 @@ class PureCallTests(CommandTestBase):
             with (
                 mock.patch.object(self.delegate, "ensure_binary"),
                 mock.patch.object(
-                    self.delegate.delegate_runner,
+                    runner_api,
                     "execute_call",
                     side_effect=create_deliverable,
                 ),
@@ -136,10 +144,10 @@ class PureCallTests(CommandTestBase):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
-                    source_workspace=self.delegate.ResolvedWorkspace(source, "directory"),
+                    source_workspace=request_types.ResolvedWorkspace(source, "directory"),
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
                 )
@@ -160,7 +168,7 @@ class PureCallTests(CommandTestBase):
             {"PATH": "/bin", "HOME": "/home/test", "DELEGATE_TEST_SECRET": "secret"},
             clear=True,
         ):
-            env = self.delegate.profiles.child_environment(
+            env = profiles_api.child_environment(
                 base={"CODEX_HOME": "/trusted/codex"},
                 overrides={"PROFILE_VALUE": "trusted"},
                 pure=True,
@@ -179,23 +187,23 @@ class PureCallTests(CommandTestBase):
                 '"required":["answer"],"additionalProperties":false}'
             )
             schema.write_text(contents, encoding="utf-8")
-            codex = self.delegate.build_request(
+            codex = request_api.build_request(
                 "codex",
                 "call",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "answer",
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 True,
                 output_schema=str(schema),
             )
-            claude = self.delegate.build_request(
+            claude = request_api.build_request(
                 "claude",
                 "call",
                 None,
-                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                request_types.ResolvedWorkspace(tmp, "directory"),
                 "answer",
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 True,
                 output_schema=str(schema),
                 pure=True,
@@ -204,22 +212,22 @@ class PureCallTests(CommandTestBase):
                 codex.argv[codex.argv.index("--output-schema") + 1], str(schema.resolve())
             )
             self.assertEqual(claude.argv[claude.argv.index("--json-schema") + 1], contents)
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.build_request(
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                request_api.build_request(
                     "grok",
                     "call",
                     None,
-                    self.delegate.ResolvedWorkspace(tmp, "directory"),
+                    request_types.ResolvedWorkspace(tmp, "directory"),
                     "answer",
-                    self.delegate.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     True,
                     output_schema=str(schema),
                 )
             self.assertEqual(ctx.exception.error, "unsupported_output_schema")
 
     def test_pure_rejects_engine_without_required_capabilities(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_cursor_argv(
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            argv_builders_api.build_cursor_argv(
                 ["agent"],
                 "call",
                 "/tmp/call",
@@ -230,9 +238,9 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "unsupported_pure_call")
 
     def test_codex_pure_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_codex_argv(
-                self.delegate.DEFAULT_CONFIG["codex"],
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            argv_builders_api.build_codex_argv(
+                config_api.embedded_default_config()["codex"],
                 "call",
                 "/tmp/call",
                 "requested-model",
@@ -261,7 +269,7 @@ class PureCallTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "claude_result.py"
             script.write_text(f"print({json.dumps(json.dumps(event))})\n", encoding="utf-8")
-            result = self.delegate.delegate_runner.execute_call(
+            result = runner_api.execute_call(
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
         self.assertEqual(result.text, '{"answer":"yes"}')
@@ -283,7 +291,7 @@ class PureCallTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "claude_no_usage.py"
             script.write_text(f"print({json.dumps(json.dumps(no_usage))})\n", encoding="utf-8")
-            result = self.delegate.delegate_runner.execute_call(
+            result = runner_api.execute_call(
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
         self.assertEqual(result.usage, {"basis": "unavailable"})
@@ -323,7 +331,7 @@ class PureCallTests(CommandTestBase):
             with self.subTest(events=events), tempfile.TemporaryDirectory() as tmp:
                 script = Path(tmp) / "claude_tripwire.py"
                 script.write_text(f"print({json.dumps(json.dumps(events))})\n", encoding="utf-8")
-                result = self.delegate.delegate_runner.execute_call(
+                result = runner_api.execute_call(
                     [sys.executable, str(script)], tmp, harness="claude", pure=True
                 )
                 self.assertEqual(result.exit_code, 1)
@@ -334,7 +342,7 @@ class PureCallTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
             schema.write_text('{"type":"object"}', encoding="utf-8")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "claude",
                     "call",
@@ -346,10 +354,10 @@ class PureCallTests(CommandTestBase):
                     "answer",
                 ]
             )
-            request = self.delegate.request_from_parsed(
-                parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+            request = request_api.request_from_parsed(
+                parsed, config_api.embedded_default_config(), io.StringIO("")
             )
-            fake = self.delegate.delegate_runner.CallResult(
+            fake = runner_api.CallResult(
                 text='{"answer":"yes"}',
                 exit_code=0,
                 duration_ms=3,
@@ -362,15 +370,15 @@ class PureCallTests(CommandTestBase):
             )
             with (
                 mock.patch.object(self.delegate, "ensure_binary"),
-                mock.patch.object(self.delegate.delegate_runner, "execute_call", return_value=fake),
+                mock.patch.object(runner_api, "execute_call", return_value=fake),
             ):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
-                    source_workspace=self.delegate.ResolvedWorkspace("<call>", "directory"),
+                    source_workspace=request_types.ResolvedWorkspace("<call>", "directory"),
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
                 )
@@ -385,7 +393,7 @@ class PureCallTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "bad_claude.py"
             script.write_text("print('not json')\n", encoding="utf-8")
-            result = self.delegate.delegate_runner.execute_call(
+            result = runner_api.execute_call(
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
         self.assertEqual(result.exit_code, 1)
@@ -404,7 +412,7 @@ class PureCallTests(CommandTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "claude_usage.py"
             script.write_text(f"print({json.dumps(json.dumps(events))})\n", encoding="utf-8")
-            result = self.delegate.delegate_runner.execute_call(
+            result = runner_api.execute_call(
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
 
@@ -417,13 +425,13 @@ class PureCallTests(CommandTestBase):
             schema = Path(tmp) / "schema.json"
             contents = '{"type":"object"}'
             schema.write_text(contents, encoding="utf-8")
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["dry-run", "claude", "call", "--pure", "--output-schema", str(schema), "x"]
             )
-            request = self.delegate.request_from_parsed(
-                parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+            request = request_api.request_from_parsed(
+                parsed, config_api.embedded_default_config(), io.StringIO("")
             )
-        self.assertEqual(request.workspace, self.delegate.CALL_TEMP_CWD_PLACEHOLDER)
+        self.assertEqual(request.workspace, request_api.CALL_TEMP_CWD_PLACEHOLDER)
         self.assertIn("--safe-mode", request.argv)
         self.assertEqual(request.argv[request.argv.index("--json-schema") + 1], contents)
 
@@ -438,8 +446,8 @@ class PureCallTests(CommandTestBase):
                 "time.sleep(60)\n",
                 encoding="utf-8",
             )
-            with self.assertRaises(self.delegate.delegate_runner.RunnerLaunchError) as ctx:
-                self.delegate.delegate_runner.execute_call(
+            with self.assertRaises(runner_api.RunnerLaunchError) as ctx:
+                runner_api.execute_call(
                     [sys.executable, str(script)], tmp, harness="codex", timeout=1
                 )
             self.assertEqual(ctx.exception.error, "call_timeout")
@@ -458,7 +466,7 @@ class PureCallTests(CommandTestBase):
         import subprocess
         import threading
 
-        runner = self.delegate.delegate_runner
+        runner = runner_api
 
         class BlockingStdin:
             def __init__(self) -> None:
@@ -522,7 +530,7 @@ class PureCallTests(CommandTestBase):
         # buffered writer's close() contends with the blocked write() lock.
         import subprocess
 
-        runner = self.delegate.delegate_runner
+        runner = runner_api
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
             stdin=subprocess.PIPE,
@@ -548,7 +556,7 @@ class PureCallTests(CommandTestBase):
         self.assertIsNotNone(process.poll())
 
     def test_copy_auth_is_private_copy_not_hardlink(self):
-        runner = self.delegate.delegate_runner
+        runner = runner_api
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "auth.json"
             dst = Path(tmp) / "ephemeral" / "auth.json"
@@ -562,7 +570,7 @@ class PureCallTests(CommandTestBase):
     def test_call_stderr_overflow_uses_distinct_error(self):
         import subprocess
 
-        runner = self.delegate.delegate_runner
+        runner = runner_api
 
         class GrowingStderr:
             def __init__(self) -> None:
@@ -632,13 +640,13 @@ class PureCallTests(CommandTestBase):
                 "raise SystemExit(9)\n",
                 encoding="utf-8",
             )
-            result = self.delegate.delegate_runner.execute_call(
+            result = runner_api.execute_call(
                 [sys.executable, str(script)],
                 tmp,
                 harness="codex",
                 sensitive_texts=(prompt, schema),
             )
-        self.assertLessEqual(len(result.stderr_tail), self.delegate.profiles.STDERR_TAIL_LIMIT)
+        self.assertLessEqual(len(result.stderr_tail), profiles_api.STDERR_TAIL_LIMIT)
         self.assertNotIn(prompt, result.stderr_tail)
         self.assertNotIn(schema, result.stderr_tail)
 

@@ -161,6 +161,10 @@ def _read_record_json(path: Path, *, allow_missing: bool = False) -> JsonObject 
 
 def _load_snapshot_record(registry_root: Path, run_id: str) -> JsonObject | None:
     try:
+        _read_record_json(
+            run_registry.run_directory(registry_root, run_id) / run_registry.SNAPSHOT_FILE,
+            allow_missing=True,
+        )
         return run_registry.load_run_snapshot(registry_root, run_id)
     except run_registry.RegistryJsonError as exc:
         raise _record_invalid(str(exc)) from exc

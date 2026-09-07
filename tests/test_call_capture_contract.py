@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import cli, config
+from delegate_agent import request_build as request_api
 from tests.test_omp_output_capture import final_line, thinking_line
 
 
@@ -25,7 +26,7 @@ class CallCaptureContractTests(unittest.TestCase):
             cfg = config.embedded_default_config()
             cfg["omp"]["binary"] = str(executable)
             out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(cli, "load_config", return_value=(cfg, "fixture")):
+            with mock.patch.object(request_api, "load_config", return_value=(cfg, "fixture")):
                 code = cli.main(["--json", "omp", "call", "Fixture prompt"], stdout=out, stderr=err)
             self.assertEqual(code, 0, err.getvalue())
             payload = json.loads(out.getvalue())

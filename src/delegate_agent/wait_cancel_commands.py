@@ -10,7 +10,14 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, profiles, run_registry, snapshot_view, terminal_states
+from delegate_agent import (
+    command_errors,
+    profiles,
+    redaction,
+    run_registry,
+    snapshot_view,
+    terminal_states,
+)
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
@@ -116,7 +123,11 @@ def _resolve_targets(
 
 def _merged_view(registry_root: Path, run_id: str, target: run_registry.RunTarget) -> JsonObject:
     snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
-    view = snapshot_view.merge_snapshot_view(registry_root, run_id, snapshot, redact=True)
+    view = (
+        redaction.redact_value(snapshot)
+        if snapshot is not None
+        else snapshot_view.merge_snapshot_view(registry_root, run_id, None, redact=True)
+    )
     run_registry.add_run_target_resolution(view, target)
     return dict(view)
 

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import copy
 import unittest
 from pathlib import Path
 
 from delegate_agent import argv_builders, prompt_instructions, resume_command, worktree_execution
+from delegate_agent import config as config_api
 from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
@@ -46,7 +46,7 @@ class PersonaFramerTests(CommandTestBase):
         return Path(repo.name)
 
     def _config(self, engine: str) -> dict[str, object]:
-        config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
+        config = config_api.embedded_default_config()
         config["personas"]["forceTransport"] = "prepend"
         if engine == "droid":
             config["droid"]["defaultModel"] = "droid-model"

@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import cli, request_build, runner
+from delegate_agent import config as config_api
+from delegate_agent import request_build, runner
 from delegate_agent.errors import DelegateError
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import Request, ResolvedWorkspace
@@ -112,7 +113,7 @@ class PersonaResolutionTests(unittest.TestCase):
                         None,
                         ResolvedWorkspace(str(source), "directory"),
                         "prompt",
-                        cli.DEFAULT_CONFIG,
+                        config_api.embedded_default_config(),
                         dry_run=True,
                         isolation_context=self._context(source, lifecycle),
                         persona="editor",
@@ -144,7 +145,7 @@ class PersonaResolutionTests(unittest.TestCase):
                     None,
                     ResolvedWorkspace(str(source), "directory"),
                     "prompt",
-                    cli.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     dry_run=True,
                     isolation_context=context,
                     persona="editor",
@@ -163,7 +164,7 @@ class PersonaResolutionTests(unittest.TestCase):
                     None,
                     ResolvedWorkspace(str(source), "directory"),
                     "prompt",
-                    cli.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     dry_run=True,
                     isolation_context=context,
                     persona="editor",
@@ -199,7 +200,7 @@ class PersonaResolutionTests(unittest.TestCase):
                     None,
                     ResolvedWorkspace(str(source), "directory"),
                     "prompt",
-                    cli.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     dry_run=True,
                     persona="editor",
                     stderr=stderr,
@@ -266,7 +267,7 @@ class PersonaResolutionTests(unittest.TestCase):
                     None,
                     ResolvedWorkspace(str(source), "directory"),
                     "prompt",
-                    cli.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     dry_run=True,
                     persona="reviewer",
                     stderr=stderr,

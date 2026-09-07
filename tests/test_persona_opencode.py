@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import copy
 import json
 import os
 import unittest
 from unittest import mock
 
+from delegate_agent import config as config_api
 from delegate_agent import request_build
 from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
@@ -15,7 +15,7 @@ class PersonaOpenCodeTests(CommandTestBase):
     _PERSONA = "OPEN CODE PERSONA APPENDED"
 
     def _config_with_profile(self, config_content: str) -> dict[str, object]:
-        config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
+        config = config_api.embedded_default_config()
         config["profiles"] = {
             "detectFrom": [],
             "default": "work",
@@ -65,7 +65,7 @@ class PersonaOpenCodeTests(CommandTestBase):
 
     def test_malformed_existing_config_falls_back_without_overwriting_config(self):
         malformed = "{not-json"
-        config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
+        config = config_api.embedded_default_config()
         with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": malformed}, clear=False):
             request = self._request(config)
             ambient_config_after_build = os.environ["OPENCODE_CONFIG_CONTENT"]

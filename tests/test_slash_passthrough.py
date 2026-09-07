@@ -4,6 +4,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as config_api
+from delegate_agent import describe_payload as describe_api
+from delegate_agent import request_build as request_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 
@@ -54,12 +59,12 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         super().setUp()
         self.repo = make_git_repo()
         self.addCleanup(self.repo.cleanup)
-        self.config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        self.config = config_api.embedded_default_config()
         self.config["droid"]["models"] = {"reviewer": "model-id"}
 
     def build(self, argv):
-        parsed = self.delegate.parse_cli(["--cwd", self.repo.name, *argv])
-        return self.delegate.request_from_parsed(parsed, self.config, io.StringIO(""))
+        parsed = parser_api.parse_cli(["--cwd", self.repo.name, *argv])
+        return request_api.request_from_parsed(parsed, self.config, io.StringIO(""))
 
     def assert_verbatim(self, request, prompt):
         self.assertEqual(request.prompt_instruction_mode, PROMPT_INSTRUCTION_MODE_SLASH)
@@ -92,7 +97,7 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         for argv in (
             ["cursor", "safe", "/goal x"],
             ["kimi", "safe", "/goal x"],
-            ["droid", "reviewer", "safe", "/goal x"],
+            ["droid", "safe", "--model", "reviewer", "/goal x"],
         ):
             with self.assertRaises(DelegateError) as caught:
                 self.build(argv)
@@ -112,13 +117,13 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
 
     def test_droid_work_slash_prompt_verbatim_in_prompt_file(self):
         prompt = "/goal implement the thing"
-        request = self.build(["droid", "reviewer", "work", prompt])
+        request = self.build(["droid", "work", "--model", "reviewer", prompt])
         self.assertEqual(request.prompt_instruction_mode, PROMPT_INSTRUCTION_MODE_SLASH)
         self.assertEqual(request.prompt_file_text, prompt)
 
     def build_no_cwd(self, argv):
-        parsed = self.delegate.parse_cli(argv)
-        return self.delegate.request_from_parsed(parsed, self.config, io.StringIO(""))
+        parsed = parser_api.parse_cli(argv)
+        return request_api.request_from_parsed(parsed, self.config, io.StringIO(""))
 
     def test_call_read_only_rejects_slash(self):
         with self.assertRaises(DelegateError) as caught:
@@ -142,7 +147,9 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         self.assertTrue(request.prompt.startswith(SKILL_REVIEW_PREFIX))
 
     def test_pass_through_without_slash_keeps_safe_prefix_drops_preamble(self):
-        request = self.build(["--pass-through", "droid", "reviewer", "safe", "review this"])
+        request = self.build(
+            ["--pass-through", "droid", "safe", "--model", "reviewer", "review this"]
+        )
         self.assertEqual(request.prompt_instruction_mode, PROMPT_INSTRUCTION_MODE_WRAPPED)
         self.assertNotIn(SKILL_REVIEW_PREFIX, request.prompt)
         self.assertIn("Delegate Droid safe mode", request.prompt)
@@ -172,8 +179,8 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
             )
             input_path = handle.name
         self.addCleanup(lambda: Path(input_path).unlink(missing_ok=True))
-        parsed = self.delegate.parse_cli(["run", "--input-json", input_path])
-        request = self.delegate.request_from_parsed(parsed, self.config, io.StringIO(""))
+        parsed = parser_api.parse_cli(["run", "--input-json", input_path])
+        request = request_api.request_from_parsed(parsed, self.config, io.StringIO(""))
         self.assert_verbatim(request, prompt)
 
     def test_input_json_slash_prompt_safe_cursor_rejected(self):
@@ -186,16 +193,16 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
             )
             input_path = handle.name
         self.addCleanup(lambda: Path(input_path).unlink(missing_ok=True))
-        parsed = self.delegate.parse_cli(["run", "--input-json", input_path])
+        parsed = parser_api.parse_cli(["run", "--input-json", input_path])
         with self.assertRaises(DelegateError) as caught:
-            self.delegate.request_from_parsed(parsed, self.config, io.StringIO(""))
+            request_api.request_from_parsed(parsed, self.config, io.StringIO(""))
         self.assertEqual(caught.exception.error, "slash_passthrough_unsupported")
 
 
 class SlashPassthroughDescribeTests(ExecutionTestBase):
     def test_describe_capability_table(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        payload = self.delegate.describe_payload(config, "defaults")
+        config = config_api.embedded_default_config()
+        payload = describe_api.describe_payload(config, "defaults")
         modes = payload["promptInstructionModes"]
         self.assertEqual(
             modes["modes"],

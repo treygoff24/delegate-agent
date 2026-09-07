@@ -4,6 +4,11 @@ import io
 import json
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import command_help as help_api
+from delegate_agent import errors as errors_api
+from delegate_agent import request_build as request_api
+from delegate_agent.workflows import commands as workflow_commands_api
 from tests.test_delegate_help_cli import HelpCliTestBase
 
 
@@ -18,7 +23,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         self.assertIn("version", overview)
         for excluded in ("configSource", "configResolution", "profiles", "launchOptions"):
             self.assertNotIn(excluded, overview)
-        specs = self.delegate.command_help.COMMAND_SPECS
+        specs = help_api.COMMAND_SPECS
         self.assertEqual(
             {row["command"] for row in overview["commands"]},
             {name for name, spec in specs.items() if not spec.internal},
@@ -46,7 +51,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
 
     def test_overview_does_not_load_config(self):
         with mock.patch.object(
-            self.delegate, "load_config", side_effect=AssertionError("config read")
+            request_api, "load_config", side_effect=AssertionError("config read")
         ):
             code, out, err = self.run_main(["--json", "describe", "--overview"])
         self.assertEqual(code, 0, err)
@@ -67,16 +72,16 @@ class DiscoveryContractsTests(HelpCliTestBase):
     def test_resume_alias_preserves_existing_parse_contract(self):
         for extra in ([], ["--budget", "12"], ["--dry-run"], ["--notify", "channel:test"]):
             with self.subTest(extra=extra):
-                original = self.delegate.parse_cli(
+                original = parser_api.parse_cli(
                     ["--json", "workflow", "run", "--resume", "wf_0123abcdef45", *extra]
                 )
-                alias = self.delegate.parse_cli(
+                alias = parser_api.parse_cli(
                     ["--json", "workflow", "resume", "wf_0123abcdef45", *extra]
                 )
                 self.assertEqual(alias, original)
         for args in ([], ["wf_0123abcdef45", "another"], ["wf_0123abcdef45", "--args", "{}"]):
-            with self.subTest(args=args), self.assertRaises(self.delegate.DelegateError):
-                self.delegate.parse_cli(["workflow", "resume", *args])
+            with self.subTest(args=args), self.assertRaises(errors_api.DelegateError):
+                parser_api.parse_cli(["workflow", "resume", *args])
 
     def test_nested_typo_is_advisory_with_safe_recovery(self):
         for parent, typo, suggestion in (
@@ -87,7 +92,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         ):
             with (
                 self.subTest(parent=parent),
-                mock.patch.object(self.delegate.workflow_commands, "emit") as execute,
+                mock.patch.object(workflow_commands_api, "emit") as execute,
             ):
                 code, out, err = self.run_main(["--json", parent, typo])
                 self.assertEqual(code, 2, err)
@@ -110,7 +115,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         self.assertIn("delegate help workflow reject", payload["nextActions"])
 
     def test_generic_error_preserves_existing_fields_and_actions(self):
-        error = self.delegate.DelegateError(
+        error = errors_api.DelegateError(
             "example_error",
             "Example failure",
             3,
@@ -179,7 +184,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         }
         self.assertEqual(set(arguments), set(actions))
         for action in actions:
-            parsed = self.delegate.parse_cli(["workflow", action, *arguments[action]])
+            parsed = parser_api.parse_cli(["workflow", action, *arguments[action]])
             self.assertEqual(parsed.payload.action, "run" if action == "resume" else action)
             code, out, err = self.run_main(["--json", "workflow", action, "--help"])
             self.assertEqual(code, 0, err)

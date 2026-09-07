@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import cli, config, private_io, workflow_attempts, workflow_pinning
+from delegate_agent import request_build as request_api
 from delegate_agent.workflows import commands, registry, runtime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ class WorkflowAttemptTests(unittest.TestCase):
     def test_cli_supplies_the_resolved_config_source(self) -> None:
         with (
             mock.patch.object(
-                cli,
+                request_api,
                 "load_config",
                 return_value=(config.embedded_default_config(), "fixture-config"),
             ),
