@@ -302,9 +302,12 @@ labels before printing, and do not include raw child output.
 `--progress` is incompatible with `--pass-through`, which already streams raw
 child output.
 
-OpenCode v1.17.17 buffers stdout until completion. A tracked OpenCode run can
-remain at "no events yet" while it is still running; the final events appear
-after the child exits.
+A tracked OpenCode run that sits at "no events yet" while it is still running was
+once attributed to OpenCode buffering stdout until completion, observed against
+v1.17.17. That did not reproduce against the emit pattern OpenCode's runner uses,
+and the retest ran against a standalone Bun rather than the shipped binary, so
+treat the cause as unsettled and check `--print-logs` stderr before concluding
+the child is stuck.
 
 ## Need one-hop output instead of a tracked run
 

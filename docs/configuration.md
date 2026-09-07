@@ -402,7 +402,12 @@ ambient pass returns immediately.
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
 - `models`: optional map of local aliases to Codex model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
-- `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
+- `profile`: optional Codex CLI config overlay name. Codex reads it as a file:
+  `--profile <name>` layers `$CODEX_HOME/<name>.config.toml` on top of the base
+  user config. It is not a `[profiles.<name>]` table inside `config.toml`, which
+  current Codex no longer consults. A name whose file does not exist is accepted
+  silently and resolves no overlay, so `delegate doctor` warns when the file is
+  missing. It is config-only; JSON run input cannot set it.
 - `fallbackProfile`: optional top-level `profiles.definitions` name for Codex-only quota fallback. The profile must define `env.CODEX_HOME`; a known-blocked credential namespace is not launched.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
@@ -415,8 +420,9 @@ both namespaces are blocked, Delegate keeps the primary attempt and skips the
 fallback.
 
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
-- `codex.profile` is a Codex CLI config overlay. The top-level `profiles`
-  block below is Delegate-injected auth/env and is a separate concept.
+- `codex.profile` names a Codex CLI config overlay file. The top-level `profiles`
+  block below is Delegate-injected auth/env and is a separate concept; it is what
+  supplies the `CODEX_HOME` the overlay file is looked up under.
 
 ### `profiles`
 
