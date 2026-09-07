@@ -22,6 +22,7 @@ from delegate_agent import (
     command_help,
     harness_discovery,
     mail_core,
+    reasoning,
     request_build,
 )
 from delegate_agent import cli_parser as parser_api
@@ -500,27 +501,46 @@ class OmpCatalogWarningTests(CommandTestBase):
         )
 
 
-class GrokEffortHelpStringTests(unittest.TestCase):
-    """A9: the help strings stop advertising an effort grok 1.0.13 rejects."""
+class EffortHelpStringTests(unittest.TestCase):
+    """A9: help prose is read from the effort enums, not typed out beside them.
 
-    def test_command_help_omits_max(self):
-        spec = command_help.COMMAND_SPECS["grok"]
-        effort_notes = [note for note in spec.notes if "--effort" in note]
-        self.assertTrue(effort_notes)
-        for note in effort_notes:
-            self.assertIn("low, medium, high, xhigh", note)
-            self.assertNotIn("max", note)
+    The audit found Grok's help advertising `max`, which grok 1.0.13 rejects
+    outright, because the list was maintained by hand next to the tuple it was
+    meant to describe. Both surfaces now render the tuple.
+    """
 
-    def test_describe_payload_omits_max(self):
+    _CASES = (
+        ("grok", "--effort", "GROK_NATIVE_EFFORTS"),
+        ("pi", "--thinking", "PI_NATIVE_EFFORTS"),
+        ("omp", "--thinking", "OMP_NATIVE_EFFORTS"),
+    )
+
+    def _payload_notes(self, engine):
         payload = describe_api.describe_payload(
             delegate_config.embedded_default_config(), "embedded default"
         )
+        mapping = payload["modeMapping"][engine]
+        return list(mapping.get("safeNotes", [])) + list(mapping.get("workNotes", []))
+
+    def test_help_and_describe_name_exactly_the_supported_efforts(self):
+        for engine, flag, enum_name in self._CASES:
+            efforts = getattr(reasoning, enum_name)
+            with self.subTest(engine=engine):
+                notes = [
+                    note for note in command_help.COMMAND_SPECS[engine].notes if flag in note
+                ] + [note for note in self._payload_notes(engine) if flag in note]
+                self.assertTrue(notes, engine)
+                for note in notes:
+                    for effort in efforts:
+                        self.assertIn(effort, note)
+
+    def test_grok_help_no_longer_advertises_max(self):
+        # The specific defect: grok rejects `max`, and a run that asks for it
+        # dies after workspace isolation and prompt materialization.
+        self.assertNotIn("max", reasoning.GROK_NATIVE_EFFORTS)
         notes = [
-            note
-            for note in payload["modeMapping"]["grok"]["safeNotes"]
-            + payload["modeMapping"]["grok"].get("workNotes", [])
-            if "--effort" in note
-        ]
+            note for note in command_help.COMMAND_SPECS["grok"].notes if "--effort" in note
+        ] + [note for note in self._payload_notes("grok") if "--effort" in note]
         self.assertTrue(notes)
         for note in notes:
             self.assertNotIn("max", note)

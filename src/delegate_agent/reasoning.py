@@ -94,18 +94,6 @@ OMP_NATIVE_EFFORTS = (*PI_NATIVE_EFFORTS, "auto")
 PI_THINKING_LEVELS = OMP_NATIVE_EFFORTS
 
 
-def thinking_vocabulary_prose(efforts: tuple[str, ...]) -> str:
-    """`a, b, or c` — a native `--thinking` vocabulary rendered for help prose.
-
-    Help and describe text is derived from the tuple rather than transcribed, so
-    a vendor adding or removing a level cannot leave the two surfaces claiming a
-    vocabulary the resolver no longer accepts.
-    """
-    if len(efforts) == 1:
-        return efforts[0]
-    return f"{', '.join(efforts[:-1])}, or {efforts[-1]}"
-
-
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support; "
