@@ -1681,6 +1681,14 @@ class VersionIdentityTests(unittest.TestCase):
         renamed = self.discovery._identify_version("droid", ("/bin/something-else",), "1.2.3")
         self.assertEqual((renamed.status, renamed.version), ("unrecognized", None))
 
+    def test_explicit_wrapper_name_accepts_a_bare_version(self):
+        identity = self.discovery._identify_version("pi", ("estate-pi",), "0.85.1", explicit=True)
+        self.assertEqual((identity.status, identity.version), ("expected", "0.85.1"))
+
+    def test_explicit_ambiguous_wrapper_name_still_rejects_a_bare_version(self):
+        identity = self.discovery._identify_version("pi", ("agent",), "0.85.1", explicit=True)
+        self.assertEqual((identity.status, identity.version), ("unrecognized", None))
+
     def test_unbranded_cursor_shaped_build_id_is_uncertain_for_other_harnesses(self):
         """A bare build ID names no tool, so it cannot convict a selector.
 
@@ -1945,6 +1953,18 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(result.error, "fingerprint_mismatch")
         self.assertEqual(result.selector, (str(wrong),))
         self.assertEqual(result.identified_harness, "grok")
+
+    def test_explicit_pi_wrapper_with_bare_version_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            estate_pi = write_version_harness(root / "estate-pi", "0.85.1")
+            config = self.embedded_default_config()
+            config["pi"]["binary"] = "estate-pi"
+            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}
+            result = self.resolve_harness_selector(config, "pi", env=env)
+        self.assertEqual(result.selector, (str(estate_pi),))
+        self.assertEqual(result.version, "0.85.1")
+        self.assertIsNone(result.error)
 
     def test_mismatch_attempt_preserves_last_good_record_and_typed_provenance(self):
         from delegate_agent import harness_discovery
