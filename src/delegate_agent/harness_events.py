@@ -407,6 +407,96 @@ def _served_model(payload: JsonObject) -> str | None:
     return None
 
 
+# Cursor's stream reports the model's DISPLAY NAME, never the id passed to
+# `--model`, so a pinned run comparing the two fails 100% of the time. The
+# authoritative mapping is the `displayName` that `parse_cursor_catalog` records
+# for each selector; `requested_model_display_name` carries it when a caller has
+# the catalog to hand. Without one, the selector's own documented shape
+# (`<family>-<effort>[-fast]`, rendered as "<Family> <Effort Label>[ Fast]") is
+# enough to reconstruct the expected label. Kept in step with
+# `harness_discovery._CURSOR_EFFORT_LABELS` by
+# test_cursor_effort_labels_match_harness_discovery.
+_CURSOR_EFFORT_LABELS = {
+    "none": "None",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra High",
+    "max": "Max",
+}
+_CURSOR_SELECTOR_PATTERN = re.compile(
+    r"(?P<family>.+)-(?P<effort>none|low|medium|high|xhigh|max)(?P<fast>-fast)?$"
+)
+
+# Claude reports the fully dated served id, so every documented alias trips a
+# pinned run. The two evidenced equivalences are the dated suffix on a concrete
+# id and the family segment of a family alias. `best` and `opusplan` map to no
+# single family and are deliberately absent: they fail pinned preflight.
+_CLAUDE_FAMILY_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
+_CLAUDE_SERVED_FAMILY_PATTERN = re.compile(r"^claude-(?P<family>[a-z]+)-")
+
+
+def _label_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _cursor_expected_label_keys(requested: str) -> set[str]:
+    keys = {_label_key(requested)}
+    match = _CURSOR_SELECTOR_PATTERN.fullmatch(requested)
+    if match is not None:
+        label = _CURSOR_EFFORT_LABELS[match.group("effort")]
+        suffix = "fast" if match.group("fast") else ""
+        keys.add(_label_key(match.group("family")) + _label_key(label) + suffix)
+    keys.discard("")
+    return keys
+
+
+def _cursor_pin_matches(requested: str, served: str, display_name: str | None) -> bool:
+    if display_name is not None and served == display_name:
+        return True
+    served_key = _label_key(served)
+    if not served_key:
+        return False
+    return served_key in _cursor_expected_label_keys(requested)
+
+
+def _claude_pin_matches(requested: str, served: str) -> bool:
+    # `opus[1m]` and `claude-opus-5[1m]` name a context-window variant of the
+    # same model, so the documented bracket suffix is stripped before comparing.
+    base = requested.split("[", 1)[0].strip()
+    if not base:
+        return False
+    if served == base:
+        return True
+    if base.lower() in _CLAUDE_FAMILY_ALIASES:
+        match = _CLAUDE_SERVED_FAMILY_PATTERN.match(served)
+        return match is not None and match.group("family") == base.lower()
+    return re.fullmatch(rf"{re.escape(base)}-\d{{8}}", served) is not None
+
+
+def served_model_matches_requested(
+    harness: str | None,
+    requested: str,
+    served: str,
+    *,
+    display_name: str | None = None,
+) -> bool:
+    """Is a served model id the pinned one, under this engine's own naming?
+
+    Exact identity always matches. Beyond that only engine-specific equivalences
+    evidenced against the vendor apply; there is deliberately no substring or
+    containment rule, which would accept a genuinely different model whose name
+    happens to embed the requested one.
+    """
+    if served == requested:
+        return True
+    if harness == "cursor":
+        return _cursor_pin_matches(requested, served, display_name)
+    if harness == "claude":
+        return _claude_pin_matches(requested, served)
+    return False
+
+
 def _normalize_terminal_status(value: JsonValue) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -439,6 +529,9 @@ def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
 class StreamAccumulator:
     harness: str | None = None
     requested_model: str | None = None
+    # The catalog `displayName` for `requested_model`, when the caller has the
+    # discovery catalog to hand. Only cursor reports a display name.
+    requested_model_display_name: str | None = None
     continuity_mode: str = "fungible"
     assistant_chunks: list[str] = field(default_factory=list)
     events: EventBuffer = field(default_factory=EventBuffer)
@@ -681,7 +774,12 @@ class StreamAccumulator:
                 self.continuity_mode == "pinned"
                 and isinstance(requested, str)
                 and requested
-                and model != requested
+                and not served_model_matches_requested(
+                    self.harness,
+                    requested,
+                    model,
+                    display_name=self.requested_model_display_name,
+                )
             ):
                 self.continuity_violation = {
                     "reason": "served_model_mismatch",

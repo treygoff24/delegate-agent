@@ -148,6 +148,135 @@ class HarnessEventsTests(unittest.TestCase):
                 self.assertEqual(len(completed), 1)
                 self.assertEqual(acc.terminal_event["event"], f"{harness}.error")
 
+    def test_cursor_effort_labels_match_harness_discovery(self):
+        """The duplicated label table must not drift from its source."""
+        import delegate_agent.harness_discovery as harness_discovery
+
+        self.assertEqual(
+            self.events._CURSOR_EFFORT_LABELS,
+            harness_discovery._CURSOR_EFFORT_LABELS,
+        )
+
+    def test_pinned_cursor_accepts_the_served_display_name(self):
+        """cursor B1: cursor reports a display name, never the requested id."""
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="composer-2.5",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "29e13e2f-2ddd-49c7-a5d5-8b1d6b672db5",
+                    "model": "Composer 2.5",
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "result", "subtype": "success", "result": "Done."}))
+
+        self.assertIsNone(acc.continuity_violation)
+        self.assertEqual(acc.served_model, "Composer 2.5")
+        self.assertEqual(acc.completion_text, "Done.")
+        self.assertEqual(acc.session_id, "29e13e2f-2ddd-49c7-a5d5-8b1d6b672db5")
+
+    def test_pinned_cursor_accepts_the_effort_suffixed_catalog_label(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="cursor-grok-4.6-xhigh",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(
+            json.dumps({"type": "system", "subtype": "init", "model": "Cursor Grok 4.6 Extra High"})
+        )
+        self.assertIsNone(acc.continuity_violation)
+
+    def test_pinned_cursor_still_rejects_a_different_model(self):
+        for served in ("Composer 2.6", "Cursor Grok 4.6 Extra High"):
+            with self.subTest(served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="cursor",
+                    requested_model="composer-2.5",
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": served}))
+                self.assertIsNotNone(acc.continuity_violation)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pinned_cursor_uses_a_supplied_catalog_display_name(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="cursor-mystery-1",
+            requested_model_display_name="Mystery One",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": "Mystery One"}))
+        self.assertIsNone(acc.continuity_violation)
+
+    def test_pinned_claude_accepts_the_dated_served_id_for_an_alias(self):
+        """claude L4: every documented alias trips a pinned run today."""
+        for requested, served in (
+            ("haiku", "claude-haiku-4-5-20251001"),
+            ("opus", "claude-opus-5-20260101"),
+            ("fable", "claude-fable-5-1-20260601"),
+            ("sonnet[1m]", "claude-sonnet-5-20260101"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+            ("claude-opus-5[1m]", "claude-opus-5"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="claude",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(
+                    json.dumps(
+                        {"type": "system", "subtype": "init", "session_id": "s1", "model": served}
+                    )
+                )
+                self.assertIsNone(acc.continuity_violation)
+                self.assertIsNone(acc.terminal_status)
+
+    def test_pinned_claude_rejects_a_different_family_or_an_unmapped_alias(self):
+        for requested, served in (
+            ("haiku", "claude-opus-5-20260101"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-turbo"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-2025100"),
+            ("best", "claude-opus-5-20260101"),
+            ("opusplan", "claude-opus-5-20260101"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="claude",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": served}))
+                self.assertIsNotNone(acc.continuity_violation)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pinned_equivalence_is_not_generic_containment(self):
+        """A served id that merely embeds the requested one is a different model."""
+        acc = self.events.StreamAccumulator(
+            harness="codex",
+            requested_model="gpt-5.6",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "turn.started", "model": "gpt-5.6-sol-preview"}))
+        self.assertIsNotNone(acc.continuity_violation)
+
+    def test_mid_run_model_switch_check_is_unchanged_for_cursor(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="composer-2.5",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": "Composer 2.5"}))
+        self.assertIsNone(acc.continuity_violation)
+        acc.ingest_line(json.dumps({"type": "assistant", "model": "Composer 2.6"}))
+        self.assertEqual((acc.continuity_violation or {}).get("reason"), "mid_session_model_switch")
+
     def test_provider_max_turns_is_typed_from_result_metadata(self):
         acc = self.events.StreamAccumulator(harness="claude")
 
