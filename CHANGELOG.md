@@ -8,14 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `describe --overview` provides a compact command index without expanded option
-  prose. Existing full and summary discovery remain available.
+- `describe` provides a compact command index; `describe --full` expands the
+  command/config catalog. Help is generated from the same command specifications
+  used to validate supported global options.
 - `workflow resume` aliases `workflow run --resume`; focused reject help,
   workflow typo suggestions, and additive error recovery fields reduce guesswork.
   `workflow watch --jsonl` streams events without retaining the full response.
-- Capable workflow pins use immutable per-attempt operational settings with
-  effective values, origins, and digests. New pins bind the selected profile and
-  credential namespaces; older pins retain their behavior with explicit warnings.
+- Workflow pins use immutable per-attempt operational settings with effective
+  values, origins, and digests, and bind the selected profile and credential
+  namespaces.
 
 ### Fixed
 - Persistent-worktree launches preserve requested continuity and process-group
@@ -37,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removal target, and limited run listings avoid probing logs for excluded rows.
 
 ### Changed
+- Droid uses the same `--model <alias-or-model>` grammar as other engines. The
+  positional model-alias form is retired.
+- Workflow resume requires current-format pins, attempt configuration and
+  version-2 structural keys. Legacy formats are refused before child launch;
+  start a new workflow instead of migrating old state. Gate approvals require
+  the matching result hash.
+- Run progress, finalization and cancellation share one bounded mutable record.
+  Snapshot output is computed from that record; new runs do not maintain a
+  second mutable `snapshot.json`. Keep old and new runtime writers in separate
+  workspace registries during development or cutover.
+- Routine progress updates recover only their own pending finalization record.
+  Inspection remains lock-free and can observe a valid pending completion.
+  Automatic retention is throttled and is not on the cancellation path.
+- Nested workflows share runtime state without replaying the journal again.
+  New-agent and followup execution share locked replay and lifecycle decisions,
+  including concurrent rejection and interrupted-result recovery.
+- Worktree maintenance shares safety predicates while retaining command-specific
+  policies, retirement ignore-globs, and fresh checks before destructive changes.
 - CLI and input JSON normalize into one launch builder for tracked and call
   modes, retaining input-specific validation and workflow-session checks.
   Invalid JSON instruction modes return usage errors; Droid raw model IDs no
@@ -44,10 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shared metadata projections, typed isolation plans and retirement inputs, and
   a read-only record module reduce duplicated policy and circular imports.
 - Unit tests use owning modules while CLI contracts retain entrypoint coverage.
-  Acceptance selects the pinned Ruff toolchain; both test runners share private
-  temporary state and ownership-checked process cleanup. Runner parity retains
-  complete logs, and four existing cancellation regressions now run under the
-  authoritative unittest gate as well as pytest.
+  Acceptance selects the pinned Ruff toolchain. Pytest uses private temporary
+  state and ownership-checked process cleanup; runner parity retains complete
+  logs and cancellation regressions.
 
 ### Fixed
 - Claude `--output-schema` is accepted in tracked `safe`/`work` modes, not only

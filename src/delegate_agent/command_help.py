@@ -763,7 +763,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=(
             'delegate dry-run cursor work "Refactor the parser"',
-            "delegate --json dry-run droid reviewer safe --prompt-file task.md",
+            "delegate --json dry-run droid safe --model reviewer --prompt-file task.md",
             'delegate dry-run grok safe "Review this repo."',
             'delegate dry-run devin work "Plan an implementation run."',
             'delegate dry-run opencode safe "Review this repo."',

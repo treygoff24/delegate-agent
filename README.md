@@ -128,10 +128,9 @@ Inspect what Delegate sees:
 ```bash
 delegate --version       # installed version — include this in bug reports
 delegate --json setup
-delegate --json describe --overview   # start here: command index and help topics
-delegate --json describe --summary
+delegate --json describe              # start here: command index and help topics
+delegate --json describe --full       # expanded command/config catalog
 delegate --json models --summary
-delegate --json describe
 delegate --json models
 delegate --json models codex          # per-engine advisory catalog
 delegate --json models cursor --live  # merge live harness probe when supported
@@ -143,7 +142,7 @@ delegate --json capabilities
 delegate --json capabilities refresh   # refresh the active profile's discovery cache
 ```
 
-Start with `delegate --json describe --overview` for a compact, configuration-free command index. Then `delegate <command> --help` prints focused help, and `delegate --json <command> --help` returns its usage, arguments, and options. Global options may appear anywhere before `--`; tokens after `--` are literal prompt text. `delegate --json describe` retains the full command/config catalog. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` performs a one-off probe without updating the cache; rerun `delegate setup` or `delegate capabilities refresh` when ordinary launches should consume newly discovered models or effort levels.
+Start with `delegate --json describe` for a compact command index. Use `delegate <command> --help` for focused text or `delegate --json <command> --help` for its exact arguments and options. `describe --full` expands the command/config catalog. Global options may appear anywhere before `--`, but commands reject options they do not support; tokens after `--` are literal prompt text. Command-local options belong after the command, for example `runs --group NAME`. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` probes without updating the cache; use `setup` or `capabilities refresh` to save discovery results for later launches.
 
 Codex tracked runs can opt into a one-run quota fallback with `codex.fallbackProfile`; hashed credential namespace is canonical, while default work/personal credential homes also mirror compatible legacy alias keys so existing launchers share blocks. Remapped aliases remain isolated. See [Configuration](docs/configuration.md).
 
@@ -203,8 +202,8 @@ delegate kimi work "Implement the scoped change and run the named check. Report 
 ```
 
 Pin a model per run with `--model` (config alias from `<engine>.models`, or a
-raw model ID passed through verbatim). Droid still accepts a positional alias;
-`--model` works on every engine, including Droid:
+raw model ID passed through verbatim). This grammar applies to every engine,
+including Droid:
 
 ```bash
 delegate devin work --model implementer "Implement the scoped change and report it."
@@ -383,9 +382,12 @@ Every child receives `WORKSPACE_ROOT`, the resolved execution workspace shown as
 after changing into a toolchain directory. Source-backed runs also expose
 `DELEGATE_SOURCE_ROOT`; isolated runs expose `DELEGATE_EXECUTION_ROOT`.
 
+Safe copies include uncommitted tracked edits and untracked, non-ignored files.
+You can review the current working tree without committing first or pasting a diff.
+
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate pi safe`, `delegate omp safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+- `delegate <engine> safe` runs in an isolated throwaway workspace for supported engines. Select a model with `--model <alias-or-model>`.
 - On Linux, eligible non-Cursor safe runs on Git workspaces can use an opt-in,
   zero-copy bubblewrap backend. Set `isolation.safeBackend` to `"bwrap"` or
   export `DELEGATE_SAFE_BACKEND=bwrap`. The real workspace is bound read-only,
