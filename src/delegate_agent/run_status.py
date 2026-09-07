@@ -196,9 +196,15 @@ def build_run_summary(
     index_entry: JsonObject,
     *,
     include_logs: bool = True,
+    state: JsonObject | object | None = _UNSET,
+    manifest: JsonObject | object | None = _UNSET,
 ) -> JsonObject:
-    state = record_io.load_run_state_or_none(registry_root, run_id)
-    manifest = record_io.load_run_manifest_or_none(registry_root, run_id)
+    if state is _UNSET:
+        state = record_io.load_run_state_or_none(registry_root, run_id)
+    if manifest is _UNSET:
+        manifest = record_io.load_run_manifest_or_none(registry_root, run_id)
+    assert state is None or isinstance(state, dict)
+    assert manifest is None or isinstance(manifest, dict)
     source_cwd = _source_workspace(registry_root, index_entry, state, manifest)
 
     stdout_bytes, stderr_bytes = (
@@ -326,7 +332,7 @@ def list_run_summaries(
 ) -> tuple[list[JsonObject], int, int]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    summaries: list[JsonObject] = []
+    candidates: list[tuple[JsonObject, JsonObject | None, bool, JsonObject]] = []
     scope_total = 0
     for run_id, entry in record_io.index_run_entries(index):
         entry_harness = entry.get("harness")
@@ -336,7 +342,29 @@ def list_run_summaries(
         if group is not None and entry_group != group:
             continue
         scope_total += 1
-        summary = build_run_summary(registry_root, run_id, entry, include_logs=False)
+        from delegate_agent import run_registry
+
+        projected_state = run_registry.terminal_selection_state(registry_root, run_id, entry)
+        state = (
+            projected_state
+            if projected_state is not None
+            else record_io.load_run_state_or_none(registry_root, run_id)
+        )
+        needs_manifest = not any(
+            isinstance(state, dict) and isinstance(state.get(key), str) and state.get(key)
+            for key in ("finishedAt", "lastActivityAt", "startedAt")
+        )
+        manifest = (
+            record_io.load_run_manifest_or_none(registry_root, run_id) if needs_manifest else None
+        )
+        summary = build_run_summary(
+            registry_root,
+            run_id,
+            entry,
+            include_logs=False,
+            state=state,
+            manifest=manifest,
+        )
         status = summary.get("status")
         if active and status not in (STATUS_RUNNING, STATUS_STALE):
             continue
@@ -344,15 +372,29 @@ def list_run_summaries(
             continue
         if status_filter == STATUS_FILTER_STALE and status != STATUS_STALE:
             continue
-        summaries.append(summary)
-    summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
-    total = len(summaries)
-    selected = summaries[:limit]
-    for summary in selected:
+        candidates.append((summary, state, projected_state is not None, entry))
+    candidates.sort(key=lambda item: item[0].get("activityAt", ""), reverse=True)
+    total = len(candidates)
+    selected: list[JsonObject] = []
+    for summary, candidate_state, projected, entry in candidates[:limit]:
+        full_state = (
+            record_io.load_run_state_or_none(registry_root, summary["runId"])
+            if projected
+            else candidate_state
+        )
+        manifest = record_io.load_run_manifest_or_none(registry_root, summary["runId"])
+        summary = build_run_summary(
+            registry_root,
+            summary["runId"],
+            entry,
+            include_logs=False,
+            state=full_state,
+            manifest=manifest,
+        )
         stdout_bytes, stderr_bytes = effective_log_byte_sizes(
             registry_root,
             summary["runId"],
-            record_io.load_run_state_or_none(registry_root, summary["runId"]),
+            full_state,
         )
         summary["stdoutBytes"] = stdout_bytes
         summary["stderrBytes"] = stderr_bytes
@@ -361,4 +403,5 @@ def list_run_summaries(
             if warning not in warnings:
                 warnings.append(warning)
         summary["warnings"] = warnings
+        selected.append(summary)
     return selected, total, scope_total

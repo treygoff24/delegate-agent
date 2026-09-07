@@ -94,6 +94,12 @@ class RunnerCaptureTests(unittest.TestCase):
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
         self.run_output = load_module(RUN_OUTPUT_PATH, "delegate_run_output_under_test")
 
+    def _snapshot(self, registry_root: Path, run_id: str) -> dict[str, object]:
+        snapshot = self.registry.load_run_snapshot(registry_root, run_id)
+        self.assertIsInstance(snapshot, dict)
+        assert isinstance(snapshot, dict)
+        return snapshot
+
     def _persistent_health_context(self):
         return self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -341,9 +347,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertIn("stdin prompt delivery", stderr.getvalue())
-            snapshot = json.loads(
-                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             warnings = snapshot.get("warnings", [])
             self.assertTrue(any("stdin prompt delivery" in w for w in warnings))
 
@@ -380,7 +384,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(caught.exception.error, "child_launch_failed")
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["error"], "child_launch_failed")
             self.assertIn("missing-agent", state["message"])
@@ -624,7 +628,7 @@ class RunnerCaptureTests(unittest.TestCase):
             secret_event = next(event for event in stream_lines if secret in str(event.get("text")))
             self.assertIn(secret, secret_event["text"])
 
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             recent = snapshot.get("recentEvents") or []
             short_recent = next(
                 event
@@ -695,7 +699,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertTrue(payload["completionReportWritten"])
             self.assertEqual(payload["completionReportSource"], "child")
             self.assertTrue(any("Droid no-op" in warning for warning in payload["warnings"]))
-            snapshot = json.loads((root / "runs" / run_id / "snapshot.json").read_text())
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(snapshot["resultQuality"], "housekeeping_noop")
 
             out = io.StringIO()
@@ -940,9 +944,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
 
             state = json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8"))
-            snapshot = json.loads(
-                (run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "running")
             self.assertTrue(state["cancelRequested"])
             self.assertEqual(state["cancelRequestedAt"], requested_at)
@@ -1001,16 +1003,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 "exitCode": 1,
                 "failureReason": "cancelled_by_user",
             }
-            terminal_snapshot = {
-                "status": "cancelled",
-                "exitCode": 1,
-                "failureReason": "cancelled_by_user",
-                "ok": False,
-            }
             self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, terminal_state)
-            self.registry.write_json_atomic(
-                run_path / self.registry.SNAPSHOT_FILE, terminal_snapshot
-            )
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
@@ -1039,10 +1032,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
                 terminal_state,
             )
-            self.assertEqual(
-                json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")),
-                terminal_snapshot,
-            )
+            self.assertFalse((run_path / self.registry.SNAPSHOT_FILE).exists())
 
     def test_finalize_first_marker_race_envelope_and_state_both_cancelled(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -1183,8 +1173,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["failureReason"], "cancelled_by_user")
             self.assertEqual(payload["error"], "cancelled_by_user")
             self.assertEqual(payload["message"], "Run was cancelled.")
-            for name in ("state.json", "snapshot.json"):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / "state.json").read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["failureReason"], "cancelled_by_user")
                 self.assertNotIn("error", persisted)
@@ -1255,8 +1247,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(finalization.extra["failureReason"], "cancelled_by_user")
             self.assertNotIn("error", finalization.extra)
             self.assertNotIn("message", finalization.extra)
-            for name in ("state.json", "snapshot.json"):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / "state.json").read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["failureReason"], "cancelled_by_user")
                 self.assertNotIn("error", persisted)
@@ -1593,7 +1587,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertIn("final from codex", report)
             self.assertNotIn("I am working", report)
             self.assertIn("I am working", snapshot["assistantText"])
@@ -1640,7 +1634,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("completionReportCommand", payload)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertIn("final from kimi", report)
             self.assertIn("final from kimi", snapshot["assistantText"])
 
@@ -1690,7 +1684,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.assertNotEqual(payload["resultQuality"], "no_assistant_text")
                 run_path = self.registry.run_directory(root, run_id)
                 report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-                snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+                snapshot = self._snapshot(root, run_id)
                 self.assertIn(expected, report)
                 self.assertIn(expected, snapshot["assistantText"])
 
@@ -1873,7 +1867,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["resultQuality"], "no_assistant_text")
             run_path = self.registry.run_directory(root, run_id)
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(snapshot["status"], "failed")
             self.assertEqual(state["resultQuality"], "no_assistant_text")
@@ -1923,7 +1917,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertNotIn("completionReportPath", payload)
             run_path = self.registry.run_directory(root, run_id)
             self.assertFalse((run_path / "completion-report.md").exists())
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertNotIn("completionReport", snapshot)
             self.assertIn("I will inspect the repo first", snapshot["assistantText"])
 
@@ -2120,9 +2114,13 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         accumulator = self.runner.harness_events.StreamAccumulator()
         accumulator.session_id = "thread-123"
-        snapshot = self.runner.build_snapshot(ctx, accumulator=accumulator)
-        self.assertEqual(snapshot["modelResolved"], "effective-model")
-        self.assertEqual(snapshot["sessionId"], "thread-123")
+        record = self.runner.build_run_record(
+            ctx,
+            status="running",
+            accumulator=accumulator,
+        )
+        self.assertEqual(record["modelProvenance"]["resolvedModel"], "effective-model")
+        self.assertEqual(record["sessionId"], "thread-123")
 
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
@@ -2260,8 +2258,9 @@ class RunnerCaptureTests(unittest.TestCase):
             stderr_bytes=0,
             extra=extra,
         )
-        snapshot = self.runner.build_snapshot(
+        record = self.runner.build_run_record(
             ctx,
+            status="succeeded",
             accumulator=self.runner.harness_events.StreamAccumulator(),
             exit_code=0,
             extra=extra,
@@ -2269,7 +2268,7 @@ class RunnerCaptureTests(unittest.TestCase):
 
         expected = ["ctx warning", "duplicate warning", "extra warning"]
         self.assertEqual(payload["warnings"], expected)
-        self.assertEqual(snapshot["warnings"], expected)
+        self.assertEqual(record["warnings"], expected)
 
     def test_work_summary_no_changes_becomes_top_level_warning(self):
         ctx = self.runner.RunContext(
@@ -2999,7 +2998,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("completionReportCommand", payload)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertIn("final from claude", report)
             self.assertIn("read:CLAUDE STDIN PROMPT", snapshot["assistantText"])
@@ -3404,7 +3403,7 @@ class RunnerCaptureTests(unittest.TestCase):
 
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertNotIn(
                 "resultQuality",
                 state,
@@ -3460,7 +3459,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(caught.exception.error, "child_launch_failed")
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["stderrBytes"], len(b"usage limit\n"))
             self.assertEqual(state["exitCode"], 1)
             self.assertIn("finishedAt", state)
@@ -3764,8 +3763,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["failureReason"], "cancelled_by_user")
             self.assertEqual(payload["error"], "cancelled_by_user")
             run_path = self.registry.run_directory(root, run_id)
-            for name in (self.registry.STATE_FILE, self.registry.SNAPSHOT_FILE):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["exitCode"], 1)
                 self.assertNotIn("error", persisted)
@@ -4651,9 +4652,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(
                 payload["stderrBytes"], len(b"primary stderr\n") + len(b"fallback stderr\n")
             )
-            snapshot = json.loads(
-                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             self.assertTrue(
                 any(event.get("message") == "usage limit" for event in snapshot["recentEvents"])
             )

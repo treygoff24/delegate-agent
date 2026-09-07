@@ -433,6 +433,9 @@ class RetentionTests(unittest.TestCase):
             "status": status,
             "finishedAt": finished,
             "lastActivityAt": finished,
+            "ok": status == "succeeded",
+            "assistantText": "done",
+            "recentEvents": [],
         }
         if pid is not None:
             state["pid"] = pid
@@ -445,18 +448,6 @@ class RetentionTests(unittest.TestCase):
                 "alias": alias,
                 "harness": "cursor",
                 "startedAt": finished,
-            },
-        )
-        self.registry.write_json_atomic(
-            run_path / "snapshot.json",
-            {
-                "schema": "delegate.snapshot.v1",
-                "ok": True,
-                "alias": alias,
-                "runId": run_id,
-                "status": status,
-                "startedAt": finished,
-                "assistantText": "done",
             },
         )
         if with_logs:
@@ -495,6 +486,71 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((run_path / "stdout.log").exists())
         self.assertFalse(self.retention.archive_path(self.registry_root, run_id).exists())
 
+    def test_completed_generation_skips_an_immediate_repeat_pass(self):
+        run_id, alias = self.registry.register_run(self.registry_root, harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        record = {
+            "schema": self.registry.STATE_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "status": "succeeded",
+            "finishedAt": "2000-01-01T00:00:00Z",
+            "lastActivityAt": "2000-01-01T00:00:00Z",
+        }
+        self.registry.write_json_atomic(
+            run_path / self.registry.MANIFEST_FILE,
+            {"schema": self.registry.MANIFEST_SCHEMA, "runId": run_id, "alias": alias},
+        )
+        for name in self.retention.ARCHIVE_MEMBER_NAMES:
+            (run_path / name).write_text("old output\n", encoding="utf-8")
+        with self.registry.registry_lock(self.registry_root):
+            self.registry.publish_terminal_record_locked(self.registry_root, run_id, record)
+
+        config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}}
+        first = self.retention.run_retention_pass(self.registry_root, config)
+        second = self.retention.run_retention_pass(self.registry_root, config)
+
+        self.assertEqual(first["scanned"], 1)
+        self.assertEqual(second, {"scanned": 0, "archived": 0, "skipped": 0})
+
+    def test_retention_retries_a_young_terminal_after_the_time_cadence(self):
+        run_id, alias = self.registry.register_run(self.registry_root, harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        finished = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        record = {
+            "schema": self.registry.STATE_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "status": "succeeded",
+            "finishedAt": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lastActivityAt": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        self.registry.write_json_atomic(
+            run_path / self.registry.MANIFEST_FILE,
+            {"schema": self.registry.MANIFEST_SCHEMA, "runId": run_id, "alias": alias},
+        )
+        for name in self.retention.ARCHIVE_MEMBER_NAMES:
+            (run_path / name).write_text("old output\n", encoding="utf-8")
+        with self.registry.registry_lock(self.registry_root):
+            self.registry.publish_terminal_record_locked(self.registry_root, run_id, record)
+
+        config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 1}}}
+        first = self.retention.run_retention_pass(self.registry_root, config, now=finished)
+        immediate = self.retention.run_retention_pass(
+            self.registry_root,
+            config,
+            now=finished + timedelta(seconds=1),
+        )
+        later = self.retention.run_retention_pass(
+            self.registry_root,
+            config,
+            now=finished + timedelta(days=2),
+        )
+
+        self.assertEqual(first["archived"], 0)
+        self.assertEqual(immediate, {"scanned": 0, "archived": 0, "skipped": 0})
+        self.assertEqual(later["archived"], 1)
+
     def test_old_completed_run_archives_raw_logs(self):
         run_id, alias = self.write_completed_run()
         old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -518,7 +574,7 @@ class RetentionTests(unittest.TestCase):
         self.assertFalse((run_path / "stderr.log").exists())
         self.assertFalse((run_path / "events.jsonl").exists())
         self.assertTrue((run_path / "manifest.json").exists())
-        self.assertTrue((run_path / "snapshot.json").exists())
+        self.assertFalse((run_path / "snapshot.json").exists())
         self.assertTrue((run_path / "state.json").exists())
         index = self.registry.load_index(self.registry_root)
         self.assertEqual(index["aliases"][alias], run_id)
