@@ -5,7 +5,97 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.31.0] - Unreleased
+
+### Harness compatibility audit (2026-09-07)
+
+Eleven audits, one per supported harness plus a shared pass, checked Delegate's
+assumptions against each vendor's current release. Every finding that could
+produce a wrong run outcome is fixed below.
+
+#### Per-engine fixes
+- Codex: `--search` and `--ask-for-approval` are declared on the interactive TUI
+  and never reached `codex exec`, so `policy.webSearch` was a no-op and the
+  approval policy was never stated. Both now ride `exec` as `-c
+  web_search="live"` and `-c approval_policy="never"`. Codex usage survives a
+  patch, and a preamble is no longer promoted to an answer after one.
+- Claude: safe and read-only call emit `--permission-prompts none` when
+  discovery has seen the flag, so a prompt is denied rather than hanging. A
+  pinned run judges the served model by Claude's own naming instead of string
+  equality, and `--continuity-mode pinned` refuses an alias that names no family
+  (`best`, `opusplan`, `default`) at preflight.
+- Cursor: read-only runs emit `--mode ask`, tool events are parsed from the
+  shape Cursor actually emits, and a pinned run accepts the display name Cursor
+  reports in place of the requested selector.
+- Grok: a response is sealed on usage rather than on `end`, so a multi-response
+  stream keeps every part. The effort vocabulary is `low, medium, high, xhigh`;
+  `max` was never accepted.
+- Oh My Pi: work mode pins `--approval-mode yolo` and names its working
+  directory with `--cwd`. An omp selector missing from a fresh account catalog
+  now warns, because omp resolves an unknown id by fuzzy match.
+- Pi and Oh My Pi: the `--thinking` vocabulary is `off, minimal, low, medium,
+  high, xhigh, max`, and omp additionally accepts `auto`.
+- Kimi: the goal summary is kept rather than dropped, pass-through runs pin
+  `--output-format text`, and bwrap binds the selected Kimi home.
+- OpenCode: read-only runs set `OPENCODE_DISABLE_CLAUDE_CODE=1`, and discovery
+  probes with `--pure models --verbose`.
+- Devin: the read-only argv is documented-compatible with 3000.6.14, but that
+  release's read-only behavior is unproven, so the 3000.4.x gate is retained
+  until `DELEGATE_DEVIN_BEHAVIOR_TEST` passes against it.
+
+#### Transports
+- Cursor Agent and Oh My Pi prompts move to stdin, verified live against
+  2026.09.02-c22c1a3 and 18.1.13. That deletes their argv redaction constants,
+  their membership in the 100 KiB argv guard, and the omp flag-like-prompt
+  rejection, and it takes the prompt out of `/proc/<pid>/cmdline`. Kimi is now
+  the only engine on argv transport and the only one whose prompt Delegate
+  redacts.
+
+#### Stream parsing
+- An error event with a `message` or `error.message` now records a `failed`
+  terminal on every harness, and a `result` carrying only `is_error: true` does
+  the same instead of being read as a clean success.
+- A non-JSON stdout line from kimi, opencode, or pi is no longer discarded in
+  silence: it is counted and sampled, bounded and redacted, while the
+  malformed-tool-output protection that stops a raw envelope becoming an answer
+  is unchanged.
+- Event types no parser branch handles are counted, so the next vendor rename
+  is visible rather than silent.
+- Run records and snapshots carry `malformedLines`, `malformedSamples`,
+  `unhandledEventTypes`, and `unhandledEventTypesTruncated`. The block appears
+  only when there is something to report, and it survives a retry or auth
+  fallback instead of being reset with the accumulator. A merged usage record
+  keeps grok's `costUsd`.
+- The stall watchdog tracks opencode and grok tool lifecycles. Kimi and Devin,
+  whose stdout is silent by design during tool execution, are exempt from the
+  engine-default detector only when the run carries a finite timeout; an
+  explicit `stallMinutes` is always honored.
+
+#### Structured output
+- One engine-keyed eligibility helper decides whether a schema can be enforced
+  natively. Claude and Codex both require an explicit object root, and Claude
+  additionally requires the serialized argv value to stay under the Linux
+  argument-length limit. An ineligible workflow schema falls back to
+  prompt-and-parse with the reason journaled; a direct `claude --output-schema`
+  fails at preflight with `schema_not_native` instead of forwarding an argv the
+  API will reject.
+- In the structured retry loop, an attempt that fails with no assistant text
+  clears native enforcement for the remaining attempts and embeds the original
+  schema in the correction prompt, including on the resumable path.
+
+#### Deferred, recorded as decisions rather than omissions
+- Devin's 3000.4.x read-only version gate stays until a behavioral probe passes
+  on 3000.6.x; Devin is not installed on the machine that ran the audit.
+- Claude's `ultracode` effort is not added. Discovery overrides the static enum
+  with a warning list that omits the level, so an enum edit alone is unreachable
+  and would need a compatibility exception with its own proof.
+- Usage-limit cooldowns stay Codex-only. Widening the valid-tool set alone
+  changes nothing; the write and check paths are engine-specific.
+- Followup and resume support for grok, droid, opencode, pi, kimi, and devin is
+  verified possible and additive, but each needs a live round trip to prove and
+  none was run.
+- Grok stays on its current stream format, and `validate_schema_subset` still
+  rejects `$defs` and `format`.
 
 ### Added
 - `describe` provides a compact command index; `describe --full` expands the
@@ -19,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces.
 
 ### Fixed
+- `delegate doctor` warns when `codex.profile` names an overlay file that does
+  not exist. Codex reads the setting as `$CODEX_HOME/<name>.config.toml` and
+  accepts a missing file silently, so a stale profile cost every run its overlay
+  without a word.
+- A recognized option name typed after the prompt warns that it is being treated
+  as prompt text.
+- A terminal reason is redacted before it reaches the run record.
 - Persistent-worktree launches preserve requested continuity and process-group
   termination grace through the shared request-to-run mapping.
 - Doctor distinguishes executing, installed, and last-promoted artifacts and
@@ -38,6 +135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removal target, and limited run listings avoid probing logs for excluded rows.
 
 ### Changed
+- The auto-injected skill-review preamble is behind
+  `tracking.skillReviewPreamble.enabled`, default `false`. Call, slash
+  pass-through, and `--pass-through` prompts never receive it either way.
 - Workspace mail setup is on by default; global `--no-mail` or
   `mail.enabled: false` opts out without suppressing `--notify`. Push remains
   opt-in.

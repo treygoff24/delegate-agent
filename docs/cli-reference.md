@@ -24,6 +24,7 @@ suggested correction.
 --auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, models, capabilities, and setup.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 --notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` after a tracked launch or resume; dry-run shows the plan. Rejected by call and --pass-through.
+--no-mail                     Skip workspace-mail setup, prompt suffix, and sandbox grants for this launch. Explicit `mail` commands and --notify still work.
 ```
 
 The notification contains the run ID, terminal status, engine/model, elapsed
@@ -111,7 +112,7 @@ with a warning), and OpenCode agent-config merge. OpenCode preserves existing
 root keys, agent keys, and prompts, appending the persona after an existing
 agent prompt. Safe mode always prepends. Claude native-file keeps the persona
 body out of argv, dry-run JSON, and the manifest; prepend engines using argv
-transport (Cursor, Kimi, and Oh My Pi) expose it in the live process argv.
+transport (Kimi alone) expose it in the live process argv.
 Tracked runs retain it only in the private
 `persona.txt` artifact.
 
@@ -158,13 +159,13 @@ delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] 
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
-Delegate resolves the prompt, Codex, Claude, OpenCode, and Pi prompts are passed to the child runtime over
-stdin. Oh My Pi receives a positional prompt because 17.0.4 did not consume piped stdin in the verified
-non-interactive invocation. Droid and Grok prompts are written to a private temporary prompt file and passed
-with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
-positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
-so those Harnesses also use argv transport; Delegate redacts Cursor, Oh My Pi, and Kimi
-prompt argv in dry-run output and run manifests.
+Delegate resolves the prompt, Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi prompts are passed to
+the child runtime over stdin; Cursor Agent 2026.09.02-c22c1a3 and Oh My Pi 18.1.13 both consume a piped
+prompt in the verified non-interactive invocation. Droid and Grok prompts are written to a private temporary
+prompt file and passed with Droid's documented `--file` option or Grok's `--prompt-file`. Kimi Code prompt
+mode still takes `--prompt`, so Kimi alone uses argv transport; Delegate redacts Kimi prompt argv in dry-run
+output and run manifests, which keeps the prompt out of Delegate's own records but not out of the child's
+`/proc/<pid>/cmdline`.
 `--prompt-file /dev/stdin` (also `-`, `/dev/fd/0`, and equivalent non-regular
 stdin descriptors) is treated as the stdin source itself, so a pipe is read
 exactly once rather than rejected as a second prompt source.
@@ -228,6 +229,14 @@ config. When neither flag is set, config `progress.enabled` applies (default
 `false`). Heartbeat labels are credential-scrubbed before printing. Timing
 resolves as env override > config > built-in default (30s initial / 60s
 interval). It is incompatible with `--pass-through`.
+
+Delegate also watches a tracked run's stream for a stall. Kimi and Devin are
+exempt from the engine-default detector, but only when the run carries a finite
+deadline: their stdout is silent by design while a tool executes, so a
+default-threshold stall on those two is normally a false positive, and a run with
+`--timeout` already has something that will end it. A standalone tracked run with
+no deadline keeps the detector, because nothing else would stop it. An explicit
+operator `stallMinutes` is always honored, on every engine, deadline or not.
 
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
 worktree isolation; when isolation is omitted, it implies `--isolation worktree`
@@ -321,6 +330,7 @@ delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--mode
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
 - Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, user settings, output styles, or other non-MCP customization surfaces are disabled. Use `claude.bare: true` for a more minimal/reproducible Claude invocation, and keep safe-mode work review-only.
 - Prompt text is delivered on stdin to `claude -p`; dry-run argv and tracked run manifests do not contain the prompt.
+- Safe mode and `claude call --read-only` also emit `--permission-prompts none`, but only when discovery has observed the flag in the installed Claude's `--help`. Anything that would otherwise prompt is then denied outright instead of hanging. An installed Claude that predates the flag runs without it and without a warning.
 - JSON-streaming runs use `--output-format stream-json --input-format text`; pass-through runs use `--output-format text`.
 - Work mode uses `claude.workPermissionMode` from config, unless Delegate policy explicitly enables `policy.harness.claude.work.bypassApprovalsAndSandbox`, which maps to Claude `--permission-mode bypassPermissions`.
 - Model selection uses `--model` (alias from `claude.models` or a raw model ID), the run-input JSON `model`, or `claude.defaultModel`.
@@ -348,7 +358,7 @@ delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or
 - Prompt text is delivered via Grok `--prompt-file` from a Delegate temp file; dry-run argv and tracked run manifests do not contain the prompt.
 - Work mode uses `grok.workPermissionMode` and `grok.workSandbox` from config, unless Delegate policy explicitly enables `policy.harness.grok.work.bypassApprovalsAndSandbox`, which maps to Grok `--permission-mode bypassPermissions`.
 - Model selection uses `--model` (alias from `grok.models` or a raw model ID), the run-input JSON `model`, or `grok.defaultModel`.
-- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
+- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, or `xhigh`. Grok has no `max`.
 - `--output-schema` is unsupported for Grok in v1 because Grok `--json-schema` forces final JSON output and weakens live snapshot parity.
 
 Examples:
@@ -378,6 +388,11 @@ delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-o
   `DELEGATE_DEVIN_BEHAVIOR_TEST` smoke against the operator's Devin version. Work and
   default call use `--permission-mode dangerous` because non-interactive Devin
   rejects unapproved edit/exec tools.
+- The read-only argv is documented-compatible with Devin 3000.6.14, but its
+  read-only behavior on that release is unproven: Devin is not installed here,
+  so nothing observed a 3000.6.x child refusing a write. The 3000.4.x version
+  gate is therefore retained, and it is lifted only once
+  `DELEGATE_DEVIN_BEHAVIOR_TEST` passes against the newer release.
 - Prompt text is materialized in a private temporary file and passed with
   Devin `--prompt-file` plus `-p`; dry-run argv and tracked manifests do not
   contain the prompt.
@@ -439,15 +454,21 @@ delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alia
   names, so a typo can have no effect.
 - `--agent NAME` selects an OpenCode agent for one run. With no flag,
   `opencode.defaultAgent` is used when configured.
-- `delegate models opencode --live` runs `opencode --pure models`. Live discovery has
+- `delegate models opencode --live` runs `opencode --pure models --verbose`. Live discovery has
   returned 452+ models and includes any provider in OpenCode's models.dev
   catalog, plus configured custom or local providers.
 - OpenCode is available to workflow `agent()` calls and
   `workflows.engineCaps` like other engines.
-- OpenCode currently buffers stdout until completion, so progress can remain
-  silent even though `--print-logs` stderr is visible. Sessions accumulate in
-  the user's global OpenCode state. Call mode has no Delegate timeout unless
-  `--timeout` is set.
+- Delegate no longer claims OpenCode buffers stdout until completion. That claim
+  came from an observation against v1.17.17 and did not reproduce: the emit
+  pattern OpenCode's runner uses delivered each write about a millisecond later
+  through a pipe, not batched at exit. The test used a standalone Bun, not the
+  Bun embedded in the shipped binary, and OpenCode is not installed on the
+  machine that ran the audit, so neither buffering nor streaming is proven here.
+  What is evidenced is a different failure: OpenCode exits through
+  `process.exit()`, which discards whatever the pipe has not accepted, so a large
+  final burst can lose its tail. Sessions accumulate in the user's global
+  OpenCode state. Call mode has no Delegate timeout unless `--timeout` is set.
 
 Examples:
 
@@ -470,7 +491,7 @@ delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-m
 - Delegate launches `pi -p --no-session --mode json` and sends the resolved prompt over stdin.
 - Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-prompt-templates --no-approve`; safe mode also uses Delegate's isolated throwaway workspace.
 - Model aliases accept either a Pi `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
-- `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select Pi's additional `off` or `minimal` levels.
+- `--reasoning-effort` maps directly to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases select the same levels. Pi has no `auto`.
 - All modes are stateless at Pi's session layer; Delegate's run registry remains the durable record.
 - JSON call responses retain the standard `text` field and also populate `assistantText`, matching tracked safe/work envelopes.
 - `delegate models pi --live` queries Pi's visible provider/model catalog.
@@ -492,10 +513,10 @@ delegate [--json] [--isolation auto|none|worktree] omp {safe,work} [--model <ali
 delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-- Delegate launches `omp -p --no-session --mode json` and passes the resolved prompt as a positional argument.
+- Delegate launches `omp -p --no-session --mode json` and sends the resolved prompt over stdin.
 - Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`; the approval mode is the load-bearing write/exec denial in headless mode, and safe mode also uses Delegate's isolated throwaway workspace.
 - Model aliases accept either a `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
-- `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select `off` or `minimal`.
+- `--reasoning-effort` maps directly to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and Oh My Pi's additional `auto`. Structured aliases select the same levels.
 - Delegate never emits Oh My Pi's `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*` role flags.
 - `delegate models omp --live` uses `omp models --json --no-extensions`.
 
@@ -567,8 +588,8 @@ delegate [--json] workflow save <script.py> --name NAME
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
   without launching child agents or consuming real budget. Each entry in
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
-  and UTF-8 `promptBytes`; Cursor/Kimi/OMP prompts over 102400 bytes add a warning
-  before their argv transport limit can fail a real run.
+  and UTF-8 `promptBytes`; Kimi prompts over 102400 bytes add a warning before its
+  argv transport limit can fail a real run. Kimi is the only engine still on argv.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work. Resuming a completed `--dry-run` starts
   its planned agents live under the same workflow ID; simulated journal events
@@ -648,7 +669,9 @@ delegate --json claude call --pure --timeout 60 --output-schema verdict.json < r
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
 it deletes that cwd after the child exits. It does not create snapshots, inject
 safe/work skill or completion-report framing, emit progress heartbeats, or honor
-persistent worktree/commit policy options. JSON
+persistent worktree/commit policy options. The skill-review preamble that safe
+and work runs can carry is off by default and never applies here; see
+[`tracking.skillReviewPreamble`](configuration.md#tracking) for the switch. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
 `model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`, `usage`,
 `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`, reasoning
@@ -743,7 +766,7 @@ Typical dry-run JSON fields:
   "cwd": "/path/to/workspace",
   "workspaceKind": "git",
   "promptTransport": "stdin",
-  "argv": ["codex", "--ask-for-approval", "never", "exec", "..."],
+  "argv": ["codex", "exec", "--cd", "/path/to/workspace", "--sandbox", "read-only", "-c", "approval_policy=\"never\"", "..."],
   "requestedReasoningEffort": "high",
   "resolvedReasoningEffort": "high",
   "reasoningEffortSource": "cli",
