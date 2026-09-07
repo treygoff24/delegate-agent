@@ -23,7 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from delegate_agent import run_registry, run_status, worktree_summary
+from delegate_agent import run_registry, run_status, worktree_records, worktree_summary
 from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -87,6 +87,197 @@ class WorktreeManagementError(Exception):
         self.payload = normalized
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class WorktreeInspection:
+    """One bounded observation; mutators always create it under their locks."""
+
+    record: PersistentWorktreeRecord
+    status: str
+    status_warnings: tuple[str, ...] = ()
+    dirty: bool | None = None
+    dirty_paths: tuple[str, ...] = ()
+    dirty_warnings: tuple[str, ...] = ()
+    branch_merged: bool | None = None
+    merge_warnings: tuple[str, ...] = ()
+    owner_block: str | None = None
+    attachments: tuple[JsonObject, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorktreeSafetyDecision:
+    """Shared predicate result; command callers map reasons to UX."""
+
+    reason: str | None = None
+    keep_branch: bool = False
+
+
+def inspect_worktree(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    *,
+    include_detached: bool = False,
+    force: bool = False,
+    check_merge: bool = True,
+    retirement_ignore_globs: tuple[str, ...] = (),
+) -> WorktreeInspection:
+    """Read worktree facts once; optional globs select effective retirement dirt."""
+
+    registry_status = record.get("registryWorktreeStatus")
+    if registry_status == STATUS_REMOVED:
+        return WorktreeInspection(record=record, status=STATUS_REMOVED)
+    owner_block = _owner_run_block_reason(registry_root, record)
+    if owner_block is not None and not force:
+        status = registry_status if registry_status in VALID_STATUSES else STATUS_UNKNOWN
+        return WorktreeInspection(record=record, status=status, owner_block=owner_block)
+    status, status_warnings = detect_worktree_status(record)
+    execution = record.get("executionCwd")
+    attachments = (
+        tuple(worktree_records.live_attachments_for_path(registry_root, execution))
+        if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution, str)
+        else ()
+    )
+    if attachments:
+        return WorktreeInspection(
+            record=record,
+            status=status,
+            status_warnings=tuple(status_warnings),
+            owner_block=owner_block,
+            attachments=attachments,
+        )
+    if retirement_ignore_globs:
+        dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
+            record,
+            status,
+            retirement_ignore_globs,
+        )
+    else:
+        dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
+    if check_merge:
+        branch_merged, merge_warnings = merged_into_source(
+            record, status, include_detached=include_detached
+        )
+    else:
+        branch_merged, merge_warnings = None, []
+    return WorktreeInspection(
+        record=record,
+        status=status,
+        status_warnings=tuple(status_warnings),
+        dirty=dirty,
+        dirty_paths=tuple(dirty_paths),
+        dirty_warnings=tuple(dirty_warnings),
+        branch_merged=branch_merged,
+        merge_warnings=tuple(merge_warnings),
+        owner_block=owner_block,
+        attachments=attachments,
+    )
+
+
+def evaluate_worktree_safety(
+    inspection: WorktreeInspection,
+    *,
+    discard_uncommitted: bool = False,
+    force_branch: bool = False,
+    keep_branch: bool = False,
+    force: bool = False,
+    require_merged: bool = False,
+    allow_unmerged_clean_keep: bool = False,
+) -> WorktreeSafetyDecision:
+    """Apply shared predicates while leaving command-specific policy to callers."""
+
+    if inspection.owner_block is not None and not force:
+        return WorktreeSafetyDecision(inspection.owner_block)
+    if inspection.attachments:
+        return WorktreeSafetyDecision("live_attachment")
+    if inspection.status not in (STATUS_PRESENT, STATUS_UNKNOWN):
+        return WorktreeSafetyDecision()
+    if inspection.dirty is None and not discard_uncommitted:
+        return WorktreeSafetyDecision("dirty_check_failed")
+    if inspection.dirty is True and not discard_uncommitted:
+        return WorktreeSafetyDecision("dirty")
+    if not require_merged:
+        return WorktreeSafetyDecision()
+    branch = inspection.record.get("branch")
+    if not isinstance(branch, str) or not branch:
+        return WorktreeSafetyDecision()
+    if keep_branch or force_branch:
+        return WorktreeSafetyDecision()
+    if inspection.branch_merged is None:
+        return WorktreeSafetyDecision("merge_check_failed")
+    if inspection.branch_merged is False:
+        if allow_unmerged_clean_keep and inspection.dirty is not True:
+            return WorktreeSafetyDecision(keep_branch=True)
+        return WorktreeSafetyDecision("unmerged_branch")
+    return WorktreeSafetyDecision()
+
+
+def safety_error_payload(
+    inspection: WorktreeInspection,
+    *,
+    alias: str,
+    reason: str,
+) -> JsonObject:
+    """Render the direct-removal error for one shared safety decision."""
+
+    record = inspection.record
+    if reason == "live_attachment":
+        attached = ", ".join(
+            str(item.get("alias") or item.get("runId")) for item in inspection.attachments
+        )
+        first = str(
+            inspection.attachments[0].get("alias") or inspection.attachments[0].get("runId")
+        )
+        corrupt = ", ".join(
+            str(item.get("alias") or item.get("runId"))
+            for item in inspection.attachments
+            if item.get("warning") == "corrupt_attachment"
+        )
+        suffix = (
+            f" Warning: corrupt attachment record for {corrupt}; refusing removal."
+            if corrupt
+            else ""
+        )
+        return _error_payload(
+            "worktree_attached",
+            f"Worktree is in use by attached resume run(s): {attached}. "
+            f"Wait for or cancel the attached run before removing.{suffix}",
+            record=record,
+            next_actions=[f"delegate wait {first}", f"delegate cancel {first}"],
+        )
+    if reason in {"run_active", "run_not_terminal", "process_group_alive"}:
+        return _error_payload(
+            reason,
+            "Worktree owner is still active; wait for the run to finish before removing.",
+            record=record,
+            next_actions=[f"delegate worktree show {alias}"],
+        )
+    messages = {
+        "dirty_check_failed": "Could not determine whether the worktree has uncommitted changes; inspect it or pass --discard-uncommitted to remove anyway.",
+        "dirty": f"Worktree has {len(inspection.dirty_paths)} uncommitted changes; pass --discard-uncommitted to remove anyway.",
+        "merge_check_failed": "Could not determine whether the worktree branch is merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
+        "unmerged_branch": "Worktree branch is not merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
+    }
+    code = "dirty_worktree" if reason == "dirty" else reason
+    actions = [f"delegate worktree show {alias}"]
+    kwargs: dict[str, object] = {"record": record, "next_actions": actions}
+    if reason == "dirty_check_failed":
+        actions.append(f"delegate worktree remove {alias} --discard-uncommitted")
+        kwargs["warnings"] = list(inspection.dirty_warnings) or None
+    elif reason == "dirty":
+        actions.append(f"delegate worktree remove {alias} --discard-uncommitted")
+        kwargs["dirty_paths"] = list(inspection.dirty_paths)
+    else:
+        actions.extend(
+            [
+                f"delegate worktree remove {alias} --keep-branch",
+                f"delegate worktree remove {alias} --force-branch",
+            ]
+        )
+        kwargs["warnings"] = list(inspection.merge_warnings) or None
+    return _error_payload(
+        code, messages.get(reason, "Worktree safety check refused removal."), **kwargs
+    )
 
 
 def _process_group_alive(pgid: int) -> bool:
@@ -252,9 +443,13 @@ def _persist_completion_worktree_fields(ctx: RetirementContext, fields: JsonObje
         return
     run_path = run_registry.run_directory(registry_root, run_id)
     with run_registry.registry_lock(registry_root):
-        for filename in (run_registry.STATE_FILE, run_registry.SNAPSHOT_FILE):
+        readers = (
+            (run_registry.STATE_FILE, run_registry.load_run_state),
+            (run_registry.SNAPSHOT_FILE, run_registry.load_run_snapshot),
+        )
+        for filename, reader in readers:
             path = run_path / filename
-            payload = run_registry.read_json_object(path)
+            payload = reader(registry_root, run_id)
             if payload is None:
                 continue
             payload.update(fields)
@@ -331,32 +526,53 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
     if ctx.resumable is True:
         retain("resumable_session")
         return
-    status, status_warnings = detect_worktree_status(record)
-    if status != STATUS_PRESENT:
+    inspection = inspect_worktree(
+        ctx.registry_root,
+        record,
+        check_merge=False,
+        retirement_ignore_globs=ctx.retirement_ignore_globs,
+    )
+    if inspection.status != STATUS_PRESENT:
         retain(
-            "worktree_missing" if status == STATUS_MISSING else "status_unknown",
-            **({"worktreeRetentionWarnings": status_warnings} if status_warnings else {}),
+            "worktree_missing" if inspection.status == STATUS_MISSING else "status_unknown",
+            **(
+                {"worktreeRetentionWarnings": list(inspection.status_warnings)}
+                if inspection.status_warnings
+                else {}
+            ),
         )
         return
 
-    dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
-        record,
-        status,
-        ctx.retirement_ignore_globs,
+    decision = evaluate_worktree_safety(
+        inspection,
+        keep_branch=True,
     )
-    if dirty is None:
+    if decision.reason == "dirty_check_failed":
         retain(
             "dirty_check_failed",
-            **({"worktreeRetentionWarnings": dirty_warnings} if dirty_warnings else {}),
+            **(
+                {"worktreeRetentionWarnings": list(inspection.dirty_warnings)}
+                if inspection.dirty_warnings
+                else {}
+            ),
         )
         return
-    if dirty:
+    if decision.reason == "dirty":
         retain(
             "dirty",
             **(
-                {"worktreeRetentionPaths": dirty_paths[:MAX_DIRTY_PATHS_REPORTED]}
-                if dirty_paths
+                {"worktreeRetentionPaths": list(inspection.dirty_paths)[:MAX_DIRTY_PATHS_REPORTED]}
+                if inspection.dirty_paths
                 else {}
+            ),
+        )
+        return
+
+    if decision.reason is not None:
+        retain(
+            "cleanup_failed",
+            worktreeRetentionError=(
+                "worktree_attached" if decision.reason == "live_attachment" else decision.reason
             ),
         )
         return
@@ -376,7 +592,7 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
             handle=str(record.get("alias") or record.get("runId")),
             keep_branch=True,
             discard_uncommitted=True,
-            _dirty_check_already_passed=True,
+            retirement_ignore_globs=ctx.retirement_ignore_globs,
         )
     except WorktreeManagementError as exc:
         retain("cleanup_failed", worktreeRetentionError=exc.code)
@@ -1165,8 +1381,6 @@ from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
     _build_remove_worktree_plan,
     _mark_worktree_removed,
     _normalize_remove_options,
-    _raise_if_dirty_without_discard,
-    _raise_if_unmerged_without_override,
     _remove_already_removed,
     _remove_branch,
     _remove_branch_if_requested,
@@ -1174,7 +1388,6 @@ from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
     _remove_payload,
     _remove_present_worktree_path,
     _remove_worktree_path,
-    _require_removal_metadata,
     remove_empty_pool_parent,
     remove_worktree,
 )

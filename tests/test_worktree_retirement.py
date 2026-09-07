@@ -403,6 +403,34 @@ class WorktreeRetirementTests(ExecutionTestBase):
         self.assertEqual(extra.get("worktreeRetentionPaths"), ["child-created.txt"])
         self.assertTrue(self._worktree_paths(fake_home.name))
 
+    def test_discarded_paths_exclude_ignored_retirement_ledgers(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .beads\n"
+            'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
+            "printf 'real work\\n' > child-created.txt\n"
+            "printf 'done\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, _run_id, registry_root, payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        result = self.delegate.worktree_mgmt.remove_worktree(
+            registry_root,
+            handle=payload["alias"],
+            discard_uncommitted=True,
+            keep_branch=True,
+            retirement_ignore_globs=(".beads/**",),
+        )
+
+        self.assertTrue(result["pathRemoved"])
+        state = self.delegate.run_registry.load_run_state(registry_root, payload["runId"])
+        self.assertEqual(state["discardedDirtyPaths"], ["child-created.txt"])
+        self.assertFalse(self._worktree_paths(fake_home.name))
+
     def test_manifest_reconstruction_retains_process_group_survivor(self):
         fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
             agent=self._clean_agent()
