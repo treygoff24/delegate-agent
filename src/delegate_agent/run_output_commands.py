@@ -9,12 +9,12 @@ from typing import BinaryIO, TextIO
 from delegate_agent import command_errors, harness_events, log_output, redaction, run_registry
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
+from delegate_agent.constants import RUN_OUTPUT_DEFAULT_TAIL_LINES
 from delegate_agent.json_types import JsonObject
 from delegate_agent.log_output import RUN_OUTPUT_DEFAULT_MAX_CHARS
 
 RECOVERY_STDOUT_TAIL_LINES = 2000
 RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
-RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
 STREAM_READ_CHUNK_KIB = 64
 STREAM_READ_CHUNK_BYTES = STREAM_READ_CHUNK_KIB * run_registry.BYTES_PER_KIB
 RESULT_QUALITY_OK = harness_events.RESULT_QUALITY_OK
@@ -109,7 +109,7 @@ def _structured_stdout_tail(
     )
     for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
-    if not accumulator.structured_events_seen:
+    if not accumulator.structured_events_seen and not accumulator.malformed_lines:
         return None
     lines = [_render_event_line(event) for event in accumulator.events]
     # Assistant prose is recorded as chunks, not events, so it would vanish from

@@ -9,7 +9,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 python3 bin/delegate.py --json describe
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 Use `python3 bin/delegate.py` from this repository when validating development changes. Do not overwrite an installed `delegate` shim, `~/.delegate/config.json`, or any live runtime unless an operator explicitly asks for promotion.
@@ -35,7 +35,7 @@ Run the narrowest useful checks for your change, then the full suite before prop
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ruff check .
 ruff format --check .
 ```

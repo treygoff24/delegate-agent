@@ -11,6 +11,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import request_build as request_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -52,7 +57,7 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         return path
 
     def config_with_cursor(self, agent: Path, *, data_home: str | None = None) -> dict:
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["argvPrefix"] = [str(agent)]
         if data_home is not None:
             config["worktrees"]["dataHome"] = data_home
@@ -295,7 +300,11 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         config_path = self.write_config(config)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_CONFIG": str(config_path), "HOME": self._test_home},
+            clear=False,
+        ):
             code = self.delegate.main(
                 ["--cwd", repo.name, "--json", "cursor", "safe", "hello"],
                 stdout=stdout,
@@ -304,24 +313,28 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         self.assertEqual(code, 0, stderr.getvalue())
         payload = json.loads(stdout.getvalue())
         run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
-        scratch = run_path / "scratch"
-        expected_scratch = scratch.resolve()
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        expected_scratch = Path(manifest["scratchPath"])
         stdout_log = (run_path / "stdout.log").read_text(encoding="utf-8")
         self.assertIn(f"TMPDIR={expected_scratch}", stdout_log)
         self.assertIn(f"TMP={expected_scratch}", stdout_log)
         self.assertIn(f"TEMP={expected_scratch}", stdout_log)
         self.assertNotIn("/profile/tmp", stdout_log)
 
-    def test_codex_safe_run_manifest_adds_scratch_dir_to_read_only_sandbox(self):
+    def test_codex_safe_run_manifest_records_read_only_scratch_profile(self):
         repo, _git_cd = self._make_git_repo_with_commit()
         codex = self.write_executable("codex", "exit 0\n")
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["codex"]["binary"] = str(codex)
         config["codex"]["defaultModel"] = "gpt-test"
         config_path = self.write_config(config)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_CONFIG": str(config_path), "HOME": self._test_home},
+            clear=False,
+        ):
             code = self.delegate.main(
                 ["--cwd", repo.name, "--json", "codex", "safe", "hello"],
                 stdout=stdout,
@@ -332,14 +345,18 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
         manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
         argv = manifest["argv"]
-        self.assertIn("--sandbox", argv)
-        self.assertIn("read-only", argv)
-        add_dir_index = argv.index("--add-dir")
-        self.assertEqual(Path(argv[add_dir_index + 1]).resolve(), (run_path / "scratch").resolve())
+        self.assertNotIn("--sandbox", argv)
+        self.assertNotIn("--add-dir", argv)
+        self.assertIn("--strict-config", argv)
+        permissions = manifest["scratchPermissions"]
+        self.assertEqual(permissions["base"], ":read-only")
+        self.assertEqual(permissions["writableRoots"], [manifest["scratchPath"]])
+        self.assertIn(f'default_permissions="{permissions["profile"]}"', argv)
+        self.assertEqual(payload["scratchPermissions"], permissions)
 
     def test_droid_call_invalid_alias_does_not_leave_call_temp_dir(self):
         before = set(Path(tempfile.gettempdir()).glob("delegate-call-*"))
-        config_path = self.write_config(self.delegate.DEFAULT_CONFIG)
+        config_path = self.write_config(config_api.embedded_default_config())
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}, clear=False):
@@ -355,14 +372,20 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
     def test_describe_full_is_strict_superset_of_summary_and_command_options_populated(self):
         from delegate_agent import describe_payload as describe_module
 
-        config = self.delegate.DEFAULT_CONFIG
+        config = config_api.embedded_default_config()
         workspace = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(workspace, ignore_errors=True))
         full = describe_module.describe_payload(config, "test-config", workspace)
         summary = describe_module.describe_summary_payload(config, "test-config", workspace)
         for key in summary:
             self.assertIn(key, full)
-        self.assertEqual(summary["commands"], full["commands"])
+        self.assertEqual(
+            summary["commands"],
+            [
+                {"command": row["command"], "summary": row["summary"], "helpTopic": row["command"]}
+                for row in full["commands"]
+            ],
+        )
         for command in full["commands"]:
             self.assertIn("name", command)
             self.assertIsInstance(command.get("options"), list)
@@ -370,8 +393,8 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
 
 class Wave4ParserFeatureTests(ExecutionTestBase):
     def test_group_rejects_invalid_launch_name(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["--group", "bad/name", "cursor", "work", "hello"])
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            parser_api.parse_cli(["--group", "bad/name", "cursor", "work", "hello"])
         self.assertEqual(ctx.exception.error, "invalid_group")
 
     def test_run_input_json_include_dirty_matches_cli_semantics(self):
@@ -391,8 +414,10 @@ class Wave4ParserFeatureTests(ExecutionTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.parse_cli(["run", "--input-json", str(input_path)])
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            parsed = parser_api.parse_cli(["run", "--input-json", str(input_path)])
+            request = request_api.request_from_input_json(
+                parsed, config_api.embedded_default_config()
+            )
             self.assertTrue(request.include_dirty)
 
 

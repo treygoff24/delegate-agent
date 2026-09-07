@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from typing import ClassVar
 
+from delegate_agent import structured_output
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 from delegate_agent.workflows import schema as workflow_schema
@@ -207,6 +208,38 @@ class CodexNativeSchema(unittest.TestCase):
         self.assertIs(workflow_runtime._codex_native_schema(schema), schema)
 
 
+class NativeSchemaEligibility(unittest.TestCase):
+    def test_native_roots_require_an_explicit_object_type(self) -> None:
+        ineligible = (
+            {"type": "array", "items": {"type": "string"}},
+            {},
+            {"enum": ["a", "b"]},
+            {"type": ["object", "null"]},
+            {"properties": {"value": {"type": "string"}}},
+            {"type": "array", "properties": {}},
+        )
+        for engine in ("codex", "claude"):
+            for schema in ineligible:
+                with self.subTest(engine=engine, schema=schema):
+                    self.assertIsNotNone(structured_output.native_schema_eligible(engine, schema))
+            with self.subTest(engine=engine, schema="object"):
+                self.assertIsNone(
+                    structured_output.native_schema_eligible(engine, {"type": "object"})
+                )
+
+    def test_only_claude_rejects_an_oversize_serialized_schema(self) -> None:
+        empty = {"type": "object", "description": ""}
+        overhead = len(json.dumps(empty).encode("utf-8"))
+        at_limit = {
+            "type": "object",
+            "description": "x" * (structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES - overhead),
+        }
+        under_limit = {**at_limit, "description": at_limit["description"][:-1]}
+        self.assertIsNone(structured_output.native_schema_eligible("codex", at_limit))
+        self.assertIsNotNone(structured_output.native_schema_eligible("claude", at_limit))
+        self.assertIsNone(structured_output.native_schema_eligible("claude", under_limit))
+
+
 class ResumeExhaustedKeys(unittest.TestCase):
     def test_exhausted_key_replays_none_but_is_marked_for_adoption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,25 +297,31 @@ class ApprovalAccumulates(unittest.TestCase):
     def test_second_approval_keeps_the_first_gate_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workflow_registry.record_approval(root, "gate-one")
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
-            workflow_registry.record_approval(root, "gate-two")
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-two"))
-            self.assertFalse(workflow_registry.approval_allows(root, "gate-three"))
+            workflow_registry.record_approval(root, "gate-one", "hash-one")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one", "hash-one"))
+            workflow_registry.record_approval(root, "gate-two", "hash-two")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one", "hash-one"))
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-two", "hash-two"))
+            self.assertFalse(workflow_registry.approval_allows(root, "gate-three", "hash-three"))
             payload = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE)
-            self.assertEqual(payload["approvedKeys"], ["gate-one", "gate-two"])
+            self.assertEqual(
+                payload["approvedResults"],
+                [
+                    {"key": "gate-one", "resultHash": "hash-one"},
+                    {"key": "gate-two", "resultHash": "hash-two"},
+                ],
+            )
 
-    def test_legacy_single_key_file_is_honoured_and_upgraded(self) -> None:
+    def test_legacy_single_key_file_is_ignored_when_recording_current_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workflow_registry.write_json(
                 root / workflow_registry.APPROVAL_FILE, {"approved": True, "gateKey": "legacy"}
             )
-            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
-            workflow_registry.record_approval(root, "next")
-            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
-            self.assertTrue(workflow_registry.approval_allows(root, "next"))
+            self.assertFalse(workflow_registry.approval_allows(root, "legacy", "old-hash"))
+            workflow_registry.record_approval(root, "next", "next-hash")
+            self.assertFalse(workflow_registry.approval_allows(root, "legacy", "old-hash"))
+            self.assertTrue(workflow_registry.approval_allows(root, "next", "next-hash"))
 
 
 if __name__ == "__main__":

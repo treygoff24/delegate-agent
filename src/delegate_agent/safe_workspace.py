@@ -49,6 +49,7 @@ from delegate_agent.sandbox_bwrap import (
     SAFE_BACKEND_ENV,
     Bind,
     BwrapMaskOverflow,
+    SandboxPlan,
     configured_bwrap_binds,
     ensure_bwrap_backend,
     parity_masks,
@@ -1118,21 +1119,13 @@ def safe_isolated_request(
             # A linked worktree keeps its .git as a pointer into a common dir
             # outside the workspace; without it every git read fails inside.
             binds.append(Bind(path=git_common_dir, mode="ro"))
-        isolation = IsolationContext(
-            source_workspace=request.workspace,
-            effective_isolation=effective,
+        isolation = IsolationContext.temporary(
+            request.workspace,
             isolation_mode=isolation_mode,
-            isolation_lifecycle="temporary",
-            preserved_workspace=False,
             source_git_root=source_git_root,
             source_git_common_dir=git_common_dir,
             safe_workspace_method=BWRAP_METHOD,
-            sandbox={
-                "backend": "bwrap",
-                "bwrapPath": bwrap_path,
-                "masks": [{"path": mask.path, "kind": mask.kind} for mask in masks],
-                "binds": [{"path": bind.path, "mode": bind.mode} for bind in binds],
-            },
+            sandbox=SandboxPlan(bwrap_path, tuple(masks), tuple(binds)),
             warnings=tuple(warnings_list),
         )
         yield replace(request, isolation_context=isolation)
@@ -1171,12 +1164,9 @@ def safe_isolated_request(
         safe_workspace_warnings,
     )
 
-    isolation = IsolationContext(
-        source_workspace=request.workspace,
-        effective_isolation=effective,
+    isolation = IsolationContext.temporary(
+        request.workspace,
         isolation_mode=isolation_mode,
-        isolation_lifecycle="temporary",
-        preserved_workspace=False,
         source_git_root=source_git_root,
         safe_workspace_method=safe_workspace_method,
         warnings=warnings,

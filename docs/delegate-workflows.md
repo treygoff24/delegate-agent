@@ -16,7 +16,7 @@ Workflow registries use this file set as needed:
   (the launch-time source path, provenance only, never the resume execution
   input) and `scriptSha256`.
 - `result.json`: final workflow result, present only after success.
-- `approval.json`: gate approval state, present after `workflow approve`. `approvedKeys` accumulates every gate approved so far (a resume replays the whole script and re-fires each passed gate with the same key); `gateKey` is the latest.
+- `approval.json`: approvals bound to both a gate key and its result hash. A changed result requires a fresh approval; a key-only legacy approval does not authorize it.
 - `workflow.lock`: process lock held while a supervisor is active.
 
 ## Terminology
@@ -93,6 +93,12 @@ never write the persona body. Child input JSON carries `persona` and
 non-sensitive persona metadata only.
 
 ## Gates and resume
+
+Only current-format workflows can resume: version-2 structural keys, a runtime
+pin, and version-1 attempt configuration are required. Older or pinless workflow
+records are rejected before child launch. Start a new workflow instead of
+reusing old state. New workflows still replay completed children, adopt running
+children, and preserve result-bound approvals across resume.
 
 A supervisor is detached, so it pauses, fails, or finishes with nobody watching.
 Pass `--notify room:<name>` or `--notify channel:<name>` to `workflow run` and it
@@ -276,9 +282,47 @@ python3 bin/delegate.py workflow check review.py
 python3 bin/delegate.py --json workflow run review.py --args '{"files":["src/cli.py"]}' --budget 10
 python3 bin/delegate.py workflow events wf_0123abcdef45 --since 12
 python3 bin/delegate.py workflow watch wf_0123abcdef45 --since 12
+python3 bin/delegate.py workflow watch wf_0123abcdef45 --jsonl
 python3 bin/delegate.py workflow wait --timeout 60
 python3 bin/delegate.py workflow result --field summary
 python3 bin/delegate.py workflow approve wf_0123abcdef45
 python3 bin/delegate.py workflow kill wf_0123abcdef45
 python3 bin/delegate.py workflow save review.py --name review-changes
 ```
+
+`status`, `list`, and `wait` include the same additive `decision` projection
+for each workflow: status, gate key/result hash, error, budget, and suggested
+`nextActions`. The full status remains available. Suggestions do not grant
+approval or change exit codes: `wait` succeeds for succeeded/paused workflows,
+returns 1 for failed/killed/stalled/dry-run workflows, and 124 on timeout.
+Implicit latest selection still excludes dry runs; explicit IDs do not.
+
+`watch` reads new journal bytes rather than reparsing the complete journal on
+each poll. It retries an incomplete final line when more bytes arrive; malformed
+newline-terminated records remain errors. Replacement, shrink, and changed
+cursor-boundary bytes restart the reader. The sequence watermark remains in
+effect across restarts, so records at or below `--since` or the last emitted
+sequence are not replayed. In-place edits far behind the cursor are not an
+append operation and are not monitored.
+
+Existing `--json` watch output remains one final envelope containing `events`
+and `lastSeq`. For long-running watches, `--jsonl` emits and flushes one record
+at a time without retaining an event history:
+
+```json
+{"type":"event","schema":"delegate.workflow-command.v1","event":{"seq":13,"type":"agent_started"}}
+{"type":"final","schema":"delegate.workflow-command.v1","ok":true,"lastSeq":13,"workflow":{"status":"paused"}}
+```
+
+The final record includes the complete status projection (abbreviated above).
+As with existing watch behavior, its `ok` is false only for a stalled supervisor;
+it is not a claim that a terminal workflow succeeded. JSONL takes precedence
+over global `--json`. While a writer is active, an unterminated tail is buffered.
+Once settled, valid JSON without a final newline is emitted; an incomplete
+JSON or UTF-8 tail is ignored with a warning. Malformed complete records remain
+errors.
+
+Approval recovers journal-backed gate evidence under the supervisor lock. If a
+supervisor is still draining, a rejected approval attempt does not rewrite its
+status or approval file. The existing short post-launch stabilization wait is
+unchanged; approval remains bound to the gate's result hash.

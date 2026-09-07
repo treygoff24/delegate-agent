@@ -1,16 +1,4 @@
-"""Workspace-scoped run Registry and its advisory-lock durability contract.
-
-Registry mutations serialize through ``registry_lock``. Terminal finalization
-first tries that lock for the configured bounded budget
-(``DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`` or
-``tracking.registryLockTimeoutSec``). If contention outlives the budget, the
-runner atomically publishes ``runs/<runId>/finalize-wal.json`` containing a
-complete state/snapshot pair and returns the child's real result. Direct
-readers continue to see the last canonical pair until the next successful lock
-holder replays the WAL. Replay is owned only by ``registry_lock``, is
-idempotent, and quarantines malformed records; a cancellation marker or
-cancelled state always takes precedence over a WAL success.
-"""
+"""Workspace-scoped run registry and targeted finalization durability."""
 
 from __future__ import annotations
 
@@ -31,7 +19,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io, terminal_states
+from delegate_agent import archived_logs, private_io, run_scratch, run_status
+from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
@@ -48,29 +37,77 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     write_private_text_atomic,
     write_text_atomic,
 )
+from delegate_agent.record_io import (  # noqa: F401  # existing registry API
+    FINALIZE_WAL_FILE,
+    FINALIZE_WAL_SCHEMA,
+    MANIFEST_FILE,
+    RUN_ID_RE,
+    SNAPSHOT_FILE,
+    STATE_FILE,
+    STATE_SCHEMA,
+    STDERR_LOG,
+    STDOUT_LOG,
+    index_run_entries,
+    load_run_manifest,
+    load_run_manifest_or_none,
+    load_run_snapshot,
+    load_run_snapshot_or_none,
+    load_run_state,
+    load_run_state_or_none,
+    merge_terminal_record,
+    parse_utc_timestamp,
+    pending_finalize_wal_exists,
+    read_finalize_wal,
+    run_directory,
+    run_output_command,
+    runs_dir,
+    snapshot_command,
+    timestamp_from_run_id,
+    validate_finalize_wal,
+)
+from delegate_agent.run_status import (  # noqa: F401  # existing registry API
+    DEFAULT_RUNS_LIMIT,
+    LARGE_LOG_WARN_BYTES,
+    LARGE_LOG_WARN_MIB,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_FILTER_RUNNING,
+    STATUS_FILTER_STALE,
+    STATUS_RUNNING,
+    STATUS_STALE,
+    STATUS_SUCCEEDED,
+    STATUS_UNKNOWN,
+    TERMINAL_STATUSES,
+    activity_datetime,
+    activity_timestamp,
+    build_run_summary,
+    effective_log_byte_sizes,
+    effective_status,
+    large_log_warnings,
+    list_run_summaries,
+    log_byte_sizes,
+    process_alive,
+    raw_logs_archived,
+    raw_status,
+    run_succeeded,
+    stale_next_actions,
+    status_fields,
+)
 
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
-RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
-STDOUT_LOG = "stdout.log"
-STDERR_LOG = "stderr.log"
 EVENTS_JSONL = "events.jsonl"
-MANIFEST_FILE = "manifest.json"
-STATE_FILE = "state.json"
-SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
 PROMPT_TXT_FILE = "prompt.txt"
 PERSONA_TXT_FILE = "persona.txt"
 INDEX_VERSION = 1
 MANIFEST_SCHEMA = "delegate.manifest.v1"
-STATE_SCHEMA = "delegate.state.v1"
 SNAPSHOT_SCHEMA = "delegate.snapshot.v1"
 RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 RUNS_PRUNE_SCHEMA = "delegate.runs-prune.v1"
-DEFAULT_RUN_PRUNE_DAYS = 30
 LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS = 60 * 60
 LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8,}\.json$")
 RUN_PRUNE_ERROR_EXIT_CODE = 1
@@ -83,28 +120,15 @@ RETENTION_LOCK_NAME = ".retention.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 120.0
 REGISTRY_LOCK_TIMEOUT_ENV = "DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS"
 REGISTRY_LOCK_POLL_SECONDS = 0.05
-FINALIZE_WAL_FILE = "finalize-wal.json"
-FINALIZE_WAL_SCHEMA = "delegate.finalize-wal.v1"
+TERMINAL_SELECTION_KEY = "terminalSelection"
+FINALIZE_WAL_ENVELOPE_RESERVE_BYTES = 4 * 1024
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
 PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
-HARNESS_NAMES = frozenset(
-    {
-        "codex",
-        "cursor",
-        "grok",
-        "kimi",
-        "claude",
-        "droid",
-        "devin",
-        "opencode",
-        "pi",
-        "omp",
-    }
-)
+HARNESS_NAMES = frozenset(KNOWN_ENGINES)
 
 
 def generate_run_id(now: datetime | None = None) -> str:
@@ -192,10 +216,6 @@ def aliases_dir(registry_root: Path) -> Path:
     return registry_root / "aliases"
 
 
-def runs_dir(registry_root: Path) -> Path:
-    return registry_root / "runs"
-
-
 def index_path(registry_root: Path) -> Path:
     return registry_root / "index.json"
 
@@ -213,11 +233,15 @@ def load_index(registry_root: Path) -> JsonObject:
     runs = data.get("runs")
     if not isinstance(aliases, dict) or not isinstance(runs, dict):
         raise RegistryJsonError(f"{path} must contain aliases and runs objects")
-    return {
+    result: JsonObject = {
         "version": data.get("version", INDEX_VERSION),
         "aliases": aliases,
         "runs": runs,
     }
+    retention = data.get("retention")
+    if isinstance(retention, dict):
+        result["retention"] = retention
+    return result
 
 
 def _serialized_json_size(payload: JsonObject) -> int:
@@ -243,8 +267,20 @@ def save_index(registry_root: Path, index: JsonObject) -> None:
     _write_bounded_json(index_path(registry_root), index, record_name="index")
 
 
-def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
-    _write_bounded_json(run_path / SNAPSHOT_FILE, snapshot, record_name="snapshot")
+def _serialize_run_state(state: JsonObject) -> str:
+    serialized = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    size = len(serialized.encode("utf-8"))
+    limit = PRIVATE_RECORD_READ_MAX_BYTES - FINALIZE_WAL_ENVELOPE_RESERVE_BYTES
+    if size > limit:
+        raise RegistryJsonError(
+            f"state exceeds the {limit}-byte canonical record limit ({size} bytes); "
+            "reserve is required for a single-record finalization WAL"
+        )
+    return serialized
+
+
+def write_run_state(run_path: Path, state: JsonObject) -> None:
+    write_private_text_atomic(run_path / STATE_FILE, _serialize_run_state(state))
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
@@ -327,29 +363,24 @@ def write_finalize_wal(
     run_id: str,
     *,
     status: str,
-    state: JsonObject,
-    snapshot: JsonObject,
+    record: JsonObject,
 ) -> None:
-    """Publish a terminal finalization record without taking the registry lock.
-
-    The record is a complete replacement for ``state.json`` and
-    ``snapshot.json``. ``write_json_atomic`` serializes a temporary file and
-    publishes it with one rename, so readers see either the old record or the
-    complete WAL, never a partial JSON document. Readers intentionally continue to see the prior
-    canonical state until a future successful ``registry_lock`` acquisition
-    replays this record.
-    """
     if not RUN_ID_RE.fullmatch(run_id):
         raise ValueError(f"run id does not match expected format: {run_id}")
+    if status not in TERMINAL_STATUSES or record.get("status") != status:
+        raise ValueError("finalization WAL must contain a matching terminal record")
+    _serialize_run_state(record)
     payload: JsonObject = {
         "schema": FINALIZE_WAL_SCHEMA,
         "runId": run_id,
         "status": status,
         "createdAt": utc_now_iso(),
-        "state": state,
-        "snapshot": snapshot,
+        "record": record,
     }
-    write_json_atomic(finalize_wal_path(registry_root, run_id), payload)
+    validate_finalize_wal(payload, run_id)
+    _write_bounded_json(
+        finalize_wal_path(registry_root, run_id), payload, record_name="finalize WAL"
+    )
 
 
 def _quarantine_finalize_wal(path: Path, reason: str) -> None:
@@ -364,77 +395,98 @@ def _quarantine_finalize_wal(path: Path, reason: str) -> None:
         write_private_text_atomic(quarantine.with_suffix(quarantine.suffix + ".reason"), reason)
 
 
-def _replay_finalize_wal_locked(registry_root: Path) -> None:
-    """Fold pending terminal WAL records while ``registry_lock`` is held.
-
-    Replay is deliberately owned here, at the one lock seam shared by every
-    mutator.  It is idempotent: a terminal canonical state wins over a stale
-    duplicate WAL, and successful publication removes the WAL.  A cancelled
-    state or ``cancelRequested`` marker always wins over a WAL success record.
-    Malformed records are quarantined and never abort the caller's mutation.
-    """
-    runs = runs_dir(registry_root)
+def _state_identity(path: Path) -> JsonObject | None:
     try:
-        candidates = list(runs.iterdir())
+        info = path.lstat()
     except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtimeNs": info.st_mtime_ns,
+        "ctimeNs": info.st_ctime_ns,
+    }
+
+
+def _terminal_selection(state: JsonObject, state_path: Path) -> JsonObject | None:
+    status = state.get("status")
+    activity = run_status.activity_timestamp(state, None)
+    identity = _state_identity(state_path)
+    if status not in TERMINAL_STATUSES or not activity or identity is None:
+        return None
+    return {"status": status, "activityAt": activity, "stateIdentity": identity}
+
+
+def update_terminal_selection_locked(
+    registry_root: Path,
+    run_id: str,
+    state: JsonObject,
+) -> None:
+    index = load_index(registry_root)
+    entries = index.get("runs")
+    entry = entries.get(run_id) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict):
         return
-    for run_path in candidates:
-        if run_path.is_symlink() or not run_path.is_dir():
-            continue
-        run_id = run_path.name
-        if not RUN_ID_RE.fullmatch(run_id):
-            continue
-        wal_path = run_path / FINALIZE_WAL_FILE
-        if not wal_path.exists() or wal_path.is_symlink():
-            continue
-        try:
-            wal = read_json_object(wal_path)
-            if not isinstance(wal, dict):
-                raise RegistryJsonError("WAL root is not an object")
-            wal_status = wal.get("status")
-            if (
-                wal.get("schema") != FINALIZE_WAL_SCHEMA
-                or wal.get("runId") != run_id
-                or wal_status not in TERMINAL_STATUSES
-            ):
-                raise RegistryJsonError("WAL schema or run id is invalid")
-            state = wal.get("state")
-            snapshot = wal.get("snapshot")
-            if not isinstance(state, dict) or not isinstance(snapshot, dict):
-                raise RegistryJsonError("WAL state and snapshot must be objects")
-            if state.get("status") != wal_status or snapshot.get("status") != wal_status:
-                raise RegistryJsonError("WAL status does not match state and snapshot")
-            current = load_run_state_or_none(registry_root, run_id)
-            current_status = current.get("status") if isinstance(current, dict) else None
-            if current_status in TERMINAL_STATUSES and current_status != STATUS_CANCELLED:
-                # A crash can land state.json before snapshot.json.  Do not
-                # treat a terminal state alone as publication: only both WAL
-                # payloads are the finalized projection.
-                current_snapshot = load_run_snapshot_or_none(registry_root, run_id)
-                if current == state and current_snapshot == snapshot:
-                    wal_path.unlink(missing_ok=True)
-                    continue
-            if current_status == STATUS_CANCELLED or (
-                isinstance(current, dict) and current.get("cancelRequested") is True
-            ):
-                state = dict(state)
-                snapshot = dict(snapshot)
-                state["status"] = STATUS_CANCELLED
-                terminal_states.apply_operator_cancel_override(state)
-                if isinstance(current, dict):
-                    for key in ("cancelRequested", "cancelRequestedAt"):
-                        if key in current:
-                            state[key] = current[key]
-                snapshot["status"] = STATUS_CANCELLED
-                snapshot["ok"] = False
-                terminal_states.apply_operator_cancel_override(snapshot)
-            write_json_atomic(run_path / STATE_FILE, state)
-            write_snapshot(run_path, snapshot)
-            wal_path.unlink(missing_ok=True)
-        except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
-            if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":
-                continue
-            _quarantine_finalize_wal(wal_path, str(exc))
+    selection = _terminal_selection(state, run_directory(registry_root, run_id) / STATE_FILE)
+    if selection is None:
+        entry.pop(TERMINAL_SELECTION_KEY, None)
+    else:
+        entry[TERMINAL_SELECTION_KEY] = selection
+    save_index(registry_root, index)
+
+
+def terminal_selection_state(
+    registry_root: Path,
+    run_id: str,
+    index_entry: JsonObject,
+) -> JsonObject | None:
+    selection = index_entry.get(TERMINAL_SELECTION_KEY)
+    if not isinstance(selection, dict) or pending_finalize_wal_exists(registry_root, run_id):
+        return None
+    status = selection.get("status")
+    activity = selection.get("activityAt")
+    identity = selection.get("stateIdentity")
+    current_identity = _state_identity(run_directory(registry_root, run_id) / STATE_FILE)
+    if (
+        status not in TERMINAL_STATUSES
+        or not isinstance(activity, str)
+        or not isinstance(identity, dict)
+        or identity != current_identity
+    ):
+        return None
+    return {"status": status, "finishedAt": activity, "lastActivityAt": activity}
+
+
+def publish_terminal_record_locked(registry_root: Path, run_id: str, record: JsonObject) -> None:
+    run_path = run_directory(registry_root, run_id)
+    write_run_state(run_path, record)
+    try:
+        update_terminal_selection_locked(registry_root, run_id, record)
+    except (OSError, RegistryJsonError):
+        return
+
+
+def reconcile_finalize_wal_locked(registry_root: Path, run_id: str) -> None:
+    run_path = run_directory(registry_root, run_id)
+    wal_path = run_path / FINALIZE_WAL_FILE
+    if not wal_path.exists() or wal_path.is_symlink():
+        return
+    try:
+        record = read_finalize_wal(run_path, run_id, suppress_malformed=False)
+        if record is None:
+            return
+        current = read_json_object_or_none(run_path / STATE_FILE)
+        published = merge_terminal_record(current, record)
+        if published != current:
+            publish_terminal_record_locked(registry_root, run_id, published)
+        wal_path.unlink(missing_ok=True)
+    except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
+        if isinstance(exc, RegistryJsonError) and exc.reason == "replaced":
+            return
+        _quarantine_finalize_wal(wal_path, str(exc))
 
 
 @contextmanager
@@ -474,15 +526,7 @@ def registry_lock(
     *,
     timeout_seconds: float | None = None,
 ) -> Iterator[None]:
-    """Serialize registry mutations and replay pending finalization WALs.
-
-    Finalizers that cannot acquire this lock within their bounded budget publish
-    ``runs/<runId>/finalize-wal.json`` instead.  Every later successful lock
-    holder replays those records before its own mutation; direct readers retain
-    the last canonical state until that replay occurs.
-    """
     with file_lock(registry_lock_path(registry_root), timeout_seconds=timeout_seconds):
-        _replay_finalize_wal_locked(registry_root)
         yield
 
 
@@ -561,33 +605,11 @@ def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     return None
 
 
-def index_run_entries(index: JsonObject) -> Iterator[tuple[str, JsonObject]]:
-    """Yield usable index entries without deriving paths from corrupt keys."""
-    runs = index.get("runs", {})
-    if not isinstance(runs, dict):
-        return
-    for run_id, entry in runs.items():
-        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) and isinstance(entry, dict):
-            yield run_id, entry
-
-
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).strftime(UTC_TIMESTAMP_FORMAT)
-
-
-def parse_utc_timestamp(value: str | None) -> datetime | None:
-    if not value or not isinstance(value, str):
-        return None
-    try:
-        if value.endswith("Z"):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        parsed = datetime.fromisoformat(value)
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-    except ValueError:
-        return None
 
 
 def _format_age(timestamp: str, *, now: datetime | None = None) -> str:
@@ -634,29 +656,6 @@ def latest_handle_suggestions(
         if len(suggestions) >= limit:
             break
     return suggestions
-
-
-def snapshot_command(alias: str, *, cwd: str | None = None) -> str:
-    if cwd is None:
-        return f"delegate snapshot {alias}"
-    return shlex.join(["delegate", "--cwd", cwd, "snapshot", alias])
-
-
-def run_output_command(
-    handle: str,
-    *,
-    completion_report: bool = False,
-    cwd: str | None = None,
-) -> str:
-    if cwd is not None:
-        argv = ["delegate", "--cwd", cwd, "run-output", handle]
-        if completion_report:
-            argv.append("--completion-report")
-        return shlex.join(argv)
-    base = f"delegate run-output {handle}"
-    if completion_report:
-        return f"{base} --completion-report"
-    return base
 
 
 def alias_sequence_for_harness(alias: object, harness: str) -> int:
@@ -853,18 +852,6 @@ def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
             warnings.append(target.resolution_warning)
 
 
-def run_directory(registry_root: Path, run_id: str) -> Path:
-    if not RUN_ID_RE.fullmatch(run_id):
-        raise RegistryJsonError(f"invalid run id for registry path: {run_id!r}")
-    root = runs_dir(registry_root).resolve(strict=False)
-    path = (root / run_id).resolve(strict=False)
-    try:
-        path.relative_to(root)
-    except ValueError:
-        raise RegistryJsonError(f"run path escapes registry: {run_id!r}") from None
-    return path
-
-
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
     aliases = sorted(
         alias
@@ -1005,30 +992,6 @@ def resolve_run_target(
     )
 
 
-def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / STATE_FILE)
-
-
-def load_run_state_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / STATE_FILE)
-
-
-def load_run_snapshot(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
-
-
-def load_run_snapshot_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
-
-
-def load_run_manifest(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
-
-
-def load_run_manifest_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
-    return read_json_object_or_none(run_directory(registry_root, run_id) / MANIFEST_FILE)
-
-
 def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
@@ -1039,14 +1002,6 @@ def alias_for_run(index: JsonObject, run_id: str) -> str | None:
         if candidate_id == run_id and isinstance(candidate, str) and ALIAS_RE.fullmatch(candidate):
             return candidate
     return None
-
-
-def timestamp_from_run_id(run_id: str) -> str:
-    match = re.match(r"^del_(\d{8}T\d{6}Z)_", run_id)
-    if not match:
-        return ""
-    raw = match.group(1)
-    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[9:11]}:{raw[11:13]}:{raw[13:15]}Z"
 
 
 def _write_worktree_status(
@@ -1070,7 +1025,10 @@ def _write_worktree_status(
         state["worktreeRemovedAt"] = removed_at
     if discarded_dirty_paths is not None:
         state["discardedDirtyPaths"] = discarded_dirty_paths
-    write_json_atomic(state_path, state)
+    if state.get("status") in TERMINAL_STATUSES:
+        publish_terminal_record_locked(registry_root, run_id, state)
+    else:
+        write_run_state(run_path, state)
     return state
 
 
@@ -1089,7 +1047,10 @@ def set_worktree_status(
 
     Status must be one of: 'present', 'removed', 'missing', 'unknown'.
     """
+    if status not in {"present", "removed", "missing", "unknown"}:
+        raise ValueError("worktree status must be one of: missing, present, removed, unknown")
     with registry_lock(registry_root):
+        reconcile_finalize_wal_locked(registry_root, run_id)
         return _write_worktree_status(
             registry_root,
             run_id,
@@ -1108,6 +1069,7 @@ def set_worktree_status_locked(
     discarded_dirty_paths: list[str] | None = None,
 ) -> JsonObject:
     """Set worktree status when the caller already holds the registry lock."""
+    reconcile_finalize_wal_locked(registry_root, run_id)
     return _write_worktree_status(
         registry_root,
         run_id,
@@ -1196,37 +1158,6 @@ def _latest_run_id_for_harness(
     return matches[0][3]
 
 
-from delegate_agent import run_status  # noqa: E402  # facade re-export, placed after core defs
-from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
-    DEFAULT_RUNS_LIMIT,
-    LARGE_LOG_WARN_BYTES,
-    LARGE_LOG_WARN_MIB,
-    STATUS_CANCELLED,
-    STATUS_FAILED,
-    STATUS_FILTER_RUNNING,
-    STATUS_FILTER_STALE,
-    STATUS_RUNNING,
-    STATUS_STALE,
-    STATUS_SUCCEEDED,
-    STATUS_UNKNOWN,
-    TERMINAL_STATUSES,
-    activity_datetime,
-    activity_timestamp,
-    build_run_summary,
-    effective_log_byte_sizes,
-    effective_status,
-    large_log_warnings,
-    list_run_summaries,
-    log_byte_sizes,
-    process_alive,
-    raw_logs_archived,
-    raw_status,
-    run_succeeded,
-    stale_next_actions,
-    status_fields,
-)
-
-
 def _run_prune_ref(
     index: JsonObject,
     run_id: str,
@@ -1244,10 +1175,38 @@ def _run_prune_ref(
     return entry
 
 
-def _remove_run_record_artifacts(registry_root: Path, run_id: str) -> None:
+def _remove_run_record_artifacts(
+    registry_root: Path,
+    run_id: str,
+    manifest: JsonObject | None,
+    manifest_error: RegistryJsonError | None,
+) -> None:
     run_path = run_directory(registry_root, run_id)
     if run_path.is_symlink():
         raise OSError(f"refusing to prune symlinked run directory: {run_path}")
+    if manifest_error is not None:
+        raise OSError(
+            f"refusing to prune run {run_id}: unreadable manifest must be preserved: "
+            f"{manifest_error}"
+        ) from manifest_error
+    if manifest is not None and "scratchPath" in manifest:
+        recorded = manifest.get("scratchPath")
+        if not isinstance(recorded, str) or not recorded:
+            raise OSError(f"refusing to prune run {run_id}: invalid recorded scratch path")
+        expected = run_scratch.expected_path(registry_root, run_id)
+        recorded_path = Path(os.path.abspath(recorded))
+        if recorded_path != expected:
+            raise OSError(
+                f"refusing to prune run {run_id}: recorded scratch path {recorded_path} "
+                f"does not match current owned path {expected}"
+            )
+    # A manifest without a recorded scratch path, or an absent legacy manifest,
+    # carries no deletion pointer, and a run that allocated no scratch can
+    # still have left a sidecar (the mail-push private homes). The
+    # deterministic current paths are safe to inspect and remove either way
+    # because they derive from registry identity and run id, never from record
+    # bytes.
+    run_scratch.remove_owned(registry_root, run_id)
     if run_path.exists():
         shutil.rmtree(run_path)
     archived_logs.archive_path(registry_root, run_id).unlink(missing_ok=True)
@@ -1355,6 +1314,7 @@ def prune_runs(
                     )
                 )
                 continue
+            reconcile_finalize_wal_locked(registry_root, run_id)
             state = load_run_state_or_none(registry_root, run_id)
             effective_status = run_status.effective_status(state)
             attached_runs = live_attachments_by_owner_id.get(run_id)
@@ -1386,7 +1346,12 @@ def prune_runs(
                     _run_prune_ref(index, run_id, effective_status, reason="non_terminal")
                 )
                 continue
-            manifest = load_run_manifest_or_none(registry_root, run_id)
+            manifest_error: RegistryJsonError | None = None
+            try:
+                manifest = load_run_manifest(registry_root, run_id)
+            except RegistryJsonError as exc:
+                manifest = None
+                manifest_error = exc
             activity = run_status.activity_datetime(state, manifest, run_id)
             if activity is None:
                 skipped.append(
@@ -1404,7 +1369,7 @@ def prune_runs(
             if dry_run:
                 continue
             try:
-                _remove_run_record_artifacts(registry_root, run_id)
+                _remove_run_record_artifacts(registry_root, run_id, manifest, manifest_error)
             except OSError as exc:
                 errors.append({**candidate, "code": "record_remove_failed", "message": str(exc)})
                 continue

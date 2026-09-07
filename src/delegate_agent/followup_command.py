@@ -9,7 +9,7 @@ plain-text continuation (original prompt + output digest) and stays
 ephemeral / cross-engine. `followup` continues the native harness conversation
 directly on supported engines (Codex and Claude) and supports work-mode runs.
 
-Trust model: the session ID is read from state.json / snapshot.json /
+Trust model: the session ID is read from the canonical state view /
 manifest.json. Because work-mode children can modify workspace files, the
 session ID is treated as attacker-controlled input entering subprocess argv.
 All record reads use bounded no-follow readers, and session IDs are strictly
@@ -44,6 +44,7 @@ from delegate_agent.private_io import (
 from delegate_agent.request_models import (
     CONTINUITY_MODES,
     DEFAULT_CONTINUITY_MODE,
+    FollowupOptions,
     GlobalOptions,
     LaunchOptions,
     ParsedCommand,
@@ -102,6 +103,13 @@ def _read_record_json(path: Path, allow_missing: bool = False) -> JsonObject | N
     if not isinstance(data, dict):
         raise _record_invalid(f"record file {path.name} must contain a JSON object")
     return data
+
+
+def _load_snapshot_record(registry_root: Path, run_id: str) -> JsonObject | None:
+    try:
+        return run_registry.load_run_snapshot(registry_root, run_id)
+    except run_registry.RegistryJsonError as exc:
+        raise _record_invalid(str(exc)) from exc
 
 
 def _manifest_str(manifest: JsonObject, key: str) -> str | None:
@@ -198,8 +206,8 @@ def build_followup_plan(
     *,
     stderr: TextIO,
 ) -> FollowupPlan:
-    opts = parsed.followup
-    if opts is None:
+    opts = parsed.payload
+    if not isinstance(opts, FollowupOptions):
         raise DelegateError("invalid_command", "followup options are required.")
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -227,16 +235,9 @@ def build_followup_plan(
             "The source run's cwd does not match the workspace containing its Registry."
         )
 
-    with run_registry.registry_lock(registry_root):
-        source_state = _read_record_json(
-            run_path / run_registry.STATE_FILE,
-            allow_missing=True,
-        )
-        source_snapshot = _read_record_json(
-            run_path / run_registry.SNAPSHOT_FILE,
-            allow_missing=True,
-        )
-        effective_status = run_registry.effective_status(source_state)
+    source_state = run_registry.load_run_state_or_none(registry_root, run_id)
+    source_snapshot = _load_snapshot_record(registry_root, run_id)
+    effective_status = run_registry.effective_status(source_state)
 
     if effective_status not in RESUMABLE_STATUSES:
         raise DelegateError(
@@ -381,6 +382,7 @@ def build_followup_plan(
         resumable=True,
         resume_session_id=session_id,
         continuity_mode=continuity_mode,
+        warnings=opts.warnings,
     )
     synthetic = ParsedCommand(
         source_engine,
@@ -394,7 +396,7 @@ def build_followup_plan(
             group=group,
             notify=global_options.notify,
         ),
-        launch=launch,
+        payload=launch,
     )
 
     for note in notes:
@@ -426,14 +428,10 @@ def apply_followup_to_request(request: Request, plan: FollowupPlan) -> Request:
         source_git_root = attach.get("sourceGitRoot")
         updated = replace(
             updated,
-            isolation_context=IsolationContext(
-                source_workspace=request.workspace,
-                effective_isolation="worktree",
-                isolation_mode="worktree",
-                isolation_lifecycle="attached",
-                preserved_workspace=False,
-                planned_branch=str(attach.get("branch") or "") or None,
-                planned_execution_cwd=str(attach.get("path") or "") or None,
+            isolation_context=IsolationContext.attached(
+                request.workspace,
+                branch=str(attach.get("branch") or ""),
+                execution_cwd=str(attach.get("path") or ""),
                 source_git_root=str(source_git_root) if isinstance(source_git_root, str) else None,
                 attachment={
                     "sourceRunId": attach.get("sourceRunId"),

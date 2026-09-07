@@ -252,29 +252,14 @@ class OverviewTests(unittest.TestCase):
         # still be a registry top-level command.
         self.assertEqual(registry_top_level, set(TOP_LEVEL_COMMANDS) | {"help"})
 
-    def test_overview_advertises_codex_output_schema(self):
-        self.assertIn("codex {safe,work}", self.overview)
-        self.assertIn("codex call", self.overview)
-        self.assertIn("--output-schema FILE", self.overview)
-
-    def test_overview_advertises_output_schema_on_every_claude_line(self):
-        claude_lines = [
-            line for line in self.overview.splitlines() if " claude " in line and "[--model" in line
-        ]
-        self.assertEqual(len(claude_lines), 4)
-        for line in claude_lines:
-            self.assertIn("[--output-schema FILE]", line)
-
-    def test_overview_advertises_codex_fast_on_every_codex_line(self):
-        codex_lines = [
-            line for line in self.overview.splitlines() if " codex " in line and "[--model" in line
-        ]
-        self.assertEqual(len(codex_lines), 4)
-        for line in codex_lines:
-            self.assertIn("[--fast|--no-fast]", line)
-        for line in self.overview.splitlines():
-            if "[--fast|--no-fast]" in line:
-                self.assertIn(" codex ", line)
+    def test_focused_help_advertises_engine_capabilities(self):
+        for engine in ("codex", "claude"):
+            for name in (engine, f"{engine} call"):
+                with self.subTest(command=name):
+                    text = command_help.render_command_help_text(command_help.COMMAND_SPECS[name])
+                    self.assertIn("--output-schema", text)
+                    if engine == "codex":
+                        self.assertIn("--fast", text)
 
     def test_overview_call_lines_omit_workspace_options(self):
         """Stateless call usage must not advertise workspace-only options."""
@@ -299,15 +284,9 @@ class OverviewTests(unittest.TestCase):
                 with self.subTest(line=line, option=option):
                     self.assertNotIn(option, line)
 
-    def test_overview_devin_usage_omits_unsupported_reasoning_effort(self):
-        devin_lines = [line for line in self.overview.splitlines() if " devin " in line]
-        self.assertEqual(len(devin_lines), 4)
-        self.assertTrue(all("--reasoning-effort" not in line for line in devin_lines))
-
-    def test_overview_advertises_ps_structural(self):
-        ps_lines = [line for line in self.overview.splitlines() if " ps " in line]
-        self.assertEqual(len(ps_lines), 1)
-        self.assertIn("--structural", ps_lines[0])
+    def test_focused_devin_usage_omits_unsupported_reasoning_effort(self):
+        for usage in command_help.COMMAND_SPECS["devin"].usage:
+            self.assertNotIn("--reasoning-effort", usage)
 
 
 class PsHelpContractTests(unittest.TestCase):
@@ -507,3 +486,85 @@ class IsHelpTokenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OmpPromptTransportHelpTests(unittest.TestCase):
+    """omp moved to stdin; the help note must not still advertise argv.
+
+    The effort vocabularies themselves are asserted against the reasoning enums
+    in tests/test_lane_a_transport.py, which owns those strings; this covers only
+    the transport sentence beside them.
+    """
+
+    def test_omp_help_names_stdin_and_not_a_positional_prompt(self):
+        from delegate_agent.prompt_transport import ARGV_PROMPT_TRANSPORT_ENGINES
+
+        self.assertEqual(ARGV_PROMPT_TRANSPORT_ENGINES, ("kimi",))
+        transport = [
+            note for note in command_help.COMMAND_SPECS["omp"].notes if note.startswith("Uses omp ")
+        ]
+        self.assertEqual(len(transport), 1)
+        self.assertIn("stdin", transport[0])
+        self.assertNotIn("positional argument", transport[0])
+
+
+class ThinkingVocabularyTests(unittest.TestCase):
+    """Help and describe must quote the vocabulary the resolver accepts.
+
+    Pi 3.5.0 and Oh My Pi 18.1.13 accept `off` and `minimal`, and omp also
+    accepts `auto`; the prose used to list five levels for both, so an operator
+    reading `delegate help omp` was told `auto` was invalid and `off` unavailable.
+    The strings are derived from `reasoning`'s tuples rather than transcribed.
+    """
+
+    def setUp(self):
+        from delegate_agent import config as delegate_config
+        from delegate_agent import describe_payload, reasoning
+
+        self.reasoning = reasoning
+        self.describe_payload = describe_payload
+        self.config = delegate_config.embedded_default_config()
+
+    def _note(self, notes, engine):
+        matches = [note for note in notes if f"{engine} --thinking" in note]
+        self.assertEqual(len(matches), 1, f"expected one {engine} --thinking note")
+        return matches[0]
+
+    def _levels(self, note):
+        _, _, tail = note.partition("--thinking")
+        return tuple(
+            level
+            for level in re.findall(r"[a-z]+", tail.replace("or ", " "))
+            if level not in {"maps", "directly", "to"}
+        )
+
+    def test_help_notes_list_the_resolver_vocabulary(self):
+        for engine, efforts in (
+            ("pi", self.reasoning.PI_NATIVE_EFFORTS),
+            ("omp", self.reasoning.OMP_NATIVE_EFFORTS),
+        ):
+            with self.subTest(engine=engine):
+                note = self._note(command_help.COMMAND_SPECS[engine].notes, engine)
+                self.assertEqual(self._levels(note), tuple(efforts))
+
+    def test_describe_notes_list_the_resolver_vocabulary(self):
+        payload = self.describe_payload.describe_payload(self.config, "embedded-default")
+        harnesses = payload["modeMapping"]
+        for engine, efforts in (
+            ("pi", self.reasoning.PI_NATIVE_EFFORTS),
+            ("omp", self.reasoning.OMP_NATIVE_EFFORTS),
+        ):
+            with self.subTest(engine=engine):
+                note = self._note(harnesses[engine]["workNotes"], engine)
+                self.assertEqual(self._levels(note), tuple(efforts))
+
+    def test_omp_is_no_longer_documented_as_an_argv_prompt_engine(self):
+        """omp moved to stdin; only kimi keeps the argv carve-out."""
+        from delegate_agent.prompt_transport import ARGV_PROMPT_TRANSPORT_ENGINES
+
+        self.assertEqual(ARGV_PROMPT_TRANSPORT_ENGINES, ("kimi",))
+        notes = command_help.COMMAND_SPECS["omp"].notes
+        transport = [note for note in notes if note.startswith("Uses omp ")]
+        self.assertEqual(len(transport), 1)
+        self.assertIn("stdin", transport[0])
+        self.assertNotIn("positional argument", transport[0])

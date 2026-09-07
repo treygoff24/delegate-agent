@@ -57,6 +57,17 @@ for _name, _module in list(sys.modules.items()):
         if _file is not None and not str(_file).startswith(_SRC + os.sep):
             del sys.modules[_name]
 os.environ.pop("DELEGATE_WORKFLOW_PIN", None)
+# A parent workflow's immutable operational attempt must not select config or
+# numeric overrides inside the test process after HOME has been redirected.
+for _name in (
+    "DELEGATE_WORKFLOW_ATTEMPT",
+    "DELEGATE_STALL_MINUTES",
+    "DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC",
+    "DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS",
+    "DELEGATE_PROGRESS_INITIAL_DELAY_SEC",
+    "DELEGATE_PROGRESS_INTERVAL_SEC",
+):
+    os.environ.pop(_name, None)
 _pythonpath = [
     entry
     for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
@@ -95,9 +106,32 @@ tempfile.tempdir = None
 # milliseconds and reads as a dead lane.
 ORIGINAL_HOME = os.environ.get("HOME")
 
-_TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="dt-"))
+_TEST_HOME = str(_TEST_ROOT / "home")
+_TEST_TEMP = str(_TEST_ROOT / "tmp")
+Path(_TEST_HOME).mkdir()
+Path(_TEST_TEMP).mkdir()
 os.environ["HOME"] = _TEST_HOME
-atexit.register(shutil.rmtree, _TEST_HOME, True)
+for _name in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_name] = _TEST_TEMP
+tempfile.tempdir = _TEST_TEMP
+
+
+def _finish_test_environment() -> None:
+    # Both runners use the same ownership guard. Pytest also invokes it for
+    # each test; unittest gets this suite-level backstop before temp cleanup.
+    from tests.process_guard import reap_delegate_processes
+
+    try:
+        reap_delegate_processes(_TEST_ROOT)
+    except Exception as exc:
+        os.write(2, f"test process cleanup failed; retaining {_TEST_ROOT}: {exc}\n".encode())
+        # atexit exceptions otherwise do not make the authoritative gate fail.
+        os._exit(1)
+    shutil.rmtree(_TEST_ROOT, ignore_errors=True)
+
+
+atexit.register(_finish_test_environment)
 
 # unittest, which is the CI gate, never imports pytest's conftest.py.  Start
 # the linked-worktree flock watcher at package import so both runners observe

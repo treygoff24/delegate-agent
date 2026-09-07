@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import notify
+from delegate_agent import cli, cli_parser, notify
+from delegate_agent import config as delegate_config
 from delegate_agent.errors import DelegateError
 
 
@@ -157,15 +158,15 @@ class RunnerHookTests(unittest.TestCase):
             post.chmod(post.stat().st_mode | stat.S_IEXEC)
             config_path = root / "config.json"
             config_path.write_text("{}\n", encoding="utf-8")
-            run_path = root / "registry" / "runs" / "del_test"
+            run_path = root / "registry" / "runs" / "del_20260907T000000Z_abcdef"
             run_path.mkdir(parents=True)
             (run_path / "manifest.json").write_text(
-                json.dumps({"runId": "del_test"}), encoding="utf-8"
+                json.dumps({"runId": "del_20260907T000000Z_abcdef"}), encoding="utf-8"
             )
 
             ctx = mock.Mock()
             ctx.notify = "room:r"
-            ctx.run_id = "del_test"
+            ctx.run_id = "del_20260907T000000Z_abcdef"
             ctx.registry_root = root / "registry"
             ctx.engine = "omp"
             ctx.model = "glm"
@@ -189,7 +190,7 @@ class RunnerHookTests(unittest.TestCase):
                 mock.patch.object(
                     runner.run_registry,
                     "load_run_manifest_or_none",
-                    return_value={"runId": "del_test"},
+                    return_value={"runId": "del_20260907T000000Z_abcdef"},
                 ),
             ):
                 runner._send_completion_notification(run_path, ctx, "succeeded")
@@ -221,13 +222,16 @@ class RunnerHookTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             registry = Path(temp) / "registry"
-            run_path = registry / "runs" / "del_test"
+            run_path = registry / "runs" / "del_20260907T000000Z_abcdef"
             run_path.mkdir(parents=True)
-            (run_path / "manifest.json").write_text(json.dumps({"runId": "del_test"}))
+            (run_path / "manifest.json").write_text(
+                json.dumps({"runId": "del_20260907T000000Z_abcdef"})
+            )
             ctx = mock.Mock()
             ctx.notify = "room:r"
-            ctx.run_id = "del_test"
+            ctx.run_id = "del_20260907T000000Z_abcdef"
             ctx.registry_root = registry
+            ctx.registry_lock_timeout_seconds = 1
             ctx.engine = "omp"
             ctx.model = "glm"
             ctx.model_resolved = None
@@ -241,13 +245,15 @@ class RunnerHookTests(unittest.TestCase):
                 mock.patch.object(
                     runner.run_registry,
                     "load_run_manifest_or_none",
-                    return_value={"runId": "del_test"},
+                    return_value={"runId": "del_20260907T000000Z_abcdef"},
                 ),
             ):
                 runner._send_completion_notification(run_path, ctx, "failed")
             self.assertEqual(send.call_count, 1)
             message = send.call_args.args[1]
-            self.assertTrue(message.startswith("delegate del_test failed omp/glm "))
+            self.assertTrue(
+                message.startswith("delegate del_20260907T000000Z_abcdef failed omp/glm ")
+            )
             manifest = json.loads((run_path / "manifest.json").read_text())
             self.assertEqual(
                 manifest["notify"], {"target": "room:r", "ok": True, "messageId": "id"}
@@ -258,13 +264,16 @@ class RunnerHookTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             registry = Path(temp) / "registry"
-            run_path = registry / "runs" / "del_test"
+            run_path = registry / "runs" / "del_20260907T000000Z_abcdef"
             run_path.mkdir(parents=True)
-            (run_path / "manifest.json").write_text(json.dumps({"runId": "del_test"}))
+            (run_path / "manifest.json").write_text(
+                json.dumps({"runId": "del_20260907T000000Z_abcdef"})
+            )
             ctx = mock.Mock()
             ctx.notify = "room:r"
-            ctx.run_id = "del_test"
+            ctx.run_id = "del_20260907T000000Z_abcdef"
             ctx.registry_root = registry
+            ctx.registry_lock_timeout_seconds = 1
             ctx.engine = "omp"
             ctx.model = "glm"
             ctx.model_resolved = None
@@ -277,7 +286,7 @@ class RunnerHookTests(unittest.TestCase):
                 mock.patch.object(
                     runner.run_registry,
                     "load_run_manifest_or_none",
-                    return_value={"runId": "del_test", "warnings": ["earlier"]},
+                    return_value={"runId": "del_20260907T000000Z_abcdef", "warnings": ["earlier"]},
                 ),
             ):
                 runner._send_completion_notification(run_path, ctx, "succeeded")
@@ -293,12 +302,13 @@ class RunnerHookTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             registry = Path(temp) / "registry"
-            run_path = registry / "runs" / "del_test"
+            run_path = registry / "runs" / "del_20260907T000000Z_abcdef"
             run_path.mkdir(parents=True)
             ctx = mock.Mock()
             ctx.notify = "room:r"
-            ctx.run_id = "del_test"
+            ctx.run_id = "del_20260907T000000Z_abcdef"
             ctx.registry_root = registry
+            ctx.registry_lock_timeout_seconds = 1
             ctx.harness = "omp"
             ctx.source_prompt = None
             ctx.creation_context = None
@@ -307,10 +317,8 @@ class RunnerHookTests(unittest.TestCase):
             error = runner.RunnerLaunchError("child_launch_failed", "nope")
             with (
                 mock.patch.object(runner.run_registry, "load_run_state_or_none", return_value=None),
-                mock.patch.object(runner, "write_state"),
-                mock.patch.object(runner, "build_state", return_value={}),
-                mock.patch.object(runner, "build_snapshot", return_value={}),
-                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "build_run_record", return_value={}),
+                mock.patch.object(runner.run_registry, "publish_terminal_record_locked"),
                 mock.patch.object(runner, "_send_completion_notification") as hook,
             ):
                 runner._record_tracked_launch_failure(files, ctx, error)
@@ -350,10 +358,7 @@ class RunnerHookTests(unittest.TestCase):
             registration.branch = "b"
             registration.worktree_path = str(Path(temp) / "wt")
             with (
-                mock.patch.object(runner, "build_state", return_value={}),
-                mock.patch.object(runner, "write_state"),
-                mock.patch.object(runner, "build_snapshot", return_value={}),
-                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "_persist_final_progress", return_value=("failed", {})),
                 mock.patch.object(runner, "_send_completion_notification") as hook,
             ):
                 worktree_execution._record_persistent_worktree_failure(
@@ -393,17 +398,17 @@ class ParserAndDryRunTests(unittest.TestCase):
         self.assertIn("call mode does not use --notify", str(caught.exception))
 
     def test_notify_threads_into_global_options_for_launches(self) -> None:
-        parsed = self.delegate.parse_cli(
+        parsed = cli_parser.parse_cli(
             ["--json", "--notify", "channel:machineroom", "codex", "safe", "review"]
         )
         self.assertEqual(parsed.global_options.notify, "channel:machineroom")
 
     def test_notify_rejected_for_non_launch_subcommands_and_call_mode(self) -> None:
         with self.assertRaises(DelegateError) as caught:
-            self.delegate.parse_cli(["--notify", "room:r", "runs"])
+            cli_parser.parse_cli(["--notify", "room:r", "runs"])
         self.assertEqual(caught.exception.error, "invalid_option_combination")
         with self.assertRaises(DelegateError) as caught:
-            self.delegate.parse_cli(["--notify", "nope", "codex", "safe", "x"])
+            cli_parser.parse_cli(["--notify", "nope", "codex", "safe", "x"])
         self.assertEqual(caught.exception.error, "invalid_notify_target")
 
     def test_dry_run_payload_reports_target_and_post_argv(self) -> None:
@@ -415,12 +420,18 @@ class ParserAndDryRunTests(unittest.TestCase):
         base.setUp()
         try:
             request = base.build_git_request(
-                "codex", "safe", None, "/repo", "review", self.delegate.DEFAULT_CONFIG, dry_run=True
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
             )
         except AttributeError:
             self.skipTest("execution test base lacks build_git_request")
         request = dataclasses.replace(request, notify="room:devbox")
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertEqual(payload["notify"]["target"], "room:devbox")
         self.assertEqual(payload["notify"]["argv"][:4], ["post", "send", "--to", "devbox"])
 

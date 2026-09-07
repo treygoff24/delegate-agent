@@ -94,6 +94,12 @@ class RunnerCaptureTests(unittest.TestCase):
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
         self.run_output = load_module(RUN_OUTPUT_PATH, "delegate_run_output_under_test")
 
+    def _snapshot(self, registry_root: Path, run_id: str) -> dict[str, object]:
+        snapshot = self.registry.load_run_snapshot(registry_root, run_id)
+        self.assertIsInstance(snapshot, dict)
+        assert isinstance(snapshot, dict)
+        return snapshot
+
     def _persistent_health_context(self):
         return self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -181,6 +187,42 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.text, "")
         self.assertEqual(result.text_chars, 0)
+        self.assertTrue(any("no assistant text" in warning for warning in result.warnings))
+
+    def test_execute_call_returns_plain_text_stdout_from_a_malformed_line_harness(self):
+        """An unauthenticated pi prints prose to stdout; the message is the whole answer."""
+        message = "Error: no credentials found for provider anthropic"
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "plain_pi.py"
+            script.write_text(
+                f"print({json.dumps(message)})\n",
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="pi",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(message, result.text)
+        self.assertEqual(result.warnings, ())
+
+    def test_execute_call_still_suppresses_raw_stdout_once_one_real_event_parsed(self):
+        """A malformed line alongside a genuine event must not reopen the raw fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "mixed_pi.py"
+            script.write_text(
+                "print('pi: warning: retrying')\n"
+                'print(\'{"type":"tool_call","toolName":"read"}\')\n',
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="pi",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.text, "")
         self.assertTrue(any("no assistant text" in warning for warning in result.warnings))
 
     def test_execute_call_captures_redacted_stderr_tail_on_failure(self):
@@ -341,9 +383,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertIn("stdin prompt delivery", stderr.getvalue())
-            snapshot = json.loads(
-                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             warnings = snapshot.get("warnings", [])
             self.assertTrue(any("stdin prompt delivery" in w for w in warnings))
 
@@ -380,7 +420,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(caught.exception.error, "child_launch_failed")
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["error"], "child_launch_failed")
             self.assertIn("missing-agent", state["message"])
@@ -624,7 +664,7 @@ class RunnerCaptureTests(unittest.TestCase):
             secret_event = next(event for event in stream_lines if secret in str(event.get("text")))
             self.assertIn(secret, secret_event["text"])
 
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             recent = snapshot.get("recentEvents") or []
             short_recent = next(
                 event
@@ -695,7 +735,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertTrue(payload["completionReportWritten"])
             self.assertEqual(payload["completionReportSource"], "child")
             self.assertTrue(any("Droid no-op" in warning for warning in payload["warnings"]))
-            snapshot = json.loads((root / "runs" / run_id / "snapshot.json").read_text())
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(snapshot["resultQuality"], "housekeeping_noop")
 
             out = io.StringIO()
@@ -940,9 +980,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
 
             state = json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8"))
-            snapshot = json.loads(
-                (run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "running")
             self.assertTrue(state["cancelRequested"])
             self.assertEqual(state["cancelRequestedAt"], requested_at)
@@ -1001,16 +1039,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 "exitCode": 1,
                 "failureReason": "cancelled_by_user",
             }
-            terminal_snapshot = {
-                "status": "cancelled",
-                "exitCode": 1,
-                "failureReason": "cancelled_by_user",
-                "ok": False,
-            }
             self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, terminal_state)
-            self.registry.write_json_atomic(
-                run_path / self.registry.SNAPSHOT_FILE, terminal_snapshot
-            )
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
@@ -1039,10 +1068,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
                 terminal_state,
             )
-            self.assertEqual(
-                json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")),
-                terminal_snapshot,
-            )
+            self.assertFalse((run_path / self.registry.SNAPSHOT_FILE).exists())
 
     def test_finalize_first_marker_race_envelope_and_state_both_cancelled(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -1183,8 +1209,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["failureReason"], "cancelled_by_user")
             self.assertEqual(payload["error"], "cancelled_by_user")
             self.assertEqual(payload["message"], "Run was cancelled.")
-            for name in ("state.json", "snapshot.json"):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / "state.json").read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["failureReason"], "cancelled_by_user")
                 self.assertNotIn("error", persisted)
@@ -1255,8 +1283,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(finalization.extra["failureReason"], "cancelled_by_user")
             self.assertNotIn("error", finalization.extra)
             self.assertNotIn("message", finalization.extra)
-            for name in ("state.json", "snapshot.json"):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / "state.json").read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["failureReason"], "cancelled_by_user")
                 self.assertNotIn("error", persisted)
@@ -1593,7 +1623,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertIn("final from codex", report)
             self.assertNotIn("I am working", report)
             self.assertIn("I am working", snapshot["assistantText"])
@@ -1640,7 +1670,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("completionReportCommand", payload)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertIn("final from kimi", report)
             self.assertIn("final from kimi", snapshot["assistantText"])
 
@@ -1690,7 +1720,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.assertNotEqual(payload["resultQuality"], "no_assistant_text")
                 run_path = self.registry.run_directory(root, run_id)
                 report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-                snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+                snapshot = self._snapshot(root, run_id)
                 self.assertIn(expected, report)
                 self.assertIn(expected, snapshot["assistantText"])
 
@@ -1873,7 +1903,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["resultQuality"], "no_assistant_text")
             run_path = self.registry.run_directory(root, run_id)
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(snapshot["status"], "failed")
             self.assertEqual(state["resultQuality"], "no_assistant_text")
@@ -1923,7 +1953,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertNotIn("completionReportPath", payload)
             run_path = self.registry.run_directory(root, run_id)
             self.assertFalse((run_path / "completion-report.md").exists())
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertNotIn("completionReport", snapshot)
             self.assertIn("I will inspect the repo first", snapshot["assistantText"])
 
@@ -1957,8 +1987,9 @@ class RunnerCaptureTests(unittest.TestCase):
                         "--cwd",
                         workspace,
                         "droid",
-                        "minimax",
                         "safe",
+                        "--model",
+                        "minimax",
                         "hello",
                     ],
                     text=True,
@@ -2028,8 +2059,9 @@ class RunnerCaptureTests(unittest.TestCase):
                 "--cwd",
                 repo_temp.name,
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "hello",
             ],
             text=True,
@@ -2120,9 +2152,13 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         accumulator = self.runner.harness_events.StreamAccumulator()
         accumulator.session_id = "thread-123"
-        snapshot = self.runner.build_snapshot(ctx, accumulator=accumulator)
-        self.assertEqual(snapshot["modelResolved"], "effective-model")
-        self.assertEqual(snapshot["sessionId"], "thread-123")
+        record = self.runner.build_run_record(
+            ctx,
+            status="running",
+            accumulator=accumulator,
+        )
+        self.assertEqual(record["modelProvenance"]["resolvedModel"], "effective-model")
+        self.assertEqual(record["sessionId"], "thread-123")
 
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
@@ -2260,8 +2296,9 @@ class RunnerCaptureTests(unittest.TestCase):
             stderr_bytes=0,
             extra=extra,
         )
-        snapshot = self.runner.build_snapshot(
+        record = self.runner.build_run_record(
             ctx,
+            status="succeeded",
             accumulator=self.runner.harness_events.StreamAccumulator(),
             exit_code=0,
             extra=extra,
@@ -2269,7 +2306,7 @@ class RunnerCaptureTests(unittest.TestCase):
 
         expected = ["ctx warning", "duplicate warning", "extra warning"]
         self.assertEqual(payload["warnings"], expected)
-        self.assertEqual(snapshot["warnings"], expected)
+        self.assertEqual(record["warnings"], expected)
 
     def test_work_summary_no_changes_becomes_top_level_warning(self):
         ctx = self.runner.RunContext(
@@ -2999,7 +3036,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("completionReportCommand", payload)
             run_path = self.registry.run_directory(root, run_id)
             report = (run_path / "completion-report.md").read_text(encoding="utf-8")
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertIn("final from claude", report)
             self.assertIn("read:CLAUDE STDIN PROMPT", snapshot["assistantText"])
@@ -3404,7 +3441,7 @@ class RunnerCaptureTests(unittest.TestCase):
 
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertNotIn(
                 "resultQuality",
                 state,
@@ -3460,7 +3497,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(caught.exception.error, "child_launch_failed")
             run_path = root / "runs" / run_id
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = self._snapshot(root, run_id)
             self.assertEqual(state["stderrBytes"], len(b"usage limit\n"))
             self.assertEqual(state["exitCode"], 1)
             self.assertIn("finishedAt", state)
@@ -3764,8 +3801,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["failureReason"], "cancelled_by_user")
             self.assertEqual(payload["error"], "cancelled_by_user")
             run_path = self.registry.run_directory(root, run_id)
-            for name in (self.registry.STATE_FILE, self.registry.SNAPSHOT_FILE):
-                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+            for persisted in (
+                json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
+                self._snapshot(root, run_id),
+            ):
                 self.assertEqual(persisted["status"], "cancelled")
                 self.assertEqual(persisted["exitCode"], 1)
                 self.assertNotIn("error", persisted)
@@ -3835,18 +3874,20 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["stderrBytes"], len(primary_child) + len(retry_stderr))
 
     def test_safe_resume_empty_retry_refuses_argv_overflow_before_spawning(self):
+        # Kimi is the last engine whose prompt rides argv, so it is the only one
+        # the resume final-prompt size guard still covers.
         with tempfile.TemporaryDirectory() as workspace:
-            script = Path(workspace) / "cursor"
+            script = Path(workspace) / "kimi"
             script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_id, alias = self.registry.register_run(root, harness="kimi")
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
                 alias=alias,
-                harness="cursor",
-                engine="cursor",
+                harness="kimi",
+                engine="kimi",
                 mode="safe",
                 model=None,
                 source_cwd=workspace,
@@ -3854,7 +3895,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 workspace_kind="directory",
                 isolated_workspace=False,
                 started_at="2026-07-31T12:00:00Z",
-                resumed_from={"runId": "del_source", "alias": "cursor-1"},
+                resumed_from={"runId": "del_source", "alias": "kimi-1"},
             )
             prompt = "x" * (self.runner.resume_command.ARGV_PROMPT_GUARD_BYTES - 1)
 
@@ -3879,17 +3920,17 @@ class RunnerCaptureTests(unittest.TestCase):
 
     def test_non_resume_empty_retry_does_not_raise_resume_prompt_overflow(self):
         with tempfile.TemporaryDirectory() as workspace:
-            script = Path(workspace) / "cursor"
+            script = Path(workspace) / "kimi"
             script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_id, alias = self.registry.register_run(root, harness="kimi")
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
                 alias=alias,
-                harness="cursor",
-                engine="cursor",
+                harness="kimi",
+                engine="kimi",
                 mode="safe",
                 model=None,
                 source_cwd=workspace,
@@ -4651,9 +4692,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(
                 payload["stderrBytes"], len(b"primary stderr\n") + len(b"fallback stderr\n")
             )
-            snapshot = json.loads(
-                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
-            )
+            snapshot = self._snapshot(root, run_id)
             self.assertTrue(
                 any(event.get("message") == "usage limit" for event in snapshot["recentEvents"])
             )
@@ -5443,3 +5482,240 @@ class RunnerCaptureTests(unittest.TestCase):
         with mock.patch.object(os, "killpg") as kill_group:
             self.runner._terminate_call_process(process, pgid=own_pgid, grace_seconds=0)
         kill_group.assert_not_called()
+
+
+class MergedAttemptDiagnosticsTests(unittest.TestCase):
+    """A retry must not erase the first attempt's stream diagnostics."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_merge_under_test")
+
+    def _capture(self, accumulator):
+        return self.runner.TrackedCaptureResult(
+            accumulator=accumulator,
+            exit_code=0,
+            duration_ms=1,
+            stdout_bytes=1,
+            stderr_bytes=0,
+            stdin_failures=(),
+            pid=1,
+            pgid=None,
+        )
+
+    def _accumulator(self, **fields):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        for name, value in fields.items():
+            setattr(accumulator, name, value)
+        return accumulator
+
+    def test_merge_carries_malformed_and_unhandled_diagnostics(self):
+        prior = self._accumulator(
+            malformed_lines=2,
+            malformed_samples=["first", "second"],
+            unhandled_event_types={"session.resume_hint": 2, "only_prior": 1},
+        )
+        current = self._accumulator(
+            malformed_lines=1,
+            malformed_samples=["third"],
+            unhandled_event_types={"session.resume_hint": 3, "only_current": 4},
+        )
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertEqual(merged.malformed_lines, 3)
+        self.assertEqual(merged.malformed_samples, ["first", "second", "third"])
+        self.assertEqual(
+            merged.unhandled_event_types,
+            {"session.resume_hint": 5, "only_prior": 1, "only_current": 4},
+        )
+        self.assertFalse(merged.unhandled_event_types_truncated)
+
+    def test_merged_samples_and_types_stay_within_their_bounds(self):
+        limit = self.runner.harness_events.UNHANDLED_EVENT_TYPE_LIMIT
+        prior = self._accumulator(
+            malformed_samples=["a", "b", "c"],
+            unhandled_event_types={f"prior.{index}": 1 for index in range(limit)},
+        )
+        current = self._accumulator(
+            malformed_samples=["d"],
+            unhandled_event_types={"current.new": 1},
+        )
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertEqual(
+            len(merged.malformed_samples), self.runner.harness_events.MALFORMED_SAMPLE_LIMIT
+        )
+        self.assertEqual(len(merged.unhandled_event_types), limit)
+        self.assertNotIn("current.new", merged.unhandled_event_types)
+        self.assertTrue(merged.unhandled_event_types_truncated)
+
+    def test_prior_truncation_flag_survives_a_clean_retry(self):
+        prior = self._accumulator(unhandled_event_types_truncated=True)
+        current = self._accumulator()
+
+        merged = self.runner._merge_tracked_attempt_captures(
+            self._capture(prior), self._capture(current)
+        ).accumulator
+
+        self.assertTrue(merged.unhandled_event_types_truncated)
+
+
+class AggregatedUsageCostTests(unittest.TestCase):
+    """grok's `end` event prices the run; merging attempts must not drop it."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_usage_under_test")
+
+    def _reported(self, **extra):
+        return {"basis": "reported", "inputTokens": 10, "outputTokens": 2, **extra}
+
+    def test_cost_is_summed_across_merged_captures(self):
+        aggregated = self.runner._aggregate_usage(
+            self._reported(costUsd=0.01234574),
+            self._reported(costUsd=0.5),
+        )
+
+        self.assertAlmostEqual(aggregated["costUsd"], 0.51234574)
+        self.assertEqual(aggregated["inputTokens"], 20)
+
+    def test_partial_cost_is_reported_as_unknown_rather_than_understated(self):
+        aggregated = self.runner._aggregate_usage(
+            self._reported(costUsd=0.5),
+            self._reported(),
+        )
+
+        self.assertIn("costUsd", aggregated)
+        self.assertIsNone(aggregated["costUsd"])
+
+    def test_engines_that_never_price_a_run_gain_no_cost_key(self):
+        aggregated = self.runner._aggregate_usage(self._reported(), self._reported())
+
+        self.assertNotIn("costUsd", aggregated)
+
+    def test_a_negative_or_boolean_cost_is_not_summed(self):
+        for bad in (-1.0, True):
+            with self.subTest(cost=bad):
+                aggregated = self.runner._aggregate_usage(
+                    self._reported(costUsd=bad), self._reported(costUsd=0.5)
+                )
+                self.assertIsNone(aggregated["costUsd"])
+
+
+class StreamDiagnosticsSurfaceTests(unittest.TestCase):
+    """Malformed lines and unknown event types must reach the run record."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_diagnostics_under_test")
+
+    def _context(self):
+        return self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="kimi-1",
+            harness="kimi",
+            engine="kimi",
+            mode="safe",
+            model="kimi-latest",
+            source_cwd="/repo",
+            execution_cwd="/repo",
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-07T00:00:00Z",
+        )
+
+    def _record(self, accumulator):
+        return self.runner.build_run_record(
+            self._context(),
+            status="succeeded",
+            accumulator=accumulator,
+            exit_code=0,
+        )
+
+    def test_a_clean_stream_adds_no_diagnostic_keys(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line(json.dumps({"type": "assistant", "text": "done"}))
+
+        record = self._record(accumulator)
+
+        for key in (
+            "malformedLines",
+            "malformedSamples",
+            "unhandledEventTypes",
+            "unhandledEventTypesTruncated",
+        ):
+            self.assertNotIn(key, record)
+
+    def test_malformed_stdout_reaches_the_run_record(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line("Error: could not reach the provider")
+
+        record = self._record(accumulator)
+
+        self.assertEqual(record["malformedLines"], 1)
+        self.assertEqual(len(record["malformedSamples"]), 1)
+        self.assertIn("could not reach the provider", record["malformedSamples"][0])
+        self.assertEqual(record["unhandledEventTypes"], {})
+        self.assertFalse(record["unhandledEventTypesTruncated"])
+
+    def test_an_unknown_event_type_reaches_the_run_record(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+
+        record = self._record(accumulator)
+
+        self.assertEqual(record["unhandledEventTypes"], {"session.resume_hint": 2})
+        self.assertEqual(record["malformedLines"], 0)
+
+    def test_the_snapshot_view_declares_the_diagnostic_fields(self):
+        from delegate_agent.snapshot_view import SnapshotView
+
+        annotations = SnapshotView.__annotations__
+        self.assertIn("malformedLines", annotations)
+        self.assertIn("malformedSamples", annotations)
+        self.assertIn("unhandledEventTypes", annotations)
+        self.assertIn("unhandledEventTypesTruncated", annotations)
+
+    def test_structured_stdout_with_no_text_is_classified_no_assistant_text(self):
+        """The E10 warning must fire when the parser owned stdout but got nothing.
+
+        A kimi run whose every line was malformed exits 0 with no assistant text
+        and no completion; without this branch it is published as a clean
+        success and the operator never learns the answer was never parsed.
+        """
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line("Traceback (most recent call last):")
+
+        quality = self.runner._classify_result_quality(
+            ctx=self._context(),
+            exit_code=0,
+            report_text="",
+            report_written=False,
+            report_source=None,
+            accumulator=accumulator,
+        )
+
+        self.assertEqual(quality, self.runner.RESULT_QUALITY_NO_ASSISTANT_TEXT)
+        warning = self.runner._quality_warning(quality, harness="kimi")
+        self.assertIsNotNone(warning)
+        self.assertIn("no_assistant_text", warning)
+
+    def test_a_stream_the_parser_never_saw_is_not_no_assistant_text(self):
+        """Planted negative: an empty stream is `empty`, not a parse failure."""
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+
+        quality = self.runner._classify_result_quality(
+            ctx=self._context(),
+            exit_code=0,
+            report_text="",
+            report_written=False,
+            report_source=None,
+            accumulator=accumulator,
+        )
+
+        self.assertEqual(quality, self.runner.RESULT_QUALITY_EMPTY)

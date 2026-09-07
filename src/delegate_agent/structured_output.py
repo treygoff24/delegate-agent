@@ -3,12 +3,48 @@
 from __future__ import annotations
 
 import copy
+import json
 
 from delegate_agent.json_types import JsonObject
 
 
 class SchemaPreflightError(ValueError):
     pass
+
+
+NATIVE_SCHEMA_ENGINES = frozenset({"claude", "codex"})
+CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES = 120_000
+
+
+def native_schema_eligible(
+    engine: str, schema: object, *, serialized: str | None = None
+) -> str | None:
+    """Return why a schema cannot use an engine's native enforcement.
+
+    Claude carries the schema as a single `--json-schema` argv token, so the
+    limit applies to the exact bytes that become that token. A caller that
+    already has those bytes -- the direct `--output-schema` path, which inlines
+    the file or the supplied text verbatim -- passes them as `serialized`.
+    Re-serializing the parsed object measures a different string: a
+    pretty-printed file is materially larger than `json.dumps` of its contents,
+    so the compact form can sit under the limit while the token that actually
+    reaches argv is over it. Callers that serialize the schema themselves, such
+    as the workflow path, leave `serialized` unset and get that same default.
+    """
+    if engine not in NATIVE_SCHEMA_ENGINES:
+        return f"{engine} does not support native structured output."
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return f'{engine} native structured output requires root type "object".'
+    if engine == "claude":
+        text = json.dumps(schema) if serialized is None else serialized
+        serialized_bytes = len(text.encode("utf-8"))
+        if serialized_bytes >= CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES:
+            return (
+                "claude native schema is "
+                f"{serialized_bytes} bytes; the argv limit is under "
+                f"{CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES} bytes."
+            )
+    return None
 
 
 def normalize_codex_schema(schema: object) -> tuple[JsonObject, tuple[str, ...]]:

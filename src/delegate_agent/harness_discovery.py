@@ -24,7 +24,7 @@ from typing import BinaryIO, TextIO, TypeAlias
 
 from delegate_agent import config as delegate_config
 from delegate_agent import private_io, profiles, redaction, run_registry
-from delegate_agent.constants import KNOWN_ENGINES
+from delegate_agent.constants import CURSOR_EFFORT_LABELS, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 
 # A refresh-progress callback: called with each harness name before its probe
@@ -116,14 +116,6 @@ _AMBIGUOUS_VERSION_BASENAMES = frozenset({"agent"})
 _DIAGNOSTIC_LIMIT = 8_000
 METADATA_PROBE_TIMEOUT_SEC = 15
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_CURSOR_EFFORT_LABELS = {
-    "none": "None",
-    "low": "Low",
-    "medium": "Medium",
-    "high": "High",
-    "xhigh": "Extra High",
-    "max": "Max",
-}
 _SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses", "contexts"})
 _HARNESS_FIELDS = frozenset(
     {
@@ -136,6 +128,7 @@ _HARNESS_FIELDS = frozenset(
         "models",
         "harnessReasoning",
         "personaTransports",
+        "capabilities",
         "warnings",
         # Attempt-only provenance fields. Failed records are never selected for
         # persistence, but keeping these fields in the validated shape lets a
@@ -163,8 +156,15 @@ def validate_snapshot(
     *,
     expected_profile: str | None = None,
     allow_unknown_harnesses: bool = False,
+    drop_unknown_fields: bool = False,
 ) -> tuple[str, ...]:
-    """Validate a normalized snapshot and return forward-compat warnings."""
+    """Validate a normalized snapshot and return forward-compat warnings.
+
+    `drop_unknown_fields` separates reading from writing. Producing a snapshot
+    with a field this build does not know is a bug in this build and stays
+    fatal. Reading one is ordinary version skew, so the read path strips the
+    unknown names and reports them rather than discarding the whole file.
+    """
     _reject_extra_fields(snapshot, _SNAPSHOT_FIELDS, "discovery snapshot")
     schema = snapshot.get("schema")
     if isinstance(schema, bool) or schema != DISCOVERY_SCHEMA:
@@ -190,6 +190,7 @@ def validate_snapshot(
         _validate_harnesses(
             harnesses,
             allow_unknown_harnesses=allow_unknown_harnesses,
+            drop_unknown_fields=drop_unknown_fields,
         )
     )
 
@@ -219,6 +220,7 @@ def validate_snapshot(
                 _validate_harnesses(
                     nested_harnesses,
                     allow_unknown_harnesses=allow_unknown_harnesses,
+                    drop_unknown_fields=drop_unknown_fields,
                 )
             )
 
@@ -226,7 +228,10 @@ def validate_snapshot(
 
 
 def _validate_harnesses(
-    harnesses: dict[object, object], *, allow_unknown_harnesses: bool
+    harnesses: dict[object, object],
+    *,
+    allow_unknown_harnesses: bool,
+    drop_unknown_fields: bool = False,
 ) -> list[str]:
     warnings: list[str] = []
     for harness, record in harnesses.items():
@@ -236,7 +241,9 @@ def _validate_harnesses(
             if not allow_unknown_harnesses:
                 raise ValueError(f"unsupported discovery harness: {harness}")
             warnings.append(f"ignored unknown discovery harness {harness!r}")
-        _validate_harness_record(harness, record)
+        warnings.extend(
+            _validate_harness_record(harness, record, drop_unknown_fields=drop_unknown_fields)
+        )
     return warnings
 
 
@@ -258,8 +265,37 @@ def _reject_extra_fields(value: JsonObject, allowed: frozenset[str], path: str) 
         raise ValueError(f"{path} contains unsupported field {extras[0]!r}")
 
 
-def _validate_harness_record(harness: str, record: JsonObject) -> None:
-    _reject_extra_fields(record, _HARNESS_FIELDS, f"discovery harness {harness}")
+def _check_extra_fields(
+    value: JsonObject, allowed: frozenset[str], path: str, *, drop: bool
+) -> list[str]:
+    if not drop:
+        _reject_extra_fields(value, allowed, path)
+        return []
+    return _drop_extra_fields(value, allowed, path)
+
+
+def _drop_extra_fields(value: JsonObject, allowed: frozenset[str], path: str) -> list[str]:
+    """Drop unknown field names, reporting each one, instead of failing the file.
+
+    The discovery cache is shared between delegate builds. A newer build that
+    adds a per-harness field used to make the whole file unreadable to an older
+    one, which then discarded every other harness's models and reasoning
+    declarations until the next refresh rewrote it. An unrecognized name is
+    forward compatibility, not corruption, so it is removed and reported.
+    Wrong types on fields this build does know about stay fatal.
+    """
+    extras = [key for key in value if key not in allowed]
+    for key in extras:
+        del value[key]
+    return [f"ignored unsupported field {key!r} in {path}" for key in extras]
+
+
+def _validate_harness_record(
+    harness: str, record: JsonObject, *, drop_unknown_fields: bool = False
+) -> list[str]:
+    warnings = _check_extra_fields(
+        record, _HARNESS_FIELDS, f"discovery harness {harness}", drop=drop_unknown_fields
+    )
     if not isinstance(record.get("installed"), bool):
         raise ValueError(f"discovery harness {harness}.installed must be boolean")
     selector = record.get("selector")
@@ -317,8 +353,31 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
             raise ValueError(
                 f"discovery harness {harness}.personaTransports.native-file must be boolean"
             )
+    capabilities = record.get("capabilities")
+    if capabilities is not None:
+        if not isinstance(capabilities, dict):
+            raise ValueError(f"discovery harness {harness}.capabilities must be an object")
+        warnings.extend(
+            _check_extra_fields(
+                capabilities,
+                frozenset({"permissionPrompts"}),
+                f"discovery harness {harness}.capabilities",
+                drop=drop_unknown_fields,
+            )
+        )
+        if not capabilities:
+            # Everything it carried came from a newer build; an empty object is
+            # not the same as "this build observed no capabilities".
+            del record["capabilities"]
+        elif "permissionPrompts" in capabilities and not isinstance(
+            capabilities["permissionPrompts"], bool
+        ):
+            raise ValueError(
+                f"discovery harness {harness}.capabilities.permissionPrompts must be boolean"
+            )
     if not _string_list(record.get("warnings")):
         raise ValueError(f"discovery harness {harness}.warnings must be a string array")
+    return warnings
 
 
 def _validate_model_record(
@@ -861,7 +920,7 @@ def _opencode_object_end(raw: str, start: int) -> int | None:
 
 
 def _next_opencode_selector(raw: str, start: int) -> re.Match[str] | None:
-    return re.compile(r"(?m)^([^\s/]+/[^\s/]+)\r?\n(?=\s*\{)").search(raw, start)
+    return re.compile(r"(?m)^([^\s/]+/\S+)\r?\n(?=\s*\{)").search(raw, start)
 
 
 def parse_opencode_catalog(raw: str) -> JsonObject:
@@ -933,6 +992,13 @@ def parse_kimi_catalog(raw: str) -> JsonObject:
     entries = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         raise ValueError("Kimi catalog must contain a top-level models object")
+    if not entries:
+        return _fragment(
+            model_scope="configured",
+            models={},
+            probe_status="partial",
+            warnings=["Kimi catalog contained no configured models"],
+        )
     models: JsonObject = {}
     warnings: list[str] = []
     for selector, entry in entries.items():
@@ -1067,7 +1133,7 @@ def _cursor_route_candidate(selector: str, label: str) -> tuple[str, bool, str, 
     if match is None:
         return None
     effort = match.group("effort")
-    expected_label = _CURSOR_EFFORT_LABELS[effort]
+    expected_label = CURSOR_EFFORT_LABELS[effort]
     direct = re.search(rf"\b{re.escape(expected_label)}\b", label, re.IGNORECASE) is not None
     return match.group("family"), match.group("fast") is not None, effort, direct
 
@@ -1087,7 +1153,7 @@ def _cursor_high_corroborated(efforts: dict[str, tuple[str, bool, str]], *, fast
 
 
 def _cursor_direct_label_base(label: str, effort: str, *, fast: bool) -> str | None:
-    suffix = f" {_CURSOR_EFFORT_LABELS[effort]}{' Fast' if fast else ''}"
+    suffix = f" {CURSOR_EFFORT_LABELS[effort]}{' Fast' if fast else ''}"
     return label[: -len(suffix)] if label.casefold().endswith(suffix.casefold()) else None
 
 
@@ -1176,18 +1242,14 @@ def parse_droid_settings_models(custom_models: object) -> JsonObject:
     models: JsonObject = {}
     if not isinstance(custom_models, list):
         return models
-    for item in custom_models:
+    for index, item in enumerate(custom_models):
         if not isinstance(item, dict):
             continue
-        selector = item.get("id")
         display = item.get("displayName")
-        if not _nonempty_string(selector):
-            if not _nonempty_string(display):
-                continue
-            selector = "custom:" + "-".join(display.split())
-        model: JsonObject = {}
-        if _nonempty_string(display):
-            model["displayName"] = display
+        if not _nonempty_string(display):
+            continue
+        selector = f"custom:{'-'.join(display.split())}-{index}"
+        model: JsonObject = {"displayName": display}
         models[selector] = model
     return models
 
@@ -1250,20 +1312,31 @@ def parse_grok_catalog(raw: str) -> JsonObject:
     default_match = re.search(r"^Default model:\s*(\S+)\s*$", raw, re.MULTILINE)
     default_model = default_match.group(1) if default_match else None
     collecting = False
-    models: JsonObject = {}
+    entries: list[str] = []
     for line in raw.splitlines():
         stripped = line.strip()
         if not collecting:
             collecting = stripped.lower() == "available models:"
             continue
-        if models and (not stripped or (line and not line[0].isspace())):
+        if entries and (not stripped or (line and not line[0].isspace())):
             break
-        match = re.match(r"^\*?\s*(\S+?)(?:\s+\(default\))?$", stripped)
-        if match:
-            selector = match.group(1)
-            if selector.startswith("-"):
-                break
-            models[selector] = {}
+        if stripped:
+            entries.append(stripped)
+    # Bulleted entries are what grok 1.0.13 prints, and requiring the bullet is
+    # what keeps a trailing prose line out of the catalog. A build that prints
+    # plain selectors must still parse rather than fail the whole probe, so the
+    # unbulleted form is a second pass over the same lines: it applies only when
+    # the section carried no bullet at all, and a bulleted section keeps its
+    # prose guard. In a wholly unbulleted section a single-word prose line is
+    # indistinguishable from a selector and would be read as one.
+    models: JsonObject = {}
+    for pattern in (r"^[*-]\s+(\S+?)(?:\s+\(default\))?$", r"^(\S+?)(?:\s+\(default\))?$"):
+        for entry in entries:
+            match = re.match(pattern, entry)
+            if match:
+                models[match.group(1)] = {}
+        if models:
+            break
     if not models:
         raise ValueError("Grok catalog had no Available models entries")
     warnings: list[str] = []
@@ -1371,8 +1444,9 @@ def _probe_omp(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None
 def _probe_opencode(
     selector: tuple[str, ...], env: Mapping[str, str], _: Path | None
 ) -> JsonObject:
+    probe_env = {**env, "OPENCODE_DISABLE_AUTOUPDATE": "1"}
     return parse_opencode_catalog(
-        _probe_output(selector, ("--pure", "models", "--verbose"), env).stdout
+        _probe_output(selector, ("--pure", "models", "--verbose"), probe_env).stdout
     )
 
 
@@ -1426,6 +1500,7 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
             "--append-system-prompt-file" in combined or "--append-system-prompt[-file]" in combined
         ),
     }
+    fragment["capabilities"] = {"permissionPrompts": "--permission-prompts" in combined}
     return fragment
 
 
@@ -1689,6 +1764,7 @@ def load_discovery_cache(
             snapshot,
             expected_profile=_normalized_profile_name(profile_name),
             allow_unknown_harnesses=True,
+            drop_unknown_fields=True,
         )
     except (private_io.RegistryJsonError, ValueError):
         _DISCOVERY_CACHE_MEMO[memo_key] = None

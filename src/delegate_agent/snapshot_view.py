@@ -77,76 +77,10 @@ class SnapshotView(TypedDict, total=False):
     terminalRecord: JsonObject
     continuityMode: str
     modelProvenance: JsonObject
-
-
-def _snapshot_value(snapshot: JsonObject | None, key: str) -> object:
-    if snapshot is None:
-        return None
-    return snapshot.get(key)
-
-
-def _write_status_contract(view: SnapshotView, state: JsonObject | None) -> str | None:
-    status = run_registry.status_fields(state)
-    raw_status = status.get("rawStatus")
-    effective_status = status.get("effectiveStatus")
-    display_status = status.get("status")
-    stale_reason = status.get("staleReason")
-    terminal_state = status.get("terminalState")
-    if isinstance(raw_status, str):
-        view["rawStatus"] = raw_status
-    if isinstance(effective_status, str):
-        view["effectiveStatus"] = effective_status
-    if isinstance(display_status, str):
-        view["status"] = display_status
-    if isinstance(stale_reason, str):
-        view["staleReason"] = stale_reason
-    if isinstance(terminal_state, str):
-        view["terminalState"] = terminal_state
-    return effective_status if isinstance(effective_status, str) else None
-
-
-def _write_identity_contract(
-    view: SnapshotView,
-    *,
-    run_id: str,
-    snapshot: JsonObject | None,
-    state: JsonObject | None,
-    manifest: JsonObject | None,
-) -> str | None:
-    view["runId"] = run_id
-    alias = first_string(
-        _snapshot_value(snapshot, "alias"),
-        manifest.get("alias") if manifest else None,
-        state.get("alias") if state else None,
-    )
-    if alias is not None:
-        view["alias"] = alias
-    return alias
-
-
-def _write_completion_report_contract(
-    view: SnapshotView,
-    snapshot: JsonObject | None,
-) -> JsonObject | None:
-    completion_report = _snapshot_value(snapshot, "completionReport")
-    if isinstance(completion_report, dict):
-        view["completionReport"] = completion_report
-        return completion_report
-    return None
-
-
-def _source_workspace(
-    registry_root: Path,
-    snapshot: JsonObject | None,
-    state: JsonObject | None,
-    manifest: JsonObject | None,
-) -> str:
-    return first_string(
-        manifest.get("cwd") if manifest else None,
-        state.get("cwd") if state else None,
-        _snapshot_value(snapshot, "cwd"),
-        str(registry_root.parent),
-    ) or str(registry_root.parent)
+    malformedLines: int
+    malformedSamples: list[str]
+    unhandledEventTypes: JsonObject
+    unhandledEventTypesTruncated: bool
 
 
 def merge_snapshot_view(
@@ -155,59 +89,67 @@ def merge_snapshot_view(
     snapshot: JsonObject | None,
     *,
     redact: bool,
+    state: JsonObject | None = None,
 ) -> SnapshotView:
-    state = run_registry.load_run_state(registry_root, run_id)
+    if state is None:
+        state = run_registry.load_run_state(registry_root, run_id)
     manifest = run_registry.load_run_manifest(registry_root, run_id)
     stdout_bytes, stderr_bytes = delegate_retention.effective_log_byte_sizes(registry_root, run_id)
-    view: SnapshotView = dict(snapshot or {})
+    view: JsonObject = dict(snapshot or {})
+    if state:
+        view.update(state)
     if not view:
         view = {
             "schema": run_registry.SNAPSHOT_SCHEMA,
             "ok": True,
         }
     view.setdefault("ok", True)
-    alias = _write_identity_contract(
-        view,
-        run_id=run_id,
-        snapshot=snapshot,
-        state=state,
-        manifest=manifest,
+    view["runId"] = run_id
+    alias = first_string(
+        state.get("alias") if state else None,
+        view.get("alias"),
+        manifest.get("alias") if manifest else None,
     )
-    effective_status = _write_status_contract(view, state)
-    completion_report = _write_completion_report_contract(view, snapshot)
-    source_cwd = _source_workspace(registry_root, snapshot, state, manifest)
+    if alias is not None:
+        view["alias"] = alias
+    status = run_registry.status_fields(state)
+    view.update(status)
+    effective_status = status.get("effectiveStatus")
+    completion_report = view.get("completionReport")
+    completion_report = completion_report if isinstance(completion_report, dict) else None
+    source_cwd = first_string(
+        manifest.get("cwd") if manifest else None,
+        state.get("cwd") if state else None,
+        view.get("cwd"),
+        str(registry_root.parent),
+    ) or str(registry_root.parent)
     view["stdoutBytes"] = stdout_bytes
     view["stderrBytes"] = stderr_bytes
-    if state:
-        for key in (
-            "lastActivityAt",
-            "current",
-            "exitCode",
-            "finishedAt",
-            "completionReportWritten",
-            "completionReportSource",
-            "resultQuality",
-            "terminalState",
-            "terminalRecord",
-            "continuityMode",
-            "modelProvenance",
-        ):
-            if key in state and key not in view:
-                view[key] = state[key]
-        if state.get("status") == "failed":
-            for key in ("error", "message", "plannedBranch", "plannedExecutionCwd"):
-                if key in state and key not in view:
-                    view[key] = state[key]
-        for key in run_metadata.SNAPSHOT_STATE_FALLBACK_KEYS:
-            if key in state and key not in view:
-                view[key] = state[key]
     if manifest:
-        for key in ("alias", "harness", "cwd", "executionCwd", "mode", "model", "startedAt"):
+        for key in (
+            "alias",
+            "harness",
+            "cwd",
+            "executionCwd",
+            "mode",
+            "model",
+            "startedAt",
+            "workflowAgentKey",
+            "isolatedWorkspace",
+            "workspaceRoot",
+            "authProfile",
+            "promptInstructionMode",
+            "temporaryWorkspaceCleanup",
+        ):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
         for key in run_metadata.SNAPSHOT_MANIFEST_FALLBACK_KEYS:
             if key in manifest and key not in view:
                 view[key] = manifest[key]
+    if state and state.get("plannedExecutionCwd") and "worktreeStatus" not in state:
+        # The launch manifest describes the plan, not proof that creation succeeded.
+        for key in ("executionCwd", "branch", "worktreeStatus", "worktreeCleanupCommands"):
+            view.pop(key, None)
     warnings = list(view.get("warnings") or [])
     for source in (state, manifest):
         if not source:
@@ -240,9 +182,10 @@ def merge_snapshot_view(
                 completion_report=True,
                 cwd=source_cwd,
             )
+    view["schema"] = run_registry.SNAPSHOT_SCHEMA
     if redact:
-        view = cast(SnapshotView, redact_value(view))
-    return view
+        view = redact_value(view)
+    return cast(SnapshotView, view)
 
 
 def snapshot_json_payload(view: SnapshotView) -> JsonObject:

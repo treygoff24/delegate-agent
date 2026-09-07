@@ -17,6 +17,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import run_registry as registry_api
+from delegate_agent import worktree_gc as worktree_gc_api
+from delegate_agent import worktree_mgmt as worktree_api
+from delegate_agent import worktree_remove as worktree_remove_api
 from tests.execution_test_base import ExecutionTestBase
 
 
@@ -39,9 +46,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
         env: dict[str, str],
         resumable: bool = False,
     ):
-        workspace = self.delegate.resolve_workspace(repo)
+        workspace = request_api.resolve_workspace(repo)
         request = self._make_persistent_worktree_request("cursor", "work", repo, config)
-        request = self.delegate.Request(
+        request = request_types.Request(
             request.engine,
             request.mode,
             request.workspace,
@@ -71,7 +78,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
         fake_home = tempfile.TemporaryDirectory(prefix="delegate-reconstruct-home-")
         self.addCleanup(fake_home.cleanup)
         repo, _ = self._make_git_repo_with_commit()
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["worktrees"]["retireWorktreeOnCompletion"] = False
         code, payload = self._run_cursor(
             repo.name,
@@ -99,7 +106,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()
             agent = self._clean_agent()
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -118,7 +125,8 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertFalse(list(pool.iterdir()))
             run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
-            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertFalse((run_path / "snapshot.json").exists())
+            snapshot = registry_api.load_run_snapshot(run_path.parent.parent, payload["runId"])
             self.assertEqual(state["worktreeStatus"], "removed")
             self.assertEqual(snapshot["worktreeStatus"], "removed")
             branches = subprocess.run(
@@ -145,7 +153,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             agent.chmod(0o755)
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -169,7 +177,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             seeded = Path(repo.name) / "seeded.txt"
             seeded.write_text("source dirt\n", encoding="utf-8")
             agent = self._clean_agent()
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -197,7 +205,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             agent.chmod(0o755)
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -219,7 +227,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 (Path(repo.name) / f"seeded-{idx:02d}.txt").write_text(
                     f"seeded {idx}\n", encoding="utf-8"
                 )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -249,7 +257,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             agent.chmod(0o755)
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -271,7 +279,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             agent = self._clean_agent()
             agent.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
             agent.chmod(0o755)
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -296,7 +304,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             agent.chmod(0o755)
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -324,22 +332,22 @@ class WorktreeRetirementTests(ExecutionTestBase):
             extra = {"processGroupSurvived": True}
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_completion_record",
                     return_value={"runId": "del_survivor"},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt.run_registry,
+                    worktree_api.run_registry,
                     "load_run_state_or_none",
                     return_value={"status": "succeeded"},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_persist_completion_worktree_fields",
                 ) as persist,
-                mock.patch.object(self.delegate.worktree_mgmt, "detect_worktree_status") as detect,
+                mock.patch.object(worktree_api, "detect_worktree_status") as detect,
             ):
-                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+                worktree_api.retire_worktree_on_completion(ctx, extra)
 
             self.assertEqual(extra["worktreeRetained"], "process_group_survived")
             persist.assert_called_once()
@@ -356,7 +364,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             agent=agent
         )
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertEqual(extra["worktreeRetained"], "dirty")
         self.assertTrue(self._worktree_paths(fake_home.name))
@@ -376,7 +384,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             agent=agent
         )
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertNotIn("worktreeRetained", extra)
         self.assertTrue(extra.get("worktreeRetired"))
@@ -397,23 +405,51 @@ class WorktreeRetirementTests(ExecutionTestBase):
             agent=agent
         )
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertEqual(extra["worktreeRetained"], "dirty")
         self.assertEqual(extra.get("worktreeRetentionPaths"), ["child-created.txt"])
         self.assertTrue(self._worktree_paths(fake_home.name))
 
+    def test_discarded_paths_exclude_ignored_retirement_ledgers(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .beads\n"
+            'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
+            "printf 'real work\\n' > child-created.txt\n"
+            "printf 'done\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, _run_id, registry_root, payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        result = worktree_remove_api.remove_worktree(
+            registry_root,
+            handle=payload["alias"],
+            discard_uncommitted=True,
+            keep_branch=True,
+            retirement_ignore_globs=(".beads/**",),
+        )
+
+        self.assertTrue(result["pathRemoved"])
+        state = registry_api.load_run_state(registry_root, payload["runId"])
+        self.assertEqual(state["discardedDirtyPaths"], ["child-created.txt"])
+        self.assertFalse(self._worktree_paths(fake_home.name))
+
     def test_manifest_reconstruction_retains_process_group_survivor(self):
         fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
             agent=self._clean_agent()
         )
-        state_path = self.delegate.run_registry.run_directory(registry_root, run_id) / "state.json"
-        state = self.delegate.run_registry.load_run_state(registry_root, run_id)
+        state_path = registry_api.run_directory(registry_root, run_id) / "state.json"
+        state = registry_api.load_run_state(registry_root, run_id)
         self.assertIsNotNone(state)
         state["processGroupSurvived"] = True
-        self.delegate.run_registry.write_json_atomic(state_path, state)
+        registry_api.write_json_atomic(state_path, state)
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertEqual(extra["worktreeRetained"], "process_group_survived")
         self.assertTrue(self._worktree_paths(fake_home.name))
@@ -423,7 +459,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             agent=self._clean_agent(), resumable=True
         )
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertEqual(extra["worktreeRetained"], "resumable_session")
         self.assertTrue(self._worktree_paths(fake_home.name))
@@ -434,7 +470,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
         )
         self.assertTrue(self._worktree_paths(fake_home.name))
 
-        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
 
         self.assertTrue(extra["worktreeRetired"])
         self.assertEqual(extra["worktreeStatus"], "removed")
@@ -453,21 +489,19 @@ class WorktreeRetirementTests(ExecutionTestBase):
             extra = {}
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_completion_record",
                     return_value={"runId": "del_structured"},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt.run_registry,
+                    worktree_api.run_registry,
                     "load_run_state_or_none",
                     return_value={"status": "succeeded"},
                 ),
-                mock.patch.object(
-                    self.delegate.worktree_mgmt, "_persist_completion_worktree_fields"
-                ),
-                mock.patch.object(self.delegate.worktree_mgmt, "detect_worktree_status") as detect,
+                mock.patch.object(worktree_api, "_persist_completion_worktree_fields"),
+                mock.patch.object(worktree_api, "detect_worktree_status") as detect,
             ):
-                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+                worktree_api.retire_worktree_on_completion(ctx, extra)
 
             self.assertEqual(extra["worktreeRetained"], "structured_retry_pending")
             detect.assert_not_called()
@@ -485,30 +519,28 @@ class WorktreeRetirementTests(ExecutionTestBase):
             extra = {}
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_completion_record",
                     return_value={"runId": "del_resumable"},
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt.run_registry,
+                    worktree_api.run_registry,
                     "load_run_state_or_none",
                     return_value={"status": "succeeded"},
                 ),
+                mock.patch.object(worktree_api, "_persist_completion_worktree_fields"),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt, "_persist_completion_worktree_fields"
-                ),
-                mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "detect_worktree_status",
                     return_value=("present", []),
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_effective_dirty_for_retirement",
                     return_value=(False, [], []),
                 ),
             ):
-                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+                worktree_api.retire_worktree_on_completion(ctx, extra)
 
             self.assertEqual(extra["worktreeRetained"], "resumable_session")
             self.assertNotIn("worktreeRetired", extra)
@@ -527,7 +559,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             )
             tracked.unlink()
             agent = self._clean_agent()
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             code, payload = self._run_cursor(
                 repo.name,
                 config,
@@ -546,7 +578,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()
             agent = self._clean_agent()
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["worktrees"]["retireWorktreeOnCompletion"] = False
             code, payload = self._run_cursor(
                 repo.name,
@@ -576,12 +608,25 @@ class WorktreeRetirementTests(ExecutionTestBase):
             extra = {}
             result = {"ok": True, "removed": []}
             with mock.patch.object(
-                self.delegate.worktree_mgmt, "maybe_auto_prune", return_value=result
+                worktree_gc_api, "maybe_auto_prune", return_value=result
             ) as prune:
-                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+                worktree_api.retire_worktree_on_completion(ctx, extra)
 
             prune.assert_called_once()
             self.assertEqual(extra["autoPrune"], result)
+
+    def test_corrupt_snapshot_retains_completed_worktree(self):
+        agent = self._clean_agent()
+        fake_home, _repo, _config, run_id, registry_root, payload = self._completed_manifest_run(
+            agent=agent
+        )
+        snapshot = registry_root / "runs" / run_id / "snapshot.json"
+        snapshot.write_text("not json", encoding="utf-8")
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+        self.assertNotIn("worktreeRetired", extra)
+        self.assertIn("worktreeRetained", extra)
+        self.assertTrue(self._worktree_paths(fake_home.name))
+        self.assertTrue(Path(payload["executionCwd"]).is_dir())
 
 
 if __name__ == "__main__":

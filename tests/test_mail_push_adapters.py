@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from delegate_agent import cli, mail, profile_guard, run_registry
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import mail, profile_guard, run_registry
 from tests.delegate_commands_test_base import CommandTestBase
 
 # Stop-hook injection is verified only for Claude and Codex. Promote another
@@ -86,8 +87,17 @@ class MailPushAdapterTests(CommandTestBase):
             with self.subTest(engine=engine):
                 env = self._env()
                 argv = argv_by_engine[engine]
+                # Provisioning writes into the workspace registry and, for
+                # engines with a private engine home, into neutral run scratch
+                # outside it. Both roots are scanned so the delta stays real.
+                scratch_root = mail.mail_push_scratch_root(self.registry_root, self.run_id)
+                provisioned_roots = (self.workspace, scratch_root)
                 before_files = {
-                    path.resolve() for path in self.workspace.rglob("*") if path.is_file()
+                    path.resolve()
+                    for root in provisioned_roots
+                    if root.is_dir()
+                    for path in root.rglob("*")
+                    if path.is_file()
                 }
                 provision = mail.provision_mail_push(
                     engine,
@@ -132,7 +142,12 @@ class MailPushAdapterTests(CommandTestBase):
                     self.assertTrue(
                         Path(env["CODEX_HOME"])
                         .resolve()
-                        .is_relative_to(run_registry.run_directory(self.registry_root, self.run_id))
+                        .is_relative_to(
+                            mail.mail_push_scratch_root(self.registry_root, self.run_id).resolve()
+                        )
+                    )
+                    self.assertFalse(
+                        Path(env["CODEX_HOME"]).resolve().is_relative_to(self.workspace.resolve())
                     )
                     self.assertTrue(Path(env["CODEX_HOME"]).joinpath("hooks.json").is_file())
                     self.assertFalse((box / "codex-home").exists())
@@ -143,7 +158,9 @@ class MailPushAdapterTests(CommandTestBase):
                     self.assertEqual(path.read_bytes(), contents, path)
                 created_files = {
                     path.resolve()
-                    for path in self.workspace.rglob("*")
+                    for root in provisioned_roots
+                    if root.is_dir()
+                    for path in root.rglob("*")
                     if path.is_file() and path.resolve() not in before_files
                 }
                 self.assertTrue(created_files)
@@ -153,6 +170,7 @@ class MailPushAdapterTests(CommandTestBase):
                         or path.is_relative_to(
                             run_registry.run_directory(self.registry_root, self.run_id)
                         )
+                        or path.is_relative_to(scratch_root.resolve())
                         for path in created_files
                     ),
                     created_files,
@@ -178,12 +196,12 @@ class MailPushAdapterTests(CommandTestBase):
                 self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
     def test_provisioning_is_absent_without_mail_push_flag(self):
-        parsed = cli.parse_cli(["claude", "work", "prompt"])
-        self.assertFalse(parsed.launch.mail_push)
+        parsed = parser_api.parse_cli(["claude", "work", "prompt"])
+        self.assertFalse(parsed.payload.mail_push)
         self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
     def test_hook_pump_is_classified_as_a_mutation_by_both_python_and_shell_guards(self):
-        parsed = cli.parse_cli(["mail", "hook-pump"])
+        parsed = parser_api.parse_cli(["mail", "hook-pump"])
         self.assertFalse(profile_guard.is_read_only_command(parsed))
         shim = Path(__file__).resolve().parents[1] / "bin" / "delegate-profile-shim"
         shim_text = shim.read_text(encoding="utf-8")

@@ -8,9 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import config, prompt_transport, request_build, run_registry
-from delegate_agent.cli import parse_cli, request_from_parsed
+from delegate_agent import config, mail, prompt_transport, request_build, run_registry
+from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
+from delegate_agent.request_build import request_from_parsed
 from delegate_agent.workflows import runtime as workflow_runtime
 
 
@@ -42,10 +43,11 @@ class PersonaSizeGuardTests(unittest.TestCase):
         return len(
             request_build.effective_prompt(
                 prompt,
-                engine="cursor",
+                engine="kimi",
                 mode="work",
                 completion_report_mode=config.COMPLETION_REPORT_MODE_MARKDOWN,
                 persona_text=self.persona_text,
+                mail_suffix=mail.MAIL_PROMPT_SUFFIX,
             ).encode("utf-8")
         )
 
@@ -58,12 +60,21 @@ class PersonaSizeGuardTests(unittest.TestCase):
         self.assertEqual(self._framed_prompt_bytes(over), limit + 1)
         return exact, over
 
+    def _preamble_enabled_config(self) -> dict[str, object]:
+        # _boundary_prompt() computes its overhead via a direct
+        # effective_prompt() call, which always includes SKILL_REVIEW_PREFIX
+        # (it does not pass skip_skill_preamble). Enable the config switch here
+        # so the actual framed request matches that overhead math.
+        cfg = config.embedded_default_config()
+        cfg["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        return cfg
+
     def _cli_request(self, prompt: str):
         parsed = parse_cli(
             [
                 "--cwd",
                 str(self.workspace),
-                "cursor",
+                "kimi",
                 "work",
                 "--persona",
                 "editor",
@@ -72,7 +83,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         )
         return request_from_parsed(
             parsed,
-            config.embedded_default_config(),
+            self._preamble_enabled_config(),
             io.StringIO(),
             stderr=io.StringIO(),
         )
@@ -82,7 +93,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         input_path.write_text(
             json.dumps(
                 {
-                    "engine": "cursor",
+                    "engine": "kimi",
                     "mode": "work",
                     "cwd": str(self.workspace),
                     "prompt": prompt,
@@ -94,7 +105,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         parsed = parse_cli(["--cwd", str(self.workspace), "run", "--input-json", str(input_path)])
         return request_from_parsed(
             parsed,
-            config.embedded_default_config(),
+            self._preamble_enabled_config(),
             io.StringIO(),
             stderr=io.StringIO(),
         )
@@ -133,11 +144,9 @@ class PersonaSizeGuardTests(unittest.TestCase):
             budget=workflow_runtime.Budget(None),
             dry_run=True,
         )
-        workflow_runtime.WorkflowDsl(
-            state, {"defaults": {"engine": "cursor", "mode": "safe"}}
-        ).agent(
+        workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "kimi", "mode": "safe"}}).agent(
             prompt,
-            engine="cursor",
+            engine="kimi",
             mode="safe",
             persona="editor",
         )
@@ -167,7 +176,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
             len(
                 request_build.effective_prompt(
                     "x",
-                    engine="cursor",
+                    engine="kimi",
                     mode="safe",
                     completion_report_mode=config.COMPLETION_REPORT_MODE_MARKDOWN,
                     persona_text=self.persona_text,

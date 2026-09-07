@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import command_help as help_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 RETENTION_PATH = ROOT / "src" / "delegate_agent" / "retention.py"
@@ -20,6 +22,8 @@ CLI_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
+
+from delegate_agent import run_scratch  # noqa: E402
 
 
 def load_module(path: Path, name: str):
@@ -131,6 +135,288 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue(outcome["result"]["ok"])
         self.assertFalse(run_path.exists())
 
+    def test_run_prune_refuses_tampered_recorded_scratch_and_preserves_pointer(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            (scratch / "artifact.txt").write_text("remove\n", encoding="utf-8")
+            outside = self.workspace / "outside-canary"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "runId": run_id,
+                    "scratchPath": str(outside),
+                    "scratchPermissions": {"writableRoots": [str(outside)]},
+                },
+            )
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["errors"][0]["code"], "record_remove_failed")
+            self.assertTrue(scratch.exists())
+            self.assertTrue(run_path.exists())
+            self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep\n")
+
+    def test_run_prune_removes_exact_recorded_owned_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            (scratch / "artifact.txt").write_text("remove\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json", {"runId": run_id, "scratchPath": str(scratch)}
+            )
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(scratch.exists())
+            self.assertFalse(run_path.exists())
+
+    def test_run_prune_refuses_corrupt_manifest_with_external_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            (scratch / "forensic.txt").write_text("retain\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            manifest_path = run_path / "manifest.json"
+            corrupt = b"{not-json\n"
+            manifest_path.write_bytes(corrupt)
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("unreadable manifest", result["errors"][0]["message"])
+            self.assertEqual(manifest_path.read_bytes(), corrupt)
+            self.assertEqual((scratch / "forensic.txt").read_text(), "retain\n")
+
+    def test_run_prune_cleans_owned_external_scratch_when_legacy_manifest_is_absent(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            (scratch / "orphan.txt").write_text("remove\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            (run_path / "manifest.json").unlink()
+            self.assertFalse((run_path / "manifest.json").exists())
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(scratch.exists())
+            self.assertFalse(run_path.exists())
+
+    def test_moved_registry_with_corrupt_manifest_preserves_forensic_record(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            manifest_path = run_path / "manifest.json"
+            corrupt = b"{forensic-corruption\n"
+            manifest_path.write_bytes(corrupt)
+            moved_registry = self.workspace / "moved-registry"
+            self.registry_root.rename(moved_registry)
+            self.registry_root = moved_registry
+            moved_run_path = self.registry.run_directory(self.registry_root, run_id)
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual((moved_run_path / "manifest.json").read_bytes(), corrupt)
+            self.assertTrue(scratch.exists())
+
+    def test_changed_home_with_corrupt_manifest_preserves_forensic_record(self):
+        with (
+            tempfile.TemporaryDirectory() as first_home,
+            tempfile.TemporaryDirectory() as second_home,
+        ):
+            with mock.patch.dict(os.environ, {"HOME": first_home}):
+                run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+                scratch = run_scratch.allocate(self.registry_root, run_id)
+                run_path = self.registry.run_directory(self.registry_root, run_id)
+                corrupt = b"{forensic-corruption\n"
+                (run_path / "manifest.json").write_bytes(corrupt)
+
+            with mock.patch.dict(os.environ, {"HOME": second_home}):
+                result = self.registry.prune_runs(
+                    self.registry_root,
+                    older_than_days=0,
+                    now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual((run_path / "manifest.json").read_bytes(), corrupt)
+            self.assertTrue(scratch.exists())
+
+    def test_run_prune_refuses_when_registry_move_changes_derived_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json", {"runId": run_id, "scratchPath": str(scratch)}
+            )
+            moved_workspace = self.workspace / "moved"
+            self.registry_root.rename(moved_workspace)
+            self.registry_root = moved_workspace
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("does not match", result["errors"][0]["message"])
+            self.assertTrue(scratch.exists())
+            self.assertTrue(self.registry.run_directory(self.registry_root, run_id).exists())
+
+    def test_run_prune_refuses_when_home_change_changes_derived_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as first_home,
+            tempfile.TemporaryDirectory() as second_home,
+        ):
+            with mock.patch.dict(os.environ, {"HOME": first_home}):
+                run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+                scratch = run_scratch.allocate(self.registry_root, run_id)
+                run_path = self.registry.run_directory(self.registry_root, run_id)
+                self.registry.write_json_atomic(
+                    run_path / "manifest.json",
+                    {"runId": run_id, "scratchPath": str(scratch)},
+                )
+
+            with mock.patch.dict(os.environ, {"HOME": second_home}):
+                result = self.registry.prune_runs(
+                    self.registry_root,
+                    older_than_days=0,
+                    now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("does not match", result["errors"][0]["message"])
+            self.assertTrue(scratch.exists())
+            self.assertTrue(run_path.exists())
+
+    def test_run_prune_preserves_legacy_run_local_scratch(self):
+        run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        legacy_scratch = run_path / "scratch"
+        legacy_scratch.mkdir()
+        (legacy_scratch / "old.txt").write_text("legacy\n", encoding="utf-8")
+
+        result = self.registry.prune_runs(
+            self.registry_root,
+            older_than_days=0,
+            now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(run_path.exists())
+
+    def test_run_prune_keeps_ordinary_legacy_no_manifest_no_external_behavior(self):
+        run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "manifest.json").unlink()
+        self.assertFalse(run_scratch.expected_path(self.registry_root, run_id).exists())
+
+        result = self.registry.prune_runs(
+            self.registry_root,
+            older_than_days=0,
+            now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(run_path.exists())
+
+    def test_run_prune_refuses_symlinked_derived_scratch_and_keeps_record(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            scratch.rmdir()
+            outside = self.workspace / "outside-canary"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+            scratch.symlink_to(outside, target_is_directory=True)
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json", {"runId": run_id, "scratchPath": str(scratch)}
+            )
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["errors"][0]["code"], "record_remove_failed")
+            self.assertTrue(self.registry.run_directory(self.registry_root, run_id).exists())
+            self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep\n")
+
+    def test_run_prune_keeps_active_run_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            run_id, _alias = self.write_completed_run(
+                status="running", finished_at="2000-01-01T00:00:00Z", pid=os.getpid()
+            )
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            (scratch / "active.txt").write_text("keep\n", encoding="utf-8")
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertEqual(result["skipped"][0]["reason"], "running")
+            self.assertEqual((scratch / "active.txt").read_text(encoding="utf-8"), "keep\n")
+
     def write_completed_run(
         self,
         *,
@@ -149,6 +435,9 @@ class RetentionTests(unittest.TestCase):
             "status": status,
             "finishedAt": finished,
             "lastActivityAt": finished,
+            "ok": status == "succeeded",
+            "assistantText": "done",
+            "recentEvents": [],
         }
         if pid is not None:
             state["pid"] = pid
@@ -161,18 +450,6 @@ class RetentionTests(unittest.TestCase):
                 "alias": alias,
                 "harness": "cursor",
                 "startedAt": finished,
-            },
-        )
-        self.registry.write_json_atomic(
-            run_path / "snapshot.json",
-            {
-                "schema": "delegate.snapshot.v1",
-                "ok": True,
-                "alias": alias,
-                "runId": run_id,
-                "status": status,
-                "startedAt": finished,
-                "assistantText": "done",
             },
         )
         if with_logs:
@@ -211,6 +488,71 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((run_path / "stdout.log").exists())
         self.assertFalse(self.retention.archive_path(self.registry_root, run_id).exists())
 
+    def test_completed_generation_skips_an_immediate_repeat_pass(self):
+        run_id, alias = self.registry.register_run(self.registry_root, harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        record = {
+            "schema": self.registry.STATE_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "status": "succeeded",
+            "finishedAt": "2000-01-01T00:00:00Z",
+            "lastActivityAt": "2000-01-01T00:00:00Z",
+        }
+        self.registry.write_json_atomic(
+            run_path / self.registry.MANIFEST_FILE,
+            {"schema": self.registry.MANIFEST_SCHEMA, "runId": run_id, "alias": alias},
+        )
+        for name in self.retention.ARCHIVE_MEMBER_NAMES:
+            (run_path / name).write_text("old output\n", encoding="utf-8")
+        with self.registry.registry_lock(self.registry_root):
+            self.registry.publish_terminal_record_locked(self.registry_root, run_id, record)
+
+        config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}}
+        first = self.retention.run_retention_pass(self.registry_root, config)
+        second = self.retention.run_retention_pass(self.registry_root, config)
+
+        self.assertEqual(first["scanned"], 1)
+        self.assertEqual(second, {"scanned": 0, "archived": 0, "skipped": 0})
+
+    def test_retention_retries_a_young_terminal_after_the_time_cadence(self):
+        run_id, alias = self.registry.register_run(self.registry_root, harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        finished = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+        record = {
+            "schema": self.registry.STATE_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "status": "succeeded",
+            "finishedAt": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lastActivityAt": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        self.registry.write_json_atomic(
+            run_path / self.registry.MANIFEST_FILE,
+            {"schema": self.registry.MANIFEST_SCHEMA, "runId": run_id, "alias": alias},
+        )
+        for name in self.retention.ARCHIVE_MEMBER_NAMES:
+            (run_path / name).write_text("old output\n", encoding="utf-8")
+        with self.registry.registry_lock(self.registry_root):
+            self.registry.publish_terminal_record_locked(self.registry_root, run_id, record)
+
+        config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 1}}}
+        first = self.retention.run_retention_pass(self.registry_root, config, now=finished)
+        immediate = self.retention.run_retention_pass(
+            self.registry_root,
+            config,
+            now=finished + timedelta(seconds=1),
+        )
+        later = self.retention.run_retention_pass(
+            self.registry_root,
+            config,
+            now=finished + timedelta(days=2),
+        )
+
+        self.assertEqual(first["archived"], 0)
+        self.assertEqual(immediate, {"scanned": 0, "archived": 0, "skipped": 0})
+        self.assertEqual(later["archived"], 1)
+
     def test_old_completed_run_archives_raw_logs(self):
         run_id, alias = self.write_completed_run()
         old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -234,7 +576,7 @@ class RetentionTests(unittest.TestCase):
         self.assertFalse((run_path / "stderr.log").exists())
         self.assertFalse((run_path / "events.jsonl").exists())
         self.assertTrue((run_path / "manifest.json").exists())
-        self.assertTrue((run_path / "snapshot.json").exists())
+        self.assertFalse((run_path / "snapshot.json").exists())
         self.assertTrue((run_path / "state.json").exists())
         index = self.registry.load_index(self.registry_root)
         self.assertEqual(index["aliases"][alias], run_id)
@@ -317,7 +659,7 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((run_path / "stdout.log").exists())
 
     def test_no_delete_commands_exist(self):
-        help_text = self.delegate.HELP
+        help_text = help_api.render_overview_text()
         self.assertIn("worktree prune", help_text.lower())
         self.assertNotIn("retention prune", help_text.lower())
         self.assertNotIn("delete", help_text.lower())

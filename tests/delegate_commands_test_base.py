@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli, request_build, request_models
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 
@@ -17,7 +19,7 @@ if SRC not in sys.path:
 
 
 def load_delegate():
-    return importlib.reload(importlib.import_module("delegate_agent.cli"))
+    return importlib.reload(cli)
 
 
 def make_git_repo(*, with_commit: bool = False):
@@ -89,11 +91,11 @@ class CommandTestBase(unittest.TestCase):
         **kwargs,
     ):
         with mock.patch.dict(os.environ, self._config_env, clear=False):
-            return self.delegate.build_request(
+            return request_build.build_request(
                 engine,
                 mode,
                 model_alias,
-                self.delegate.ResolvedWorkspace(workspace, "git"),
+                request_models.ResolvedWorkspace(workspace, "git"),
                 prompt,
                 config,
                 dry_run,

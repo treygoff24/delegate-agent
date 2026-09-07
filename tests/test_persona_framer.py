@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import copy
 import unittest
 from pathlib import Path
 
-from delegate_agent import argv_builders, prompt_instructions, resume_command, worktree_execution
+from delegate_agent import (
+    argv_builders,
+    mail,
+    prompt_instructions,
+    resume_command,
+    worktree_execution,
+)
+from delegate_agent import config as config_api
 from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
@@ -36,7 +42,8 @@ class PersonaFramerTests(CommandTestBase):
         "omp",
     )
     _SAFE_ENGINES = tuple(engine for engine in _ENGINES if engine != "devin")
-    _TRANSPORT_ENGINES = (("argv", "cursor"), ("stdin", "codex"), ("file", "droid"))
+    # Kimi is the last argv-transport engine; cursor and omp moved to stdin.
+    _TRANSPORT_ENGINES = (("argv", "kimi"), ("stdin", "codex"), ("file", "droid"))
 
     def _dirty_repo(self):
         repo = make_git_repo(with_commit=True)
@@ -46,7 +53,11 @@ class PersonaFramerTests(CommandTestBase):
         return Path(repo.name)
 
     def _config(self, engine: str) -> dict[str, object]:
-        config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
+        # This class exercises the enabled skill-review-preamble path: every
+        # SKILL_REVIEW_PREFIX expectation below asserts framing order/bytes
+        # with the preamble present.
+        config = config_api.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
         config["personas"]["forceTransport"] = "prepend"
         if engine == "droid":
             config["droid"]["defaultModel"] = "droid-model"
@@ -134,7 +145,6 @@ class PersonaFramerTests(CommandTestBase):
                 self.assertEqual(prompt.count("Note: "), 1)
 
     def test_prompt_enforced_builders_do_not_self_prefix_when_framer_marks_prompt_complete(self):
-        cursor = argv_builders.build_cursor_argv(["agent"], "safe", "/repo", "model", "RAW PROMPT")
         droid = argv_builders.build_droid_argv(
             "droid",
             "safe",
@@ -147,7 +157,6 @@ class PersonaFramerTests(CommandTestBase):
             {"binary": "kimi"}, "safe", "/repo", None, "RAW PROMPT"
         )
 
-        self.assertEqual(cursor[-1], "RAW PROMPT")
         self.assertEqual(droid[-1], "RAW PROMPT")
         self.assertEqual(kimi[-1], "RAW PROMPT")
 
@@ -181,6 +190,7 @@ class PersonaFramerTests(CommandTestBase):
                             safe,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
                         if segment is not None
                     )
@@ -218,6 +228,7 @@ class PersonaFramerTests(CommandTestBase):
                             safe,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
                         if segment is not None
                     )
@@ -379,7 +390,7 @@ class PersonaFramerTests(CommandTestBase):
             ),
             ("short_persona", "the", "USER", 1),
         )
-        engines = (("argv", "cursor"), ("stdin", "codex"), ("file", "droid"))
+        engines = self._TRANSPORT_ENGINES
         for collision, persona, user, note_count in collisions:
             for transport, engine in engines:
                 with self.subTest(collision=collision, transport=transport):
@@ -412,6 +423,7 @@ class PersonaFramerTests(CommandTestBase):
                             PERSISTENT_WORKTREE_CONTEXT_NOTE,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX,
                         )
                     )
                     prompt = self._final_prompt(request, str(repo / "exec"))

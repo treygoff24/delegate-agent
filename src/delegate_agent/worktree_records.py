@@ -13,6 +13,7 @@ import hashlib
 import os
 import shlex
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
@@ -57,6 +58,81 @@ class PersistentWorktreeRecord(TypedDict, total=False):
     lastActivityAt: str
     creationContext: JsonObject
     registryWorktreeStatus: str | None
+    recordWarnings: list[str]
+
+
+@dataclass(frozen=True)
+class WorktreeRecordBundle:
+    """One read of each record, with identity conflicts retained as evidence.
+
+    Missing older projections are valid fallback inputs; malformed existing
+    records are not evidence permitting removal. No bundle survives a command
+    or replaces the fresh reads under the mutation lock.
+    """
+
+    index: JsonObject | None
+    state: JsonObject | None
+    manifest: JsonObject | None
+    snapshot: JsonObject | None
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def load(
+        cls, registry_root: Path, run_id: str, index: JsonObject | None
+    ) -> WorktreeRecordBundle:
+        values: list[JsonObject | None] = []
+        warnings: list[str] = []
+        readers = (
+            (run_registry.STATE_FILE, run_registry.load_run_state),
+            (run_registry.MANIFEST_FILE, run_registry.load_run_manifest),
+            # A display view normalizes identity and can hide contradictory
+            # legacy evidence. Destructive checks must inspect the raw record.
+            (
+                run_registry.SNAPSHOT_FILE,
+                lambda root, key: run_registry.read_json_object(
+                    run_registry.run_directory(root, key) / run_registry.SNAPSHOT_FILE
+                ),
+            ),
+        )
+        for filename, reader in readers:
+            try:
+                value = reader(registry_root, run_id)
+            except (OSError, ValueError):
+                value = None
+                warnings.append(f"unreadable {filename}")
+            if value is not None and value.get("runId", run_id) != run_id:
+                warnings.append(f"conflicting runId in {filename}")
+            values.append(value)
+        return cls(index, *values, tuple(warnings))
+
+    def record(self, registry_root: Path, run_id: str) -> PersistentWorktreeRecord | None:
+        record = _record_from_parts(
+            registry_root, run_id, self.index, self.state, self.manifest, self.snapshot
+        )
+        if record is None:
+            return None
+        warnings = list(self.warnings)
+        for field in ("executionCwd", "sourceGitRoot", "branch"):
+            values = {
+                _get_str(source, field)
+                for source in (self.index, self.state, self.manifest, self.snapshot)
+            } - {None}
+            if field == "executionCwd":
+                planned = _get_str(self.state, "plannedExecutionCwd")
+                if planned:
+                    values.add(planned)
+            if field != "branch":
+                values = {_canonical_path(value) for value in values}
+            if len(values) > 1:
+                warnings.append(f"conflicting {field}")
+        if warnings:
+            record["recordWarnings"] = warnings
+            # Existing removal/GC gates require these fields. Do not choose a
+            # destructive target from conflicting or unreadable ownership data,
+            # even when a caller requested force.
+            record["sourceGitRoot"] = None
+            record["registryWorktreeStatus"] = STATUS_UNKNOWN
+        return record
 
 
 _utc_now_iso = run_registry.utc_now_iso
@@ -248,10 +324,9 @@ def _record_for_run(
     run_id: str,
     index_entry: JsonObject | None,
 ) -> PersistentWorktreeRecord | None:
-    state = run_registry.load_run_state_or_none(registry_root, run_id)
-    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
-    snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
-    return _record_from_parts(registry_root, run_id, index_entry, state, manifest, snapshot)
+    return WorktreeRecordBundle.load(registry_root, run_id, index_entry).record(
+        registry_root, run_id
+    )
 
 
 def _canonical_path(path: str) -> str:

@@ -9,23 +9,10 @@ builders, not here.
 
 from __future__ import annotations
 
-import difflib
 import re
 import shlex
 
-from delegate_agent import (
-    capability_commands,
-    command_help,
-    config_commands,
-    inspection_commands,
-    mail,
-    profile_commands,
-    reasoning,
-    run_output_commands,
-    wait_cancel_commands,
-    worktree_commands,
-    worktree_mgmt,
-)
+from delegate_agent import command_help, reasoning
 from delegate_agent import config as delegate_config
 from delegate_agent import notify as notify_module
 from delegate_agent.constants import (
@@ -35,12 +22,13 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_SAFE,
     MODELESS_ENGINES,
+    RUN_OUTPUT_DEFAULT_TAIL_LINES,
     VALID_MODES,
     WORKFLOW_DRY_RUN_HINT,
     validate_mode,
     validate_pure_call,
 )
-from delegate_agent.errors import DelegateError
+from delegate_agent.errors import DelegateError, command_suggestions
 from delegate_agent.request_models import (
     CONTINUITY_MODES,
     FollowupOptions,
@@ -53,14 +41,20 @@ from delegate_agent.request_models import (
     ResumeOptions,
     RunJsonOptions,
 )
-from delegate_agent.run_output_commands import RUN_OUTPUT_DEFAULT_TAIL_LINES
-from delegate_agent.workflows import commands as workflow_commands
+
+_OPTION_VALUE_FLAGS = frozenset(
+    option.flag
+    for engine in KNOWN_ENGINES
+    for option in command_help.COMMAND_SPECS[engine].options
+    if option.arg is not None
+)
 
 FLAG_GLOBAL_OPTIONS = frozenset(
     {
         "--json",
         "--pass-through",
         "--no-completion-report",
+        "--no-mail",
     }
 )
 
@@ -69,14 +63,7 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 )
 GLOBAL_OPTIONS = FLAG_GLOBAL_OPTIONS | VALUE_GLOBAL_OPTIONS
 
-AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume", "followup"}
-)
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume", "followup"})
-NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"droid", "dry-run", "run", "resume", "followup", "workflow"}
-)
 
 
 def validate_group(value: str, *, option: str = "--group") -> str:
@@ -89,24 +76,15 @@ def validate_group(value: str, *, option: str = "--group") -> str:
 
 
 def _is_command_local_global(option: str, command_argv: list[str]) -> bool:
-    """Keep colliding command options out of global normalization."""
+    """Keep command-local options out of global normalization.
 
+    The command registry owns both the option spelling and the command path;
+    parser branches only consume the resulting token stream.
+    """
     if not command_argv:
         return False
-    subcommand = "runs" if command_argv[0] == "list" else command_argv[0]
-    if option == "--completion-report":
-        return subcommand in {"run-output", "wait"}
-    if option != "--group":
-        return False
-    if subcommand in {"ps", "wait"}:
-        return True
-    if subcommand == "runs":
-        return len(command_argv) < 2 or command_argv[1] != "prune"
-    if subcommand == "mail":
-        return len(command_argv) >= 2 and command_argv[1] == "send"
-    if subcommand == "worktree":
-        return len(command_argv) >= 2 and command_argv[1] in {"list", "remove", "prune", "reap"}
-    return False
+    spec = command_help.COMMAND_SPECS.get(_command_spec_path(command_argv))
+    return spec is not None and option in {item.flag for item in spec.options}
 
 
 def _normalize_global_options(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -143,6 +121,40 @@ def _normalize_global_options(argv: list[str]) -> tuple[list[str], list[str]]:
         command_argv.append(token)
         i += 1
     return globals_argv, command_argv
+
+
+def _command_spec_path(command_argv: list[str]) -> str:
+    """Return the registry path used to validate normalized global options."""
+    if not command_argv:
+        return ""
+    command = "runs" if command_argv[0] == "list" else command_argv[0]
+    rest = command_argv[1:]
+    if command == "dry-run" and rest:
+        if rest[0] in KNOWN_ENGINES and len(rest) > 1 and rest[1] == "call":
+            return "dry-run call"
+        return "dry-run"
+    if command in KNOWN_ENGINES and rest and rest[0] == "call":
+        return f"{command} call"
+    if command in {"mail", "runs", "worktree", "workflow", "config"} and rest:
+        candidate = f"{command} {rest[0]}"
+        if candidate in command_help.COMMAND_SPECS:
+            return candidate
+    return command
+
+
+def _validate_global_options(command_argv: list[str], values: dict[str, object]) -> None:
+    """Reject globals forbidden by the command's single registry spec."""
+    topic = _command_spec_path(command_argv)
+    spec = command_help.COMMAND_SPECS.get(topic)
+    if spec is None:
+        return
+    unsupported = set(spec.unsupported_global_options)
+    for option, value in values.items():
+        if value is not None and value is not False and option in unsupported:
+            raise DelegateError(
+                "invalid_option_combination",
+                f"--{option.lstrip('-')} is not supported with delegate {spec.name}.",
+            )
 
 
 def infer_global_json(argv: list[str]) -> bool:
@@ -230,12 +242,20 @@ def parse_simple_inspection_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
     summary = False
+    overview = False
+    full = False
     engine: str | None = None
     live = False
     if name in INSPECTION_OPTION_SUBCOMMANDS:
         for token in rest:
             if token == "--summary":
                 summary = True
+                continue
+            if name == "describe" and token == "--overview":
+                overview = True
+                continue
+            if name == "describe" and token == "--full":
+                full = True
                 continue
             if name == "models" and token == "--live":
                 live = True
@@ -246,6 +266,11 @@ def parse_simple_inspection_subcommand(
                 engine = token
                 continue
             require_no_extra([token], name)
+        if sum((overview, summary, full)) > 1:
+            raise DelegateError(
+                "invalid_option_combination",
+                "Choose only one of --overview, --summary, or --full.",
+            )
         if live and engine is None:
             raise DelegateError(
                 "invalid_option_combination",
@@ -273,7 +298,9 @@ def parse_simple_inspection_subcommand(
             isolation=isolation,
             auth_profile=auth_profile,
         ),
-        inspection=InspectionOptions(summary=summary, engine=engine, live=live),
+        payload=InspectionOptions(
+            summary=summary, engine=engine, live=live, overview=overview, full=full
+        ),
     )
 
 
@@ -287,6 +314,8 @@ def parse_capabilities_subcommand(
     isolation: str | None,
     auth_profile: str | None,
 ) -> ParsedCommand:
+    from delegate_agent import capability_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "capabilities")
@@ -315,7 +344,7 @@ def parse_capabilities_subcommand(
             isolation=isolation,
             auth_profile=auth_profile,
         ),
-        capabilities=capability_commands.CapabilitiesCommand(
+        payload=capability_commands.CapabilitiesCommand(
             refresh=refresh,
             engines=engines,
             json_mode=json_mode,
@@ -333,6 +362,8 @@ def parse_config_subcommand(
     isolation: str | None,
     auth_profile: str | None,
 ) -> ParsedCommand:
+    from delegate_agent import config_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "config")
@@ -348,7 +379,7 @@ def parse_config_subcommand(
         )
     action = rest[0]
     if action not in {"init", "sync-profiles"}:
-        raise DelegateError("unknown_config_action", f"Unknown config action: {action}")
+        raise unknown_action_error("config", action)
     force = False
     if action == "sync-profiles":
         for token in rest[1:]:
@@ -358,7 +389,7 @@ def parse_config_subcommand(
         return ParsedCommand(
             "config",
             global_options=GlobalOptions(json_mode=json_mode),
-            config_command=config_commands.ConfigCommand(
+            payload=config_commands.ConfigCommand(
                 action="sync-profiles",
                 json_mode=json_mode,
             ),
@@ -373,7 +404,7 @@ def parse_config_subcommand(
     return ParsedCommand(
         "config",
         global_options=GlobalOptions(json_mode=json_mode),
-        config_command=config_commands.ConfigCommand(
+        payload=config_commands.ConfigCommand(
             action="init",
             force=force,
             json_mode=json_mode,
@@ -473,7 +504,7 @@ def parse_runtime_subcommand(
     return ParsedCommand(
         "promote",
         global_options=GlobalOptions(json_mode=json_mode),
-        promote=PromoteOptions(actor=actor, source=source, runtime_digest=runtime_digest),
+        payload=PromoteOptions(actor=actor, source=source, runtime_digest=runtime_digest),
     )
 
 
@@ -484,6 +515,9 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return ParsedCommand("version")
 
     global_argv, command_argv = _normalize_global_options(argv)
+    completion_report_flag = False
+    no_completion_report_flag = False
+    no_mail = False
 
     json_mode = False
     cwd: str | None = None
@@ -510,11 +544,17 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through = True
             i += 1
             continue
+        if token == "--no-mail":
+            no_mail = True
+            i += 1
+            continue
         if token == "--no-completion-report":
+            no_completion_report_flag = True
             completion_report = delegate_config.COMPLETION_REPORT_MODE_NONE
             i += 1
             continue
         if token == "--completion-report":
+            completion_report_flag = True
             if i + 1 >= len(global_argv):
                 raise DelegateError(
                     "missing_completion_report", "--completion-report requires markdown or none."
@@ -583,25 +623,20 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "unknown_option", f"Unknown global option before subcommand: {subcommand}"
         )
-    if auth_profile is not None and subcommand not in AUTH_PROFILE_SUBCOMMANDS:
-        raise DelegateError(
-            "invalid_option_combination",
-            f"--auth-profile is not supported with delegate {subcommand}; "
-            "use it with launches, dry-run, run --input-json, profiles, models, capabilities, "
-            "or setup.",
-        )
-    if notify is not None and subcommand not in NOTIFY_SUBCOMMANDS:
-        raise DelegateError(
-            "invalid_option_combination",
-            f"--notify is not supported with delegate {subcommand}; use it with a launch, "
-            "dry-run, run, resume, or workflow run.",
-        )
-    if group is not None and subcommand not in GROUP_SUBCOMMANDS:
-        raise DelegateError(
-            "invalid_option_combination",
-            f"--group is not supported with delegate {subcommand}; use command-specific "
-            "--group selectors where available.",
-        )
+    _validate_global_options(
+        command_argv,
+        {
+            "--cwd": cwd,
+            "--pass-through": pass_through,
+            "--completion-report": completion_report_flag,
+            "--no-completion-report": no_completion_report_flag,
+            "--no-mail": no_mail,
+            "--isolation": isolation,
+            "--auth-profile": auth_profile,
+            "--group": group,
+            "--notify": notify,
+        },
+    )
 
     if subcommand == "help":
         return parse_help_subcommand(rest, json_mode)
@@ -682,6 +717,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile,
             group,
             notify,
+            no_mail,
         )
     if subcommand in MODELESS_ENGINES:
         return parse_modeless_engine(
@@ -696,6 +732,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -709,6 +746,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "dry-run":
         return parse_dry_run(
@@ -721,14 +759,9 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile,
             group,
             notify,
+            no_mail,
         )
     if subcommand == "resume":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate resume; "
-                "isolation is inherited from the source run.",
-            )
         return parse_resume(
             rest,
             json_mode,
@@ -738,14 +771,9 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "followup":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate followup; "
-                "isolation is inherited from the source run.",
-            )
         return parse_followup(
             rest,
             json_mode,
@@ -755,6 +783,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -765,39 +794,14 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
     if subcommand == "wait":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate wait.",
-            )
         return parse_wait(rest, json_mode, cwd)
     if subcommand == "cancel":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate cancel.",
-            )
         return parse_cancel(rest, json_mode, cwd)
     if subcommand == "worktree":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate worktree commands.",
-            )
         return parse_worktree(rest, json_mode, cwd)
     if subcommand == "workflow":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate workflow commands.",
-            )
         return parse_workflow(rest, json_mode, cwd, notify)
     if subcommand == "profiles":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate profiles.",
-            )
         return parse_profiles(rest, json_mode, cwd, auth_profile)
 
     raise DelegateError("unknown_subcommand", unknown_subcommand_message(subcommand))
@@ -810,9 +814,12 @@ def unknown_subcommand_message(subcommand: str) -> str:
     }
     if subcommand.startswith("droid-"):
         model = subcommand.removeprefix("droid-")
-        suggestion_only[subcommand] = f"use: delegate droid {model} ..."
-    candidates = sorted(set(command_help.COMMAND_SPECS) | set(KNOWN_ENGINES))
-    matches = difflib.get_close_matches(subcommand, candidates, n=3)
+        suggestion_only[subcommand] = f"use: delegate droid --model {model} ..."
+    candidates = sorted(
+        {name for name, spec in command_help.COMMAND_SPECS.items() if not spec.internal}
+        | set(KNOWN_ENGINES)
+    )
+    matches = command_suggestions(subcommand, candidates)
     parts = [f"Unknown subcommand: {subcommand}"]
     if subcommand in suggestion_only:
         parts.append(suggestion_only[subcommand])
@@ -824,13 +831,33 @@ def unknown_subcommand_message(subcommand: str) -> str:
     return " ".join(parts)
 
 
+def unknown_action_error(parent: str, action: str) -> DelegateError:
+    candidates = [
+        name.split()[1]
+        for name, spec in command_help.COMMAND_SPECS.items()
+        if name.startswith(f"{parent} ") and len(name.split()) == 2 and not spec.internal
+    ]
+    matches = command_suggestions(action, candidates)
+    suffix = f" Did you mean: {', '.join(matches)}?" if matches else ""
+    return DelegateError(
+        f"unknown_{parent}_action",
+        f"Unknown {parent} action: {action}.{suffix}",
+        command=parent,
+        help_topic=parent,
+        next_actions=[f"delegate help {parent} {match}" for match in matches]
+        or [f"delegate help {parent}"],
+    )
+
+
 def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import mail
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "mail")
     action = rest[0]
     if action not in {"send", "inbox", "read", "status", "watch", "prune", "hook-pump"}:
-        raise DelegateError("unknown_mail_action", f"Unknown mail action: {action}.")
+        raise unknown_action_error("mail", action)
     args = rest[1:]
     if any(command_help.is_help_token(token) for token in args):
         return help_command(json_mode, f"mail {action}")
@@ -1016,7 +1043,7 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     return ParsedCommand(
         "mail",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        mail_command=command,
+        payload=command,
     )
 
 
@@ -1068,7 +1095,7 @@ def corrected_command_suffix(argv: list[str]) -> str:
 def unknown_option_message(command: str, option: str) -> str:
     spec = command_help.COMMAND_SPECS.get(command)
     candidates = [opt.flag for opt in spec.options] if spec is not None else []
-    matches = difflib.get_close_matches(option, candidates, n=3)
+    matches = command_suggestions(option, candidates)
     if command == "run-output" and option == "--full":
         matches = ["--raw", *[match for match in matches if match != "--raw"]]
     suffix = f" Did you mean: {', '.join(matches)}?" if matches else ""
@@ -1104,6 +1131,7 @@ def parse_run(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     # Help wins before required-arg validation: `run --help` needs no --input-json.
     if any(command_help.is_help_token(token) for token in rest):
@@ -1121,8 +1149,9 @@ def parse_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
-        run_json=RunJsonOptions(rest[1]),
+        payload=RunJsonOptions(rest[1]),
     )
 
 
@@ -1138,6 +1167,7 @@ def parse_modeless_engine(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1156,6 +1186,8 @@ def parse_modeless_engine(
     # `cursor safe --help`. Once a prompt positional begins, a later --help is
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
+        return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
+    if _help_follows_options(rest[1:]):
         return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
     tail = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     prompt_file = tail.prompt_file
@@ -1179,6 +1211,7 @@ def parse_modeless_engine(
     allow_repo_persona = tail.allow_repo_persona
     resumable = tail.resumable
     continuity_mode = tail.continuity_mode
+    tail_warnings = tail.warnings
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
@@ -1238,8 +1271,9 @@ def parse_modeless_engine(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
-        launch=LaunchOptions(
+        payload=LaunchOptions(
             engine=engine,
             mode=mode,
             prompt_parts=prompt_parts,
@@ -1263,6 +1297,7 @@ def parse_modeless_engine(
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
 
@@ -1278,6 +1313,7 @@ def parse_droid(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1286,33 +1322,22 @@ def parse_droid(
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, topic)
     if not rest:
+        raise DelegateError("missing_droid_args", "droid requires mode.")
+    # Droid follows the same launch grammar as every other engine.  Model
+    # selection is always --model (alias or raw model id); the old positional
+    # alias syntax is rejected rather than silently changing the selection.
+    if rest[0] not in VALID_MODES:
         raise DelegateError(
-            "missing_droid_args",
-            "droid requires mode (and optionally a MODEL_ALIAS before the mode).",
+            "invalid_droid_model_syntax",
+            "Droid model selection uses --model <alias-or-model>; positional model syntax is no longer supported.",
         )
-    # First token is the mode when it is a known mode name; otherwise it is the
-    # positional alias and the mode follows.
-    if rest[0] in VALID_MODES:
-        model_alias = None
-        mode = rest[0]
-        tail = rest[1:]
-        command_prefix = ["droid", mode]
-    else:
-        if len(rest) < 2:
-            raise DelegateError(
-                "missing_droid_args",
-                "droid requires MODEL_ALIAS and mode.",
-            )
-        model_alias = rest[0]
-        # Help wins after the alias, before the mode: `droid x --help`.
-        if command_help.is_help_token(rest[1]):
-            return help_command(json_mode, topic)
-        mode = rest[1]
-        validate_mode(mode)
-        tail = rest[2:]
-        command_prefix = ["droid", model_alias, mode]
-    # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
+    mode = rest[0]
+    tail = rest[1:]
+    command_prefix = ["droid", mode]
+    # Help wins after the mode, before prompt capture: `droid safe --help`.
     if tail and command_help.is_help_token(tail[0]):
+        return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
+    if _help_follows_options(tail):
         return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
     tail_result = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
     prompt_file = tail_result.prompt_file
@@ -1336,6 +1361,7 @@ def parse_droid(
     allow_repo_persona = tail_result.allow_repo_persona
     resumable = tail_result.resumable
     continuity_mode = tail_result.continuity_mode
+    tail_warnings = tail_result.warnings
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
@@ -1364,7 +1390,7 @@ def parse_droid(
         isolation = "worktree"
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
-        droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
+        droid_tokens = ["droid", mode]
         corrected = corrected_command_suffix(
             [
                 "--isolation",
@@ -1390,11 +1416,11 @@ def parse_droid(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
-        launch=LaunchOptions(
+        payload=LaunchOptions(
             engine="droid",
             mode=mode,
-            model_alias=model_alias,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             output_schema=output_schema,
@@ -1416,8 +1442,31 @@ def parse_droid(
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
+
+
+def _help_follows_options(tokens: list[str]) -> bool:
+    """Recognize a trailing help token after options, not after prompt text."""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return False
+        if command_help.is_help_token(token):
+            return True
+        if token in _OPTION_VALUE_FLAGS:
+            if index + 1 == len(tokens) or (
+                tokens[index + 1].startswith("-") and tokens[index + 1] != "-"
+            ):
+                return False
+            index += 2
+        elif token.startswith("-"):
+            index += 1
+        else:
+            return False
+    return False
 
 
 def parse_dry_run(
@@ -1430,6 +1479,7 @@ def parse_dry_run(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     # Help wins before the engine is consumed: `dry-run --help`.
     if rest and command_help.is_help_token(rest[0]):
@@ -1453,6 +1503,7 @@ def parse_dry_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
             help_topic="dry-run",
         )
     if engine == "droid":
@@ -1467,12 +1518,38 @@ def parse_dry_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
             help_topic="dry-run",
         )
     raise DelegateError(
         "invalid_engine",
         f"dry-run engine must be {ENGINES_PROSE}.",
     )
+
+
+# An option-shaped token: a single flag, not prose and not a negative number.
+_OPTION_SHAPED_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*$")
+
+
+def _absorbed_option_warning(option: str) -> str:
+    return (
+        f"option after the prompt is treated as prompt text: {option}. "
+        "Move it before the prompt to apply it."
+    )
+
+
+def _absorbed_option_warnings(prompt_parts: list[str]) -> tuple[str, ...]:
+    """Advisories for options swallowed by a resume/followup prompt tail.
+
+    The launch parsers raise on an unrecognized option in the tail, so only a
+    recognized one can be absorbed silently there. `resume` and `followup`
+    accept no options at all after the handle: every option-shaped token in the
+    tail becomes prompt text, so every one of them is warned about. Tokens after
+    a literal `--` are excluded by the caller, which is an explicit
+    "this is prompt text".
+    """
+    absorbed = [token for token in prompt_parts if _OPTION_SHAPED_TOKEN.match(token)]
+    return tuple(_absorbed_option_warning(option) for option in dict.fromkeys(absorbed))
 
 
 def parse_resume(
@@ -1485,6 +1562,7 @@ def parse_resume(
     auth_profile: str | None,
     group: str | None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     """Parse ``resume [resume-options] <alias|runId> ["extra instructions"...]``.
 
@@ -1510,6 +1588,7 @@ def parse_resume(
     continuity_mode: str | None = None
     handle: str | None = None
     extra_parts: list[str] = []
+    tail_warnings: tuple[str, ...] = ()
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -1654,7 +1733,10 @@ def parse_resume(
         extra_parts = rest[i:]
         if "--" in extra_parts:
             terminator = extra_parts.index("--")
+            tail_warnings = _absorbed_option_warnings(extra_parts[:terminator])
             extra_parts = [*extra_parts[:terminator], *extra_parts[terminator + 1 :]]
+        else:
+            tail_warnings = _absorbed_option_warnings(extra_parts)
         break
     if handle is None:
         raise DelegateError("missing_handle", "resume requires a run handle (alias or run id).")
@@ -1673,8 +1755,9 @@ def parse_resume(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
-        resume=ResumeOptions(
+        payload=ResumeOptions(
             handle=handle,
             extra_parts=list(extra_parts),
             engine=engine,
@@ -1692,6 +1775,7 @@ def parse_resume(
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
 
@@ -1706,58 +1790,64 @@ def parse_followup(
     auth_profile: str | None,
     group: str | None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
-    """Parse ``followup [followup-options] <alias|runId> [--prompt-file PATH] [prompt...]``.
-
-    Parser law: launch flags must appear BEFORE the handle — once positional
-    text starts, remaining tokens are prompt material.
-    """
-    if rest and command_help.is_help_token(rest[0]):
-        return help_command(json_mode, "followup")
+    """Parse options on either side of the handle, before free-form prompt text."""
     prompt_file: str | None = None
     timeout: int | None = None
     dry_run = False
     handle: str | None = None
     prompt_parts: list[str] = []
+    tail_warnings: tuple[str, ...] = ()
     i = 0
     while i < len(rest):
         token = rest[i]
+        if token == "--":
+            literal = rest[i + 1 :]
+            if handle is None and literal:
+                handle, *literal = literal
+            prompt_parts = literal
+            break
+        if command_help.is_help_token(token):
+            return help_command(json_mode, "followup")
+        if token == "--json":
+            json_mode = True
+            i += 1
+            continue
+        if token == "--timeout":
+            timeout, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="--timeout",
+                missing_error="missing_timeout",
+                invalid_error="invalid_timeout",
+            )
+            continue
+        if token == "--prompt-file":
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
+            if prompt_file is not None:
+                raise DelegateError("ambiguous_prompt_source", "Only one --prompt-file is allowed.")
+            prompt_file = rest[i + 1]
+            i += 2
+            continue
+        if token == "--dry-run":
+            dry_run = True
+            i += 1
+            continue
         if handle is None:
-            if token == "--json":
-                json_mode = True
-                i += 1
-                continue
-            if command_help.is_help_token(token):
-                return help_command(json_mode, "followup")
-            if token == "--timeout":
-                timeout, i = parse_required_positive_int_option(
-                    rest,
-                    i,
-                    option_label="--timeout",
-                    missing_error="missing_timeout",
-                    invalid_error="invalid_timeout",
-                )
-                continue
-            if token == "--prompt-file":
-                if i + 1 >= len(rest):
-                    raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
-                if prompt_file is not None:
-                    raise DelegateError(
-                        "ambiguous_prompt_source", "Only one --prompt-file is allowed."
-                    )
-                prompt_file = rest[i + 1]
-                i += 2
-                continue
-            if token == "--dry-run":
-                dry_run = True
-                i += 1
-                continue
             if token.startswith("-"):
                 raise DelegateError("unknown_option", unknown_option_message("followup", token))
             handle = token
             i += 1
             continue
         prompt_parts = rest[i:]
+        if "--" in prompt_parts:
+            terminator = prompt_parts.index("--")
+            tail_warnings = _absorbed_option_warnings(prompt_parts[:terminator])
+            prompt_parts = [*prompt_parts[:terminator], *prompt_parts[terminator + 1 :]]
+        else:
+            tail_warnings = _absorbed_option_warnings(prompt_parts)
         break
     if handle is None:
         raise DelegateError("missing_handle", "followup requires a run handle (alias or run id).")
@@ -1771,13 +1861,15 @@ def parse_followup(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
-        followup=FollowupOptions(
+        payload=FollowupOptions(
             handle=handle,
-            prompt_parts=list(prompt_parts),
+            prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             timeout=timeout,
             dry_run=dry_run,
+            warnings=tail_warnings,
         ),
     )
 
@@ -2126,6 +2218,15 @@ def parse_prompt_tail(
         raise DelegateError(
             "invalid_output_schema", "--output-schema must appear before direct prompt text."
         )
+    # An unrecognized option after the prompt already fails loudly above. A
+    # recognized one is the silent case: the trailing prompt is variadic, so the
+    # flag and its value become prompt text and the run proceeds with the default.
+    # Match whole tokens only, so prose that mentions a flag stays quiet, and skip
+    # everything after a literal `--`, which is an explicit "this is prompt text".
+    absorbed_options = [token for token in checked_prompt_parts if token in known_options]
+    tail_warnings = tuple(
+        _absorbed_option_warning(option) for option in dict.fromkeys(absorbed_options)
+    )
     return PromptTail(
         prompt_file,
         output_schema,
@@ -2148,6 +2249,7 @@ def parse_prompt_tail(
         allow_repo_persona,
         resumable,
         continuity_mode,
+        tail_warnings,
     )
 
 
@@ -2162,6 +2264,8 @@ def _validate_pure_options(
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import inspection_commands
+
     # Help wins over the optional handle/flags: a help token anywhere is help.
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
@@ -2202,7 +2306,7 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     return ParsedCommand(
         "snapshot",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        snapshot=inspection_commands.SnapshotCommand(
+        payload=inspection_commands.SnapshotCommand(
             handle=handle,
             latest_harness=latest_harness,
             no_redact=no_redact,
@@ -2218,6 +2322,8 @@ def parse_runs(
     *,
     command_label: str = "runs",
 ) -> ParsedCommand:
+    from delegate_agent import inspection_commands
+
     # Help wins over flags: a help token anywhere is help.
     # ``command_label`` names the command the user actually typed so delegating
     # front-ends (ps) do not report errors against flags nobody entered.
@@ -2307,7 +2413,7 @@ def parse_runs(
     return ParsedCommand(
         "runs",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        runs=inspection_commands.RunsCommand(
+        payload=inspection_commands.RunsCommand(
             active=active,
             running=running,
             stale=stale,
@@ -2321,6 +2427,8 @@ def parse_runs(
 
 
 def parse_runs_prune(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import inspection_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "runs prune")
@@ -2342,7 +2450,7 @@ def parse_runs_prune(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     return ParsedCommand(
         "runs",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        runs=inspection_commands.RunsCommand(
+        payload=inspection_commands.RunsCommand(
             action="prune",
             older_than_days=older_than_days,
             dry_run=dry_run,
@@ -2368,6 +2476,8 @@ def parse_ps(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand
 
 
 def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import run_output_commands
+
     # Help wins over the required handle/selectors: a help token anywhere is help.
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
@@ -2475,7 +2585,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     return ParsedCommand(
         "run-output",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        run_output=run_output_commands.RunOutputCommand(
+        payload=run_output_commands.RunOutputCommand(
             handle=handle,
             latest_harness=latest_harness,
             json_mode=json_mode,
@@ -2492,6 +2602,8 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
 
 
 def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import wait_cancel_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "wait")
@@ -2552,7 +2664,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     return ParsedCommand(
         "wait",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        wait_command=wait_cancel_commands.WaitCommand(
+        payload=wait_cancel_commands.WaitCommand(
             handles=tuple(handles),
             latest_harness=latest_harness,
             group=group,
@@ -2565,6 +2677,8 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
 
 
 def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import wait_cancel_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "cancel")
@@ -2578,13 +2692,28 @@ def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCom
     return ParsedCommand(
         "cancel",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        cancel_command=wait_cancel_commands.CancelCommand(tuple(handles), json_mode=json_mode),
+        payload=wait_cancel_commands.CancelCommand(tuple(handles), json_mode=json_mode),
     )
 
 
 def parse_workflow(
     rest: list[str], json_mode: bool, cwd: str | None, notify: str | None = None
 ) -> ParsedCommand:
+    try:
+        return _parse_workflow(rest, json_mode, cwd, notify)
+    except DelegateError as exc:
+        action = next((token for token in rest if token != "--json"), "")
+        topic = f"workflow {action}" if action in command_help.WORKFLOW_ACTION_KINDS else "workflow"
+        exc.command = exc.command or topic
+        exc.help_topic = exc.help_topic or topic
+        raise
+
+
+def _parse_workflow(
+    rest: list[str], json_mode: bool, cwd: str | None, notify: str | None = None
+) -> ParsedCommand:
+    from delegate_agent.workflows import commands as workflow_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "workflow")
@@ -2596,24 +2725,29 @@ def parse_workflow(
         return ParsedCommand(
             "workflow",
             global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-            workflow_command=workflow_commands.WorkflowCommand(
+            payload=workflow_commands.WorkflowCommand(
                 action="_supervise", wf_id=args[0], json_mode=json_mode
             ),
         )
     if any(command_help.is_help_token(token) for token in args):
         return help_command(json_mode, f"workflow {action}")
-    if action in {"run", "check", "save"}:
+    kind = command_help.WORKFLOW_ACTION_KINDS.get(action)
+    if kind == "resume":
+        if not args or args[0].startswith("-"):
+            raise DelegateError("missing_workflow", "workflow resume requires <wfId>.")
+        return _parse_workflow_path_action("run", ["--resume", *args], json_mode, cwd, notify)
+    if kind == "path":
         return _parse_workflow_path_action(action, args, json_mode, cwd, notify)
-    if action in {"status", "watch", "events", "result", "wait", "approve", "reject", "kill"}:
+    if kind == "id":
         return _parse_workflow_id_action(action, args, json_mode, cwd)
-    if action == "list":
+    if kind == "list":
         require_no_extra(args, "workflow list")
         return ParsedCommand(
             "workflow",
             global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-            workflow_command=workflow_commands.WorkflowCommand("list", json_mode=json_mode),
+            payload=workflow_commands.WorkflowCommand("list", json_mode=json_mode),
         )
-    raise DelegateError("unknown_workflow_action", f"Unknown workflow action: {action}")
+    raise unknown_action_error("workflow", action)
 
 
 def _parse_workflow_path_action(
@@ -2623,6 +2757,8 @@ def _parse_workflow_path_action(
     cwd: str | None,
     notify: str | None = None,
 ) -> ParsedCommand:
+    from delegate_agent.workflows import commands as workflow_commands
+
     script: str | None = None
     args_json: str | None = None
     budget: int | None = None
@@ -2696,7 +2832,7 @@ def _parse_workflow_path_action(
     return ParsedCommand(
         "workflow",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        workflow_command=workflow_commands.WorkflowCommand(
+        payload=workflow_commands.WorkflowCommand(
             action,
             script=script,
             args_json=args_json,
@@ -2716,15 +2852,22 @@ def _parse_workflow_id_action(
     json_mode: bool,
     cwd: str | None,
 ) -> ParsedCommand:
+    from delegate_agent.workflows import commands as workflow_commands
+
     wf_id: str | None = None
     key_or_label: str | None = None
     reason: str | None = None
     since = 0
+    jsonl = False
     timeout: int | None = None
     result_field: str | None = None
     i = 0
     while i < len(args):
         token = args[i]
+        if token == "--jsonl" and action == "watch":
+            jsonl = True
+            i += 1
+            continue
         if token == "--since" and action in {"events", "watch"}:
             if i + 1 >= len(args):
                 raise DelegateError("missing_since", f"workflow {action} --since requires a value.")
@@ -2785,7 +2928,7 @@ def _parse_workflow_id_action(
     return ParsedCommand(
         "workflow",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        workflow_command=workflow_commands.WorkflowCommand(
+        payload=workflow_commands.WorkflowCommand(
             action,
             wf_id=wf_id,
             key_or_label=key_or_label,
@@ -2794,6 +2937,7 @@ def _parse_workflow_id_action(
             timeout=timeout,
             result_field=result_field,
             json_mode=json_mode,
+            jsonl=jsonl,
         ),
     )
 
@@ -2934,6 +3078,8 @@ def _apply_worktree_option(
     option: str,
     spec: WorktreeOptionSpec,
 ) -> int:
+    from delegate_agent import worktree_mgmt
+
     kind, attr = spec
     if kind == "flag":
         options[attr] = True
@@ -2960,6 +3106,8 @@ def _apply_worktree_option(
 
 
 def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import worktree_commands
+
     # Help wins before an action is consumed: `worktree --help`.
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, "worktree")
@@ -2976,7 +3124,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         topic = f"worktree {action}" if action in WORKTREE_OPTION_SPECS else "worktree"
         return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
-        raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
+        raise unknown_action_error("worktree", action)
     options: dict[str, WorktreeOptionValue] = {}
     positional: list[str] = []
     i = 0
@@ -3041,7 +3189,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     return ParsedCommand(
         "worktree",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        worktree=worktree_commands.WorktreeCommand(
+        payload=worktree_commands.WorktreeCommand(
             action=action,
             json_mode=json_mode,
             **options,
@@ -3055,6 +3203,8 @@ def parse_profiles(
     cwd: str | None,
     auth_profile: str | None,
 ) -> ParsedCommand:
+    from delegate_agent import profile_commands
+
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "profiles")
@@ -3062,5 +3212,5 @@ def parse_profiles(
     return ParsedCommand(
         "profiles",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd, auth_profile=auth_profile),
-        profiles_command=profile_commands.ProfilesCommand(json_mode=json_mode),
+        payload=profile_commands.ProfilesCommand(json_mode=json_mode),
     )

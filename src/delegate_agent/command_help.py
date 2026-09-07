@@ -11,12 +11,16 @@ appears in any spec or rendered output.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from delegate_agent import VERSION
-from delegate_agent.constants import ENGINES_PROSE
+from delegate_agent import VERSION, reasoning
+from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
-from delegate_agent.run_registry import DEFAULT_RUN_PRUNE_DAYS
+from delegate_agent.reasoning import (
+    OMP_NATIVE_EFFORTS,
+    PI_NATIVE_EFFORTS,
+    thinking_vocabulary_prose,
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,24 @@ class CommandSpec:
     see_also: tuple[str, ...] = field(default_factory=tuple)
     unsupported_global_options: tuple[str, ...] = field(default_factory=tuple)
     internal: bool = False
+
+
+# Public parser shapes; internal supervisor entrypoints stay out of discovery.
+WORKFLOW_ACTION_KINDS = {
+    "run": "path",
+    "resume": "resume",
+    "check": "path",
+    "save": "path",
+    "status": "id",
+    "events": "id",
+    "watch": "id",
+    "result": "id",
+    "wait": "id",
+    "approve": "id",
+    "reject": "id",
+    "kill": "id",
+    "list": "list",
+}
 
 
 SAFE_WORKSPACE_SYNC_NOTE = (
@@ -131,6 +153,11 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         "--no-completion-report",
         None,
         "Disable completion-report prompt injection.",
+    ),
+    OptionSpec(
+        "--no-mail",
+        None,
+        "Disable mail prompt injection and sandbox grants for this launch; --notify is unchanged.",
     ),
 )
 
@@ -484,7 +511,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "safe-mode isolation is filesystem-only.",
             "Work mode uses grok.workPermissionMode, unless Delegate policy explicitly "
             "enables policy.harness.grok.work.bypassApprovalsAndSandbox.",
-            "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+            f"Reasoning effort maps to Grok --effort ({', '.join(reasoning.GROK_NATIVE_EFFORTS)}).",
             "--output-schema is unsupported in v1 because Grok --json-schema forces final json output.",
             "The top-level grok engine is distinct from any Droid-served Grok model alias.",
         ),
@@ -602,7 +629,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only pi's read tool and disable extension, skill, prompt-template, and project-approval discovery.",
             "All modes are stateless at pi's session layer; Delegate run tracking remains available.",
-            "Reasoning effort maps directly to pi --thinking: low, medium, high, xhigh, or max.",
+            "Reasoning effort maps directly to pi --thinking: "
+            f"{thinking_vocabulary_prose(PI_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("opencode", "codex", "models", "agent-help"),
@@ -635,13 +663,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate omp call --read-only --prompt-file judge.md",
         ),
         notes=(
-            "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
+            "Uses omp -p --mode json --no-session --cwd <workspace> with prompt delivered on stdin.",
             SAFE_WORKSPACE_SYNC_NOTE,
             WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only omp's read tool and disable extension, skill, rules, and LSP discovery.",
             "All modes are stateless at omp's session layer; Delegate run tracking remains available.",
-            "Reasoning effort maps directly to omp --thinking: low, medium, high, xhigh, or max.",
+            "Reasoning effort maps directly to omp --thinking: "
+            f"{thinking_vocabulary_prose(OMP_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("pi", "opencode", "codex", "models", "agent-help"),
@@ -651,18 +680,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run a Factory Droid BYOK model alias in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "droid {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "delegate [--json] droid call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(
-            ArgSpec(
-                "MODEL_ALIAS",
-                False,
-                "Optional droid model alias from config (see delegate models). "
-                "Omit when using --model or droid.defaultModel. Do not combine with --model.",
-            ),
             _MODE_ARG,
             _PROMPT_ARG,
         ),
@@ -678,10 +701,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _PROMPT_FILE_OPTION,
         ),
         examples=(
-            'delegate droid reviewer safe "Investigate this issue; do not edit."',
             'delegate droid safe --model glm-5.1 "Investigate this issue; do not edit."',
-            'delegate droid reviewer work --reasoning-effort xhigh "Implement and verify."',
-            'delegate droid reviewer work "Implement this bounded change; run the named check."',
+            'delegate droid work --model reviewer "Implement this bounded change; run the named check."',
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
@@ -690,8 +711,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Droid safe mode stays read-only; work mode uses --skip-permissions-unsafe "
             "and is intentionally no-prompt -- use only in workspaces you trust.",
             "Reasoning effort is model-specific and never changes safe/work/call permissions.",
-            "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id pass-through. "
-            "Give one or the other, not both. With neither, droid.defaultModel is used.",
+            "Model selection uses --model (configured alias or raw model ID); with neither, droid.defaultModel is used.",
             "Run delegate models to list available aliases.",
         ),
         see_also=("models", "cursor", "codex", "agent-help"),
@@ -723,9 +743,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--reasoning-effort LEVEL] [--output-schema FILE] "
             "[--fast|--no-fast] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run droid {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] "
+            "delegate [--json] dry-run droid call [--read-only] [--timeout SECONDS] "
             "[--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -755,7 +775,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=(
             'delegate dry-run cursor work "Refactor the parser"',
-            "delegate --json dry-run droid reviewer safe --prompt-file task.md",
+            "delegate --json dry-run droid safe --model reviewer --prompt-file task.md",
             'delegate dry-run grok safe "Review this repo."',
             'delegate dry-run devin work "Plan an implementation run."',
             'delegate dry-run opencode safe "Review this repo."',
@@ -868,6 +888,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "use `delegate followup`.",
         ),
         see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
+        unsupported_global_options=("--isolation",),
     ),
     "followup": CommandSpec(
         name="followup",
@@ -908,9 +929,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
             "The source run must have been launched with --resumable to capture its native session ID.",
             "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",
-            "Followup options must appear before the handle; tokens after the handle are prompt instructions.",
+            "Followup options may appear on either side of the handle before prompt text. Use -- to introduce literal flag-like prompt text.",
         ),
         see_also=("resume", "runs", "snapshot", "run-output", "worktree show"),
+        unsupported_global_options=("--isolation",),
     ),
     "snapshot": CommandSpec(
         name="snapshot",
@@ -942,7 +964,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "run-output"),
-        unsupported_global_options=("--auth-profile",),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+            "--auth-profile",
+            "--group",
+            "--notify",
+        ),
     ),
     "runs": CommandSpec(
         name="runs",
@@ -993,7 +1023,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "status flag.",
         ),
         see_also=("ps", "runs prune", "snapshot", "run-output"),
-        unsupported_global_options=("--auth-profile",),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+            "--auth-profile",
+            "--notify",
+        ),
     ),
     "runs prune": CommandSpec(
         name="runs prune",
@@ -1020,7 +1057,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Runs with a registered present persistent worktree are skipped, so their worktree remains manageable. Pruning removes the per-Run directory, including its Snapshot, Manifest, logs, events, and Completion Report, plus the retained raw-log archive.",
         ),
         see_also=("runs", "snapshot", "run-output"),
-        unsupported_global_options=("--auth-profile",),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+            "--auth-profile",
+            "--group",
+            "--notify",
+        ),
     ),
     "mail": CommandSpec(
         name="mail",
@@ -1286,7 +1331,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "selector, and completion reports reject both bounds.",
         ),
         see_also=("snapshot", "runs"),
-        unsupported_global_options=("--auth-profile",),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--no-completion-report",
+            "--auth-profile",
+            "--group",
+            "--notify",
+        ),
     ),
     "wait": CommandSpec(
         name="wait",
@@ -1326,7 +1378,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "snapshot", "run-output", "cancel"),
-        unsupported_global_options=("--auth-profile", "--isolation"),
+        unsupported_global_options=(
+            "--auth-profile",
+            "--isolation",
+            "--pass-through",
+            "--no-completion-report",
+            "--notify",
+        ),
     ),
     "cancel": CommandSpec(
         name="cancel",
@@ -1350,7 +1408,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Ungrouped call mode is untracked; grouped calls are registered and cancellable.",
         ),
         see_also=("wait", "runs", "snapshot", "run-output"),
-        unsupported_global_options=("--auth-profile", "--isolation"),
+        unsupported_global_options=(
+            "--auth-profile",
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+            "--group",
+            "--notify",
+        ),
     ),
     "workflow": CommandSpec(
         name="workflow",
@@ -1358,9 +1424,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]",
             "delegate [--json] workflow run --resume <wfId> [--budget N]",
+            "delegate [--json] workflow resume <wfId> [--budget N]",
             "delegate [--json] workflow run --name <saved-name> [--args JSON] [--budget N]",
             "delegate [--json] workflow check <script.py>",
             "delegate [--json] workflow status|events|approve|kill <wfId>",
+            "delegate [--json] workflow watch <wfId> [--since SEQ]",
+            "delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT",
             "delegate [--json] workflow wait [<wfId>] [--timeout SEC]",
             "delegate [--json] workflow result [<wfId>] [--field KEY]",
             "delegate [--json] workflow list",
@@ -1371,6 +1440,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--budget", "N", "Maximum number of live agent() runs."),
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
+            OptionSpec("--reason", "TEXT", "Non-empty reason for rejecting an agent result."),
             OptionSpec("--name", "NAME", "Use or save a user-level workflow name."),
             OptionSpec("--since", "SEQ", "For events/watch, emit events after sequence number."),
             OptionSpec("--timeout", "SEC", "For wait, maximum seconds to wait."),
@@ -1410,6 +1480,20 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("workflow status", "workflow events", "workflow wait"),
     ),
+    "workflow resume": CommandSpec(
+        name="workflow resume",
+        summary="Resume a workflow using the existing run --resume path.",
+        usage=("delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]",),
+        arguments=(ArgSpec("wfId", True, "Workflow ID to resume."),),
+        options=(
+            OptionSpec("--budget", "N", "Maximum real delegate.run calls."),
+            OptionSpec("--dry-run", None, "Replay using planned stubs without launching agents."),
+        ),
+        notes=(
+            "Alias for workflow run --resume <wfId>; pinned args and resume checks are unchanged.",
+        ),
+        see_also=("workflow run", "workflow approve"),
+    ),
     "workflow check": CommandSpec(
         name="workflow check",
         summary="Validate a workflow script without launching agents.",
@@ -1432,8 +1516,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "workflow watch": CommandSpec(
         name="workflow watch",
         summary="Print workflow journal events incrementally.",
-        usage=("delegate [--json] workflow watch <wfId> [--since SEQ]",),
-        options=(OptionSpec("--since", "SEQ", "Start after sequence number."),),
+        usage=("delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]",),
+        options=(
+            OptionSpec("--since", "SEQ", "Start after sequence number."),
+            OptionSpec(
+                "--jsonl",
+                None,
+                "Stream JSONL event records and one final status; overrides --json buffering.",
+            ),
+        ),
         see_also=("workflow events",),
     ),
     "workflow result": CommandSpec(
@@ -1458,7 +1549,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "workflow wait": CommandSpec(
         name="workflow wait",
-        summary="Wait for a workflow to reach a terminal status.",
+        summary="Wait for completion or an attention-required paused/stalled workflow.",
         usage=("delegate [--json] workflow wait [<wfId>] [--timeout SEC]",),
         arguments=(
             ArgSpec("wfId", False, "Workflow ID; omit to select the latest eligible workflow."),
@@ -1470,6 +1561,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
+            "Returns at completion, paused, or stalled; a pause is not proof of completed work.",
+            "An explicit wfId may return a completed dry-run. Implicit latest selection excludes dry-runs.",
         ),
         see_also=("workflow status", "workflow result"),
     ),
@@ -1478,6 +1571,21 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Approve a paused gate and relaunch the supervisor.",
         usage=("delegate [--json] workflow approve <wfId>",),
         see_also=("workflow run",),
+    ),
+    "workflow reject": CommandSpec(
+        name="workflow reject",
+        summary="Invalidate a recorded agent result by structural key or label.",
+        usage=("delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT",),
+        arguments=(
+            ArgSpec("wfId", True, "Workflow ID containing the result."),
+            ArgSpec("key-or-label", True, "Agent structural key or unambiguous label."),
+        ),
+        options=(OptionSpec("--reason", "TEXT", "Non-empty reason recorded in the journal."),),
+        notes=(
+            "Refuses a live supervisor; use the script's reject() while it is running.",
+            "Records rejection without relaunching; resume separately when ready.",
+        ),
+        see_also=("workflow resume", "workflow events"),
     ),
     "workflow kill": CommandSpec(
         name="workflow kill",
@@ -2019,17 +2127,23 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "describe": CommandSpec(
         name="describe",
         summary="Print a machine-readable inventory of engines, modes, argv shapes, and policy.",
-        usage=("delegate [--json] describe [--summary]",),
-        options=(OptionSpec("--summary", None, "Emit a compact command/config surface summary."),),
+        usage=("delegate [--json] describe [--overview|--summary|--full]",),
+        options=(
+            OptionSpec(
+                "--overview", None, "Command index and focused-help topics; no config bodies."
+            ),
+            OptionSpec("--summary", None, "Emit a compact command/config surface summary."),
+            OptionSpec("--full", None, "Emit the full engine argv and policy contract."),
+        ),
         examples=(
             "delegate describe",
             "delegate --json describe",
             "delegate --json describe --summary",
         ),
         notes=(
-            "--json describe is the full detailed surface.",
+            "--json describe is compact; use --full for the detailed engine argv and policy surface.",
             "Discovery output applies best-effort credential scrubbing.",
-            "Agent discovery should start with --summary, then use raw describe only when needed.",
+            "Start discovery with --overview, then focused help; summary and full views retain their details.",
         ),
         see_also=("models", "agent-help", "help"),
         unsupported_global_options=("--auth-profile",),
@@ -2038,7 +2152,18 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="agent-help",
         summary="Print best-practices guidance for agents driving delegate.",
         usage=("delegate agent-help",),
-        examples=("delegate agent-help",),
+        examples=(
+            "delegate codex work --isolation worktree --forbid-commit --prompt-file task.md",
+            "delegate snapshot cursor-1",
+        ),
+        notes=(
+            "Give each run a bounded task, owned paths, and a verification requirement.",
+            "Use safe mode for review and work mode for edits. Review work-mode diffs before integration.",
+            "For tracked runs, do not pipe delegate launches through tail. Use snapshot or run-output; if using a shell pipeline, set -o pipefail.",
+            "Use --prompt-file for long briefs and --resumable when a native followup will be needed.",
+            "Model selection uses --model on every engine; use describe and focused engine help for supported modes.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+        ),
         see_also=("describe", "help"),
         unsupported_global_options=("--auth-profile",),
     ),
@@ -2088,65 +2213,21 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
 }
 
-# Keep the persona option spelling and descriptions identical for every engine
-# and dry-run surface. Focused call specs are derived from these base specs.
-for _persona_command in (
-    "cursor",
-    "kimi",
-    "codex",
-    "claude",
-    "grok",
-    "devin",
-    "opencode",
-    "pi",
-    "omp",
-    "droid",
-    "dry-run",
-):
-    _spec = COMMAND_SPECS[_persona_command]
-    COMMAND_SPECS[_persona_command] = CommandSpec(
-        name=_spec.name,
-        summary=_spec.summary,
-        usage=_spec.usage,
-        arguments=_spec.arguments,
-        options=(*_spec.options, *PERSONA_OPTIONS),
-        examples=_spec.examples,
-        notes=_spec.notes,
-        see_also=_spec.see_also,
-        unsupported_global_options=_spec.unsupported_global_options,
-        internal=_spec.internal,
-    )
-
-for _mail_command in (
-    "cursor",
-    "kimi",
-    "codex",
-    "claude",
-    "grok",
-    "devin",
-    "opencode",
-    "pi",
-    "omp",
-    "droid",
-    "dry-run",
-):
-    _spec = COMMAND_SPECS[_mail_command]
-    COMMAND_SPECS[_mail_command] = CommandSpec(
-        name=_spec.name,
-        summary=_spec.summary,
-        usage=_spec.usage,
-        arguments=_spec.arguments,
-        options=(
-            *_spec.options[: -len(PERSONA_OPTIONS)],
-            _MAIL_PUSH_OPTION,
-            _CONTINUITY_MODE_OPTION,
-            *_spec.options[-len(PERSONA_OPTIONS) :],
-        ),
-        examples=_spec.examples,
-        notes=_spec.notes,
-        see_also=_spec.see_also,
-        unsupported_global_options=_spec.unsupported_global_options,
-        internal=_spec.internal,
+# One canonical policy and option list feed help and parser validation.
+_INSPECTION_GLOBAL_RESTRICTIONS = (
+    "--isolation",
+    "--pass-through",
+    "--completion-report",
+    "--no-completion-report",
+    "--no-mail",
+    "--group",
+    "--notify",
+)
+for _engine in (*KNOWN_ENGINES, "dry-run"):
+    _spec = COMMAND_SPECS[_engine]
+    COMMAND_SPECS[_engine] = replace(
+        _spec,
+        options=(*_spec.options, _MAIL_PUSH_OPTION, _CONTINUITY_MODE_OPTION, *PERSONA_OPTIONS),
     )
 
 
@@ -2217,6 +2298,46 @@ COMMAND_SPECS["dry-run call"] = CommandSpec(
     see_also=("dry-run", "cursor call", "codex call", "droid call"),
     unsupported_global_options=_CALL_UNSUPPORTED_GLOBAL_OPTIONS,
 )
+
+
+# Materialize inherited policy once so both text/JSON help and parsing agree.
+for _name, _spec in tuple(COMMAND_SPECS.items()):
+    if " " in _name:
+        _parent = COMMAND_SPECS.get(_name.split()[0])
+        if _parent is not None:
+            COMMAND_SPECS[_name] = replace(
+                _spec,
+                unsupported_global_options=tuple(
+                    dict.fromkeys(
+                        (*_parent.unsupported_global_options, *_spec.unsupported_global_options)
+                    )
+                ),
+            )
+
+
+# Non-launch globals never substitute for command-local options of the same
+# name. For example, `wait --completion-report` is a local boolean, whereas a
+# launch's global `--completion-report markdown` selects an output format.
+for _name, _spec in tuple(COMMAND_SPECS.items()):
+    if _name.split()[0] in {*KNOWN_ENGINES, "dry-run", "run", "resume", "followup"}:
+        continue
+    _restrictions = tuple(
+        flag
+        for flag in _INSPECTION_GLOBAL_RESTRICTIONS
+        if flag != "--notify" or _name not in {"workflow run", "workflow resume"}
+    )
+    COMMAND_SPECS[_name] = replace(
+        _spec,
+        unsupported_global_options=tuple(
+            dict.fromkeys(
+                (
+                    *_spec.unsupported_global_options,
+                    *_restrictions,
+                    *(("--cwd",) if _name == "help" else ()),
+                )
+            )
+        ),
+    )
 
 
 # Help-token detection.
@@ -2292,141 +2413,31 @@ def render_command_help_text(spec: CommandSpec, *, prog: str = "delegate") -> st
 
 
 def render_overview_text() -> str:
-    """Render the global usage/help body that replaces the hand-written ``HELP``.
-
-    Worktree actions are enumerated on their own lines (``worktree prune ...``)
-    so the overview contains the literal substring ``worktree prune``.
-    """
-
-    iso = "[--isolation auto|none|worktree]"
-    lines: list[str] = [f"delegate {VERSION}", "", "Usage:"]
-
-    usage_lines = [
-        f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} pi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} omp {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run pi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run omp {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        "delegate [--json] dry-run kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
-        'delegate [--cwd PATH] [--json] resume [resume-options] <alias|runId> ["extra instructions"...]',
-        "delegate [--cwd PATH] [--json] followup [options] <alias|runId> [--prompt-file PATH] [prompt...]",
-        "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
-        "delegate [--cwd PATH] [--json] runs "
-        "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
-        "delegate [--cwd PATH] [--json] runs prune [--older-than DAYS] [--dry-run]",
-        "delegate [--cwd PATH] [--json] mail {send,inbox,read,status,watch,prune} ...",
-        "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N] [--structural]",
-        "delegate [--cwd PATH] [--json] run-output <handle> "
-        "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
-        "[--raw] [--no-redact]",
-        "delegate [--cwd PATH] [--json] wait <handle>... [--latest HARNESS] "
-        "[--timeout SEC] [--interval SEC] [--completion-report]",
-        "delegate [--cwd PATH] [--json] cancel <handle>...",
-        "delegate [--cwd PATH] [--json] worktree list "
-        "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
-        "delegate [--cwd PATH] [--json] worktree show <handle>",
-        "delegate [--cwd PATH] [--json] worktree show --latest HARNESS",
-        "delegate [--cwd PATH] [--json] worktree remove <handle> "
-        "[--discard-uncommitted] [--force-branch] [--force] [--keep-branch]",
-        "delegate [--cwd PATH] [--json] worktree prune "
-        "[--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] "
-        "[--discard-uncommitted] [--force-branch] [--force]",
-        "delegate [--cwd PATH] [--json] worktree gc [--dry-run]",
-        "delegate [--cwd PATH] [--json] worktree reap "
-        "(--handle HANDLE | --path PATH | --group NAME) --older-than DAYS [--dry-run] [--yes]",
-        "delegate [--cwd PATH] [--json] workflow run <script.py> "
-        "[--args JSON] [--budget N] [--dry-run]",
-        "delegate [--cwd PATH] [--json] workflow run --resume <wfId>",
-        "delegate [--cwd PATH] [--json] workflow status|events|approve|kill <wfId>",
-        "delegate [--cwd PATH] [--json] workflow wait [<wfId>] [--timeout SEC]",
-        "delegate [--cwd PATH] [--json] workflow result [<wfId>] [--field KEY]",
-        "delegate [--cwd PATH] [--json] workflow list",
-        "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
-        "delegate [--json] [--auth-profile NAME] setup",
-        "delegate [--json] doctor",
-        "delegate [--json] promote --actor WHO --source TEXT [--runtime-digest HEX]",
-        "delegate [--json] [--auth-profile NAME] models [--summary]",
-        "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
-        "delegate [--json] [--auth-profile NAME] capabilities [refresh [<engine> ...]]",
-        "delegate [--json] describe [--summary]",
-        "delegate [--cwd PATH] [--json] personas",
-        "delegate agent-help",
-        "delegate help [<command> [<subcommand>]]",
+    """Generate compact discovery from the same specs as focused help."""
+    lines = [
+        f"delegate {VERSION}",
+        "",
+        "Usage: delegate [GLOBAL OPTIONS] COMMAND [COMMAND OPTIONS] [ARGS...]",
+        "Launch: delegate ENGINE MODE [--model ALIAS_OR_MODEL] PROMPT",
+        "Modes: safe (review), work (edit), call (one hop). See engine help for support.",
+        "",
+        "Commands:",
     ]
-    for usage in usage_lines:
-        lines.append(f"  {usage}")
-
-    lines.append("")
-    lines.append("Global options may appear anywhere before an option terminator (--).")
-
-    lines.append("")
-    lines.append("Run output options (before subcommand):")
-    detail_globals = (
-        "--pass-through",
-        "--completion-report",
-        "--no-completion-report",
+    groups: dict[str, list[str]] = {}
+    for name, spec in COMMAND_SPECS.items():
+        if not spec.internal:
+            groups.setdefault(name.split()[0], []).append(name)
+    lines.extend("  " + " | ".join(names) for names in groups.values())
+    lines.extend(
+        [
+            "",
+            "Global options: " + ", ".join(option.flag for option in GLOBAL_OPTIONS),
+            "Use delegate help <command> or delegate --json help <command> for its options.",
+            "Discovery: delegate --json describe; describe --full expands the contract.",
+            "Models: delegate --json models --summary.",
+            "Tracked output is bounded. Use snapshot, runs, and run-output to inspect it.",
+        ]
     )
-    for opt in GLOBAL_OPTIONS:
-        if opt.flag not in detail_globals:
-            continue
-        label = _format_option(opt)
-        lines.append(f"  {label.ljust(26)} {opt.description}")
-
-    lines.append("")
-    lines.append("Discovery:")
-    lines.append(
-        "  delegate setup                 Discover installed harnesses and initialize Delegate."
-    )
-    lines.append("  delegate help <command>        Focused help for any command path.")
-    lines.append("  delegate --json <command> --help   Machine-readable spec for an agent.")
-    lines.append("  delegate --json describe --summary  Compact command/config surface inventory.")
-    lines.append("  delegate --json models --summary    Compact model inventory.")
-    lines.append("  delegate agent-help             Full agent guidance.")
-
-    lines.append("")
-    lines.append(
-        "Tracked runs return bounded summaries by default. Avoid piping launches through tail;"
-    )
-    lines.append("inspect runs with delegate snapshot, delegate runs, and delegate run-output.")
-    lines.append(
-        "A verified zero-change work run with no assistant text reports failed/empty_result and exits 1."
-    )
-
     return "\n".join(lines) + "\n"
 
 

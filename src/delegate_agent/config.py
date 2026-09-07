@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from delegate_agent import reasoning, redaction, stall_watchdog, wsl
-from delegate_agent.constants import VALID_MODES
+from delegate_agent.constants import KNOWN_ENGINES, VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH: Path | None = None
@@ -36,20 +36,7 @@ DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
 # ceiling a script that waits on a human gate parks forever and the dry run hangs
 # with it (observed 2026-08-27: 38 minutes and still climbing).
 DEFAULT_DRY_RUN_TIMEOUT_SECONDS: Final = 300
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
-    {
-        "codex",
-        "cursor",
-        "droid",
-        "kimi",
-        "claude",
-        "grok",
-        "devin",
-        "opencode",
-        "pi",
-        "omp",
-    }
-)
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(KNOWN_ENGINES)
 
 SAFE_BACKEND_COPY = "copy"
 SAFE_BACKEND_BWRAP = "bwrap"
@@ -213,7 +200,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "structuredOutputRetries": 2,
     },
     "mail": {
-        "enabled": False,
+        "enabled": True,
     },
 }
 
@@ -1143,10 +1130,13 @@ def _validate_pi_family_models(models: JsonValue, *, engine: str) -> None:
             path=f"{path}.{alias}.thinking",
             error=error,
         )
-        if thinking not in reasoning.PI_THINKING_LEVELS:
+        thinking_levels = (
+            reasoning.PI_NATIVE_EFFORTS if engine == "pi" else reasoning.PI_THINKING_LEVELS
+        )
+        if thinking not in thinking_levels:
             raise ConfigError(
                 error,
-                f"{path}.{alias}.thinking must be one of: {', '.join(reasoning.PI_THINKING_LEVELS)}.",
+                f"{path}.{alias}.thinking must be one of: {', '.join(thinking_levels)}.",
             )
 
 
@@ -1379,6 +1369,17 @@ def merge_config_layer(base: JsonObject, override: JsonObject) -> JsonObject:
     cannot inherit stale ``env`` keys from lower layers.
     """
     merged = deep_merge(base, override)
+    tracking_override = override.get("tracking")
+    if (
+        isinstance(tracking_override, dict)
+        and "registryLockTimeoutSeconds" in tracking_override
+        and "registryLockTimeoutSec" not in tracking_override
+    ):
+        # Both spellings identify one setting. A higher layer's legacy name
+        # must override a canonical value inherited from a lower/default layer.
+        merged["tracking"]["registryLockTimeoutSec"] = tracking_override[
+            "registryLockTimeoutSeconds"
+        ]
     _replace_profile_definitions(merged, override)
     return merged
 
@@ -1492,6 +1493,21 @@ def load_config(
     instead of discarding lower-precedence layers. Workspace config is never merged
     implicitly because repositories are not trusted to select executables or policy.
     """
+    if os.environ.get("DELEGATE_WORKFLOW_ATTEMPT"):
+        from delegate_agent import workflow_attempts, workflow_pinning
+
+        try:
+            attempt = workflow_attempts.from_environment()
+        except workflow_pinning.WorkflowPinError as exc:
+            raise ConfigError(exc.error, exc.message) from exc
+        if attempt is None:
+            raise ConfigError("invalid_workflow_attempt", "workflow attempt is missing")
+        if cli_overrides:
+            raise ConfigError(
+                "invalid_workflow_attempt",
+                "config overrides cannot replace an immutable workflow attempt",
+            )
+        return copy.deepcopy(attempt.config), str(attempt.config_path)
     merged = embedded_default_config()
     primary_source = "embedded-default"
 
@@ -1578,6 +1594,23 @@ def validate_config(config: JsonObject) -> None:
                     "invalid_tracking_config",
                     "tracking.completionReport.defaultMode must be markdown or none.",
                 )
+        preamble = tracking.get("skillReviewPreamble")
+        if preamble is not None:
+            if not isinstance(preamble, dict):
+                raise ConfigError(
+                    "invalid_tracking_config", "tracking.skillReviewPreamble must be an object."
+                )
+            unknown = set(preamble) - {"enabled"}
+            if unknown:
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    f"tracking.skillReviewPreamble has unknown keys: {', '.join(sorted(unknown))}.",
+                )
+            if not isinstance(preamble.get("enabled", False), bool):
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    "tracking.skillReviewPreamble.enabled must be a boolean.",
+                )
         retention = tracking.get("retention")
         if retention is not None:
             if not isinstance(retention, dict):
@@ -1642,9 +1675,19 @@ def validate_config(config: JsonObject) -> None:
     _validate_mail_section(config.get("mail"))
 
 
-def mail_enabled(config: JsonObject) -> bool:
-    section = config.get("mail")
+def skill_review_preamble_enabled(config: JsonObject) -> bool:
+    """Return whether wrapped prompts get the skill-review preamble (default off)."""
+
+    tracking = config.get("tracking")
+    if not isinstance(tracking, dict):
+        return False
+    section = tracking.get("skillReviewPreamble")
     return isinstance(section, dict) and section.get("enabled") is True
+
+
+def mail_enabled(config: JsonObject) -> bool:
+    section = config.get("mail", {})
+    return isinstance(section, dict) and section.get("enabled", True) is True
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

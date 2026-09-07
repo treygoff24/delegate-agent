@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, TextIO, cast
 
 from delegate_agent import (
     account_binding,
@@ -32,15 +32,16 @@ from delegate_agent import (
     notify,
     profiles,
     prompt_instructions,
-    reasoning,
     redaction,
     rendering,
     resume_command,
     run_metadata,
     run_registry,
+    run_scratch,
     sandbox_bwrap,
     seatbelt,
     stall_watchdog,
+    stream_capture,
     terminal_states,
     worktree_summary,
 )
@@ -54,7 +55,6 @@ STDERR_LOG = run_registry.STDERR_LOG
 EVENTS_JSONL = run_registry.EVENTS_JSONL
 MANIFEST_FILE = run_registry.MANIFEST_FILE
 STATE_FILE = run_registry.STATE_FILE
-SNAPSHOT_FILE = run_registry.SNAPSHOT_FILE
 COMPLETION_REPORT_FILE = run_registry.COMPLETION_REPORT_FILE
 PROMPT_TXT_FILE = run_registry.PROMPT_TXT_FILE
 PERSONA_TXT_FILE = run_registry.PERSONA_TXT_FILE
@@ -209,7 +209,8 @@ class RunContext:
     structured_retry: bool = False
     harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
-    sandbox: JsonObject | None = None
+    sandbox: sandbox_bwrap.SandboxPlan | None = None
+    scratch_permissions: JsonObject | None = None
     # Bounded wait for registry mutations. Finalization writes a WAL when this
     # budget expires; launch admission fails before spawning a child.
     registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
@@ -237,6 +238,7 @@ def _launch_registry_lock(ctx: RunContext):
             ctx.registry_root,
             timeout_seconds=timeout,
         ):
+            run_registry.reconcile_finalize_wal_locked(ctx.registry_root, ctx.run_id)
             yield
     except TimeoutError as exc:
         raise RunnerLaunchError(
@@ -257,11 +259,7 @@ def write_manifest(run_path: Path, manifest: JsonObject) -> None:
 
 
 def write_state(run_path: Path, state: JsonObject) -> None:
-    run_registry.write_json_atomic(run_path / STATE_FILE, state)
-
-
-def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
-    run_registry.write_snapshot(run_path, snapshot)
+    run_registry.write_run_state(run_path, state)
 
 
 def open_events_log(run_path: Path) -> TextIO:
@@ -531,13 +529,7 @@ def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
 
 
 def _add_persona_payload_fields(payload: JsonObject, ctx: RunContext) -> None:
-    if ctx.persona_name is None:
-        return
-    payload["personaName"] = ctx.persona_name
-    payload["personaSource"] = ctx.persona_source
-    payload["personaTransport"] = ctx.persona_transport
-    payload["personaDigest"] = ctx.persona_digest
-    payload["personaFile"] = ctx.persona_file or PERSONA_TXT_FILE
+    run_metadata.add_persona_payload_fields(payload, ctx, default_file=PERSONA_TXT_FILE)
 
 
 def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
@@ -565,9 +557,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     if ctx.temporary_workspace_cleanup is not None:
         payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
-    run_metadata.add_model_payload_fields(payload, ctx)
-    reasoning.add_reasoning_payload_fields(payload, ctx)
-    run_metadata.add_speed_payload_fields(payload, ctx)
+    run_metadata.add_selection_payload_fields(payload, ctx)
+    cleanup = _worktree_cleanup_commands(ctx)
+    if cleanup is not None:
+        payload["worktreeCleanupCommands"] = cleanup
     if ctx.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if ctx.auth_profile is not None:
@@ -611,72 +604,6 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     return payload
 
 
-def build_state(
-    ctx: RunContext,
-    *,
-    status: str,
-    exit_code: int | None = None,
-    stdout_bytes: int = 0,
-    stderr_bytes: int = 0,
-    current: str | None = None,
-    pid: int | None = None,
-    pgid: int | None = None,
-    extra: JsonObject | None = None,
-) -> JsonObject:
-    now = run_registry.utc_now_iso()
-    state: JsonObject = {
-        "schema": run_registry.STATE_SCHEMA,
-        "runId": ctx.run_id,
-        "alias": ctx.alias,
-        "status": status,
-        "stdoutBytes": stdout_bytes,
-        "stderrBytes": stderr_bytes,
-        "lastActivityAt": now,
-        "continuityMode": ctx.continuity_mode,
-        "modelProvenance": _model_provenance(ctx),
-    }
-    state["completionReportWritten"] = bool(
-        extra.get("completionReportWritten") if extra is not None else False
-    )
-    state["completionReportSource"] = (
-        extra.get("completionReportSource") if extra is not None else None
-    )
-    # Default to "ok" only when no extra payload is supplied (e.g. an early
-    # running persist). When extra is provided, respect its resultQuality
-    # explicitly: a None value means "no result to classify" (e.g. a launch
-    # failure that never ran the child), so the key is omitted entirely rather
-    # than defaulted to "ok".
-    if extra is None:
-        state["resultQuality"] = RESULT_QUALITY_OK
-    elif "resultQuality" in extra and extra["resultQuality"] is not None:
-        state["resultQuality"] = extra["resultQuality"]
-    if exit_code is not None:
-        state["exitCode"] = exit_code
-        state["finishedAt"] = now
-    if current:
-        state["current"] = redaction.redact_string(current)
-    if pid is not None:
-        state["pid"] = pid
-        if pgid is not None:
-            state["pgid"] = pgid
-        else:
-            with contextlib.suppress(OSError):
-                state["pgid"] = os.getpgid(pid)
-    if extra is not None:
-        state.update(extra)
-    if ctx.group is not None:
-        state["group"] = ctx.group
-    if ctx.include_dirty:
-        state["includeDirty"] = True
-        state["syncedFiles"] = ctx.synced_files
-    # A None resultQuality means "no result to classify" (e.g. a launch failure
-    # that never ran the child). Omit the key entirely rather than persist null,
-    # so launch-failure state stays consistent with its snapshot.
-    if state.get("resultQuality") is None:
-        state.pop("resultQuality", None)
-    return state
-
-
 def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
     """Build the worktreeCleanupCommands object for persistent worktree runs.
 
@@ -699,77 +626,77 @@ def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
     }
 
 
-def build_snapshot(
+def build_run_record(
     ctx: RunContext,
     *,
-    accumulator: harness_events.StreamAccumulator,
+    status: str,
+    accumulator: harness_events.StreamAccumulator | None = None,
     exit_code: int | None = None,
+    stdout_bytes: int = 0,
+    stderr_bytes: int = 0,
+    current: str | None = None,
+    pid: int | None = None,
+    pgid: int | None = None,
     completion_report_written: bool = False,
     extra: JsonObject | None = None,
 ) -> JsonObject:
-    _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
-    recent_events, events_meta = accumulator.bounded_recent_events()
-    snapshot: JsonObject = {
-        "schema": run_registry.SNAPSHOT_SCHEMA,
+    now = run_registry.utc_now_iso()
+    record: JsonObject = {
+        "schema": run_registry.STATE_SCHEMA,
         "ok": True,
         "alias": ctx.alias,
         "runId": ctx.run_id,
-        "harness": ctx.harness,
-        "cwd": ctx.source_cwd,
-        "executionCwd": ctx.execution_cwd,
-        "workspaceRoot": str(Path(ctx.execution_cwd).resolve(strict=False)),
-        "mode": ctx.mode,
-        "model": ctx.model,
+        "status": status,
+        "stdoutBytes": stdout_bytes,
+        "stderrBytes": stderr_bytes,
+        "lastActivityAt": now,
         "continuityMode": ctx.continuity_mode,
         "modelProvenance": _model_provenance(ctx, accumulator),
-        "startedAt": ctx.started_at,
-        "current": (
-            redaction.redact_string(accumulator.current)
-            if accumulator.current
-            else accumulator.current
-        ),
-        "recentEvents": recent_events,
         "completionReportWritten": completion_report_written,
         "completionReportSource": None,
         "resultQuality": RESULT_QUALITY_OK,
-        **assistant_meta,
-        **events_meta,
     }
-    run_metadata.add_run_metadata_payload_fields(snapshot, ctx)
-    run_metadata.add_model_payload_fields(snapshot, ctx)
-    reasoning.add_reasoning_payload_fields(snapshot, ctx)
-    run_metadata.add_speed_payload_fields(snapshot, ctx)
-    if ctx.resumable:
-        snapshot["resumable"] = True
-    if ctx.resumable and accumulator.harness_session_id is not None:
-        snapshot["harnessSessionId"] = accumulator.harness_session_id
-    snapshot["promptInstructionMode"] = ctx.prompt_instruction_mode
-    if ctx.auth_profile is not None:
-        snapshot["authProfile"] = ctx.auth_profile
-    if ctx.workflow_agent_key is not None:
-        snapshot["workflowAgentKey"] = ctx.workflow_agent_key
-    if ctx.temporary_workspace_cleanup is not None:
-        snapshot["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
-    cleanup = _worktree_cleanup_commands(ctx)
-    if cleanup is not None:
-        snapshot["worktreeCleanupCommands"] = cleanup
-
+    if ctx.warnings:
+        record["warnings"] = list(ctx.warnings)
+    if accumulator is not None:
+        _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
+        recent_events, events_meta = accumulator.bounded_recent_events()
+        record.update(assistant_meta)
+        record.update(events_meta)
+        record.update(accumulator.stream_diagnostics())
+        record["recentEvents"] = recent_events
+        display_current = accumulator.current if current is None else current
+        if display_current:
+            record["current"] = redaction.redact_string(display_current)
+        if accumulator.terminal_event is not None:
+            record["terminalEvent"] = accumulator.terminal_event
+        if accumulator.terminal_status is not None:
+            record["terminalStatus"] = accumulator.terminal_status
+        if accumulator.session_id is not None:
+            record["sessionId"] = accumulator.session_id
+        if ctx.resumable and accumulator.harness_session_id is not None:
+            record["harnessSessionId"] = accumulator.harness_session_id
+            record["resumable"] = True
+    elif current:
+        record["current"] = redaction.redact_string(current)
     if exit_code is not None:
-        snapshot["exitCode"] = exit_code
-    if accumulator.terminal_event is not None:
-        snapshot["terminalEvent"] = accumulator.terminal_event
-    if accumulator.terminal_status is not None:
-        snapshot["terminalStatus"] = accumulator.terminal_status
-    if accumulator.session_id is not None:
-        snapshot["sessionId"] = accumulator.session_id
+        record["exitCode"] = exit_code
+        record["finishedAt"] = now
+    if pid is not None:
+        record["pid"] = pid
+        if pgid is not None:
+            record["pgid"] = pgid
+        else:
+            with contextlib.suppress(OSError):
+                record["pgid"] = os.getpgid(pid)
     if ctx.group is not None:
-        snapshot["group"] = ctx.group
+        record["group"] = ctx.group
     if ctx.include_dirty:
-        snapshot["includeDirty"] = True
-        snapshot["syncedFiles"] = ctx.synced_files
+        record["includeDirty"] = True
+        record["syncedFiles"] = ctx.synced_files
     if completion_report_written:
         report_path = completion_report_path(ctx.run_id)
-        snapshot["completionReport"] = {
+        record["completionReport"] = {
             "path": report_path,
             "command": run_registry.run_output_command(
                 ctx.alias,
@@ -778,8 +705,10 @@ def build_snapshot(
             ),
         }
     if extra is not None:
-        _merge_extra(snapshot, extra)
-    return snapshot
+        _merge_extra(record, extra)
+    if record.get("resultQuality") is None:
+        record.pop("resultQuality", None)
+    return record
 
 
 def persist_progress(
@@ -803,6 +732,7 @@ def persist_progress(
         ctx.registry_root,
         timeout_seconds=lock_timeout_seconds,
     ):
+        run_registry.reconcile_finalize_wal_locked(ctx.registry_root, ctx.run_id)
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
         if current_status in run_registry.TERMINAL_STATUSES:
@@ -823,27 +753,20 @@ def persist_progress(
             persisted_extra["resumable"] = True
         write_state(
             run_path,
-            build_state(
+            build_run_record(
                 ctx,
                 status=status,
+                accumulator=accumulator,
                 exit_code=exit_code,
                 stdout_bytes=stdout_bytes,
                 stderr_bytes=stderr_bytes,
                 current=accumulator.current,
                 pid=pid,
                 pgid=persisted_pgid,
+                completion_report_written=completion_report_written,
                 extra=persisted_extra or None,
             ),
         )
-        snapshot = build_snapshot(
-            ctx,
-            accumulator=accumulator,
-            exit_code=exit_code,
-            completion_report_written=completion_report_written,
-            extra=persisted_extra or None,
-        )
-        snapshot["status"] = status
-        write_snapshot(run_path, snapshot)
 
 
 def _reconcile_cancel_extra(extra: JsonObject) -> None:
@@ -894,9 +817,38 @@ def _persist_final_progress(
         _registry_lock_timeout(ctx) if lock_timeout_seconds is None else lock_timeout_seconds
     )
 
+    def existing_terminal_result(current: JsonObject) -> tuple[str, JsonObject]:
+        persisted_status = current["status"]
+        assert isinstance(persisted_status, str)
+        persisted_extra = dict(extra)
+        for key in (
+            "completionReportWritten",
+            "completionReportSource",
+            "error",
+            "failureReason",
+            "message",
+            "modelProvenance",
+            "resultQuality",
+            "terminalEvent",
+            "terminalRecord",
+            "terminalState",
+            "warnings",
+        ):
+            if key in current:
+                persisted_extra[key] = current[key]
+        current_exit_code = current.get("exitCode")
+        persisted_extra["exitCode"] = (
+            current_exit_code
+            if isinstance(current_exit_code, int) and not isinstance(current_exit_code, bool)
+            else 1
+            if persisted_status == run_registry.STATUS_CANCELLED
+            else exit_code
+        )
+        return persisted_status, persisted_extra
+
     def terminal_payloads(
         current: JsonObject | None,
-    ) -> tuple[str, JsonObject, JsonObject, JsonObject]:
+    ) -> tuple[str, JsonObject, JsonObject]:
         persisted_status = status
         persisted_extra = dict(extra)
         if ctx.resumable and accumulator.harness_session_id is not None:
@@ -912,56 +864,61 @@ def _persist_final_progress(
             _clear_operator_cancel_terminal_evidence(accumulator)
             _reconcile_cancel_extra(persisted_extra)
         persisted_exit_code = 1 if persisted_status == run_registry.STATUS_CANCELLED else exit_code
-        state = build_state(
+        persisted_extra["exitCode"] = persisted_exit_code
+        record = build_run_record(
             ctx,
             status=persisted_status,
+            accumulator=accumulator,
             exit_code=persisted_exit_code,
             stdout_bytes=stdout_bytes,
             stderr_bytes=stderr_bytes,
             current=accumulator.current,
             pid=persisted_extra.get("pid"),
-            extra=persisted_extra,
-        )
-        snapshot = build_snapshot(
-            ctx,
-            accumulator=accumulator,
-            exit_code=persisted_exit_code,
             completion_report_written=completion_report_written,
             extra=persisted_extra,
         )
-        snapshot["ok"] = run_registry.run_succeeded(
+        record["ok"] = run_registry.run_succeeded(
             persisted_status,
-            snapshot.get("resultQuality"),
-            snapshot.get("terminalState"),
+            record.get("resultQuality"),
+            record.get("terminalState"),
         )
-        snapshot["status"] = persisted_status
-        return persisted_status, persisted_extra, state, snapshot
+        record = run_registry.merge_terminal_record(current, record)
+        return persisted_status, persisted_extra, record
 
     try:
         with run_registry.registry_lock(
             ctx.registry_root,
             timeout_seconds=lock_timeout_seconds,
         ):
-            persisted_status, persisted_extra, state, snapshot = terminal_payloads(
-                run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
-            )
-            write_state(run_path, state)
-            write_snapshot(run_path, snapshot)
+            run_registry.reconcile_finalize_wal_locked(ctx.registry_root, ctx.run_id)
+            current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+            current_status = current.get("status") if isinstance(current, dict) else None
+            if current_status in run_registry.TERMINAL_STATUSES and (
+                current_status != run_registry.STATUS_CANCELLED
+                and current.get("cancelRequested") is not True
+            ):
+                return existing_terminal_result(current)
+            persisted_status, persisted_extra, record = terminal_payloads(current)
+            run_registry.publish_terminal_record_locked(ctx.registry_root, ctx.run_id, record)
         return persisted_status, persisted_extra
     except TimeoutError:
         # The child has completed and its output/logs are durable. Keep the
         # caller's real result while publishing an atomic WAL for the next
         # successful lock holder to fold. Replay re-reads state under the lock,
         # preserving cancel precedence even if cancellation wins this race.
-        persisted_status, persisted_extra, state, snapshot = terminal_payloads(
-            run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
-        )
+        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        current_status = current.get("status") if isinstance(current, dict) else None
+        if current_status in run_registry.TERMINAL_STATUSES and (
+            current_status != run_registry.STATUS_CANCELLED
+            and current.get("cancelRequested") is not True
+        ):
+            return existing_terminal_result(current)
+        persisted_status, persisted_extra, record = terminal_payloads(current)
         run_registry.write_finalize_wal(
             ctx.registry_root,
             ctx.run_id,
             status=persisted_status,
-            state=state,
-            snapshot=snapshot,
+            record=record,
         )
         return persisted_status, persisted_extra
 
@@ -1000,7 +957,21 @@ def _aggregate_usage(*usages: JsonObject) -> JsonObject:
                 if all(is_non_negative_int(usage.get(key)) for usage in usages)
                 else None
             )
+    # Grok's `end` event is the only source of a provider-priced cost, and it is
+    # a float, so the token rules above would drop it on every merged capture.
+    # It survives only when every merged usage carries one; a partial sum would
+    # understate the run's cost while looking authoritative.
+    if any("costUsd" in usage for usage in usages):
+        result["costUsd"] = (
+            sum(float(cast(float, usage["costUsd"])) for usage in usages)
+            if all(_is_non_negative_number(usage.get("costUsd")) for usage in usages)
+            else None
+        )
     return result
+
+
+def _is_non_negative_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and value >= 0
 
 
 # Delegate to the shared helper in harness_events so the runner (write-time) and
@@ -1041,7 +1012,7 @@ def _classify_result_quality(
         return RESULT_QUALITY_OK
     if (
         exit_code == 0
-        and accumulator.structured_events_seen > 0
+        and (accumulator.structured_events_seen > 0 or accumulator.malformed_lines > 0)
         and not accumulator.assistant_text.strip()
         and not accumulator.completion_text
     ):
@@ -1366,9 +1337,7 @@ def completion_json_payload(
         payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
-    run_metadata.add_model_payload_fields(payload, ctx)
-    reasoning.add_reasoning_payload_fields(payload, ctx)
-    run_metadata.add_speed_payload_fields(payload, ctx)
+    run_metadata.add_selection_payload_fields(payload, ctx)
     _add_persona_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
@@ -1414,26 +1383,34 @@ def _drain_stream(
     max_bytes: int,
     limit_signal: StreamLimitSignal,
     stream: str,
+    capture_info: JsonObject | None = None,
+    on_omitted: Callable[[str], None] | None = None,
 ) -> None:
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
     with log_path.open("ab") as log_handle:
-        captured_bytes = log_handle.tell()
-        while True:
-            chunk = pipe.readline(STREAM_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            remaining = max(max_bytes - captured_bytes, 0)
-            captured = chunk[:remaining]
-            if captured:
-                log_handle.write(captured)
-                captured_bytes += len(captured)
-                byte_counter.total += len(captured)
-                if on_line is not None and decoder is not None:
-                    decoded = decoder.decode(captured, final=False)
-                    if decoded:
-                        on_line(decoded)
-            if len(captured) < len(chunk):
-                limit_signal.trip(stream)
+
+        def write(captured: bytes) -> None:
+            log_handle.write(captured)
+            byte_counter.total += len(captured)
+            if on_line is not None and decoder is not None:
+                decoded = decoder.decode(captured, final=False)
+                if decoded:
+                    on_line(decoded)
+
+        capture = stream_capture.BoundedCapture(
+            write,
+            max_bytes,
+            initial_bytes=log_handle.tell(),
+            compact_omp=capture_info is not None,
+            on_omitted=on_omitted,
+        )
+        try:
+            stream_capture.drain_bounded(lambda: pipe.readline(STREAM_READ_CHUNK_BYTES), capture)
+        except stream_capture.CaptureLimit as exc:
+            limit_signal.trip(stream, limit=exc.limit)
+        finally:
+            if capture_info is not None:
+                capture_info.update(capture.payload())
         if on_line is not None and decoder is not None:
             decoded = decoder.decode(b"", final=True)
             if decoded:
@@ -1610,6 +1587,7 @@ class TrackedCaptureResult:
     stall: JsonObject | None = None
     process_group_survived: bool = False
     zero_commit_health: JsonObject | None = None
+    stdout_capture: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1631,6 +1609,7 @@ class CallResult:
     empty_retry_attempted: bool = False
     empty_retry_resolved: bool = False
     codex_thread_fallback: JsonObject | None = None
+    stdout_capture: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1763,12 +1742,14 @@ class ByteCounter:
 class StreamLimitSignal:
     event: threading.Event = field(default_factory=threading.Event)
     stream: str | None = None
+    limit: int | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def trip(self, stream: str) -> None:
+    def trip(self, stream: str, *, limit: int | None = None) -> None:
         with self._lock:
             if self.stream is None:
                 self.stream = stream
+                self.limit = limit
             self.event.set()
 
 
@@ -1936,8 +1917,34 @@ def _prepare_tracked_run(
     run_registry.ensure_private_dir(run_path)
     scratch_dir: Path | None = None
     if ctx.mode == "safe" or ctx.effective_isolation != "none":
-        scratch_dir = run_path / "scratch"
-        run_registry.ensure_private_dir(scratch_dir)
+        scratch_plan: run_scratch.ScratchPlan | None = None
+        try:
+            scratch_plan = run_scratch.plan(ctx.registry_root, ctx.run_id)
+            scratch_dir = run_scratch.allocate_plan(scratch_plan)
+        except run_scratch.ScratchSafetyError as exc:
+            error = RunnerLaunchError(
+                "unsafe_scratch_directory",
+                f"Could not create safe neutral scratch for this run: {exc}",
+            )
+            manifest = build_manifest(ctx, manifest_argv or argv)
+            allocation: JsonObject = {"status": "failed", "message": str(exc)}
+            if scratch_plan is not None:
+                allocation["plannedPath"] = str(scratch_plan.path)
+                manifest["scratchPath"] = str(scratch_plan.path)
+            manifest["scratchAllocation"] = allocation
+            write_manifest(run_path, manifest)
+            stdout_log = run_path / STDOUT_LOG
+            stderr_log = run_path / STDERR_LOG
+            run_registry.write_private_bytes(stdout_log, b"")
+            run_registry.write_private_bytes(stderr_log, b"")
+            files = TrackedRunFiles(
+                run_path=run_path,
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+                scratch_dir=None,
+            )
+            _record_tracked_launch_failure(files, ctx, error)
+            raise error from exc
     if ctx.source_prompt is not None:
         # The user prompt exactly as resolved, before instruction framing, so
         # `delegate resume` can rebuild the original task text. Verbatim by
@@ -1945,7 +1952,10 @@ def _prepare_tracked_run(
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
     if ctx.persona_text is not None:
         run_registry.write_private_text(run_path / PERSONA_TXT_FILE, ctx.persona_text)
-    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
+    manifest = build_manifest(ctx, manifest_argv or argv)
+    if scratch_dir is not None:
+        manifest["scratchPath"] = str(scratch_dir)
+    write_manifest(run_path, manifest)
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
@@ -1973,63 +1983,45 @@ def _env_overrides_with_scratch(
     }
 
 
-def _codex_argv_with_scratch(argv: list[str], scratch_dir: Path | None) -> list[str]:
+def _codex_argv_with_scratch(
+    argv: list[str], scratch_dir: Path | None, *, permission_profile: str | None = None
+) -> list[str]:
     if scratch_dir is None or "--sandbox" not in argv:
         return list(argv)
     sandbox_index = argv.index("--sandbox")
     if sandbox_index + 1 >= len(argv) or argv[sandbox_index + 1] != "read-only":
         return list(argv)
+    if scratch_dir.is_symlink() or not scratch_dir.is_dir():
+        raise RunnerLaunchError(
+            "invalid_scratch_directory", "Codex scratch must be an existing non-symlink directory."
+        )
+    scratch = str(scratch_dir.resolve(strict=True))
+    # Profile tables merge with lower config layers. An unpredictable name
+    # prevents a pre-existing same-name profile from adding writable roots.
+    name = permission_profile or f"delegate_safe_{os.urandom(16).hex()}"
+    definition = (
+        f'permissions.{name}={{extends=":read-only",filesystem={{'
+        f'{json.dumps(scratch, ensure_ascii=False)}="write"}}}}'
+    )
     updated = list(argv)
-    insert_at = max(len(updated) - 1, 0)
-    updated[insert_at:insert_at] = ["--add-dir", str(scratch_dir)]
+    del updated[sandbox_index : sandbox_index + 2]
+    # Never allow an older Codex to silently ignore named permission settings:
+    # unknown flags/fields fail before a turn rather than selecting a default
+    # writable workspace. All model, cwd, session and approval flags stay put.
+    updated[1:1] = ["--strict-config", "-c", f'default_permissions="{name}"', "-c", definition]
     return updated
 
 
-def _masks_from_sandbox(payload: JsonObject | None) -> tuple[sandbox_bwrap.Mask, ...]:
-    if not payload:
-        return ()
-    entries = payload.get("masks")
-    if not isinstance(entries, list):
-        return ()
-    masks: list[sandbox_bwrap.Mask] = []
-    for entry in entries:
-        if (
-            isinstance(entry, dict)
-            and isinstance(entry.get("path"), str)
-            and isinstance(entry.get("kind"), str)
-        ):
-            masks.append(sandbox_bwrap.Mask(path=entry["path"], kind=entry["kind"]))
-    return tuple(masks)
-
-
-def _binds_from_sandbox(payload: JsonObject | None, mode: str) -> list[str]:
-    if not payload:
-        return []
-    entries = payload.get("binds")
-    if not isinstance(entries, list):
-        return []
-    return [
-        entry["path"]
-        for entry in entries
-        if isinstance(entry, dict)
-        and entry.get("mode") == mode
-        and isinstance(entry.get("path"), str)
-    ]
-
-
 def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
-    """Mail-push private homes must stay writable inside the bwrap boundary."""
+    """Mail-push private homes must stay writable inside the bwrap boundary.
+
+    They live in neutral run scratch, outside the read-only workspace, so the
+    boundary accepts them as an ordinary external writable root.
+    """
     if not ctx.mail_push:
         return []
-    run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
-    return [
-        str(run_path / name)
-        for name in (
-            mail_push.MAIL_PUSH_CODEX_HOME_NAME,
-            mail_push.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
-        )
-        if (run_path / name).is_dir()
-    ]
+    scratch_root = mail_push.mail_push_scratch_root(ctx.registry_root, ctx.run_id)
+    return [str(scratch_root)] if scratch_root.is_dir() else []
 
 
 def _launch_tracked_process(
@@ -2040,7 +2032,7 @@ def _launch_tracked_process(
     env_overrides: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
-    sandbox: JsonObject | None = None,
+    sandbox: sandbox_bwrap.SandboxPlan | None = None,
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
 ) -> subprocess.Popen[bytes]:
@@ -2049,7 +2041,11 @@ def _launch_tracked_process(
     )
     for key in drop_env:
         env.pop(key, None)
-    if sandbox:
+    if sandbox is not None:
+        if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
+            raise DelegateError(
+                "invalid_bwrap_plan", "Tracked sandbox requires a validated SandboxPlan."
+            )
         # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
         # resolved), mirroring where the codex-pure seatbelt prefix is applied.
         # Boundary construction and the preflight of the final plan raise
@@ -2060,12 +2056,13 @@ def _launch_tracked_process(
             env=env,
             engine=engine,
             scratch_dir=str(scratch_dir) if scratch_dir is not None else None,
-            masks=_masks_from_sandbox(sandbox),
-            extra_rw_roots=[*_binds_from_sandbox(sandbox, "rw"), *(extra_rw_roots or [])],
-            extra_ro_roots=_binds_from_sandbox(sandbox, "ro"),
-            bwrap_path=sandbox.get("bwrapPath")
-            if isinstance(sandbox.get("bwrapPath"), str)
-            else None,
+            masks=sandbox.masks,
+            extra_rw_roots=[
+                *[bind.path for bind in sandbox.binds if bind.mode == "rw"],
+                *(extra_rw_roots or []),
+            ],
+            extra_ro_roots=[bind.path for bind in sandbox.binds if bind.mode == "ro"],
+            bwrap_path=sandbox.bwrap_path,
         )
         sandbox_bwrap.preflight_plan(argv)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
@@ -2099,8 +2096,7 @@ def _record_tracked_launch_failure(
     prior_capture: TrackedCaptureResult | None = None,
 ) -> None:
     # A launch failure never ran the child, so there is no result to classify.
-    # resultQuality is set to None explicitly so build_state omits the key,
-    # keeping state consistent with the snapshot below (which also omits it).
+    # The canonical record omits resultQuality when no child result exists.
     extra: JsonObject = {
         "error": error.error,
         "message": error.message,
@@ -2130,26 +2126,18 @@ def _record_tracked_launch_failure(
             # replace cancelled with child_launch_failed.
             return
         recorded = True
-        write_state(
-            files.run_path,
-            build_state(
-                ctx,
-                status="failed",
-                exit_code=1,
-                stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
-                stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
-                current=accumulator.current,
-                extra=extra,
-            ),
+        record = build_run_record(
+            ctx,
+            status="failed",
+            accumulator=accumulator,
+            exit_code=1,
+            stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
+            stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
+            current=accumulator.current,
+            extra=extra,
         )
-        snapshot = build_snapshot(ctx, accumulator=accumulator, exit_code=1)
-        snapshot["ok"] = False
-        snapshot["status"] = "failed"
-        # The child never ran, so there is no result quality to report. Remove the
-        # snapshot's default "ok" verdict so launch-failure state and snapshot agree.
-        snapshot.pop("resultQuality", None)
-        snapshot.update({"error": error.error, "message": error.message})
-        write_snapshot(files.run_path, snapshot)
+        record["ok"] = False
+        run_registry.publish_terminal_record_locked(ctx.registry_root, ctx.run_id, record)
     if recorded:
         # A launch failure is a terminal state too; the --notify ping fires
         # outside the registry lock so a slow post cannot hold it.
@@ -2216,6 +2204,7 @@ def _capture_tracked_process(
 
     line_buffer = ""
     stdout_bytes_counter = ByteCounter()
+    stdout_capture: JsonObject | None = {} if ctx.harness == "omp" else None
     stderr_bytes_counter = ByteCounter()
     lines_since_persist = 0
     last_persist_at = time.monotonic()
@@ -2294,8 +2283,12 @@ def _capture_tracked_process(
                 prior_session_id = accumulator.session_id
                 accumulator.ingest_line(line)
                 watchdog.observe_line(line, now=time.monotonic())
-                if accumulator.terminal_status is not None:
+                if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
+                elif accumulator.harness in {"pi", "omp"}:
+                    # A harness-owned retry/new turn supersedes its preceding
+                    # terminal receipt, including a provider backoff interval.
+                    terminal_signal.clear()
                 progress_dirty = True
                 if append_stdout_line_event(line):
                     lines_since_persist += 1
@@ -2317,6 +2310,15 @@ def _capture_tracked_process(
                 current_reason=mail_push_failure_reason,
             )
 
+        def observe_omitted_thinking(line: str) -> None:
+            # Compaction must not disable the existing new-content stall detector.
+            nonlocal progress_dirty
+            watchdog.observe_line(line, now=time.monotonic())
+            progress_dirty = True
+            if time.monotonic() - last_persist_at >= PROGRESS_PERSIST_TIME_INTERVAL_SEC:
+                events_handle.flush()
+                maybe_persist_running()
+
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
@@ -2325,6 +2327,8 @@ def _capture_tracked_process(
                 "max_bytes": TRACKED_STREAM_MAX_BYTES,
                 "limit_signal": limit_signal,
                 "stream": "stdout",
+                "capture_info": stdout_capture,
+                "on_omitted": observe_omitted_thinking,
             },
             daemon=True,
         )
@@ -2435,6 +2439,8 @@ def _capture_tracked_process(
                         stopped_after_completion = True
                     exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
                     break
+            else:
+                terminal_seen_at = None
             if deadline is not None and now >= deadline and not terminal_signal.is_set():
                 _terminate_call_process(
                     process,
@@ -2513,6 +2519,7 @@ def _capture_tracked_process(
             # so the raw event log matches what the accumulator saw.
             accumulator.ingest_line(line_buffer)
             append_stdout_line_event(line_buffer)
+        accumulator.finish_stream()
         error: str | None = None
         message: str | None = None
         if stall_detail is not None:
@@ -2528,7 +2535,7 @@ def _capture_tracked_process(
             error = "output_limit_exceeded"
             message = (
                 f"Child {limit_signal.stream or 'output'} exceeded the tracked output limit "
-                f"of {TRACKED_STREAM_MAX_BYTES} bytes."
+                f"of {limit_signal.limit or TRACKED_STREAM_MAX_BYTES} bytes."
             )
     return TrackedCaptureResult(
         accumulator=accumulator,
@@ -2543,10 +2550,13 @@ def _capture_tracked_process(
         error=error,
         message=message,
         output_limit_stream=limit_signal.stream if output_limited else None,
-        output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
+        output_limit_bytes=(limit_signal.limit or TRACKED_STREAM_MAX_BYTES)
+        if output_limited
+        else None,
         stopped_after_completion=stopped_after_completion,
         stall=stall_detail,
         zero_commit_health=zero_commit_health,
+        stdout_capture=stdout_capture,
     )
 
 
@@ -2644,6 +2654,7 @@ def record_mail_push_degradation(
     warning = f"{MAIL_PUSH_WARNING_PREFIX} for {engine}: {reason[:200]}."
     run_path = run_registry.run_directory(registry_root, run_id)
     with run_registry.registry_lock(registry_root):
+        run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
         state = run_registry.load_run_state_or_none(registry_root, run_id) or {}
         if state.get("mailPushDegraded") is True:
             existing = state.get("mailPushWarning")
@@ -2655,31 +2666,21 @@ def record_mail_push_degradation(
         if warning not in warnings:
             warnings.append(warning)
         state["warnings"] = warnings
-        run_registry.write_json_atomic(run_path / STATE_FILE, state)
         event = {"kind": MAIL_PUSH_EVENT_KIND, "message": warning}
         with open_events_log(run_path) as handle:
             append_event(handle, event)
             handle.flush()
-        snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
-        if isinstance(snapshot, dict):
-            snapshot = dict(snapshot)
-            snapshot_warnings = [
-                item for item in snapshot.get("warnings", []) if isinstance(item, str)
-            ]
-            if warning not in snapshot_warnings:
-                snapshot_warnings.append(warning)
-            snapshot["warnings"] = snapshot_warnings
-            recent_events = snapshot.get("recentEvents")
-            if not isinstance(recent_events, list):
-                recent_events = []
-            recent_events = [item for item in recent_events if isinstance(item, dict)]
-            total = snapshot.get("eventsTotal")
-            recent_events.append(event)
-            snapshot["recentEvents"] = recent_events[-harness_events.EVENT_LIMIT :]
-            snapshot["eventsTotal"] = total + 1 if isinstance(total, int) else len(recent_events)
-            snapshot["eventsTruncated"] = snapshot["eventsTotal"] > harness_events.EVENT_LIMIT
-            snapshot["eventsLimit"] = harness_events.EVENT_LIMIT
-            run_registry.write_snapshot(run_path, snapshot)
+        recent_events = state.get("recentEvents")
+        if not isinstance(recent_events, list):
+            recent_events = []
+        recent_events = [item for item in recent_events if isinstance(item, dict)]
+        total = state.get("eventsTotal")
+        recent_events.append(event)
+        state["recentEvents"] = recent_events[-harness_events.EVENT_LIMIT :]
+        state["eventsTotal"] = total + 1 if isinstance(total, int) else len(recent_events)
+        state["eventsTruncated"] = state["eventsTotal"] > harness_events.EVENT_LIMIT
+        state["eventsLimit"] = harness_events.EVENT_LIMIT
+        write_state(run_path, state)
     return warning
 
 
@@ -2848,6 +2849,8 @@ def _finalize_tracked_run(
         signal_text=signal_text,
         extra=merged_extra,
     )
+    if failure is not None and failure.code == "child_failed":
+        failure = _unclassified_provider_failure(capture.accumulator) or failure
     if ctx.followup_of is not None:
         session_failure = child_failures.classify_followup_session_failure(signal_text, ctx.engine)
         if session_failure is not None:
@@ -2999,9 +3002,14 @@ def _finalize_tracked_run(
             report_written=report_written,
             extra=persisted_extra,
         )
+    persisted_exit_code = persisted_extra.get("exitCode")
     return TrackedFinalization(
         status=persisted_status,
-        exit_code=exit_code,
+        exit_code=(
+            persisted_exit_code
+            if isinstance(persisted_exit_code, int) and not isinstance(persisted_exit_code, bool)
+            else exit_code
+        ),
         report_written=report_written,
         extra=persisted_extra,
     )
@@ -3079,6 +3087,13 @@ def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulat
     # Redacted here rather than at each call site: this is the only classifier
     # input that is not already scrubbed, and the classified message reaches
     # state.json, the snapshot, and the completion report.
+    terminal = accumulator.terminal_event or {}
+    if accumulator.harness in {"pi", "omp"} and terminal.get("status") == "failed":
+        reason = terminal.get("reason")
+        if isinstance(reason, str) and reason:
+            # Retried turns remain in the diagnostic event history, but an
+            # earlier auth/quota error must not classify a different final failure.
+            return redaction.redact_string(reason)
     events = list(accumulator.events)
     for kind in ("error", "run.completed"):
         latest = accumulator.events.last_by_kind.get(kind)
@@ -3326,7 +3341,7 @@ def _run_single_tracked_attempt(
                     )
                 write_state(
                     files.run_path,
-                    build_state(
+                    build_run_record(
                         ctx,
                         status="running",
                         pid=process.pid,
@@ -3478,6 +3493,32 @@ def _merge_tracked_attempt_captures(
         prior_capture.accumulator.structured_events_seen
         + current_capture.accumulator.structured_events_seen
     )
+    # The stream diagnostics are per-attempt counters. A retry or auth fallback
+    # replaces the accumulator, so anything not carried here is lost: a run whose
+    # first attempt hit malformed stdout or an unknown event type would report a
+    # clean stream after the retry, which is the exact silence these counters
+    # exist to break.
+    accumulator.malformed_lines = (
+        prior_capture.accumulator.malformed_lines + current_capture.accumulator.malformed_lines
+    )
+    accumulator.malformed_samples = [
+        *prior_capture.accumulator.malformed_samples,
+        *current_capture.accumulator.malformed_samples,
+    ][: harness_events.MALFORMED_SAMPLE_LIMIT]
+    merged_unhandled = dict(prior_capture.accumulator.unhandled_event_types)
+    truncated = (
+        prior_capture.accumulator.unhandled_event_types_truncated
+        or current_capture.accumulator.unhandled_event_types_truncated
+    )
+    for name, count in current_capture.accumulator.unhandled_event_types.items():
+        if name in merged_unhandled:
+            merged_unhandled[name] += count
+        elif len(merged_unhandled) >= harness_events.UNHANDLED_EVENT_TYPE_LIMIT:
+            truncated = True
+        else:
+            merged_unhandled[name] = count
+    accumulator.unhandled_event_types = merged_unhandled
+    accumulator.unhandled_event_types_truncated = truncated
     return replace(
         current_capture,
         accumulator=accumulator,
@@ -3656,14 +3697,35 @@ def _execute_tracked(
         _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)
     started = time.monotonic()
     deadline = None if timeout is None else started + timeout
-    run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
+    scratch_profile = (
+        f"delegate_safe_{os.urandom(16).hex()}"
+        if ctx.engine == "codex" and files.scratch_dir is not None
+        else None
+    )
+    run_argv = (
+        _codex_argv_with_scratch(argv, files.scratch_dir, permission_profile=scratch_profile)
+        if ctx.engine == "codex"
+        else argv
+    )
+    scratch_permissions: JsonObject | None = None
+    if ctx.engine == "codex" and run_argv != argv:
+        scratch_permissions = {
+            "profile": scratch_profile,
+            "base": ":read-only",
+            "writableRoots": [str(files.scratch_dir.resolve(strict=True))],
+        }
+        ctx = replace(ctx, scratch_permissions=scratch_permissions)
     run_manifest_argv = (
-        _codex_argv_with_scratch(manifest_argv, files.scratch_dir)
+        _codex_argv_with_scratch(
+            manifest_argv, files.scratch_dir, permission_profile=scratch_profile
+        )
         if ctx.engine == "codex" and manifest_argv is not None
         else manifest_argv
     )
     if ctx.engine == "codex" and files.scratch_dir is not None:
-        write_manifest(files.run_path, build_manifest(ctx, run_manifest_argv or run_argv))
+        manifest = build_manifest(ctx, run_manifest_argv or run_argv)
+        manifest["scratchPath"] = str(files.scratch_dir)
+        write_manifest(files.run_path, manifest)
     sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         run_argv,
@@ -4064,6 +4126,31 @@ def _execute_tracked(
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
+    if scratch_permissions is not None:
+        final_extra["scratchPermissions"] = scratch_permissions
+        diagnostic = profiles.read_bounded_stderr_tail(files.stderr_log).lower()
+        if capture.exit_code != 0 and any(
+            token in diagnostic
+            for token in (
+                "--strict-config",
+                "unknown configuration field",
+                "default_permissions",
+                "permission profile",
+            )
+        ):
+            final_extra.update(
+                error="codex_scratch_permissions_unavailable",
+                message="Codex refused the read-only scratch permissions. Use Codex 0.153.4 or later and fix unsupported config fields; no permissive fallback was used.",
+                nextActions=[
+                    "codex --version",
+                    "Check Codex config compatibility with --strict-config.",
+                ],
+            )
+    if capture.stdout_capture is not None:
+        final_extra["stdoutCapture"] = capture.stdout_capture
+        capture_warning = stream_capture.capture_warning(capture.stdout_capture)
+        if capture_warning is not None:
+            _append_unique(final_warnings, capture_warning)
     if final_warnings:
         final_extra["warnings"] = final_warnings
     if capture.output_limit_stream is not None:
@@ -4275,6 +4362,8 @@ def _bounded_call_communicate(
     max_stdout: int,
     max_stderr: int,
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    *,
+    stdout_capture: JsonObject | None = None,
 ) -> tuple[bytes, bytes]:
     """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout.
 
@@ -4298,25 +4387,20 @@ def _bounded_call_communicate(
         message: str,
         stream: str,
     ) -> None:
+        capture = stream_capture.BoundedCapture(
+            buf.write, limit, compact_omp=stream == "stdout" and stdout_capture is not None
+        )
         try:
-            while not overflow.is_set():
-                chunk = pipe.read(65536)
-                if not chunk:
-                    break
-                available = limit - buf.tell()
-                if available <= 0:
-                    overflow_message[0] = message
-                    overflow_stream[0] = stream
-                    overflow.set()
-                    break
-                if len(chunk) > available:
-                    buf.write(chunk[:available])
-                    overflow_message[0] = message
-                    overflow_stream[0] = stream
-                    overflow.set()
-                    break
-                buf.write(chunk)
+            stream_capture.drain_bounded(lambda: pipe.read(65536), capture, stop=overflow.is_set)
+        except stream_capture.CaptureLimit as exc:
+            overflow_message[0] = (
+                f"Child call {stream} exceeded {exc}." if exc.kind != "retained" else message
+            )
+            overflow_stream[0] = stream
+            overflow.set()
         finally:
+            if stream == "stdout" and stdout_capture is not None:
+                stdout_capture.update(capture.payload())
             with contextlib.suppress(OSError):
                 pipe.close()
 
@@ -4432,6 +4516,10 @@ def _bounded_call_communicate(
     else:
         _terminate_call_process(process, grace_seconds=process_group_grace_seconds)
     _join_io_threads()
+    # A short-lived leader can exit before its drains observe the final overflow.
+    if overflow.is_set():
+        stream = overflow_stream[0] or "stdout"
+        raise RunnerLaunchError(f"call_{stream}_overflow", overflow_message[0], 1)
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
 
@@ -4478,7 +4566,9 @@ def _parse_claude_call_json(
         events = json.loads(stdout_text)
     except json.JSONDecodeError:
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
-    if not isinstance(events, list):
+    if isinstance(events, dict):
+        events = [events]
+    elif not isinstance(events, list):
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
     result = next(
         (
@@ -4488,13 +4578,25 @@ def _parse_claude_call_json(
         ),
         None,
     )
-    if not isinstance(result, dict) or not isinstance(result.get("result"), str):
+    if not isinstance(result, dict):
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    result_text = harness_events.claude_result_text(result)
+    if result_text is None:
+        # `claude_result_text` requires a non-blank string because a blank one is
+        # not an answer worth publishing as assistant text. For the call surface
+        # it still is a valid result: claude's deferred-tool-use branch emits
+        # `stop_reason: "tool_deferred"` with `is_error: false` and `result: ""`.
+        # Only a `result` event with no string `result` at all is a broken
+        # transport, and `is_error` remains what decides the exit code.
+        raw_result = result.get("result")
+        if not isinstance(raw_result, str):
+            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        result_text = raw_result
     denials = result.get("permission_denials")
     if pure:
         if not isinstance(denials, list):
             return (
-                result["result"],
+                result_text,
                 1,
                 (),
                 _claude_model_resolved(result),
@@ -4504,7 +4606,7 @@ def _parse_claude_call_json(
             )
         if denials:
             return (
-                result["result"],
+                result_text,
                 1,
                 (),
                 _claude_model_resolved(result),
@@ -4514,7 +4616,7 @@ def _parse_claude_call_json(
             )
     exit_code = 1 if result.get("is_error") is True else 0
     return (
-        result["result"],
+        result_text,
         exit_code,
         (),
         _claude_model_resolved(result),
@@ -4522,6 +4624,17 @@ def _parse_claude_call_json(
         "child_failed" if exit_code else None,
         None,
     )
+
+
+def _unclassified_provider_failure(
+    accumulator: harness_events.StreamAccumulator,
+) -> child_failures.ChildFailure | None:
+    if accumulator.harness not in {"pi", "omp"} or accumulator.terminal_status != "failed":
+        return None
+    reason = (accumulator.terminal_event or {}).get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return child_failures.ChildFailure("provider_error", redaction.redact_string(reason))
 
 
 def _call_failure_details(
@@ -4608,6 +4721,7 @@ def _execute_call_once(
     ephemeral_codex_home: str | None = None
     process: subprocess.Popen[bytes] | None = None
     process_pgid: int | None = None
+    stdout_capture: JsonObject | None = {} if harness == "omp" else None
     try:
         if harness == "codex" and pure:
             if not seatbelt.codex_pure_available():
@@ -4665,6 +4779,7 @@ def _execute_call_once(
                 CALL_STDOUT_MAX_BYTES,
                 CALL_STDERR_MAX_BYTES,
                 process_group_grace_seconds,
+                **({"stdout_capture": stdout_capture} if stdout_capture is not None else {}),
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
@@ -4728,6 +4843,7 @@ def _execute_call_once(
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
+    accumulator.finish_stream()
     if harness == "codex" and structured_output and accumulator.completion_text:
         raw_text = accumulator.completion_text
         text = _bounded_call_fallback_text(raw_text)
@@ -4754,15 +4870,27 @@ def _execute_call_once(
         text = _bounded_call_fallback_text(raw)
         text_chars = len(raw)
         text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
+    result_exit_code = process.returncode
+    if result_exit_code == 0 and (
+        accumulator.terminal_status in {"failed", "cancelled"}
+        or accumulator.provider_terminal_state is not None
+    ):
+        result_exit_code = 1
     error, message = _call_failure_details(
-        process.returncode,
+        result_exit_code,
         "\n".join(
             part for part in (stderr_tail, _accumulator_failure_signal_text(accumulator)) if part
         ),
     )
+    if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
+        error, message = failure.code, failure.message
+    if stdout_capture is not None:
+        warning = stream_capture.capture_warning(stdout_capture)
+        if warning is not None:
+            warnings = (*warnings, warning)
     return CallResult(
         text=text,
-        exit_code=process.returncode,
+        exit_code=result_exit_code,
         duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,
@@ -4773,6 +4901,7 @@ def _execute_call_once(
         error=error,
         message=message,
         usage=accumulator.usage or {"basis": "unavailable"},
+        stdout_capture=stdout_capture,
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0

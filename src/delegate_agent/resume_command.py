@@ -8,7 +8,7 @@ prefixes, isolation, registration), which is what makes the resumed Run's own
 ``prompt.txt`` the synthesized continuation and chains legal.
 
 Trust model: every record file read here — prompt.txt, completion-report.md,
-snapshot.json, manifest.json — is potentially child-tampered after write (work
+state.json, manifest.json — is potentially child-tampered after write (work
 children run inside the workspace that owns ``.delegate``), so all reads go
 through the bounded no-follow reader and refuse symlinks, non-regular files,
 and oversized content. Resume is not a trust boundary; see
@@ -159,6 +159,17 @@ def _read_record_json(path: Path, *, allow_missing: bool = False) -> JsonObject 
     return data
 
 
+def _load_snapshot_record(registry_root: Path, run_id: str) -> JsonObject | None:
+    try:
+        _read_record_json(
+            run_registry.run_directory(registry_root, run_id) / run_registry.SNAPSHOT_FILE,
+            allow_missing=True,
+        )
+        return run_registry.load_run_snapshot(registry_root, run_id)
+    except run_registry.RegistryJsonError as exc:
+        raise _record_invalid(str(exc)) from exc
+
+
 def _manifest_str(manifest: JsonObject, key: str) -> str | None:
     value = manifest.get(key)
     return value if isinstance(value, str) and value else None
@@ -264,44 +275,23 @@ def _load_history(
     registry_root: Path,
     run_id: str,
 ) -> tuple[str, str, str]:
-    """Return (effective_status, history_kind, history_text) under the registry lock.
-
-    The completion report is trusted as a whole document ONLY when the run is
-    terminal under the lock: a non-Delegate or wedged writer can still leave a
-    partial file. Still effectively stale after the
-    locked recheck → assemble from the snapshot only (snapshots are atomically
-    replaced).
-    """
     run_path = run_registry.run_directory(registry_root, run_id)
-    with run_registry.registry_lock(registry_root):
-        state = _read_record_json(
-            run_path / run_registry.STATE_FILE,
-            allow_missing=True,
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    effective = run_registry.effective_status(state)
+    if effective == run_registry.STATUS_RUNNING:
+        raise DelegateError(
+            "resume_source_running",
+            "The source run is still running; wait for it or cancel it first.",
         )
-        effective = run_registry.effective_status(state)
-        if effective == run_registry.STATUS_RUNNING:
-            raise DelegateError(
-                "resume_source_running",
-                "The source run is still running; wait for it or cancel it first.",
-            )
-        if effective not in RESUMABLE_STATUSES:
-            raise _record_invalid(
-                f"The source run has status {effective!r}, which is not resumable."
-            )
-        if effective in run_registry.TERMINAL_STATUSES:
-            try:
-                report = _read_record_text(run_path / run_registry.COMPLETION_REPORT_FILE)
-                return effective, "report", report
-            except BoundedReadError:
-                pass  # No report captured; fall through to the snapshot digest.
+    if effective not in RESUMABLE_STATUSES:
+        raise _record_invalid(f"The source run has status {effective!r}, which is not resumable.")
+    if effective in run_registry.TERMINAL_STATUSES:
         try:
-            snapshot = _read_record_json(
-                run_path / run_registry.SNAPSHOT_FILE,
-                allow_missing=True,
-            )
+            report = _read_record_text(run_path / run_registry.COMPLETION_REPORT_FILE)
+            return effective, "report", report
         except BoundedReadError:
-            snapshot = None
-        return effective, "digest", _snapshot_digest(snapshot)
+            pass
+    return effective, "digest", _snapshot_digest(_load_snapshot_record(registry_root, run_id))
 
 
 def _resolve_resume_target(registry_root: Path, handle: str) -> tuple[str, str]:
@@ -463,9 +453,7 @@ def _attachment_owner_target(
             owner_state = _read_record_json(
                 owner_path / run_registry.STATE_FILE, allow_missing=True
             )
-            owner_snapshot = _read_record_json(
-                owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
-            )
+            owner_snapshot = _load_snapshot_record(registry_root, candidate_id)
             if not worktree_records._is_persistent_worktree_run(
                 owner_state, owner_manifest, owner_snapshot
             ):
@@ -523,9 +511,7 @@ def revalidate_attached_target(
                 "worktree_missing", "The attached worktree owner is no longer available."
             )
         owner_state = _read_record_json(owner_path / run_registry.STATE_FILE, allow_missing=True)
-        owner_snapshot = _read_record_json(
-            owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
-        )
+        owner_snapshot = _load_snapshot_record(registry_root, owner_id)
         target = _validate_attach_target(
             registry_root, owner_id, owner_manifest, owner_state, owner_snapshot
         )
@@ -589,8 +575,8 @@ def build_resume_plan(
     *,
     stderr: TextIO,
 ) -> ResumePlan:
-    opts = parsed.resume
-    if opts is None:
+    opts = parsed.payload
+    if not isinstance(opts, ResumeOptions):
         raise DelegateError("invalid_command", "resume options are required.")
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -621,10 +607,7 @@ def build_resume_plan(
         run_path / run_registry.STATE_FILE,
         allow_missing=True,
     )
-    source_snapshot = _read_record_json(
-        run_path / run_registry.SNAPSHOT_FILE,
-        allow_missing=True,
-    )
+    source_snapshot = _load_snapshot_record(registry_root, run_id)
     source_engine = _manifest_str(manifest, "engine") or _manifest_str(manifest, "harness")
     mode = _manifest_str(manifest, "mode")
     if source_engine not in KNOWN_ENGINES or mode not in VALID_MODES:
@@ -879,6 +862,7 @@ def build_resume_plan(
         persona_record_path=persona_record_path,
         mail_push=opts.mail_push,
         continuity_mode=continuity_mode,
+        warnings=opts.warnings,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",
@@ -892,7 +876,7 @@ def build_resume_plan(
             group=group,
             notify=global_options.notify,
         ),
-        launch=launch,
+        payload=launch,
     )
 
     for note in notes:
@@ -917,14 +901,10 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
         source_git_root = attach.get("sourceGitRoot")
         updated = replace(
             updated,
-            isolation_context=IsolationContext(
-                source_workspace=request.workspace,
-                effective_isolation="worktree",
-                isolation_mode="worktree",
-                isolation_lifecycle="attached",
-                preserved_workspace=False,
-                planned_branch=str(attach.get("branch") or "") or None,
-                planned_execution_cwd=str(attach.get("path") or "") or None,
+            isolation_context=IsolationContext.attached(
+                request.workspace,
+                branch=str(attach.get("branch") or ""),
+                execution_cwd=str(attach.get("path") or ""),
                 source_git_root=str(source_git_root) if isinstance(source_git_root, str) else None,
                 attachment={
                     "sourceRunId": attach.get("sourceRunId"),

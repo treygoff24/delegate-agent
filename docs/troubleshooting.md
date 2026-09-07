@@ -12,7 +12,7 @@ python3 bin/delegate.py ...
 Real runs require the selected child runtime on `PATH`:
 
 ```bash
-command -v agent
+cursor-agent --version
 command -v droid
 command -v codex
 command -v claude
@@ -111,7 +111,7 @@ $EDITOR ~/.delegate/config.json
 Use aliases like `reviewer` or `implementer` in commands:
 
 ```bash
-delegate droid reviewer safe "Investigate only. Do not edit."
+delegate droid safe --model reviewer "Investigate only. Do not edit."
 ```
 
 If editing `~/.delegate/config.json` does not change behavior, check the active
@@ -191,13 +191,14 @@ delegate --json models pi --live
 
 ## Oh My Pi exits after only a session event
 
-Oh My Pi 17.0.4 was observed to exit successfully without processing piped
-stdin in non-interactive JSON mode. Delegate therefore passes the resolved
-prompt as a positional argument. Confirm the direct positional form works, then
-inspect Delegate's planned argv:
+Oh My Pi 18.1.13 reads a piped prompt in every non-protocol mode, including
+`--mode json`, and Delegate delivers the prompt on stdin. Whitespace-only stdin
+counts as no prompt at all, and the read blocks until EOF, so a caller that
+holds the pipe open leaves the child waiting. Confirm the direct piped form
+works, then inspect Delegate's planned argv:
 
 ```bash
-omp -p --mode json --no-session "Reply with OK"
+printf '%s\n' "Reply with OK" | omp -p --mode json --no-session
 delegate --json dry-run omp safe --model provider/model-id "Review only."
 delegate --json models omp --live
 ```
@@ -293,7 +294,7 @@ to `true` in config and use `--no-progress` to override for one launch:
 
 ```bash
 delegate --json claude safe --progress "Review only. Do not edit."
-delegate --json droid reviewer work --progress "Implement the scoped change."
+delegate --json droid work --model reviewer --progress "Implement the scoped change."
 ```
 
 Progress messages go to stderr. They are intentionally bounded, credential-scrubbed
@@ -301,9 +302,12 @@ labels before printing, and do not include raw child output.
 `--progress` is incompatible with `--pass-through`, which already streams raw
 child output.
 
-OpenCode v1.17.17 buffers stdout until completion. A tracked OpenCode run can
-remain at "no events yet" while it is still running; the final events appear
-after the child exits.
+A tracked OpenCode run that sits at "no events yet" while it is still running was
+once attributed to OpenCode buffering stdout until completion, observed against
+v1.17.17. That did not reproduce against the emit pattern OpenCode's runner uses,
+and the retest ran against a standalone Bun rather than the shipped binary, so
+treat the cause as unsettled and check `--print-logs` stderr before concluding
+the child is stuck.
 
 ## Need one-hop output instead of a tracked run
 
@@ -313,7 +317,7 @@ require a later `snapshot`/`run-output` lookup:
 
 ```bash
 delegate --json codex call "Summarize this context."
-delegate --json droid reviewer call --prompt-file prompt.md
+delegate --json droid call --model reviewer --prompt-file prompt.md
 ```
 
 Call mode returns captured assistant text in JSON `text` when available. Use
@@ -447,14 +451,30 @@ delegate run-output <alias-or-runId> --stdout --tail 80 --max-chars 20000
 ```
 
 Non-raw stdout/stderr output is bounded by both line tail and character cap.
-Use `--raw` only when you intentionally need the full stream; it is incompatible
+Use `--raw` only when you intentionally need the full retained stream; it is incompatible
 with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
+### OMP thinking compaction and output limits
+
+Long OMP thinking streams no longer consume the entire retained-output budget.
+Delegate keeps the first 64 KiB of recognized stripped `thinking_delta` records,
+then omits only that diagnostic shape. A `delegate.capture` line in raw stdout
+and a result warning disclose the omission; `stdoutCapture` in the result or
+snapshot reports byte counts, omitted records, limits, and a transport digest.
+These counters cover the final attempt, not all retries combined.
+
+The limits remain finite: 16 MiB retained stdout, 16 MiB per record, and 256 MiB
+total OMP stdout transport per attempt. Stderr stays capped at 16 MiB. Unknown
+records, malformed JSON, useful output, and metadata-bearing events still count
+against the retained cap. Check `stdoutCapture.limitKind` to distinguish a
+retained-output, record, or transport limit; an endlessly verbose child still
+fails and is terminated. `--raw` cannot recover omitted thinking diagnostics.
+
 ## Parsing `events.jsonl` nested JSON
 
-Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.jsonl`
+Tracked Runs mirror retained child stdout lines into `.delegate/runs/<runId>/events.jsonl`
 as `stream.line` records, up to 500 lines followed by a
 `stream.lines_truncated` marker. Lines longer than 500 characters are clipped
 with a `…` sentinel and marked `truncated: true` /
@@ -470,7 +490,9 @@ jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjso
 
 Prefer `delegate snapshot` / `run-output` for parent-facing summaries. Use the
 raw event log only for diagnostics, and treat it as sensitive: retained event
-text is not redacted.
+text is not redacted. The private `state.json` record also holds bounded
+`recentEvents` diagnostics that can contain raw child text. Public snapshot
+output is redacted by default; raw record files are not safe to share.
 
 ## Structured / JSON-only final output
 
@@ -536,7 +558,7 @@ Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 Integration tests that launch real child agents should be separate from required CI.
@@ -561,6 +583,9 @@ that later vanishes.
 ## Node/tsx children fail with EINVAL on Unix IPC sockets
 
 Delegate gives each run a private scratch `TMPDIR` whose deep path can exceed
-the macOS `sun_path` limit for socket-creating tools. Workaround: have the
-child set `TMPDIR=/tmp` (or another short dir) for those tools. The private
-scratch dir is deliberate isolation, not a bug.
+the macOS `sun_path` limit for socket-creating tools. Current releases place
+scratch under a shorter neutral global root rather than the workspace registry.
+Do not override `TMPDIR` in a safe run: an arbitrary replacement is outside the
+write grant. If the neutral path still exceeds a tool's socket limit, shorten
+the user-home path or report the exact socket path so Delegate can reduce its
+owned prefix without broadening write access.

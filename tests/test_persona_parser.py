@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import cli, cli_parser, profile_guard, request_build
+from delegate_agent import cli_parser, profile_guard, request_build
+from delegate_agent import config as delegate_config
 from delegate_agent.errors import DelegateError
 
 ENGINES = ("cursor", "kimi", "codex", "claude", "grok", "devin", "opencode", "pi", "omp")
@@ -19,24 +20,24 @@ class PersonaParserTests(unittest.TestCase):
             argv = [engine, "work"] if engine != "droid" else ["droid", "work"]
             with self.subTest(engine=engine):
                 parsed = cli_parser.parse_cli([*argv, "--persona", "editor", "prompt"])
-                self.assertEqual(parsed.launch.persona, "editor")
-                self.assertFalse(parsed.launch.no_persona)
-                self.assertFalse(parsed.launch.allow_repo_persona)
+                self.assertEqual(parsed.payload.persona, "editor")
+                self.assertFalse(parsed.payload.no_persona)
+                self.assertFalse(parsed.payload.allow_repo_persona)
 
                 no_persona = cli_parser.parse_cli([*argv, "--no-persona", "prompt"])
-                self.assertIsNone(no_persona.launch.persona)
-                self.assertTrue(no_persona.launch.no_persona)
+                self.assertIsNone(no_persona.payload.persona)
+                self.assertTrue(no_persona.payload.no_persona)
 
                 allowed = cli_parser.parse_cli(
                     [*argv, "--allow-repo-persona", "--persona", "editor", "prompt"]
                 )
-                self.assertTrue(allowed.launch.allow_repo_persona)
+                self.assertTrue(allowed.payload.allow_repo_persona)
 
         for engine in (*ENGINES, "droid"):
             argv = [engine, "work"] if engine != "droid" else ["droid", "work"]
             parsed = cli_parser.parse_cli(["dry-run", *argv, "--persona", "editor", "prompt"])
             with self.subTest(dry_run_engine=engine):
-                self.assertEqual(parsed.launch.persona, "editor")
+                self.assertEqual(parsed.payload.persona, "editor")
 
     def test_parse_prompt_tail_returns_all_persona_fields(self):
         parsed = cli_parser.parse_prompt_tail(
@@ -62,7 +63,9 @@ class PersonaParserTests(unittest.TestCase):
         parsed = cli_parser.parse_cli(["run", "--input-json", str(path)])
         sentinel = object()
         with mock.patch.object(request_build, "build_request", return_value=sentinel) as built:
-            result = request_build.request_from_input_json(parsed, cli.DEFAULT_CONFIG)
+            result = request_build.request_from_input_json(
+                parsed, delegate_config.embedded_default_config()
+            )
         return result, built
 
     def test_input_json_persona_null_absent_and_nonempty_matrix_on_non_opencode(self):
@@ -93,7 +96,9 @@ class PersonaParserTests(unittest.TestCase):
                 )
                 parsed = cli_parser.parse_cli(["run", "--input-json", str(path)])
                 with self.assertRaises(DelegateError) as caught:
-                    request_build.request_from_input_json(parsed, cli.DEFAULT_CONFIG)
+                    request_build.request_from_input_json(
+                        parsed, delegate_config.embedded_default_config()
+                    )
                 self.assertEqual(caught.exception.error, "invalid_allow_repo_persona")
 
     def test_input_json_empty_persona_is_an_error(self):
@@ -111,7 +116,9 @@ class PersonaParserTests(unittest.TestCase):
                 )
                 parsed = cli_parser.parse_cli(["run", "--input-json", str(path)])
                 with self.assertRaises(DelegateError) as caught:
-                    request_build.request_from_input_json(parsed, cli.DEFAULT_CONFIG)
+                    request_build.request_from_input_json(
+                        parsed, delegate_config.embedded_default_config()
+                    )
                 self.assertEqual(caught.exception.error, "invalid_persona")
 
     def _assert_refusal(self, argv: list[str], error: str):
@@ -119,7 +126,7 @@ class PersonaParserTests(unittest.TestCase):
         with self.assertRaises(DelegateError) as caught:
             request_build.request_from_parsed(
                 parsed,
-                cli.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
                 io.StringIO(""),
                 io.StringIO(),
             )

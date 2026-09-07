@@ -13,6 +13,7 @@ from delegate_agent import (
     mail,
     profiles,
     retention,
+    run_context,
     run_metadata,
     run_registry,
     safe_workspace,
@@ -275,26 +276,16 @@ def _build_persistent_worktree_run_context(
         if isinstance(dirty_warnings, list)
         else request.warnings
     )
-    return delegate_runner.RunContext(
+    return run_context.from_request(
+        request,
         registry_root=preflight.registry_root,
         run_id=run_id,
         alias=alias,
-        harness=request.engine,
-        engine=request.engine,
-        mode=request.mode,
-        model=request.model,
         source_cwd=execution.source_workspace.path,
         execution_cwd=worktree_path,
         workspace_kind=execution.source_workspace.kind,
         isolated_workspace=True,
-        started_at=run_registry.utc_now_iso(),
-        model_alias=request.model_alias,
-        model_resolved=request.model,
-        model_requested=request.model_requested,
-        capability_model=request.capability_model,
-        capability_model_source=request.capability_model_source,
         creation_context=creation_context,
-        structured_output=request.output_schema is not None,
         source_git_root=iso_ctx.source_git_root or preflight.source_git_root,
         isolation_mode=iso_ctx.isolation_mode,
         effective_isolation=iso_ctx.effective_isolation,
@@ -303,37 +294,12 @@ def _build_persistent_worktree_run_context(
         branch=branch,
         worktree_status="present",
         warnings=merged_warnings,
-        reasoning_effort=request.reasoning_effort,
-        requested_reasoning_effort=request.requested_reasoning_effort,
-        reasoning_effort_source=request.reasoning_effort_source,
-        reasoning_capability_source=request.reasoning_capability_source,
-        reasoning_capability_evidence=request.reasoning_capability_evidence,
-        reasoning_transport=request.reasoning_transport,
-        fast=request.fast,
-        prompt_transport=request.prompt_transport,
-        forbid_commit=request.forbid_commit,
-        progress_initial_delay_sec=request.progress_initial_delay_sec,
-        progress_interval_sec=request.progress_interval_sec,
-        stall_seconds=request.stall_seconds,
         env_overrides={
             **(request.env_overrides or {}),
             "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
             "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
             "WORKSPACE_ROOT": str(Path(worktree_path).resolve()),
         },
-        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
-            request.profile_resolution,
-            {
-                **(request.env_overrides or {}),
-                "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
-                "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
-                "WORKSPACE_ROOT": str(Path(worktree_path).resolve()),
-            },
-        ),
-        auth_profile=request.auth_profile,
-        fallback_auth_profile=request.fallback_auth_profile,
-        codex_failover_identity=request.codex_failover_identity,
-        codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
         retire_worktree_on_completion=delegate_config.retire_worktree_on_completion(
@@ -342,31 +308,6 @@ def _build_persistent_worktree_run_context(
         retirement_ignore_globs=delegate_config.retirement_ignore_globs(execution.config),
         worktree_auto_prune_on_completion=auto_prune_enabled,
         worktree_auto_prune_merged_older_than_days=auto_prune_days,
-        mail_push=request.mail_push,
-        resumable=request.resumable,
-        followup_of=request.followup_of,
-        resume_session_id=request.resume_session_id,
-        structured_retry=request.structured_retry,
-        group=request.group,
-        notify=request.notify,
-        workflow_agent_key=request.workflow_agent_key,
-        call_read_only=request.call_read_only or request.pure,
-        pure=request.pure,
-        prompt_instruction_mode=request.prompt_instruction_mode,
-        source_prompt=request.source_prompt,
-        progress_requested=request.progress_requested,
-        timeout_seconds=request.timeout,
-        registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
-        output_schema_text=request.output_schema_record_text,
-        agent=request.agent,
-        resumed_from=request.resumed_from,
-        persona_name=request.persona_name,
-        persona_source=request.persona_source,
-        persona_transport=request.persona_transport,
-        persona_digest=request.persona_digest,
-        persona_file=request.persona_file,
-        persona_text=request.persona_text,
-        account_binding_command=request.account_binding_command,
     )
 
 
@@ -376,8 +317,9 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
-    if request.mode == "work" and delegate_config.mail_enabled(execution.config):
-        mail.prepare_mail_storage(preflight.registry_root)
+    mail.prepare_launch_storage(
+        request, execution.config, preflight.registry_root, execution.stderr
+    )
     _initiator_root, request.env_overrides = run_metadata.apply_initiator_root_env(
         request.env_overrides
     )
@@ -467,7 +409,7 @@ def _register_persistent_worktree_run(
 
     delegate_runner.write_state(
         run_path,
-        delegate_runner.build_state(
+        delegate_runner.build_run_record(
             pre_ctx,
             status="creating_isolation",
             extra={"plannedBranch": branch, "plannedExecutionCwd": worktree_path},
@@ -503,35 +445,19 @@ def _record_persistent_worktree_failure(
     else:
         extra["plannedBranch"] = registration.branch
         extra["plannedExecutionCwd"] = registration.worktree_path
-    failed_state = delegate_runner.build_state(
-        registration.pre_ctx,
-        status="failed",
-        extra=extra,
-    )
-    delegate_runner.write_state(registration.run_path, failed_state)
-
-    failed_snapshot = delegate_runner.build_snapshot(
+    status, _ = delegate_runner._persist_final_progress(
+        registration.run_path,
         registration.pre_ctx,
         accumulator=harness_events.StreamAccumulator(harness=registration.pre_ctx.harness),
+        status=run_registry.STATUS_FAILED,
+        exit_code=1,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        completion_report_written=False,
+        extra={**extra, "resultQuality": None},
     )
-    failed_snapshot["ok"] = False
-    failed_snapshot["error"] = error
-    failed_snapshot["message"] = message
-    failed_snapshot["status"] = "failed"
-    if not worktree_realized:
-        # Pre-creation failure: nothing was realized on disk, so strip the
-        # realized worktree fields build_snapshot derived from the registration
-        # context and record only the planned branch/path. When the worktree
-        # was realized, executionCwd, branch, worktreeStatus, and
-        # worktreeCleanupCommands stay so the operator can inspect and clean up
-        # the preserved worktree.
-        failed_snapshot["plannedBranch"] = registration.branch
-        failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
-        for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
-            failed_snapshot.pop(key, None)
-    delegate_runner.write_snapshot(registration.run_path, failed_snapshot)
     delegate_runner._send_completion_notification(
-        registration.run_path, registration.pre_ctx, "failed"
+        registration.run_path, registration.pre_ctx, status
     )
 
 
@@ -730,7 +656,7 @@ def _launch_child_in_persistent_worktree(
             registration.worktree_path,
         )
         mail_launch = mail.prepare_work_mail_launch(
-            enabled=request.mode == "work" and delegate_config.mail_enabled(execution.config),
+            enabled=mail.launch_enabled(request.mode, execution.config),
             mail_push=request.mail_push,
             engine=request.engine,
             argv=execution_request.argv,
@@ -915,22 +841,24 @@ def _cleanup_partial_worktree(
             if remove_branch:
                 commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
             manual = " && ".join(commands)
-        snapshot_path = run_path / run_registry.SNAPSHOT_FILE
+        state_path = run_path / run_registry.STATE_FILE
         metadata_warning: str | None = None
-        if snapshot_path.exists():
-            try:
-                existing = run_registry.read_json_object(snapshot_path)
+        try:
+            root, run_id = run_path.parent.parent, run_path.name
+            with run_registry.registry_lock(root):
+                run_registry.reconcile_finalize_wal_locked(root, run_id)
+                existing = run_registry.load_run_state(root, run_id)
                 if existing is not None:
                     existing["cleanupFailed"] = True
                     existing["manualCleanup"] = manual
                     if guarded:
                         existing["cleanupRefused"] = "source_root_guard"
-                    run_registry.write_snapshot(run_path, existing)
-            except (OSError, ValueError) as exc:
-                metadata_warning = (
-                    "warning: partial worktree cleanup failed, and Delegate could not "
-                    f"record cleanup metadata in {snapshot_path}: {exc}"
-                )
+                    run_registry.publish_terminal_record_locked(root, run_id, existing)
+        except (OSError, ValueError) as exc:
+            metadata_warning = (
+                "warning: partial worktree cleanup failed, and Delegate could not "
+                f"record cleanup metadata in {state_path}: {exc}"
+            )
         if metadata_warning is not None:
             print(metadata_warning, file=stderr)
         print(

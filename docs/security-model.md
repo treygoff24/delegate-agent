@@ -108,22 +108,76 @@ Delegate does not control:
 Safe mode is for review and investigation.
 
 - Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
-- Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
-- Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
+- Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only. It does **not** select a Cursor read-only mode: the isolated workspace copy and the safe-review prompt prefix are what make a Cursor safe run review-shaped, and neither is harness-enforced. `cursor call --read-only` is the one Cursor path that takes `--mode ask`, which Cursor documents as read-only and which a live child confirmed by reporting shell access blocked.
+- Codex safe sets `-c approval_policy="never"` inside the `exec` scope; the
+  global `--ask-for-approval` flag is declared on the interactive TUI and never
+  reached `codex exec` at all. Headless Codex defaults to never asking anyway, so
+  the override states the policy rather than changing it. A unique permissions
+  profile extends `:read-only` and grants writes only to tracked scratch,
+  replacing the legacy sandbox flag.
 - Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
-- Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
-- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
+- Droid safe uses Delegate's read-only safety prompt and adds no `--auto` flag, which leaves `droid exec` at its documented read-only autonomy tier: inspection and git reads are allowed, edits, package installs, git writes, and deployments are refused, and an action above the tier stops the run with a non-zero exit and no partial changes. The isolated temporary workspace is a second boundary on top of that, not the only one.
+- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode always runs at auto permission and approves every tool call, so there is no runtime read-only enforcement for Kimi safe. The isolated workspace protects against ordinary relative-path edits, and no further. Kimi 0.40 removed the workspace restriction on the Bash tool's `cwd`, and 0.41 removed the dangerous-command guard, so a Kimi safe run can reach an absolute path outside the throwaway copy. The safety prompt is advisory. A real boundary for Kimi needs the bwrap backend, which now binds `~/.kimi-code` for the child.
 - Grok safe uses Delegate's read-only safety prompt plus Grok `--sandbox read-only` and `--permission-mode dontAsk`. Delegate does not use Grok `plan` mode for safe review. Prompts are delivered via Grok `--prompt-file`.
 - Devin safe is rejected during preflight. Devin may implement filesystem surveys through generic `exec`, which Delegate cannot permit without weakening the read-only boundary; use another safe Harness for filesystem review.
 - OpenCode safe uses `--pure` plus environment-injected runtime enforcement. `OPENCODE_CONFIG_CONTENT` merges after repository config, disables sharing and autoupdate, applies deny-all-but-read/glob/grep permissions globally and to the selected agent, and creates a synthetic `delegate-read-only` agent when none is selected. `OPENCODE_PERMISSION` applies the same tool policy. Delegate re-applies these protected settings after profile resolution. `--pure` also disables repository-local plugins that could otherwise execute code during a safe run.
 - Pi safe enables only the built-in `read` tool and adds `--no-extensions --no-skills --no-prompt-templates --no-approve`. The isolated workspace remains a second filesystem boundary. `pi call --read-only` uses the same argv restrictions.
-- Oh My Pi safe enables only `read` and adds `--no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`. This differs from Pi because Oh My Pi 17.0.4 has no `--no-prompt-templates` or `--no-approve`. The read-only enforcement is **not** `--tools read` — that allowlist is not self-enforcing in Oh My Pi 17.0.4 (the write, bash, and python tools still execute under it alone). The load-bearing flag is `--approval-mode always-ask`: in headless `-p` mode there is no approver present, so every write/exec tool call auto-denies while the built-in `read` capability stays auto-allowed. This is Oh My Pi's analog of Pi's `--no-approve`. It also overrides a hostile project-local `approvalMode: yolo`. `--no-extensions` is the operative extension-discovery kill, `--no-rules` disables rules discovery, and `--no-lsp` closes the LSP formatting path. The isolated workspace remains a second filesystem boundary. `omp call --read-only` uses the same argv restrictions. Because `--tools read` alone does not bind, dropping `--approval-mode always-ask` would silently make Oh My Pi safe mode write-capable; a behavioral write-probe, not an argv-shape assertion, is the gate that this holds.
+- Oh My Pi safe enables only `read` and adds `--no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`. This differs from Pi because Oh My Pi 18.1.13 has no `--no-prompt-templates` or `--no-approve`. The read-only enforcement is **not** `--tools read` — that allowlist is not self-enforcing in Oh My Pi 18.1.13 (the write, bash, and python tools still execute under it alone), confirmed by the behavioral probe last run green on 2026-09-07 against 18.1.13. The load-bearing flag is `--approval-mode always-ask`: in headless `-p` mode there is no approver present, so every write/exec tool call auto-denies while the built-in `read` capability stays auto-allowed. It also overrides a hostile project-local `approvalMode: yolo`. `--no-extensions` is the operative extension-discovery kill, `--no-rules` disables rules discovery, and `--no-lsp` closes the LSP formatting path. `--approval-mode always-ask` is not the analog of Pi's `--no-approve`, and the two are not interchangeable: `--no-approve` controls project trust, which is whether Pi loads project-local settings, resources, packages, and extensions, and it places no restriction on what the model can ask a tool to do. In Pi the only write-blocking flag is `--tools read`; dropping it as redundant would make Pi safe mode write-capable. `--no-approve` earns its place as a supply-chain guard against a hostile repository combined with a global `defaultProjectTrust: "always"`. The isolated workspace remains a second filesystem boundary. `omp call --read-only` uses the same argv restrictions. Because `--tools read` alone does not bind, dropping `--approval-mode always-ask` would silently make Oh My Pi safe mode write-capable; a behavioral write-probe, not an argv-shape assertion, is the gate that this holds.
 - Explicit `--isolation none` is normalized to `auto` with a warning for every currently supported safe engine because it would remove the isolation/config boundary those safe contracts rely on.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
 OpenCode can silently degrade a denied tool request to a text response and still exit `0`.
 A successful process exit does not prove that the requested inspection ran.
+
+#### Codex writable scratch
+
+Tracked Codex read-only launches grant writes only to
+the private neutral path recorded as `manifest.scratchPath`, normally
+`~/.delegate/run-scratch/<registry-hash>/<runId>`. If a valid user home is
+inside a Git worktree, the path uses `/var/tmp/delegate-<uid>/run-scratch/`
+instead. `TMPDIR`, `TMP`, and `TEMP` all point there. The review workspace,
+source files, registry metadata, sibling-run scratch, and symlink targets outside
+the current scratch remain read-only. Cwd, session arguments, AGENTS discovery,
+and Delegate's safe prompt framing are unchanged.
+Tool-network access remains restricted, even when an ambient default profile
+allows it; the offline probe verifies this against a local loopback listener.
+
+The native permissions profile extends `:read-only` and adds one filesystem
+write root. Its high-entropy per-launch name prevents a pre-existing profile
+from merging in unrelated write grants. Manifest and result `scratchPermissions`
+record the exact profile, base, and writable roots. See the official
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+for named filesystem permissions; legacy `sandbox_workspace_write.writable_roots`
+does not grant writes under a read-only sandbox.
+
+This requires named permission profiles and `--strict-config`, verified offline
+with Codex 0.153.4. Unsupported flags or configuration fields fail closed with
+`codex_scratch_permissions_unavailable`; upgrade Codex or fix incompatible
+configuration rather than dropping enforcement. There is no workspace-write or
+bypass fallback. Formerly ignored config keys can now stop a safe launch.
+Codex may describe a custom scratch-only profile as
+`sandbox_mode=workspace-write` in generic model-visible prose; the actual ACL,
+not that label, defines the write boundary.
+
+Run `python3 -m tests.codex_scratch_probe /path/to/codex` for the explicit offline
+check. It first proves the temporary sentinel files are writable without a
+sandbox, then checks scratch success, source/copy/metadata denials, symlink/hardlink
+escape denial, sibling-scratch denial, work-mode temp writes, legacy read-only
+scratch denial, and strict-config rejection.
+It runs no model turn and uses neither credentials nor live user config.
+
+Scratch-owned directories are current-user-owned and `0700`; Delegate does not
+re-mode the shared `~/.delegate` directory. Pruning never follows the manifest
+path. It first requires that pointer to equal the path independently derived
+from the current registry and selected neutral root, then performs owner-checked,
+no-follow removal. A changed `HOME`, moved registry, symlink, foreign owner, or
+live run therefore preserves both scratch and its sole registry pointer.
+
+Internally, bwrap uses a typed `SandboxPlan` with immutable `Mask` and `Bind`
+tuples. Invalid entries are refused instead of silently dropped while decoding
+a dictionary. Live path checks, workspace-intersection checks, mount order,
+submodule refusal, and final-plan preflight remain in force.
 
 #### What safe review can and cannot see
 
@@ -179,13 +233,20 @@ intended contract for LLM-as-judge and grader use. `--read-only` applies only to
 
 Call mode is not a security sandbox. Even with `--read-only`, the child runtime
 may still use configured credentials, network access, absolute paths, and
-harness-native settings available to that process; on engines without a native
-read-only sandbox (Cursor, Droid, Kimi) the preamble is the only restriction.
+harness-native settings available to that process; on Kimi the preamble is the
+only restriction. Droid is the exception in Delegate's favor: with no `--auto`
+flag, `droid exec` starts at its own read-only autonomy tier, allowing file
+inspection, directory listing, process and environment inspection, and git reads
+while blocking edits, package installs, git writes, and deployments. Exceeding
+that tier stops the run immediately with a non-zero exit and no partial changes.
+That tier says nothing about network access, so no such claim is made here.
 Use `safe` or `work` instead when the child should see the project tree or when
 you need registry inspection.
 
 OpenCode `call --read-only` uses the same protected environment settings and
-`--pure` plugin restriction as OpenCode safe mode.
+`--pure` plugin restriction as OpenCode safe mode, and both also set
+`OPENCODE_DISABLE_CLAUDE_CODE=1` so the run cannot pick up an ambient Claude Code
+integration that was never part of the reviewed permission set.
 Pi `call --read-only` uses the same read-only tool allowlist and discovery-disable
 flags as Pi safe mode. All Pi modes use `--no-session`.
 Oh My Pi `call --read-only` uses its fork-specific read-only tool allowlist and
@@ -273,7 +334,7 @@ every gitignored path is hidden behind a tmpfs or `/dev/null` mask computed
 from `git ls-files -o -i --exclude-standard --directory` (so the engine sees
 the same tree shape a copy would), `$HOME` and `/tmp` are private tmpfs, the
 workspace `.delegate/` registry is masked (prior runs' prompts, logs and
-manifests are invisible) with only the current run's scratch rw-bound on top,
+manifests are invisible) with only the current run's neutral scratch rw-bound,
 and only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
 is writable. System roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
 `~/.bun`, the engine's dot-directory, the engine executable itself, a

@@ -1,7 +1,7 @@
 import unittest
 
-from delegate_agent import cli_parser
-from delegate_agent.cli import DelegateError, parse_cli
+from delegate_agent.cli_parser import parse_cli
+from delegate_agent.errors import DelegateError
 
 
 class ResumeParserTests(unittest.TestCase):
@@ -22,18 +22,16 @@ class ResumeParserTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(parsed.resume.handle, "run-1")
-        self.assertEqual(parsed.resume.engine, "cursor")
-        self.assertEqual(parsed.resume.model, "model-a")
-        self.assertEqual(parsed.resume.reasoning_effort, "high")
+        self.assertEqual(parsed.payload.handle, "run-1")
+        self.assertEqual(parsed.payload.engine, "cursor")
+        self.assertEqual(parsed.payload.model, "model-a")
+        self.assertEqual(parsed.payload.reasoning_effort, "high")
         self.assertEqual(
-            parsed.resume.extra_parts,
+            parsed.payload.extra_parts,
             ["--model", "literal prompt part", "--fast"],
         )
 
     def test_resume_is_allowed_for_auth_profiles_and_groups(self):
-        self.assertIn("resume", cli_parser.AUTH_PROFILE_SUBCOMMANDS)
-        self.assertIn("resume", cli_parser.GROUP_SUBCOMMANDS)
         parsed = parse_cli(["--auth-profile", "work", "--group", "batch", "resume", "run-1"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertEqual(parsed.global_options.group, "batch")
@@ -55,10 +53,10 @@ class ResumeParserTests(unittest.TestCase):
 
     def test_resumable_accepted_for_codex_and_claude(self):
         parsed_codex = parse_cli(["codex", "work", "--resumable", "implement feature"])
-        self.assertTrue(parsed_codex.launch.resumable)
+        self.assertTrue(parsed_codex.payload.resumable)
 
         parsed_claude = parse_cli(["claude", "work", "--resumable", "review code"])
-        self.assertTrue(parsed_claude.launch.resumable)
+        self.assertTrue(parsed_claude.payload.resumable)
 
     def test_resumable_rejected_on_safe_mode(self):
         for engine in ("codex", "claude"):

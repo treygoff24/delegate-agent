@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import isolation as isolation_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,8 +23,10 @@ if SRC not in sys.path:
 # Imported after the base (which bootstraps sys.path).
 from delegate_agent import config as delegate_config  # noqa: E402
 from delegate_agent import (  # noqa: E402
+    mail_push,
     request_build,
     run_registry,
+    run_scratch,
     runner,
     safe_workspace,
     sandbox_bwrap,
@@ -253,6 +259,111 @@ class WrapEngineArgvTests(unittest.TestCase):
             self.assertNotIn(str(fake_home / ".local"), argv)
             self.assertNotIn(str(fake_home / ".codex"), argv)
 
+    def test_kimi_default_home_is_writable_and_legacy_home_is_hidden(self):
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_home = Path(home_tmp)
+            kimi_home = fake_home / ".kimi-code"
+            legacy_home = fake_home / ".kimi"
+            kimi_home.mkdir()
+            legacy_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["kimi"],
+                cwd="/ws",
+                env={"HOME": str(fake_home)},
+                engine="kimi",
+            )
+
+            self.assertEqual(argv.count(str(kimi_home)), 2)
+            self.assertEqual(argv[argv.index(str(kimi_home)) - 1], "--bind")
+            self.assertNotIn(str(legacy_home), argv)
+
+    def test_kimi_home_override_replaces_default_home(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as override_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            default_home = fake_home / ".kimi-code"
+            default_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["kimi"],
+                cwd="/ws",
+                env={"HOME": str(fake_home), "KIMI_CODE_HOME": override_tmp},
+                engine="kimi",
+            )
+
+            self.assertEqual(argv.count(override_tmp), 2)
+            self.assertEqual(argv[argv.index(override_tmp) - 1], "--bind")
+            self.assertNotIn(str(default_home), argv)
+
+    def test_kimi_run_launches_when_the_default_home_has_never_been_created(self):
+        """bwrap refuses a missing bind source, so an absent ~/.kimi-code must not be bound."""
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            self.assertFalse((fake_home / ".kimi-code").exists())
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={"HOME": str(fake_home), "PATH": os.environ["PATH"]},
+                engine="kimi",
+            )
+
+            self.assertNotIn(str(fake_home / ".kimi-code"), argv)
+            if shutil.which(sandbox_bwrap.BWRAP_BINARY) is None:
+                self.skipTest("bwrap is not installed")
+            sandbox_bwrap.preflight_plan(argv)
+
+    def test_an_explicit_kimi_home_override_that_is_absent_still_fails_loudly(self):
+        """A bad KIMI_CODE_HOME is an operator error, not a first-run condition."""
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            missing = str(fake_home / "nowhere")
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={
+                    "HOME": str(fake_home),
+                    "KIMI_CODE_HOME": missing,
+                    "PATH": os.environ["PATH"],
+                },
+                engine="kimi",
+            )
+
+            self.assertIn(missing, argv)
+            self.assertEqual(argv[argv.index(missing) - 1], "--bind")
+
+    def test_kimi_homes_are_hidden_from_other_engines(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as override_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            default_home = fake_home / ".kimi-code"
+            legacy_home = fake_home / ".kimi"
+            default_home.mkdir()
+            legacy_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["codex"],
+                cwd="/ws",
+                env={"HOME": str(fake_home), "KIMI_CODE_HOME": override_tmp},
+                engine="codex",
+            )
+
+            self.assertNotIn(str(default_home), argv)
+            self.assertNotIn(str(legacy_home), argv)
+            self.assertNotIn(override_tmp, argv)
+
 
 class ProbeTests(unittest.TestCase):
     def test_probe_is_the_production_boundary_with_the_exact_binary(self):
@@ -368,20 +479,20 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
         (self.repo / "secret.env").write_text("s3cret\n", encoding="utf-8")
 
     def _request(self, engine: str = "codex"):
-        iso_ctx = self.delegate.build_isolation_context(
+        iso_ctx = isolation_api.build_isolation_context(
             source_workspace=str(self.repo),
             resolved_isolation="auto",
             engine=engine,
             mode="safe",
             source_git_root=str(self.repo),
         )
-        return self.delegate.build_request(
+        return request_api.build_request(
             engine,
             "safe",
             None,
-            self.delegate.ResolvedWorkspace(str(self.repo), "git"),
+            request_types.ResolvedWorkspace(str(self.repo), "git"),
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
             isolation_context=iso_ctx,
         )
@@ -464,10 +575,11 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
             self.assertEqual(isolated.workspace, str(self.repo))
             self.assertEqual(isolated.argv, request.argv)
             self.assertEqual(ctx.safe_workspace_method, sandbox_bwrap.BWRAP_METHOD)
-            self.assertEqual(ctx.sandbox["backend"], "bwrap")
+            self.assertIsInstance(ctx.sandbox, sandbox_bwrap.SandboxPlan)
+            self.assertEqual(ctx.sandbox.backend, "bwrap")
             self.assertEqual(
-                ctx.sandbox["masks"],
-                [{"path": "secret.env", "kind": sandbox_bwrap.MASK_KIND_DEVNULL}],
+                ctx.sandbox.masks,
+                (sandbox_bwrap.Mask("secret.env", sandbox_bwrap.MASK_KIND_DEVNULL),),
             )
 
     def test_structured_retry_accepts_bwrap_source_without_cleanup_descriptor(self):
@@ -503,7 +615,7 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
             {"runId": run_id, "status": "succeeded"},
         )
         resolved = request_build._structured_retry_workspace(
-            self.delegate.ResolvedWorkspace(str(self.repo), "git"),
+            request_types.ResolvedWorkspace(str(self.repo), "git"),
             engine="codex",
             group="wf-test",
             workflow_agent_key="agent",
@@ -565,7 +677,6 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as home_tmp,
-            tempfile.TemporaryDirectory() as scratch_tmp,
         ):
             home = Path(home_tmp)
             profile_dir = home / ".ai-profiles" / "personal"
@@ -573,7 +684,13 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
             canary = profile_dir / "keys.zsh"
             canary.write_text("# CANARY never-leak\n", encoding="utf-8")
 
-            scratch = Path(scratch_tmp)
+            scratch_root = home / ".delegate" / "run-scratch" / "bucket"
+            scratch = scratch_root / "del_current"
+            sibling = scratch_root / "del_sibling"
+            scratch.mkdir(parents=True)
+            sibling.mkdir()
+            sibling_canary = sibling / "keep.txt"
+            sibling_canary.write_text("keep\n", encoding="utf-8")
             repo = _make_committed_repo()
             self.addCleanup(repo.cleanup)
             workspace = Path(repo.name)
@@ -593,6 +710,7 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
                     "if touch write-attempt 2>/dev/null; then echo workspace-write=yes; else echo workspace-write=no; fi",
                     'echo "secret-bytes=$(dd if=secret.env bs=64 count=1 2>/dev/null | wc -c)"',
                     f'if touch "{scratch}/scratch-ok" 2>/dev/null; then echo scratch-write=yes; else echo scratch-write=no; fi',
+                    f'if touch "{sibling}/denied" 2>/dev/null; then echo sibling-write=yes; else echo sibling-write=no; fi',
                 ]
             )
             argv = sandbox_bwrap.build_bwrap_argv(
@@ -622,6 +740,8 @@ class LiveBwrapBoundaryTests(unittest.TestCase):
             self.assertEqual(observed.get("workspace-write"), "no")
             self.assertEqual(observed.get("secret-bytes"), "0")
             self.assertEqual(observed.get("scratch-write"), "yes")
+            self.assertEqual(observed.get("sibling-write"), "no")
+            self.assertEqual(sibling_canary.read_text(encoding="utf-8"), "keep\n")
 
 
 class DryRunBwrapTests(CommandTestBase):
@@ -767,18 +887,17 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
             {"bwrapBinds": [{"path": "/x", "mode": "ro"}, {"path": "~/y", "mode": "rw"}]}
         )
 
-    def test_runner_splits_binds_by_mode(self):
-        payload = {
-            "backend": "bwrap",
-            "masks": [],
-            "binds": [{"path": "/a", "mode": "ro"}, {"path": "/b", "mode": "rw"}, {"x": 1}],
-        }
-        self.assertEqual(runner._binds_from_sandbox(payload, "ro"), ["/a"])
-        self.assertEqual(runner._binds_from_sandbox(payload, "rw"), ["/b"])
-        self.assertEqual(runner._binds_from_sandbox(None, "rw"), [])
+    def test_typed_plan_keeps_bind_modes_and_refuses_malformed_entries(self):
+        plan = sandbox_bwrap.SandboxPlan(
+            None, binds=(sandbox_bwrap.Bind("/a", "ro"), sandbox_bwrap.Bind("/b", "rw"))
+        )
+        self.assertEqual([bind.path for bind in plan.binds if bind.mode == "ro"], ["/a"])
+        self.assertEqual([bind.path for bind in plan.binds if bind.mode == "rw"], ["/b"])
+        with self.assertRaises(DelegateError):
+            sandbox_bwrap.SandboxPlan(None, binds=({"x": 1},))
 
     def test_terminal_metadata_reports_effective_isolation_backend(self):
-        for backend, sandbox in (("copy", None), ("bwrap", {"backend": "bwrap"})):
+        for backend, sandbox in (("copy", None), ("bwrap", sandbox_bwrap.SandboxPlan(None))):
             with self.subTest(backend=backend):
                 ctx = runner.RunContext(
                     registry_root=Path("/tmp"),
@@ -817,9 +936,10 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
 
 class RegistryMaskAndContainmentTests(unittest.TestCase):
     def test_workspace_registry_is_masked_then_scratch_rebound(self):
-        with tempfile.TemporaryDirectory() as ws:
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as scratch_tmp:
             registry = Path(ws) / ".delegate"
-            scratch = registry / "runs" / "del_new" / "scratch"
+            registry.mkdir()
+            scratch = Path(scratch_tmp) / "run-scratch" / "bucket" / "del_new"
             scratch.mkdir(parents=True)
             argv = sandbox_bwrap.wrap_engine_argv(
                 engine_argv=["true"], cwd=ws, env={}, engine="codex", scratch_dir=str(scratch)
@@ -847,24 +967,20 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
             )
             self.assertNotIn("/usr/bin/env", argv[: argv.index("--")])
 
-    def test_rw_root_inside_workspace_is_refused_except_the_run_dir(self):
-        with tempfile.TemporaryDirectory() as ws:
+    def test_all_rw_roots_inside_workspace_are_refused(self):
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as scratch_tmp:
             run_dir = Path(ws) / ".delegate" / "runs" / "del_x"
-            scratch = run_dir / "scratch"
+            run_dir.mkdir(parents=True)
+            scratch = Path(scratch_tmp) / "run-scratch" / "bucket" / "del_x"
             scratch.mkdir(parents=True)
             mail_home = run_dir / "mail-push-home"
             mail_home.mkdir()
             (Path(ws) / "src").mkdir()
-            argv = sandbox_bwrap.wrap_engine_argv(
-                engine_argv=["true"],
-                cwd=ws,
-                env={},
-                engine="omp",
-                scratch_dir=str(scratch),
-                extra_rw_roots=[str(mail_home)],
-            )
-            self.assertIn(str(mail_home), argv)
-            for inside in (str(Path(ws) / "src"), str(Path(ws) / ".delegate")):
+            for inside in (
+                str(Path(ws) / "src"),
+                str(Path(ws) / ".delegate"),
+                str(mail_home),
+            ):
                 with self.assertRaises(DelegateError) as caught:
                     sandbox_bwrap.wrap_engine_argv(
                         engine_argv=["true"],
@@ -875,6 +991,17 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
                         extra_rw_roots=[inside],
                     )
                 self.assertEqual(caught.exception.error, "bwrap_bind_conflict", inside)
+            legacy_scratch = run_dir / "scratch"
+            legacy_scratch.mkdir()
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"],
+                    cwd=ws,
+                    env={},
+                    engine="omp",
+                    scratch_dir=str(legacy_scratch),
+                )
+            self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
             with self.assertRaises(DelegateError):
                 sandbox_bwrap.wrap_engine_argv(
                     engine_argv=["true"],
@@ -882,6 +1009,25 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
                     env={"CODEX_HOME": str(Path(ws) / "src")},
                     engine="codex",
                 )
+
+    def test_kimi_home_may_not_intersect_the_workspace(self):
+        with tempfile.TemporaryDirectory() as ws:
+            workspace = Path(ws)
+            default_home = workspace / ".kimi-code"
+            override_home = workspace / "kimi-override"
+            default_home.mkdir()
+            override_home.mkdir()
+
+            for env in (
+                {"HOME": ws},
+                {"HOME": "/home/elsewhere", "KIMI_CODE_HOME": str(override_home)},
+            ):
+                with self.subTest(env=env):
+                    with self.assertRaises(DelegateError) as caught:
+                        sandbox_bwrap.wrap_engine_argv(
+                            engine_argv=["kimi"], cwd=ws, env=env, engine="kimi"
+                        )
+                    self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
 
     def test_preflight_runs_the_final_plan(self):
         true_path = shutil.which("true")
@@ -1019,6 +1165,7 @@ class EndToEndBwrapRunTests(CommandTestBase):
         fake.write_text(
             "#!/bin/sh\n"
             "if touch leak.txt 2>/dev/null; then echo write=allowed; else echo write=denied; fi\n"
+            'if touch "$TMPDIR/bwrap-temp" 2>/dev/null; then echo temp=allowed; else echo temp=denied; fi\n'
             "if [ -e .delegate/runs/del_old/prompt.txt ]; then echo registry=visible; "
             "else echo registry=hidden; fi\n"
             "if grep -q OLD-PROMPT-CANARY .delegate/runs/*/prompt.txt 2>/dev/null; then echo canary=leaked; "
@@ -1046,10 +1193,13 @@ class EndToEndBwrapRunTests(CommandTestBase):
         )
         observed = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
         self.assertEqual(observed.get("write"), "denied", raw)
+        self.assertEqual(observed.get("temp"), "allowed", raw)
         self.assertEqual(observed.get("registry"), "hidden")
         self.assertEqual(observed.get("canary"), "clean")
         self.assertEqual(observed.get("git"), "ok")
         self.assertFalse((workspace / "leak.txt").exists())
+        manifest = run_registry.load_run_manifest(workspace / ".delegate", payload["runId"])
+        self.assertTrue((Path(manifest["scratchPath"]) / "bwrap-temp").is_file())
 
     def test_boundary_construction_error_is_a_recorded_launch_failure(self):
         if not sandbox_bwrap.bwrap_available():
@@ -1080,6 +1230,72 @@ class EndToEndBwrapRunTests(CommandTestBase):
         state = json.loads((runs[0] / "state.json").read_text())
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state.get("error"), "bwrap_launch_failed")
+
+
+class MailPushSandboxBoundaryTests(unittest.TestCase):
+    """The mail-push private home must be bindable inside a bwrap boundary."""
+
+    def test_mail_push_home_is_a_writable_root_outside_the_read_only_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-push-bwrap-") as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            workspace = root / "workspace"
+            workspace.mkdir()
+            source_codex = root / "codex"
+            source_codex.mkdir()
+            (source_codex / "auth.json").write_text('{"token":"x"}', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+                run_id, alias = run_registry.register_run(registry_root, harness="codex")
+                env: dict[str, str] = {"CODEX_HOME": str(source_codex)}
+                provision = mail_push.provision_mail_push(
+                    "codex",
+                    ["codex", "exec", "prompt"],
+                    None,
+                    registry_root,
+                    run_id,
+                    env,
+                )
+                self.assertIsNone(provision.warning)
+                codex_home = provision.codex_home
+                self.assertIsNotNone(codex_home)
+                assert codex_home is not None
+                ctx = runner.RunContext(
+                    registry_root=registry_root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="codex",
+                    engine="codex",
+                    mode="safe",
+                    model=None,
+                    source_cwd=str(workspace),
+                    execution_cwd=str(workspace),
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at=run_registry.utc_now_iso(),
+                    mail_push=True,
+                )
+                rw_roots = runner._bwrap_mail_push_rw_roots(ctx)
+                scratch = run_scratch.allocate(registry_root, run_id)
+                self.assertEqual(len(rw_roots), 1, rw_roots)
+                argv = sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"],
+                    cwd=str(workspace),
+                    env={"HOME": str(home), "CODEX_HOME": codex_home},
+                    engine="codex",
+                    scratch_dir=str(scratch),
+                    extra_rw_roots=rw_roots,
+                )
+                resolved_workspace = workspace.resolve()
+                self.assertTrue(Path(codex_home).is_relative_to(Path(rw_roots[0])))
+                for rw_root in (*rw_roots, codex_home):
+                    self.assertFalse(
+                        Path(rw_root).resolve().is_relative_to(resolved_workspace), rw_root
+                    )
+                self.assertEqual(argv[argv.index(rw_roots[0]) - 1], "--bind")
+                mail_push.cleanup_mail_push_private_homes(registry_root, run_id)
+                self.assertFalse(Path(codex_home).exists())
 
 
 if __name__ == "__main__":

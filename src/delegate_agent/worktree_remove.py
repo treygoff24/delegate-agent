@@ -1,32 +1,22 @@
-"""Worktree removal pipeline.
+"""Worktree removal with locked safety checks and registry status updates.
 
-Implements ``delegate worktree remove`` end to end: option normalization, dirty
-and merged safety gates, the ``git worktree remove`` + branch-delete sequence,
-and registry status updates. ``worktree_mgmt`` re-exports this surface so callers
-and tests keep importing from ``worktree_mgmt``.
-
-Cross-cutting seams that tests monkeypatch on the ``worktree_mgmt`` module
-(``_run_git``, ``_remove_branch``, ``merged_into_source``, ``detect_worktree_status``,
-``dirty_info``, ``resolve_record``, ``_error_payload``) are read back through the
-``worktree_mgmt`` facade (the ``wm`` alias) at call time so those patches still
-take effect.
-"""
+Shared inspection and error helpers come from worktree_mgmt; removal helpers
+and branch deletion belong to this module."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from delegate_agent import isolation, run_registry, worktree_records
+from delegate_agent import isolation, run_registry
+from delegate_agent import worktree_mgmt as wm
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
 from delegate_agent.worktree_records import (
     SCHEMA_REMOVE,
     STATUS_MISSING,
-    STATUS_PRESENT,
     STATUS_REMOVED,
-    STATUS_UNKNOWN,
     WORKTREE_ERROR_EXIT_CODE,
     PersistentWorktreeRecord,
     _utc_now_iso,
@@ -46,6 +36,7 @@ class RemoveWorktreeOptions:
     discard_uncommitted: bool
     force_branch: bool
     keep_branch: bool
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,110 +115,6 @@ def _normalize_remove_options(
     return discard_uncommitted, force_branch, keep_branch
 
 
-def _raise_if_dirty_without_discard(
-    *,
-    dirty: bool | None,
-    dirty_paths: list[str],
-    dirty_warnings: list[str] | None = None,
-    discard_uncommitted: bool,
-    record: PersistentWorktreeRecord,
-    alias: str,
-) -> None:
-    """Fail closed when dirty state is unsafe to discard implicitly."""
-    if dirty is None and not discard_uncommitted:
-        raise wm.WorktreeManagementError(
-            wm._error_payload(
-                "dirty_check_failed",
-                "Could not determine whether the worktree has uncommitted changes; inspect it or pass --discard-uncommitted to remove anyway.",
-                record=record,
-                warnings=dirty_warnings or None,
-                next_actions=[
-                    f"delegate worktree show {alias}",
-                    f"delegate worktree remove {alias} --discard-uncommitted",
-                ],
-            )
-        )
-    if dirty is True and not discard_uncommitted:
-        raise wm.WorktreeManagementError(
-            wm._error_payload(
-                "dirty_worktree",
-                f"Worktree has {len(dirty_paths)} uncommitted changes; pass --discard-uncommitted to remove anyway.",
-                record=record,
-                dirty_paths=dirty_paths,
-                next_actions=[
-                    f"delegate worktree show {alias}",
-                    f"delegate worktree remove {alias} --discard-uncommitted",
-                ],
-            )
-        )
-
-
-def _raise_if_unmerged_without_override(
-    *,
-    record: PersistentWorktreeRecord,
-    status: str,
-    branch: str | None,
-    keep_branch: bool,
-    force_branch: bool,
-    alias: str,
-) -> None:
-    """Raise ``unmerged_branch`` when the branch is not merged into source
-    and the caller did not request ``--keep-branch`` or ``--force-branch``."""
-    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
-        return
-    if not isinstance(branch, str) or not branch:
-        return
-    if keep_branch or force_branch:
-        return
-    merged, merge_warnings = wm.merged_into_source(record, status)
-    if merged is None:
-        raise wm.WorktreeManagementError(
-            wm._error_payload(
-                "merge_check_failed",
-                "Could not determine whether the worktree branch is merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
-                record=record,
-                next_actions=[
-                    f"delegate worktree show {alias}",
-                    f"delegate worktree remove {alias} --keep-branch",
-                    f"delegate worktree remove {alias} --force-branch",
-                ],
-                warnings=merge_warnings or None,
-            )
-        )
-    if merged is False:
-        raise wm.WorktreeManagementError(
-            wm._error_payload(
-                "unmerged_branch",
-                "Worktree branch is not merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
-                record=record,
-                next_actions=[
-                    f"delegate worktree show {alias}",
-                    f"delegate worktree remove {alias} --keep-branch",
-                    f"delegate worktree remove {alias} --force-branch",
-                ],
-                warnings=merge_warnings or None,
-            )
-        )
-
-
-def _require_removal_metadata(record: PersistentWorktreeRecord) -> tuple[str, str]:
-    """Validate that ``sourceGitRoot`` and ``executionCwd`` are present.
-
-    Returns ``(source_git_root, execution_cwd)`` for direct use by the caller.
-    """
-    source_git_root = record.get("sourceGitRoot")
-    execution_cwd = record.get("executionCwd")
-    if not isinstance(source_git_root, str) or not isinstance(execution_cwd, str):
-        raise wm.WorktreeManagementError(
-            wm._error_payload(
-                "worktree_remove_failed",
-                "Run is missing sourceGitRoot or executionCwd metadata.",
-                record=record,
-            )
-        )
-    return source_git_root, execution_cwd
-
-
 def _remove_worktree_path(
     *,
     source_git_root: str,
@@ -298,11 +185,11 @@ def _remove_branch_if_requested(
     if status == STATUS_REMOVED and not force_branch:
         return BranchRemovalResult(removed=False)
     if force_branch and isinstance(source_git_root, str) and isinstance(branch, str) and branch:
-        return wm._remove_branch(source_git_root, branch, force=True)
+        return _remove_branch(source_git_root, branch, force=True)
     if status == STATUS_MISSING:
         return BranchRemovalResult(removed=False, kept_reason="path_missing")
     if isinstance(source_git_root, str) and isinstance(branch, str) and branch:
-        return wm._remove_branch(source_git_root, branch, force=False)
+        return _remove_branch(source_git_root, branch, force=False)
     return BranchRemovalResult(removed=False)
 
 
@@ -357,16 +244,23 @@ def _remove_payload(
 
 
 def _build_remove_worktree_plan(
-    record: PersistentWorktreeRecord,
+    inspection: wm.WorktreeInspection,
     *,
     alias: str,
-    status: str,
-    status_warnings: list[str],
     options: RemoveWorktreeOptions,
-    merged_check_already_passed: bool,
-    dirty_check_already_passed: bool,
 ) -> RemoveWorktreePlan:
-    source_git_root, execution_cwd = _require_removal_metadata(record)
+    record = inspection.record
+    status = inspection.status
+    source_git_root = record.get("sourceGitRoot")
+    execution_cwd = record.get("executionCwd")
+    if not isinstance(source_git_root, str) or not isinstance(execution_cwd, str):
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "worktree_remove_failed",
+                "Run is missing sourceGitRoot or executionCwd metadata.",
+                record=record,
+            )
+        )
     if target_contains_source_root(execution_cwd, source_git_root):
         raise wm.WorktreeManagementError(
             wm._error_payload(
@@ -375,31 +269,22 @@ def _build_remove_worktree_plan(
                 record=record,
             )
         )
-    if dirty_check_already_passed:
-        dirty, dirty_paths, dirty_warnings = False, [], []
-    else:
-        dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
-    all_warnings = [*status_warnings, *dirty_warnings]
-    if status in (STATUS_PRESENT, STATUS_UNKNOWN):
-        _raise_if_dirty_without_discard(
-            dirty=dirty,
-            dirty_paths=dirty_paths,
-            dirty_warnings=dirty_warnings,
-            discard_uncommitted=options.discard_uncommitted,
-            record=record,
-            alias=alias,
+    decision = wm.evaluate_worktree_safety(
+        inspection,
+        discard_uncommitted=options.discard_uncommitted,
+        force_branch=options.force_branch,
+        keep_branch=options.keep_branch,
+        force=options.force,
+        require_merged=True,
+    )
+    if decision.reason is not None:
+        raise wm.WorktreeManagementError(
+            wm.safety_error_payload(inspection, alias=alias, reason=decision.reason)
         )
 
     branch = record.get("branch")
-    if not merged_check_already_passed:
-        _raise_if_unmerged_without_override(
-            record=record,
-            status=status,
-            branch=branch,
-            keep_branch=options.keep_branch,
-            force_branch=options.force_branch,
-            alias=alias,
-        )
+    all_warnings = [*inspection.status_warnings, *inspection.dirty_warnings]
+    all_warnings.extend(inspection.merge_warnings)
 
     return RemoveWorktreePlan(
         record=record,
@@ -408,7 +293,11 @@ def _build_remove_worktree_plan(
         source_git_root=source_git_root,
         execution_cwd=execution_cwd,
         branch=branch,
-        discarded_paths=dirty_paths if options.discard_uncommitted and dirty_paths else None,
+        discarded_paths=(
+            list(inspection.dirty_paths)
+            if options.discard_uncommitted and inspection.dirty_paths
+            else None
+        ),
         warnings=all_warnings,
     )
 
@@ -529,8 +418,8 @@ def remove_worktree(
     force_branch: bool = False,
     keep_branch: bool = False,
     force: bool = False,
-    _merged_check_already_passed: bool = False,
-    _dirty_check_already_passed: bool = False,
+    include_detached: bool = False,
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -543,79 +432,34 @@ def remove_worktree(
         discard_uncommitted=discard_uncommitted,
         force_branch=force_branch,
         keep_branch=keep_branch,
+        force=force,
     )
     with run_registry.registry_lock(registry_root):
         record = wm.resolve_record(registry_root, handle=handle)
-        status, warnings = wm.detect_worktree_status(record)
         alias = str(record.get("alias") or handle)
-
-        if status == STATUS_REMOVED:
-            return _remove_already_removed(record, alias=alias, options=options)
-
-        # Keep direct removal aligned with prune: a clean-looking path is not
-        # safe to retire while its owning run (or process group) is live.
-        # ``force`` is the explicit escape hatch used by prune as well.
-        if not force:
-            owner_block = wm._owner_run_block_reason(registry_root, record)
-            if owner_block is not None:
-                raise wm.WorktreeManagementError(
-                    wm._error_payload(
-                        owner_block,
-                        "Worktree owner is still active; wait for the run to finish before removing.",
-                        record=record,
-                        next_actions=[f"delegate worktree show {alias}"],
-                    )
-                )
-
-        execution_cwd = record.get("executionCwd")
-        if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
-            attachments = worktree_records.live_attachments_for_path(registry_root, execution_cwd)
-            if attachments:
-                attached = ", ".join(
-                    str(item.get("alias") or item.get("runId")) for item in attachments
-                )
-                corrupt = ", ".join(
-                    str(item.get("alias") or item.get("runId"))
-                    for item in attachments
-                    if item.get("warning") == "corrupt_attachment"
-                )
-                warning = (
-                    f" Warning: corrupt attachment record for {corrupt}; refusing removal."
-                    if corrupt
-                    else ""
-                )
-                raise wm.WorktreeManagementError(
-                    wm._error_payload(
-                        "worktree_attached",
-                        f"Worktree is in use by attached resume run(s): {attached}. "
-                        f"Wait for or cancel the attached run before removing.{warning}",
-                        record=record,
-                        next_actions=[
-                            f"delegate wait {attached.split(', ')[0]}",
-                            f"delegate cancel {attached.split(', ')[0]}",
-                        ],
-                    )
-                )
-
-        plan = _build_remove_worktree_plan(
+        inspection = wm.inspect_worktree(
+            registry_root,
             record,
+            include_detached=include_detached,
+            force=force,
+            check_merge=not keep_branch and not force_branch,
+            retirement_ignore_globs=retirement_ignore_globs,
+        )
+        if inspection.status == STATUS_REMOVED:
+            return _remove_already_removed(record, alias=alias, options=options)
+        plan = _build_remove_worktree_plan(
+            inspection,
             alias=alias,
-            status=status,
-            status_warnings=warnings,
             options=options,
-            merged_check_already_passed=_merged_check_already_passed,
-            dirty_check_already_passed=_dirty_check_already_passed,
         )
 
-        if status == STATUS_MISSING:
+        if plan.status == STATUS_MISSING:
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
-        return _remove_present_worktree_path(registry_root, plan, options=options)
-
-
-# Deferred to the bottom to break the worktree_mgmt<->worktree_remove facade
-# cycle: worktree_mgmt re-exports this module's surface (a top-level import here
-# would fail when worktree_remove is imported first). All `wm.<seam>` access
-# above is call-time, so binding the alias after our own definitions is
-# sufficient and keeps mock.patch.object(worktree_mgmt, ...) seams working.
-from delegate_agent import worktree_mgmt as wm  # noqa: E402
+        # Ignored/seeded dirt needs Git force only after locked policy validation.
+        physical_options = (
+            replace(options, discard_uncommitted=True)
+            if retirement_ignore_globs is not None
+            else options
+        )
+        return _remove_present_worktree_path(registry_root, plan, options=physical_options)

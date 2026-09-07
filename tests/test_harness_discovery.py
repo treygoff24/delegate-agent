@@ -232,6 +232,68 @@ class SnapshotSchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate_snapshot(snapshot, allow_unknown_harnesses=True)
 
+    def test_an_unknown_harness_field_is_dropped_with_a_warning(self):
+        """A newer delegate's cache must not blank every other harness's rows."""
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["claude"] = _harness_record()
+        snapshot["harnesses"]["claude"]["selector"] = ["claude"]
+        snapshot["harnesses"]["claude"]["fromTheFuture"] = {"anything": 1}
+
+        warnings = self.validate_snapshot(
+            snapshot, allow_unknown_harnesses=True, drop_unknown_fields=True
+        )
+
+        self.assertIn(
+            "ignored unsupported field 'fromTheFuture' in discovery harness claude", warnings
+        )
+        self.assertNotIn("fromTheFuture", snapshot["harnesses"]["claude"])
+        self.assertIn("gpt-test", snapshot["harnesses"]["codex"]["models"])
+
+    def test_an_unknown_capabilities_field_is_dropped_with_a_warning(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["capabilities"] = {
+            "permissionPrompts": True,
+            "somethingNewer": "yes",
+        }
+
+        warnings = self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
+        self.assertIn(
+            "ignored unsupported field 'somethingNewer' in discovery harness codex.capabilities",
+            warnings,
+        )
+        self.assertEqual(
+            snapshot["harnesses"]["codex"]["capabilities"], {"permissionPrompts": True}
+        )
+
+    def test_a_capabilities_object_carrying_only_future_keys_is_dropped_whole(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["capabilities"] = {"somethingNewer": "yes"}
+
+        self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
+        self.assertIsNone(snapshot["harnesses"]["codex"].get("capabilities"))
+
+    def test_writing_an_unknown_field_is_still_fatal(self):
+        """Producing a field this build does not know is a bug, not version skew."""
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["fromTheFuture"] = 1
+        with self.assertRaises(ValueError):
+            self.validate_snapshot(snapshot)
+
+    def test_a_wrong_type_on_a_known_field_is_still_rejected(self):
+        """The planted negative: forward tolerance is for unknown names only."""
+        for mutation in (
+            ("installed", "yes"),
+            ("capabilities", {"permissionPrompts": "yes"}),
+            ("capabilities", ["permissionPrompts"]),
+        ):
+            with self.subTest(field=mutation[0], value=mutation[1]):
+                snapshot = copy.deepcopy(self.snapshot)
+                snapshot["harnesses"]["codex"][mutation[0]] = mutation[1]
+                with self.assertRaises(ValueError):
+                    self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
     def test_fixture_provenance_has_safe_complete_shape(self):
         provenance = json.loads((FIXTURES / "provenance.json").read_text(encoding="utf-8"))
         self.assertRegex(provenance["capturedAt"], r"^\d{4}-\d{2}-\d{2}$")
@@ -383,6 +445,27 @@ class StructuredParserTests(unittest.TestCase):
         self.assertNotIn("wrong/selector", fragment["models"])
         self.assertGreaterEqual(len(fragment["warnings"]), 2)
 
+    def test_opencode_keeps_multi_slash_id_and_rejects_mismatched_body(self):
+        valid_selector = "openrouter/anthropic/claude-sonnet-4.5"
+        mismatched_selector = "openrouter/anthropic/claude-opus-4.5"
+        raw = (
+            f"{valid_selector}\n"
+            '{"providerID":"openrouter","id":"anthropic/claude-sonnet-4.5"}\n'
+            f"{mismatched_selector}\n"
+            '{"providerID":"openrouter","id":"anthropic/claude-sonnet-4.5"}\n'
+        )
+
+        fragment = self.parse_opencode(raw)
+
+        self.assertEqual(
+            (fragment["models"], fragment["probeStatus"], fragment["warnings"]),
+            (
+                {valid_selector: {}},
+                "partial",
+                [f"ignored mismatched OpenCode entry for {mismatched_selector!r}"],
+            ),
+        )
+
     def test_opencode_malformed_entry_never_resyncs_inside_its_body(self):
         valid = (FIXTURES / "opencode_models_verbose.txt").read_text()
         tail = (
@@ -419,6 +502,19 @@ class StructuredParserTests(unittest.TestCase):
         partial = self.parse_kimi(json.dumps(payload))
         self.assertEqual(partial["probeStatus"], "partial")
         self.assertNotIn("default", partial["models"]["kimi-code/k3"]["reasoning"])
+
+    def test_kimi_empty_models_object_is_a_partial_empty_catalog(self):
+        self.assertEqual(
+            self.parse_kimi('{"models": {}}'),
+            {
+                "probeStatus": "partial",
+                "modelScope": "configured",
+                "defaultModel": None,
+                "models": {},
+                "harnessReasoning": None,
+                "warnings": ["Kimi catalog contained no configured models"],
+            },
+        )
 
 
 class TextParserTests(unittest.TestCase):
@@ -512,15 +608,15 @@ class TextParserTests(unittest.TestCase):
         self.assertNotIn("--help", models)
         self.assertEqual(len(models), 8)
 
-    def test_droid_help_metadata_wins_settings_collision(self):
+    def test_droid_help_metadata_and_indexed_settings_models_are_merged(self):
         fragment = self.parse_droid((FIXTURES / "droid_help.txt").read_text())
         merged = self.merge_droid(
             fragment,
             json.dumps(
                 {
                     "customModels": [
-                        {"id": "claude-opus-4-8", "displayName": "Wrong"},
-                        {"id": "custom:settings", "displayName": "Settings Model"},
+                        {"id": "custom:ignored", "displayName": "Wrong"},
+                        {"model": "settings", "displayName": "Settings Model"},
                     ]
                 }
             ),
@@ -529,7 +625,16 @@ class TextParserTests(unittest.TestCase):
         self.assertEqual(merged["models"]["claude-opus-4-8"]["displayName"], "Opus 4.8")
         self.assertEqual(merged["models"]["claude-opus-4-8"]["reasoning"]["default"], "high")
         self.assertEqual(merged["models"]["auto"]["reasoning"]["supported"], [])
-        self.assertIn("custom:settings", merged["models"])
+        self.assertEqual(
+            {
+                selector: merged["models"][selector]
+                for selector in ("custom:Wrong-0", "custom:Settings-Model-1")
+            },
+            {
+                "custom:Wrong-0": {"displayName": "Wrong"},
+                "custom:Settings-Model-1": {"displayName": "Settings Model"},
+            },
+        )
 
         duplicate_labels = (
             "Available Models:\n"
@@ -542,6 +647,23 @@ class TextParserTests(unittest.TestCase):
         self.assertNotIn("reasoning", ambiguous["models"]["first"])
         self.assertNotIn("reasoning", ambiguous["models"]["second"])
         self.assertEqual(ambiguous["probeStatus"], "partial")
+
+    def test_droid_settings_selector_uses_display_name_and_array_index(self):
+        from delegate_agent.harness_discovery import parse_droid_settings_models
+
+        self.assertEqual(
+            parse_droid_settings_models(
+                [
+                    {
+                        "model": "m",
+                        "id": "custom:must-not-win",
+                        "displayName": "My Custom Model",
+                        "baseUrl": "https://provider.example/v1",
+                    }
+                ]
+            ),
+            {"custom:My-Custom-Model-0": {"displayName": "My Custom Model"}},
+        )
 
     def test_droid_stops_before_trailing_help_sections(self):
         raw = (FIXTURES / "droid_help.txt").read_text() + (
@@ -558,12 +680,12 @@ class TextParserTests(unittest.TestCase):
             ["low", "medium", "high", "xhigh", "max"],
         )
         grok = self.parse_grok((FIXTURES / "grok_models.txt").read_text())
-        self.assertEqual(grok["defaultModel"], "grok-4.5")
+        self.assertEqual(grok["defaultModel"], "grok-4.6")
         self.assertIsNone(grok["harnessReasoning"])
         bad_default = self.parse_grok(
             (FIXTURES / "grok_models.txt")
             .read_text()
-            .replace("Default model: grok-4.5", "Default model: missing-model")
+            .replace("Default model: grok-4.6", "Default model: missing-model")
         )
         self.assertEqual(bad_default["probeStatus"], "partial")
         self.assertIsNone(bad_default["defaultModel"])
@@ -606,7 +728,32 @@ class TextParserTests(unittest.TestCase):
     def test_grok_stops_before_trailing_help_sections(self):
         raw = (FIXTURES / "grok_models.txt").read_text() + "Options:\n  --help\n"
         models = self.parse_grok(raw)["models"]
-        self.assertEqual(models, {"grok-4.5": {}})
+        self.assertEqual(models, {"grok-4.6": {}, "grok-4.5": {}})
+
+    def test_grok_does_not_parse_unbulleted_trailing_prose_as_a_model(self):
+        raw = (FIXTURES / "grok_models.txt").read_text() + "  Experimental\n"
+        self.assertEqual(
+            self.parse_grok(raw)["models"],
+            {"grok-4.6": {}, "grok-4.5": {}},
+        )
+
+    def test_grok_accepts_a_wholly_unbulleted_model_list(self):
+        """A build that prints plain selectors must not fail the whole probe."""
+        raw = "Default model: grok-4.6\n\nAvailable models:\n  grok-4.6 (default)\n  grok-4.5\n"
+
+        fragment = self.parse_grok(raw)
+
+        self.assertEqual(fragment["models"], {"grok-4.6": {}, "grok-4.5": {}})
+        self.assertEqual(fragment["defaultModel"], "grok-4.6")
+
+    def test_grok_accepts_each_bullet_form(self):
+        for bullet, expected in (("*", "grok-4.6"), ("-", "grok-4.6"), ("", "grok-4.6")):
+            with self.subTest(bullet=bullet or "none"):
+                prefix = f"{bullet} " if bullet else ""
+                raw = (
+                    f"Default model: grok-4.6\n\nAvailable models:\n  {prefix}grok-4.6 (default)\n"
+                )
+                self.assertEqual(self.parse_grok(raw)["models"], {expected: {}})
 
 
 class AdapterOrchestrationTests(unittest.TestCase):
@@ -621,6 +768,7 @@ class AdapterOrchestrationTests(unittest.TestCase):
             fragment["harnessReasoning"]["supported"],
             ["low", "medium", "high", "xhigh", "max"],
         )
+        self.assertEqual(fragment["capabilities"], {"permissionPrompts": True})
 
         for error in (
             "probe_timeout",
@@ -639,7 +787,7 @@ class AdapterOrchestrationTests(unittest.TestCase):
     def test_claude_persona_transport_accepts_both_help_spellings(self):
         from delegate_agent import harness_discovery
 
-        base = (FIXTURES / "claude_effort_help.txt").read_text()
+        base = (FIXTURES / "claude_effort_help.txt").read_text().splitlines()[0]
         cases = {
             "long form": (base + "\n  --append-system-prompt-file <file>\n", True),
             # claude 2.1.220 collapses the flag pair into bracket notation.
@@ -652,6 +800,37 @@ class AdapterOrchestrationTests(unittest.TestCase):
                 with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=probe):
                     fragment = harness_discovery._probe_claude(("claude",), {}, None)
                 self.assertEqual(fragment["personaTransports"], {"native-file": expected}, label)
+
+    def test_claude_permission_prompts_capability_is_valid_snapshot_data(self):
+        from delegate_agent.harness_discovery import empty_snapshot, validate_snapshot
+
+        snapshot = empty_snapshot(captured_at="2026-09-07T06:00:00Z")
+        record = _harness_record()
+        record["capabilities"] = {"permissionPrompts": True}
+        snapshot["harnesses"] = {"claude": record}
+
+        validate_snapshot(snapshot)
+
+    def test_opencode_probe_disables_autoupdate(self):
+        from delegate_agent import harness_discovery
+
+        raw = (FIXTURES / "opencode_models_verbose.txt").read_text()
+        result = harness_discovery.ProbeResult(("opencode",), 0, raw, "", None)
+        with mock.patch.object(harness_discovery, "_probe_output", return_value=result) as probe:
+            harness_discovery._probe_opencode(
+                ("opencode",),
+                {"AMBIENT": "kept", "OPENCODE_DISABLE_AUTOUPDATE": "0"},
+                None,
+            )
+
+        self.assertEqual(
+            probe.call_args.args,
+            (
+                ("opencode",),
+                ("--pure", "models", "--verbose"),
+                {"AMBIENT": "kept", "OPENCODE_DISABLE_AUTOUPDATE": "1"},
+            ),
+        )
 
     def test_droid_unreadable_settings_is_not_reported_as_invalid_json(self):
         from delegate_agent import harness_discovery
@@ -797,6 +976,28 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
             self.assertTrue(path.exists())
 
+    def test_a_cache_written_by_a_newer_delegate_still_loads_its_known_rows(self):
+        """The live incident: a new per-harness field blanked every codex row."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", snapshot, home=home)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["harnesses"]["claude"] = _harness_record()
+            raw["harnesses"]["claude"]["selector"] = ["/claude"]
+            raw["harnesses"]["claude"]["capabilities"] = {"permissionPrompts": True}
+            raw["harnesses"]["claude"]["fieldFromANewerBuild"] = True
+            path.write_text(json.dumps(raw), encoding="utf-8")
+
+            loaded = self.discovery.load_discovery_cache("work", home=home)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(
+            loaded["harnesses"]["codex"]["models"]["gpt-test"]["reasoning"]["supported"],
+            ["low", "high"],
+        )
+        self.assertNotIn("fieldFromANewerBuild", loaded["harnesses"]["claude"])
+
     def test_discovery_cache_load_memo_invalidates_on_stat_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -869,9 +1070,16 @@ class DiscoveryCacheTests(unittest.TestCase):
             loaded = self.discovery.load_discovery_cache("work", home=home)
             self.assertEqual(set(loaded["harnesses"]), {"codex"})
 
+            # An unknown field is version skew, not corruption: it is stripped
+            # on read so the rest of the file survives, and never surfaced.
             snapshot["harnesses"]["codex"]["rawStderr"] = "benign but raw"
             private_io.write_json_atomic(path, snapshot)
-            self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
+            reloaded = self.discovery.load_discovery_cache("work", home=home)
+            self.assertEqual(set(reloaded["harnesses"]), {"codex"})
+            self.assertNotIn("rawStderr", reloaded["harnesses"]["codex"])
+            # Writing that same field from this build is still fatal.
+            with self.assertRaises(ValueError):
+                self.discovery.write_discovery_cache("work", snapshot, home=home)
 
     def test_different_profiles_write_independently(self):
         with tempfile.TemporaryDirectory() as tmp:

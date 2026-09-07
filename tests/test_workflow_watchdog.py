@@ -11,6 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
+from delegate_agent import run_registry, run_status
 from delegate_agent.workflows import registry
 from tests import proc_harness
 
@@ -163,6 +164,34 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
 
         self._wait_for(gone, timeout)
 
+    def _workflow_child_states(self, wf_id: str) -> dict[str, dict[str, object]]:
+        registry_root = run_registry.registry_root(self.workspace)
+        index = run_registry.load_index(registry_root)
+        states: dict[str, dict[str, object]] = {}
+        for run_id, entry in run_registry.index_run_entries(index):
+            if entry.get("group") != wf_id:
+                continue
+            state = run_registry.load_run_state_or_none(registry_root, run_id)
+            if isinstance(state, dict):
+                states[run_id] = state
+        return states
+
+    @staticmethod
+    def _group_gone(pgid: int) -> bool:
+        result = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == str(pgid) and not fields[1].startswith("Z"):
+                return False
+        return True
+
     def test_state_file_deletion_cancels_real_supervisor_and_releases_lock(self) -> None:
         _, root = self._launch(10)
         status = registry.read_json(root / registry.STATUS_FILE) or {}
@@ -178,6 +207,150 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         pid = int(status["supervisorPid"])
         shutil.rmtree(root)
         self._wait_process_gone(pid)
+
+    def test_state_deletion_reaps_only_owned_parallel_children(self) -> None:
+        wf_id, root = self._launch(
+            30,
+            "meta = {'name': 'watchdog parallel cleanup'}\n"
+            "return parallel([\n"
+            "    lambda: agent('owned one'),\n"
+            "    lambda: agent('owned two'),\n"
+            "    lambda: agent('owned three'),\n"
+            "])\n",
+        )
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        supervisor_pid = int(status["supervisorPid"])
+        supervisor_pgid = int(status["supervisorPgid"])
+
+        def three_running_children() -> dict[str, dict[str, object]] | None:
+            states = self._workflow_child_states(wf_id)
+            if len(states) != 3:
+                return None
+            if any(
+                run_status.raw_status(state) != run_status.STATUS_RUNNING
+                for state in states.values()
+            ):
+                return None
+            if any(not isinstance(state.get("pgid"), int) for state in states.values()):
+                return None
+            return states
+
+        running = self._wait_for(three_running_children, timeout=12)
+        self.assertIsInstance(running, dict)
+        owned_pgids = {run_id: int(state["pgid"]) for run_id, state in running.items()}
+        self.assertNotIn(supervisor_pgid, owned_pgids.values())
+        self.captured_workflow_pgids[wf_id].update(owned_pgids.values())
+
+        registry_root = run_registry.registry_root(self.workspace)
+        retained_source = self.workspace / "retained-source"
+        retained_source.mkdir()
+        subprocess.run(["git", "init", "-q", str(retained_source)], check=True)
+        (retained_source / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(retained_source), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(retained_source),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        retained_worktree = self.workspace / "retained-worktree"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(retained_source),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "retained",
+                str(retained_worktree),
+            ],
+            check=True,
+        )
+        sentinel = retained_worktree / "SENTINEL"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        retained_run_id, retained_alias = run_registry.register_run(
+            registry_root,
+            harness="codex",
+            metadata={
+                "group": wf_id,
+                "mode": "work",
+                "executionCwd": str(retained_worktree),
+            },
+        )
+        retained_run_dir = run_registry.run_directory(registry_root, retained_run_id)
+        run_registry.write_json_atomic(
+            retained_run_dir / run_registry.MANIFEST_FILE,
+            {
+                "schema": run_registry.MANIFEST_SCHEMA,
+                "runId": retained_run_id,
+                "alias": retained_alias,
+                "harness": "codex",
+                "group": wf_id,
+                "mode": "work",
+                "executionCwd": str(retained_worktree),
+                "sourceGitRoot": str(retained_source),
+                "isolationMode": "worktree",
+                "isolationLifecycle": "persistent",
+                "preservedWorkspace": True,
+            },
+        )
+        run_registry.write_json_atomic(
+            retained_run_dir / run_registry.STATE_FILE,
+            {
+                "schema": run_registry.STATE_SCHEMA,
+                "runId": retained_run_id,
+                "alias": retained_alias,
+                "status": run_status.STATUS_SUCCEEDED,
+            },
+        )
+
+        with proc_harness.spawn_process(
+            [sys.executable, "-c", "import time; time.sleep(30)", str(self.workspace)]
+        ) as canary:
+            canary_pgid = os.getpgid(canary.pid)
+            canary_run_id, canary_alias = run_registry.register_run(
+                registry_root,
+                harness="codex",
+                metadata={"group": "unrelated-canary", "mode": "work"},
+            )
+            canary_run_dir = run_registry.run_directory(registry_root, canary_run_id)
+            run_registry.write_json_atomic(
+                canary_run_dir / run_registry.STATE_FILE,
+                {
+                    "schema": run_registry.STATE_SCHEMA,
+                    "runId": canary_run_id,
+                    "alias": canary_alias,
+                    "status": run_status.STATUS_RUNNING,
+                    "pid": canary.pid,
+                    "pgid": canary_pgid,
+                },
+            )
+
+            (root / registry.STATUS_FILE).unlink()
+            self._wait_process_gone(supervisor_pid, timeout=12)
+
+            for pgid in owned_pgids.values():
+                self._wait_for(lambda pgid=pgid: self._group_gone(pgid), timeout=8)
+            settled = self._workflow_child_states(wf_id)
+            for run_id in owned_pgids:
+                self.assertEqual(
+                    run_status.raw_status(settled[run_id]), run_status.STATUS_CANCELLED
+                )
+            self.assertIsNone(canary.poll())
+            canary_state = run_registry.load_run_state(registry_root, canary_run_id)
+            self.assertEqual(run_status.raw_status(canary_state), run_status.STATUS_RUNNING)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
     def test_healthy_long_child_is_not_killed(self) -> None:
         _, root = self._launch(2)
@@ -199,12 +372,14 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             "time.sleep(3.5)\n"
             "return agent('after parked stretch')\n",
         )
+        initial_journal = registry.iter_journal(root / registry.JOURNAL_FILE)
+        self.assertEqual([event.get("type") for event in initial_journal], ["attempt_config"])
         time.sleep(2.2)
 
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         self.assertEqual(status.get("status"), "running")
         self.assertTrue(registry.supervisor_alive(root))
-        self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), [])
+        self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), initial_journal)
         self._wait_for(
             lambda: (
                 (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"

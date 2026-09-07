@@ -14,12 +14,21 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
-Prompt handling is provider-specific: Codex, Claude, OpenCode, and Pi prompts are delivered to the child
-runtime over stdin; Droid, Grok, and Devin prompts are delivered through private
-temporary prompt files; Cursor Agent, Oh My Pi, and Kimi Code currently
-require prompt argv. Delegate redacts Cursor, Oh My Pi, and Kimi prompt argv in
-dry-run output and run manifests, but true process-argv hiding for those Harnesses
-depends on the child CLIs exposing stdin or prompt-file transport.
+Prompt handling is provider-specific: Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi
+prompts are delivered to the child runtime over stdin; Droid, Grok, and Devin prompts
+are delivered through private temporary prompt files; Kimi Code is the only Harness
+that still requires prompt argv, and the only one whose prompt Delegate redacts in
+dry-run output and run manifests. Redaction hides the prompt from Delegate's own
+output, not from the child's process argv, so true hiding for Kimi depends on Kimi
+Code exposing stdin or prompt-file transport.
+
+Work runs have a workspace-local mailbox by default: use `delegate mail inbox`
+and `delegate mail read <id>` to check it. Global `--no-mail` or
+`mail.enabled: false` disables automatic mail setup; explicit mail commands
+still work. Mail needs no daemon, network, or `post`. Unavailable mail storage
+warns once and leaves the work launch running without mail setup. Stop-hook
+push (`--mail-push`) stays opt-in, and completion notifications (`--notify`)
+still require an explicit target. See [workspace mail](docs/cli-reference.md#workspace-mail).
 
 ## Install
 
@@ -52,13 +61,13 @@ python3 -m pip install -e .
 python3 bin/delegate.py --json describe
 ```
 
-Run the test suite with unittest (the validation gate), or the pytest
-accelerator for a faster local loop:
+Run the test suite with pytest, the validation gate. Add xdist workers for a
+faster local loop:
 
 ```bash
 python3 -m pip install -e ".[dev]"
-python3 -m unittest discover -s tests -t .   # gate
-pytest -n 8 --dist loadfile                  # fast accelerator, not a gate
+python3 -m pytest -q                # gate
+python3 -m pytest -n 8 --dist loadfile   # same gate, in parallel
 ```
 
 CI validates on Linux with Python 3.11, 3.12, 3.13, and 3.14, and on macOS with Python 3.12. Windows support is not claimed until it is covered by tests.
@@ -68,7 +77,7 @@ CI validates on Linux with Python 3.11, 3.12, 3.13, and 3.14, and on macOS with 
 Delegate wraps other CLIs. Install and authenticate only the runtimes you plan to call:
 
 ```bash
-command -v agent   # Cursor Agent CLI (default model: Cursor Composer), used by delegate cursor ...
+cursor-agent --version  # Cursor Agent CLI, used by delegate cursor ... (config.example.json pins composer-2.5)
 command -v droid   # Factory Droid CLI, used by delegate droid ...
 command -v codex   # OpenAI Codex CLI, used by delegate codex ...
 command -v claude  # Claude Code CLI, used by delegate claude ...
@@ -128,9 +137,9 @@ Inspect what Delegate sees:
 ```bash
 delegate --version       # installed version — include this in bug reports
 delegate --json setup
-delegate --json describe --summary
+delegate --json describe              # start here: command index and help topics
+delegate --json describe --full       # expanded command/config catalog
 delegate --json models --summary
-delegate --json describe
 delegate --json models
 delegate --json models codex          # per-engine advisory catalog
 delegate --json models cursor --live  # merge live harness probe when supported
@@ -142,7 +151,7 @@ delegate --json capabilities
 delegate --json capabilities refresh   # refresh the active profile's discovery cache
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. Global options may appear anywhere before `--`; tokens after `--` are literal prompt text. `delegate --json describe` includes a `commands` catalog of the whole surface. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` performs a one-off probe without updating the cache; rerun `delegate setup` or `delegate capabilities refresh` when ordinary launches should consume newly discovered models or effort levels.
+Start with `delegate --json describe` for a compact command index. Use `delegate <command> --help` for focused text or `delegate --json <command> --help` for its exact arguments and options. `describe --full` expands the command/config catalog. Global options may appear anywhere before `--`, but commands reject options they do not support; tokens after `--` are literal prompt text. Command-local options belong after the command, for example `runs --group NAME`. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` probes without updating the cache; use `setup` or `capabilities refresh` to save discovery results for later launches.
 
 Codex tracked runs can opt into a one-run quota fallback with `codex.fallbackProfile`; hashed credential namespace is canonical, while default work/personal credential homes also mirror compatible legacy alias keys so existing launchers share blocks. Remapped aliases remain isolated. See [Configuration](docs/configuration.md).
 
@@ -202,12 +211,12 @@ delegate kimi work "Implement the scoped change and run the named check. Report 
 ```
 
 Pin a model per run with `--model` (config alias from `<engine>.models`, or a
-raw model ID passed through verbatim). Droid still accepts a positional alias;
-`--model` works on every engine, including Droid:
+raw model ID passed through verbatim). This grammar applies to every engine,
+including Droid:
 
 ```bash
 delegate devin work --model implementer "Implement the scoped change and report it."
-delegate droid work --model custom:my-model "Implement the scoped change."
+delegate droid work --model custom:My-Model-0 "Implement the scoped change."
 delegate --json dry-run codex safe --model fast "Review this repository. Do not edit files."
 ```
 
@@ -382,9 +391,12 @@ Every child receives `WORKSPACE_ROOT`, the resolved execution workspace shown as
 after changing into a toolchain directory. Source-backed runs also expose
 `DELEGATE_SOURCE_ROOT`; isolated runs expose `DELEGATE_EXECUTION_ROOT`.
 
+Safe copies include uncommitted tracked edits and untracked, non-ignored files.
+You can review the current working tree without committing first or pasting a diff.
+
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate pi safe`, `delegate omp safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+- `delegate <engine> safe` runs in an isolated throwaway workspace for supported engines. Select a model with `--model <alias-or-model>`.
 - On Linux, eligible non-Cursor safe runs on Git workspaces can use an opt-in,
   zero-copy bubblewrap backend. Set `isolation.safeBackend` to `"bwrap"` or
   export `DELEGATE_SAFE_BACKEND=bwrap`. The real workspace is bound read-only,
@@ -401,7 +413,7 @@ Defaults are intentionally conservative for review paths:
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Pi safe mode and `pi call --read-only` use only the built-in `read` tool and disable extension, skill, prompt-template, and project-approval discovery. All Pi modes use `--no-session`; Delegate's run registry is the durable record.
-- Oh My Pi safe mode and `omp call --read-only` use only `read`, disable extension, skill, rules, and LSP discovery, and enforce `--approval-mode always-ask` so headless write and exec requests are denied. All Oh My Pi modes use `--no-session`; Delegate passes prompts as positional arguments because the verified 17.0.4 stdin path exited without processing piped input.
+- Oh My Pi safe mode and `omp call --read-only` use only `read`, disable extension, skill, rules, and LSP discovery, and enforce `--approval-mode always-ask` so headless write and exec requests are denied. All Oh My Pi modes use `--no-session`; prompts are piped on stdin, verified against 18.1.13.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
