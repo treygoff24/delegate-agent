@@ -1177,6 +1177,7 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
+                    "Adds --permission-prompts none when discovery proves the installed Claude lists the flag; anything that would prompt is then denied outright.",
                     "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
                     "Delegate does not prove Claude hooks, plugins, or user settings are disabled; keep safe-mode work review-only.",
                 ],

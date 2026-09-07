@@ -59,6 +59,14 @@ CURSOR_READ_ONLY_MODE = ("--mode", "ask")
 
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
 
+# Claude Code 2.1.259 added --permission-prompts; 2.1.263 documents "none" as
+# "nobody: anything that would prompt is denied automatically; the permission
+# mode still decides everything else". Delegate's read-only modes otherwise rely
+# on there being no approver in -p, which is incidental rather than stated. An
+# unknown flag is an immediate usage error, so this is emitted only when
+# discovery proved the installed binary lists it.
+CLAUDE_READ_ONLY_PERMISSION_PROMPTS = ("--permission-prompts", "none")
+
 CLAUDE_SAFE_ALLOWED_TOOLS = (
     "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
     "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
@@ -285,6 +293,7 @@ def build_claude_argv(
     persist_session: bool = False,
     resume_session_id: str | None = None,
     resumable: bool = False,
+    permission_prompts_supported: bool = False,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
     # Call mode reads one JSON envelope; tracked safe/work runs keep stream-json
@@ -326,6 +335,8 @@ def build_claude_argv(
                 "--strict-mcp-config",
             ]
         )
+        if permission_prompts_supported:
+            argv.extend(CLAUDE_READ_ONLY_PERMISSION_PROMPTS)
     elif mode == MODE_WORK:
         permission_mode = (
             "bypassPermissions"
@@ -346,6 +357,8 @@ def build_claude_argv(
                     "--strict-mcp-config",
                 ]
             )
+            if permission_prompts_supported:
+                argv.extend(CLAUDE_READ_ONLY_PERMISSION_PROMPTS)
         else:
             argv.extend(["--permission-mode", str(claude.get("workPermissionMode", "auto"))])
     else:

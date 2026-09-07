@@ -626,3 +626,67 @@ class PinnedClaudeAliasPreflightTests(CommandTestBase):
             continuity_mode="pinned",
         )
         self.assertEqual(request.model, "best")
+
+
+class ClaudePermissionPromptsTests(CommandTestBase):
+    """A6: make the safe-mode denial explicit instead of assuming no approver.
+
+    Claude Code 2.1.263 documents `--permission-prompts none` as "nobody:
+    anything that would prompt is denied automatically; the permission mode still
+    decides everything else". Delegate's read-only modes relied on there being no
+    approver in `-p`, which is a property of the invocation rather than a stated
+    contract. The flag is only emitted when discovery proved the installed binary
+    lists it, the same way the native persona-file transport is gated.
+    """
+
+    @staticmethod
+    def _discovery(supported):
+        return {
+            "schema": 1,
+            "profile": "default",
+            "harnesses": {"claude": {"capabilities": {"permissionPrompts": supported}}},
+        }
+
+    def _argv(self, mode, discovery, **kwargs):
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=discovery):
+            return self.build_git_request(
+                "claude",
+                mode,
+                None,
+                "/repo",
+                "review",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
+                **kwargs,
+            ).argv
+
+    def test_safe_emits_the_flag_when_discovery_proves_it(self):
+        argv = self._argv("safe", self._discovery(True))
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+
+    def test_read_only_call_emits_the_flag(self):
+        argv = self._argv("call", self._discovery(True), call_read_only=True)
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+
+    def test_work_and_write_capable_call_never_emit_the_flag(self):
+        # The planted negative: a write-capable run must keep its approver.
+        self.assertNotIn("--permission-prompts", self._argv("work", self._discovery(True)))
+        self.assertNotIn("--permission-prompts", self._argv("call", self._discovery(True)))
+
+    def test_unproven_capability_omits_the_flag(self):
+        # An unknown flag is an immediate usage error on Claude, so a run must
+        # never gamble on it; no discovery record means no flag.
+        self.assertNotIn("--permission-prompts", self._argv("safe", self._discovery(False)))
+        self.assertNotIn("--permission-prompts", self._argv("safe", None))
+
+    def test_pure_call_is_unchanged(self):
+        argv = argv_api.build_claude_argv(
+            delegate_config.embedded_default_config()["claude"],
+            "call",
+            None,
+            {},
+            pure=True,
+            call_read_only=True,
+            permission_prompts_supported=True,
+        )
+        self.assertNotIn("--permission-prompts", argv)
