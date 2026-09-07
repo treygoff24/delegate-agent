@@ -59,6 +59,15 @@ class PersonaSizeGuardTests(unittest.TestCase):
         self.assertEqual(self._framed_prompt_bytes(over), limit + 1)
         return exact, over
 
+    def _preamble_enabled_config(self) -> dict[str, object]:
+        # _boundary_prompt() computes its overhead via a direct
+        # effective_prompt() call, which always includes SKILL_REVIEW_PREFIX
+        # (it does not pass skip_skill_preamble). Enable the config switch here
+        # so the actual framed request matches that overhead math.
+        cfg = config.embedded_default_config()
+        cfg["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        return cfg
+
     def _cli_request(self, prompt: str):
         parsed = parse_cli(
             [
@@ -73,7 +82,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         )
         return request_from_parsed(
             parsed,
-            config.embedded_default_config(),
+            self._preamble_enabled_config(),
             io.StringIO(),
             stderr=io.StringIO(),
         )
@@ -95,7 +104,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         parsed = parse_cli(["--cwd", str(self.workspace), "run", "--input-json", str(input_path)])
         return request_from_parsed(
             parsed,
-            config.embedded_default_config(),
+            self._preamble_enabled_config(),
             io.StringIO(),
             stderr=io.StringIO(),
         )

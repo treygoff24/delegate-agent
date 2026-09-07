@@ -1591,6 +1591,23 @@ def validate_config(config: JsonObject) -> None:
                     "invalid_tracking_config",
                     "tracking.completionReport.defaultMode must be markdown or none.",
                 )
+        preamble = tracking.get("skillReviewPreamble")
+        if preamble is not None:
+            if not isinstance(preamble, dict):
+                raise ConfigError(
+                    "invalid_tracking_config", "tracking.skillReviewPreamble must be an object."
+                )
+            unknown = set(preamble) - {"enabled"}
+            if unknown:
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    f"tracking.skillReviewPreamble has unknown keys: {', '.join(sorted(unknown))}.",
+                )
+            if not isinstance(preamble.get("enabled", False), bool):
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    "tracking.skillReviewPreamble.enabled must be a boolean.",
+                )
         retention = tracking.get("retention")
         if retention is not None:
             if not isinstance(retention, dict):
@@ -1653,6 +1670,16 @@ def validate_config(config: JsonObject) -> None:
         )
     _validate_personas_section(config.get("personas"))
     _validate_mail_section(config.get("mail"))
+
+
+def skill_review_preamble_enabled(config: JsonObject) -> bool:
+    """Return whether wrapped prompts get the skill-review preamble (default off)."""
+
+    tracking = config.get("tracking")
+    if not isinstance(tracking, dict):
+        return False
+    section = tracking.get("skillReviewPreamble")
+    return isinstance(section, dict) and section.get("enabled") is True
 
 
 def mail_enabled(config: JsonObject) -> bool:

@@ -398,10 +398,71 @@ class ValidationTests(unittest.TestCase):
             global_options=request_types.GlobalOptions(json_mode=True, cwd=str(nested)),
             payload=request_types.RunJsonOptions(str(task)),
         )
-        request = request_api.request_from_input_json(parsed, droid_test_config(self.delegate))
+        config = droid_test_config(self.delegate)
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        request = request_api.request_from_input_json(parsed, config)
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
         self.assertEqual(request.workspace_kind, "git")
         self.assertTrue(request.prompt.startswith(runner.SKILL_REVIEW_PREFIX))
+
+    def test_skill_review_preamble_defaults_off(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        config = delegate_config.embedded_default_config()
+        parsed = parser_api.parse_cli(["--cwd", repo.name, "codex", "work", "fix the tests"])
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertFalse(request.prompt.startswith(runner.SKILL_REVIEW_PREFIX))
+        self.assertNotIn(runner.SKILL_REVIEW_PREFIX, request.prompt)
+
+    def test_skill_review_preamble_enabled_via_config(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        parsed = parser_api.parse_cli(["--cwd", repo.name, "codex", "work", "fix the tests"])
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertTrue(request.prompt.startswith(runner.SKILL_REVIEW_PREFIX))
+
+    def test_skill_review_preamble_absent_under_pass_through_even_when_enabled(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        parsed = parser_api.parse_cli(
+            ["--cwd", repo.name, "--pass-through", "codex", "work", "fix the tests"]
+        )
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertFalse(request.prompt.startswith(runner.SKILL_REVIEW_PREFIX))
+        self.assertNotIn(runner.SKILL_REVIEW_PREFIX, request.prompt)
+
+    def test_tracking_skill_review_preamble_config_shape(self):
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": False}
+        delegate_config.validate_config(config)
+
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
+        delegate_config.validate_config(config)
+
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": False, "unexpected": True}
+        with self.assertRaises(delegate_config.ConfigError) as caught:
+            delegate_config.validate_config(config)
+        self.assertEqual(caught.exception.error, "invalid_tracking_config")
+
+        for invalid in ("yes", 1, []):
+            with self.subTest(invalid=invalid):
+                config = delegate_config.embedded_default_config()
+                config["tracking"]["skillReviewPreamble"] = {"enabled": invalid}
+                with self.assertRaises(delegate_config.ConfigError) as caught:
+                    delegate_config.validate_config(config)
+                self.assertEqual(caught.exception.error, "invalid_tracking_config")
+
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = "not-an-object"
+        with self.assertRaises(delegate_config.ConfigError) as caught:
+            delegate_config.validate_config(config)
+        self.assertEqual(caught.exception.error, "invalid_tracking_config")
 
     def test_run_input_json_non_git_cwd_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:

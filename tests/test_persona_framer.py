@@ -46,7 +46,11 @@ class PersonaFramerTests(CommandTestBase):
         return Path(repo.name)
 
     def _config(self, engine: str) -> dict[str, object]:
+        # This class exercises the enabled skill-review-preamble path: every
+        # SKILL_REVIEW_PREFIX expectation below asserts framing order/bytes
+        # with the preamble present.
         config = config_api.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
         config["personas"]["forceTransport"] = "prepend"
         if engine == "droid":
             config["droid"]["defaultModel"] = "droid-model"
