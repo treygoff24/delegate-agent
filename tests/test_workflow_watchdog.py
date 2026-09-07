@@ -223,6 +223,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         supervisor_pgid = int(status["supervisorPgid"])
 
         # Four-core CI runners deliberately admit only two concurrent agents.
+        # On a 4-core runner this is 2, so the reap assertion covers two of the three children.
         expected_children = min(3, runtime._global_agent_cap())
 
         def running_children() -> dict[str, dict[str, object]] | None:

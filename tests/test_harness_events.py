@@ -1488,6 +1488,34 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.assistant_text, "Draft\n\nFinal")
         self.assertEqual(acc.completion_text, "Final")
 
+    def test_claude_terminal_result_replays_multi_block_assistant_text_only_once(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_01multi",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [
+                            {"type": "text", "text": "Part A"},
+                            {"type": "text", "text": "Part B"},
+                        ],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 12, "output_tokens": 2},
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "success", "result": "Part A\n\nPart B"})
+        )
+
+        self.assertEqual(acc.assistant_text.count("Part A"), 1)
+
     def test_repeated_non_terminal_assistant_messages_are_not_deduplicated(self):
         acc = self.events.StreamAccumulator(harness="claude")
         message = {

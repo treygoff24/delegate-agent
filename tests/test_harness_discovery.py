@@ -1685,6 +1685,10 @@ class VersionIdentityTests(unittest.TestCase):
         identity = self.discovery._identify_version("pi", ("estate-pi",), "0.85.1", explicit=True)
         self.assertEqual((identity.status, identity.version), ("expected", "0.85.1"))
 
+    def test_explicit_selector_named_for_another_harness_rejects_a_bare_version(self):
+        identity = self.discovery._identify_version("pi", ("droid",), "1.2.3", explicit=True)
+        self.assertEqual((identity.status, identity.version), ("unrecognized", None))
+
     def test_explicit_ambiguous_wrapper_name_still_rejects_a_bare_version(self):
         identity = self.discovery._identify_version("pi", ("agent",), "0.85.1", explicit=True)
         self.assertEqual((identity.status, identity.version), ("unrecognized", None))
