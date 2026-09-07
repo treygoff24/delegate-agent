@@ -71,6 +71,7 @@ from delegate_agent import sandbox_bwrap as _sandbox_bwrap
 from delegate_agent import (
     setup_commands as _setup_commands,
 )
+from delegate_agent import stall_watchdog as _stall_watchdog
 from delegate_agent import (
     wait_cancel_commands as _wait_cancel_commands,
 )
@@ -413,6 +414,23 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["plannedBranch"] = None
 
     return payload
+
+
+def _stall_minutes_explicitly_configured(config: JsonObject) -> bool:
+    workflows = config.get("workflows")
+    return "stallMinutes" in config or (isinstance(workflows, dict) and "stallMinutes" in workflows)
+
+
+def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Request:
+    stall_seconds = _stall_watchdog.effective_stall_seconds(
+        request.stall_seconds,
+        harness=request.engine,
+        timeout_seconds=request.timeout,
+        explicitly_configured=_stall_minutes_explicitly_configured(config),
+    )
+    if stall_seconds == request.stall_seconds:
+        return request
+    return dc_replace(request, stall_seconds=stall_seconds)
 
 
 def _binary_config_key(engine: str | None) -> str | None:
@@ -1806,6 +1824,7 @@ def main(
             request = _resume_command.apply_resume_to_request(request, resume_plan)
         if followup_plan is not None:
             request = _followup_command.apply_followup_to_request(request, followup_plan)
+        request = _apply_stall_watchdog_policy(request, config)
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (
