@@ -32,6 +32,8 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 
 - codex-75 = dlg-3em (confirmed by diff): merged dff62e1.
 
+- codex-76 = dlg-cjz.4 (confirmed by diff): merged, test-only.
+
 ## Failure modes seen
 - Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
 
