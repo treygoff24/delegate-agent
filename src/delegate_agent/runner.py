@@ -2268,7 +2268,7 @@ def _capture_tracked_process(
                 prior_session_id = accumulator.session_id
                 accumulator.ingest_line(line)
                 watchdog.observe_line(line, now=time.monotonic())
-                if accumulator.terminal_status is not None:
+                if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
                 elif accumulator.harness in {"pi", "omp"}:
                     # A harness-owned retry/new turn supersedes its preceding

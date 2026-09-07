@@ -667,6 +667,7 @@ class StreamAccumulator:
     usage: JsonObject | None = None
     session_id: str | None = None
     structured_events_seen: int = 0
+    terminal_exit_armed: bool = True
     malformed_lines: int = 0
     malformed_samples: list[str] = field(default_factory=list)
     unhandled_event_types: dict[str, int] = field(default_factory=dict)
@@ -678,8 +679,17 @@ class StreamAccumulator:
         event: str,
         status: str,
         reason: str | None = None,
+        arm_exit: bool = True,
     ) -> None:
+        """Record the terminal. `arm_exit` says whether the runner may stop the child.
+
+        The runner reads `terminal_exit_armed` alongside `terminal_status` and
+        SIGTERMs a child that has not exited within `TERMINAL_EXIT_GRACE_SEC` of
+        an armed terminal. A harness that still has work to do after announcing
+        its terminal passes False so its own exit is what ends the run.
+        """
         self.terminal_status = status
+        self.terminal_exit_armed = arm_exit
         payload: JsonObject = {"event": event, "status": status}
         # The reason is child-supplied text and both sinks below are persisted to
         # the run record: `terminalEvent` directly and the `run.completed` event
@@ -1328,7 +1338,12 @@ class StreamAccumulator:
         # terminal. Recording it is what lets a run that errored and then
         # recovered end clean, while a turn with nothing left to seal keeps
         # whatever failure the stream already reported.
-        self._record_terminal_event(event="turn.completed", status="succeeded")
+        #
+        # It does not arm the terminal-exit kill. codex keeps working after the
+        # turn is announced -- the rollout flush and, on a `--resumable` run,
+        # finalizing the session file -- and putting that on a one-second clock
+        # would truncate it. The natural exit ends the run instead.
+        self._record_terminal_event(event="turn.completed", status="succeeded", arm_exit=False)
 
     def _ingest_grok_text(self, payload: JsonObject) -> None:
         data = payload.get("data")
@@ -1661,6 +1676,7 @@ class StreamAccumulator:
             )
         self.terminal_status = None
         self.terminal_event = None
+        self.terminal_exit_armed = True
         self.provider_terminal_state = None
         self.provider_terminal_reason = None
 
