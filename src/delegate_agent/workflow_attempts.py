@@ -169,16 +169,19 @@ def create(pin: workflow_pinning.WorkflowPin, metadata: JsonObject) -> WorkflowA
                 raise _error("staged workflow attempt differs from its validated input")
             (staging / "config.json").chmod(0o400)
             (staging / "attempt.json").chmod(0o400)
-            staging.chmod(0o500)
             try:
+                # macOS requires the source directory to remain writable here.
                 private_io.rename_directory_noreplace(staging, root)
             except FileExistsError:
                 # A competing publication must validate as the same artifact;
                 # even an empty foreign directory is never replaced.
-                return load(root / "attempt.json", pin=pin)
+                pass
             except OSError as exc:
                 raise _error(f"atomic no-replace publication failed (errno {exc.errno})") from exc
-        return load(root / "attempt.json", pin=pin)
+        attempt = load(root / "attempt.json", pin=pin)
+        # Also seal a validated attempt left writable by an interrupted publish.
+        root.chmod(0o500)
+        return attempt
 
 
 def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> WorkflowAttempt:
