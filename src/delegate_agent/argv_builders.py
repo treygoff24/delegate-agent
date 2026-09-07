@@ -106,7 +106,7 @@ PI_FAMILY_SAFE_LOCKDOWN = {
 }
 
 
-def redacted_prompt_argv(argv: list[str], replacement: str = KIMI_PROMPT_REDACTION) -> list[str]:
+def redacted_prompt_argv(argv: list[str]) -> list[str]:
     """Replace a trailing argv prompt with a placeholder for parent-facing output.
 
     Kimi is the only engine left on argv transport; cursor and omp moved to
@@ -115,7 +115,7 @@ def redacted_prompt_argv(argv: list[str], replacement: str = KIMI_PROMPT_REDACTI
     if not argv:
         return []
     redacted = list(argv)
-    redacted[-1] = replacement
+    redacted[-1] = KIMI_PROMPT_REDACTION
     return redacted
 
 
