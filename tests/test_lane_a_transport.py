@@ -24,6 +24,7 @@ from delegate_agent import (
     mail_core,
     reasoning,
     request_build,
+    structured_output,
 )
 from delegate_agent import cli_parser as parser_api
 from delegate_agent import (
@@ -813,6 +814,64 @@ class ClaudeNativeSchemaPreflightTests(CommandTestBase):
             self._build(oversize)
         self.assertEqual(caught.exception.error, "schema_not_native")
         self.assertIn("argv limit", caught.exception.message)
+
+    def _schema_text_path(self, text: str) -> str:
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = Path(directory) / "schema.json"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_a_pretty_printed_schema_is_measured_by_its_own_bytes(self):
+        """Claude carries the file's bytes in argv; whitespace counts against the limit."""
+        limit = structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES
+        schema = {
+            "type": "object",
+            "properties": {f"field_{index}": {"type": "string"} for index in range(2600)},
+        }
+        pretty = json.dumps(schema, indent=2)
+        self.assertLess(len(json.dumps(schema).encode("utf-8")), limit)
+        self.assertGreaterEqual(len(pretty.encode("utf-8")), limit)
+
+        with self.assertRaises(errors_api.DelegateError) as caught:
+            self.build_git_request(
+                "claude",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
+                output_schema=self._schema_text_path(pretty),
+            )
+
+        self.assertEqual(caught.exception.error, "schema_not_native")
+        self.assertIn("argv limit", caught.exception.message)
+
+    def test_a_pretty_printed_schema_under_the_limit_still_builds(self):
+        """The planted negative: measuring the real bytes must not reject everything."""
+        schema = {
+            "type": "object",
+            "properties": {f"field_{index}": {"type": "string"} for index in range(1000)},
+        }
+        pretty = json.dumps(schema, indent=2)
+        self.assertLess(
+            len(pretty.encode("utf-8")), structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES
+        )
+
+        request = self.build_git_request(
+            "claude",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            output_schema=self._schema_text_path(pretty),
+        )
+
+        self.assertIn("--json-schema", request.argv)
+        self.assertIn(pretty, request.argv)
 
     def test_eligible_schema_still_builds(self):
         # The planted negative: an eligible schema must reach argv untouched.
