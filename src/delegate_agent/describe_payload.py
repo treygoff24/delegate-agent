@@ -1214,7 +1214,7 @@ def describe_payload(
                 "work": grok_work_argv,
                 "workNotes": [
                     "Uses grok.workPermissionMode unless policy.harness.grok.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
-                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh).",
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },

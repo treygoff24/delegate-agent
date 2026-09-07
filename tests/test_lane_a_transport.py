@@ -12,9 +12,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import argv_builders as argv_api
-from delegate_agent import argv_utils, mail_core
+from delegate_agent import argv_utils, command_help, harness_discovery, mail_core
 from delegate_agent import (
     config as delegate_config,
 )
@@ -418,3 +419,97 @@ class OmpWorkspaceAndApprovalTests(CommandTestBase):
         self.assertEqual(omp_work[omp_work.index("--cwd") + 1], "<workspace>")
         omp_safe = payload["modeMapping"]["omp"]["safe"]
         self.assertEqual(omp_safe[omp_safe.index("--cwd") + 1], "<isolated-workspace>")
+
+
+class OmpCatalogWarningTests(CommandTestBase):
+    """A9: warn when a resolved omp selector is not in the discovered catalog.
+
+    omp resolves `--model` by exact `provider/modelId`, then exact bare id, then a
+    provider-scoped fuzzy and substring pass, so a stale exact-form id does not
+    fail — it can silently land on a different concrete model. omp also runs
+    under `continuityMode: fungible`, so the substitution is not a violation
+    either. A warning is the whole fix: never a hard reject, never a rewrite of
+    the operator's alias.
+    """
+
+    @staticmethod
+    def _catalog(*selectors):
+        return {
+            "schema": 1,
+            "profile": "default",
+            "harnesses": {"omp": {"models": {selector: {} for selector in selectors}}},
+        }
+
+    def _request(self, model, discovery):
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=discovery):
+            return self.build_git_request(
+                "omp",
+                "work",
+                None,
+                "/repo",
+                "implement",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
+                model_override=model,
+            )
+
+    def test_absent_selector_warns_and_still_launches(self):
+        request = self._request(
+            "opencode-go/deepseek-v4-pro", self._catalog("fireworks/deepseek-v4-pro")
+        )
+        self.assertEqual(request.model, "opencode-go/deepseek-v4-pro")
+        self.assertIn("--model", request.argv)
+        self.assertTrue(
+            any(
+                "opencode-go/deepseek-v4-pro" in warning and "catalog" in warning
+                for warning in request.warnings
+            ),
+            request.warnings,
+        )
+
+    def test_present_selector_does_not_warn(self):
+        # The planted negative: a selector that is in the catalog must stay quiet,
+        # or the warning is noise on every run.
+        request = self._request(
+            "fireworks/deepseek-v4-pro", self._catalog("fireworks/deepseek-v4-pro")
+        )
+        self.assertFalse(
+            any("catalog" in warning for warning in request.warnings), request.warnings
+        )
+
+    def test_no_catalog_means_no_warning(self):
+        # Absence of discovery is not evidence of an absent model.
+        request = self._request("fireworks/anything", None)
+        self.assertFalse(
+            any("catalog" in warning for warning in request.warnings), request.warnings
+        )
+        request = self._request("fireworks/anything", self._catalog())
+        self.assertFalse(
+            any("catalog" in warning for warning in request.warnings), request.warnings
+        )
+
+
+class GrokEffortHelpStringTests(unittest.TestCase):
+    """A9: the help strings stop advertising an effort grok 1.0.13 rejects."""
+
+    def test_command_help_omits_max(self):
+        spec = command_help.COMMAND_SPECS["grok"]
+        effort_notes = [note for note in spec.notes if "--effort" in note]
+        self.assertTrue(effort_notes)
+        for note in effort_notes:
+            self.assertIn("low, medium, high, xhigh", note)
+            self.assertNotIn("max", note)
+
+    def test_describe_payload_omits_max(self):
+        payload = describe_api.describe_payload(
+            delegate_config.embedded_default_config(), "embedded default"
+        )
+        notes = [
+            note
+            for note in payload["modeMapping"]["grok"]["safeNotes"]
+            + payload["modeMapping"]["grok"].get("workNotes", [])
+            if "--effort" in note
+        ]
+        self.assertTrue(notes)
+        for note in notes:
+            self.assertNotIn("max", note)
