@@ -549,6 +549,10 @@ class StreamAccumulator:
         if self.continuity_violation is not None:
             return
         provider_terminal = _provider_terminal_state(payload, event_type)
+        # A provider terminal recorded for THIS event already published a
+        # run.completed; the generic error/result handlers below must not add a
+        # second one for the same line.
+        terminal_recorded = provider_terminal is not None
         if provider_terminal is not None:
             self.provider_terminal_state, self.provider_terminal_reason = provider_terminal
             self._record_terminal_event(
@@ -582,6 +586,20 @@ class StreamAccumulator:
             # profile-failover classifier and the synthesized completion report
             # both read it from the accumulator.
             self._ingest_error_event(payload)
+            # Text sealed before the error is pre-error output, not the turn's
+            # answer. Dropping the candidate is what stops `turn.completed` from
+            # promoting a preamble over the top of the failure.
+            self._codex_completion_candidate = None
+            if not terminal_recorded:
+                # An error event is a terminal signal, as the grok and pi
+                # handlers already treat it. Without this a child that errors
+                # and still exits 0 promotes its pre-error preamble as a clean
+                # completion report.
+                self._record_terminal_event(
+                    event=event_type,
+                    status="failed",
+                    reason=self._terminal_error_reason(payload),
+                )
             return
         if event_type == "tool_result":
             return
@@ -726,9 +744,16 @@ class StreamAccumulator:
             self.session_id = candidate
 
     def _ingest_error_event(self, payload: JsonObject) -> None:
-        message = payload.get("message")
-        if isinstance(message, str) and message.strip():
-            self._last_error_message = message.strip()
+        # Anthropic- and OpenAI-shaped errors nest the text under `error`; codex
+        # and grok put it at the top level. `_terminal_error_reason` already read
+        # both, so reading only the top level here dropped the whole event.
+        message = _string_field(payload, "message")
+        if message is None:
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = _string_field(error, "message")
+        if message:
+            self._last_error_message = message
             self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
             self.current = _bounded_current_line(self._last_error_message)
 
@@ -986,8 +1011,14 @@ class StreamAccumulator:
         self.current = _tool_current("command_execution", command)
 
     def _ingest_codex_turn_completed(self) -> None:
-        if self._codex_completion_candidate:
-            self.completion_text = self._codex_completion_candidate
+        if not self._codex_completion_candidate:
+            return
+        self.completion_text = self._codex_completion_candidate
+        # `turn.completed` sealing a fresh agent message is codex's success
+        # terminal. Recording it is what lets a run that errored and then
+        # recovered end clean, while a turn with nothing left to seal keeps
+        # whatever failure the stream already reported.
+        self._record_terminal_event(event="turn.completed", status="succeeded")
 
     def _ingest_grok_text(self, payload: JsonObject) -> None:
         data = payload.get("data")
