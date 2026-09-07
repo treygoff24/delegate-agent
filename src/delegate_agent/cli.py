@@ -421,7 +421,7 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         if (
             request.prompt_instruction_mode == "wrapped"
             and request.prompt != request.source_prompt
-            and request.prompt.endswith("\n\n" + _mail.MAIL_PROMPT_SUFFIX)
+            and ("\n\n" + _mail.MAIL_PROMPT_SUFFIX) in request.prompt
         ):
             # Expose the injected instructions without publishing the user's prompt.
             payload["mailPromptSuffix"] = _mail.MAIL_PROMPT_SUFFIX
