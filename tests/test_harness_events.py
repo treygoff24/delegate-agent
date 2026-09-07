@@ -1219,12 +1219,31 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial report")
 
-    def test_grok_maxtokens_stop_reason_stays_exit_code_derived(self):
+    def test_grok_truncation_stop_reasons_are_incomplete_terminals(self):
+        """grok L1: max_tokens and max_turn_requests were silent successes."""
+        for stop_reason in ("max_tokens", "MaxTokens", "max_turn_requests"):
+            with self.subTest(stop_reason=stop_reason):
+                acc = self.events.StreamAccumulator(harness="grok")
+                acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+                acc.ingest_line(json.dumps({"type": "end", "stopReason": stop_reason}))
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.recoverable_assistant_text, "partial report")
+                completed = [event for event in acc.events if event.kind == "run.completed"]
+                self.assertEqual(len(completed), 1)
+
+    def test_grok_max_turn_requests_is_typed_as_provider_max_turns(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "max_turn_requests"}))
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+
+    def test_grok_max_turns_reached_event_is_a_terminal(self):
+        """grok L4: the second, independent truncation signal was discarded."""
         acc = self.events.StreamAccumulator(harness="grok")
         acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
-        acc.ingest_line(json.dumps({"type": "end", "stopReason": "MaxTokens"}))
-        self.assertIsNone(acc.terminal_status)
-        self.assertEqual(acc.recoverable_assistant_text, "partial report")
+        acc.ingest_line(json.dumps({"type": "max_turns_reached", "limit": 20}))
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertEqual(acc.terminal_status, "failed")
 
     def test_codex_explicit_terminal_error_sets_failed(self):
         acc = self.events.StreamAccumulator(harness="codex")
@@ -2055,20 +2074,123 @@ class HarnessEventsTests(unittest.TestCase):
             )
         )
 
-    def test_grok_multiturn_tool_use_end_does_not_promote_preamble(self):
+    def test_grok_usage_boundary_keeps_the_preamble_out_of_the_answer(self):
+        """grok B3: `usage`, not `end`, is the per-response boundary in 1.0.13."""
         acc = self.events.StreamAccumulator(harness="grok")
         for payload in [
             {"type": "text", "data": "I'll inspect the repo first."},
-            {"type": "end", "stopReason": "ToolUse"},
-            {"type": "tool_call", "tool": "Bash", "args": {"command": "git status"}},
+            {"type": "usage", "usage": {"input_tokens": 12, "output_tokens": 8}},
+            {
+                "type": "tool_call",
+                "toolCallId": "call-1",
+                "toolName": "read_file",
+                "rawInput": {"target_file": "README.md"},
+            },
+            {"type": "tool_call_update", "toolCallId": "call-1", "status": "completed"},
             {"type": "text", "data": "Status: completed\n- final answer"},
-            {"type": "end", "stopReason": "EndTurn"},
+            {"type": "usage", "usage": {"input_tokens": 3, "output_tokens": 9}},
+            {"type": "end", "stopReason": "end_turn"},
         ]:
             acc.ingest_line(json.dumps(payload))
         self.assertEqual(acc.completion_text, "Status: completed\n- final answer")
-        self.assertNotEqual(acc.completion_text, "I'll inspect the repo first.")
+        self.assertEqual(acc.assistant_text, "Status: completed\n- final answer")
         completed = [event for event in acc.events if event.kind == "run.completed"]
         self.assertEqual(len(completed), 1)
+
+    def test_grok_single_response_usage_before_end_still_delivers_text(self):
+        """The seal must not swallow a stream whose only `usage` precedes `end`."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        for payload in [
+            {"type": "text", "data": "the only answer"},
+            {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 2}},
+            {"type": "end", "stopReason": "end_turn"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.completion_text, "the only answer")
+
+    def test_grok_sealed_response_is_visible_before_end(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "sealed answer"}))
+        acc.ingest_line(json.dumps({"type": "usage", "usage": {"input_tokens": 1}}))
+        self.assertEqual(acc.assistant_text, "sealed answer")
+        self.assertEqual(acc.recoverable_assistant_text, "sealed answer")
+
+    def test_grok_usage_with_no_new_text_keeps_the_previous_response(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        for payload in [
+            {"type": "text", "data": "the answer"},
+            {"type": "usage", "usage": {"input_tokens": 1}},
+            {"type": "usage", "usage": {"input_tokens": 2}},
+            {"type": "end", "stopReason": "end_turn"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_grok_real_capture_delivers_only_the_final_response(self):
+        fixture = ROOT / "tests" / "fixtures" / "grok" / "tool_read_multi_response.jsonl"
+        acc = self.events.StreamAccumulator(harness="grok")
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.completion_text, "ZQ-1147")
+        self.assertNotIn("I'll read", acc.assistant_text)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.session_id, "01a07a75-f34b-7e70-9f82-1ca6f7161365")
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 26387,
+                "outputTokens": 172,
+                "cacheReadTokens": 37632,
+                "cacheWriteTokens": 0,
+                "costUsd": 0.01234574,
+            },
+        )
+        tool_events = [event for event in acc.events if event.kind.startswith("tool.")]
+        self.assertEqual(
+            [(event.kind, event.tool, event.target, event.status) for event in tool_events],
+            [
+                ("tool.started", "read_file", "marker.txt", None),
+                ("tool.completed", "read_file", "marker.txt", "success"),
+            ],
+        )
+
+    def test_grok_tool_update_without_a_status_does_not_complete_the_tool(self):
+        """The first update carries only `locations`; the tool is still running."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "toolCallId": "call-1",
+                    "toolName": "read_file",
+                    "rawInput": {"target_file": "marker.txt"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "status": None,
+                    "locations": [{"path": "marker.txt"}],
+                }
+            )
+        )
+        self.assertEqual([event.kind for event in acc.events], ["tool.started"])
+
+    def test_grok_failed_tool_update_is_not_reported_as_success(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps({"type": "tool_call", "toolCallId": "call-1", "toolName": "read_file"})
+        )
+        acc.ingest_line(
+            json.dumps({"type": "tool_call_update", "toolCallId": "call-1", "status": "failed"})
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual([event.status for event in completed], ["failed"])
 
     def test_top_level_grok_shapes_are_ignored_for_non_grok_harnesses(self):
         acc = self.events.StreamAccumulator(harness="cursor")
