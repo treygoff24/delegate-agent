@@ -130,6 +130,40 @@ def codex_section(config: JsonObject) -> JsonObject:
     return section if isinstance(section, dict) else {}
 
 
+def codex_home_path(resolution: ProfileResolution) -> Path:
+    """The CODEX_HOME a Codex run under this profile will actually use.
+
+    The active profile's env wins because that is what delegate hands the child;
+    an ambient CODEX_HOME is next, and Codex's own default is last.
+    """
+    home = resolution.codex_home or os.environ.get("CODEX_HOME")
+    return Path(home).expanduser() if home and home.strip() else Path.home() / ".codex"
+
+
+def codex_profile_overlay_warning(config: JsonObject, resolution: ProfileResolution) -> str | None:
+    """Warn when ``codex.profile`` names an overlay file Codex will not find.
+
+    At 0.153.4 ``--profile <name>`` layers ``$CODEX_HOME/<name>.config.toml`` on
+    top of the base user config; profiles are no longer ``[profiles.<name>]``
+    tables inside ``config.toml``. Codex accepts a name with no matching file
+    silently and exits 0, so a setting left over from the old shape costs every
+    Codex run its overlay and says nothing. Nothing here reads or parses the
+    file: existence is the whole claim.
+    """
+    profile = codex_section(config).get("profile")
+    if not isinstance(profile, str) or not profile.strip():
+        return None
+    profile = profile.strip()
+    overlay = codex_home_path(resolution) / f"{profile}.config.toml"
+    if overlay.exists():
+        return None
+    return (
+        f"codex.profile {profile!r} layers {overlay}, which does not exist; "
+        "Codex accepts the name silently, so every codex run resolves no overlay. "
+        "Create the file or clear codex.profile."
+    )
+
+
 def codex_fallback_profile(config: JsonObject) -> str | None:
     fallback = codex_section(config).get("fallbackProfile")
     if isinstance(fallback, str) and fallback.strip():

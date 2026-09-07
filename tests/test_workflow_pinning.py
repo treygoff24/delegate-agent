@@ -780,3 +780,131 @@ finally:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodexProfileOverlayDoctorTests(unittest.TestCase):
+    """codex L2: a `codex.profile` with no overlay file fails open and silently."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.codex_home = Path(self.temp.name) / "codex-home"
+        self.codex_home.mkdir()
+
+    def _resolution(self, codex_home: Path | None = None) -> profiles.ProfileResolution:
+        home = self.codex_home if codex_home is None else codex_home
+        return profiles.ProfileResolution(
+            name="work",
+            source="config",
+            env={"CODEX_HOME": str(home)},
+            codex_home=str(home),
+        )
+
+    def test_a_profile_without_its_overlay_file_is_reported(self):
+        warning = profiles.codex_profile_overlay_warning(
+            {"codex": {"profile": "delegate"}}, self._resolution()
+        )
+
+        self.assertIsNotNone(warning)
+        self.assertIn("delegate", warning)
+        self.assertIn(str(self.codex_home / "delegate.config.toml"), warning)
+
+    def test_an_existing_overlay_file_is_silent(self):
+        (self.codex_home / "delegate.config.toml").write_text("[a]\n", encoding="utf-8")
+
+        self.assertIsNone(
+            profiles.codex_profile_overlay_warning(
+                {"codex": {"profile": "delegate"}}, self._resolution()
+            )
+        )
+
+    def test_a_legacy_profiles_table_does_not_satisfy_the_check(self):
+        """Planted negative: 0.153.4 stopped reading `[profiles.<name>]` tables."""
+        (self.codex_home / "config.toml").write_text(
+            '[profiles.delegate]\nmodel = "gpt-5"\n', encoding="utf-8"
+        )
+
+        self.assertIsNotNone(
+            profiles.codex_profile_overlay_warning(
+                {"codex": {"profile": "delegate"}}, self._resolution()
+            )
+        )
+
+    def test_no_configured_profile_produces_no_warning(self):
+        for section in (
+            {},
+            {"codex": {}},
+            {"codex": {"profile": None}},
+            {"codex": {"profile": " "}},
+        ):
+            with self.subTest(section=section):
+                self.assertIsNone(
+                    profiles.codex_profile_overlay_warning(section, self._resolution())
+                )
+
+    def test_doctor_reports_the_warning_it_is_handed(self):
+        warning = profiles.codex_profile_overlay_warning(
+            {"codex": {"profile": "delegate"}}, self._resolution()
+        )
+        assert warning is not None
+
+        report = workflow_pinning.doctor(home=Path(self.temp.name), extra_warnings=(warning,))
+        stream = io.StringIO()
+        workflow_pinning.emit_doctor(
+            home=Path(self.temp.name), stdout=stream, extra_warnings=(warning,)
+        )
+
+        self.assertIn(warning, report["warnings"])
+        self.assertIn("delegate.config.toml", stream.getvalue())
+
+    def test_doctor_without_the_warning_does_not_mention_a_profile(self):
+        report = workflow_pinning.doctor(home=Path(self.temp.name))
+
+        self.assertNotIn(
+            "codex.profile", " ".join(str(item) for item in report.get("warnings", []))
+        )
+
+    def test_delegate_doctor_surfaces_a_missing_overlay_end_to_end(self):
+        """The whole path: config on disk, `delegate doctor`, warning in JSON."""
+        from delegate_agent import cli
+
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"profile": "delegate"},
+                    "profiles": {
+                        "default": "work",
+                        "definitions": {"work": {"env": {"CODEX_HOME": str(self.codex_home)}}},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        env = {"DELEGATE_CONFIG": str(config_path)}
+        env.pop("AI_PROFILE", None)
+
+        with mock.patch.dict(os.environ, env):
+            code = cli.main(["--json", "doctor"], stdout=out, stderr=io.StringIO())
+        self.assertEqual(code, 0)
+        missing = [
+            warning
+            for warning in json.loads(out.getvalue()).get("warnings", [])
+            if "codex.profile" in warning
+        ]
+        self.assertEqual(len(missing), 1, missing)
+        self.assertIn("delegate.config.toml", missing[0])
+
+        (self.codex_home / "delegate.config.toml").write_text("[a]\n", encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env):
+            code = cli.main(["--json", "doctor"], stdout=out, stderr=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertFalse(
+            [
+                warning
+                for warning in json.loads(out.getvalue()).get("warnings", [])
+                if "codex.profile" in warning
+            ]
+        )
