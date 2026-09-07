@@ -38,6 +38,10 @@ DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
 DEFAULT_DRY_RUN_TIMEOUT_SECONDS: Final = 300
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(KNOWN_ENGINES)
 
+DEFAULT_TRACKED_STREAM_MAX_BYTES: Final = 16 * 1024 * 1024
+PI_FAMILY_TRACKED_STREAM_MAX_BYTES: Final = 64 * 1024 * 1024
+PI_FAMILY_ENGINES: Final = frozenset({"pi", "omp"})
+
 SAFE_BACKEND_COPY = "copy"
 SAFE_BACKEND_BWRAP = "bwrap"
 VALID_SAFE_BACKEND_VALUES = (SAFE_BACKEND_COPY, SAFE_BACKEND_BWRAP)
@@ -91,12 +95,14 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": "composer-2.5",
         "defaultReasoningEffort": None,
         "reasoningEffortModels": {},
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "droid": {
         "binary": "droid",
         "models": {},
         "defaultReasoningEffort": None,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
     },
     "reasoning": {
         "capabilities": {},
@@ -105,6 +111,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "binary": "kimi",
         "defaultModel": None,
         "defaultReasoningEffort": None,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "claude": {
@@ -114,6 +121,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workPermissionMode": "auto",
         "noSessionPersistence": True,
         "bare": False,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "grok": {
@@ -126,12 +134,14 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workSandbox": None,
         "disableWebSearch": True,
         "noSubagents": False,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "devin": {
         "binary": "devin",
         "defaultModel": None,
         "defaultReasoningEffort": None,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "opencode": {
@@ -139,18 +149,21 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": None,
         "defaultReasoningEffort": None,
         "defaultAgent": None,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "pi": {
         "binary": "pi",
         "defaultModel": None,
         "defaultReasoningEffort": None,
+        "trackedStreamMaxBytes": PI_FAMILY_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "omp": {
         "binary": "omp",
         "defaultModel": None,
         "defaultReasoningEffort": None,
+        "trackedStreamMaxBytes": PI_FAMILY_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "policy": {
@@ -168,6 +181,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workSandbox": "workspace-write",
         "ephemeral": True,
         "ignoreUserConfig": False,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "profiles": {
@@ -245,6 +259,21 @@ def default_progress_initial_delay_sec() -> float:
 
 def default_progress_interval_sec() -> float:
     return _embedded_progress_default("intervalSec")
+
+
+def default_tracked_stream_max_bytes(engine: str) -> int:
+    if engine in PI_FAMILY_ENGINES:
+        return PI_FAMILY_TRACKED_STREAM_MAX_BYTES
+    return DEFAULT_TRACKED_STREAM_MAX_BYTES
+
+
+def resolve_tracked_stream_max_bytes(config: JsonObject, engine: str) -> int:
+    section = config.get(engine)
+    if isinstance(section, dict):
+        value = section.get("trackedStreamMaxBytes")
+        if is_non_negative_int(value) and value > 0:
+            return value
+    return default_tracked_stream_max_bytes(engine)
 
 
 PROCESS_GROUP_TERMINATION_GRACE_SEC_DEFAULT = 3.0
@@ -476,6 +505,19 @@ def _validate_required_non_negative_int(
         raise ConfigError(error, f"{path} must not be null.")
     if not is_non_negative_int(value):
         raise ConfigError(error, f"{path} must be a non-negative integer.")
+
+
+def _validate_engine_tracked_stream_max_bytes(config: JsonObject) -> None:
+    for engine in KNOWN_ENGINES:
+        section = config.get(engine)
+        if not isinstance(section, dict) or "trackedStreamMaxBytes" not in section:
+            continue
+        value = section["trackedStreamMaxBytes"]
+        if not is_non_negative_int(value) or value <= 0:
+            raise ConfigError(
+                f"invalid_{engine}_config",
+                f"{engine}.trackedStreamMaxBytes must be a positive integer.",
+            )
 
 
 def _validate_progress_section(progress: JsonValue) -> None:
@@ -1662,6 +1704,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_opencode_section(config.get("opencode"))
     _validate_pi_family_section(config.get("pi"), engine="pi")
     _validate_pi_family_section(config.get("omp"), engine="omp")
+    _validate_engine_tracked_stream_max_bytes(config)
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

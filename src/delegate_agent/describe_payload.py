@@ -341,51 +341,61 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
         "cursor": {
             "defaultModel": config["cursor"]["defaultModel"],
             "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["cursor"]["trackedStreamMaxBytes"],
         },
         "droid": {
             "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["droid"]["trackedStreamMaxBytes"],
         },
         "codex": {
             "binary": config["codex"]["binary"],
             "defaultModel": config["codex"]["defaultModel"],
             "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["codex"]["trackedStreamMaxBytes"],
         },
         "kimi": {
             "binary": config["kimi"]["binary"],
             "defaultModel": config["kimi"]["defaultModel"],
             "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["kimi"]["trackedStreamMaxBytes"],
         },
         "claude": {
             "binary": config["claude"]["binary"],
             "defaultModel": config["claude"]["defaultModel"],
             "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["claude"]["trackedStreamMaxBytes"],
         },
         "grok": {
             "binary": config["grok"]["binary"],
             "defaultModel": config["grok"]["defaultModel"],
             "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["grok"]["trackedStreamMaxBytes"],
         },
         "devin": {
             "binary": config["devin"]["binary"],
             "defaultModel": config["devin"]["defaultModel"],
             "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["devin"]["trackedStreamMaxBytes"],
         },
         "opencode": {
             "binary": config["opencode"]["binary"],
             "defaultModel": config["opencode"]["defaultModel"],
             "defaultReasoningEffort": config["opencode"].get("defaultReasoningEffort"),
             "defaultAgent": config["opencode"].get("defaultAgent"),
+            "trackedStreamMaxBytes": config["opencode"]["trackedStreamMaxBytes"],
         },
         "pi": {
             "binary": config["pi"]["binary"],
             "defaultModel": config["pi"]["defaultModel"],
             "defaultReasoningEffort": config["pi"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["pi"]["trackedStreamMaxBytes"],
         },
         "omp": {
             "binary": config["omp"]["binary"],
             "defaultModel": config["omp"]["defaultModel"],
             "defaultReasoningEffort": config["omp"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["omp"]["trackedStreamMaxBytes"],
         },
     }
 

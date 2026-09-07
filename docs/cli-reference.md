@@ -1341,18 +1341,21 @@ Work-mode attempts are never replayed after tool activity or a workspace change.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
-Tracked stdout and stderr logs are capped independently at 16 MiB. Exceeding a
-cap terminates the child and records `output_limit_exceeded` plus an
-`outputLimit` object naming the stream and byte limit.
+Tracked stdout and stderr logs are capped independently. Pi and OMP default to
+64 MiB per stream; other engines default to 16 MiB. Set
+`<engine>.trackedStreamMaxBytes` to a positive byte count to override that
+engine's tracked-run limit. Exceeding a cap terminates the child and records
+`output_limit_exceeded` plus an `outputLimit` object naming the stream and byte
+limit; the error message also names the engine and configured limit.
 
 OMP stdout has a separate, finite transport budget: 256 MiB received per attempt,
-16 MiB per JSON record, and the same 16 MiB retained-output cap. Delegate retains
+16 MiB per JSON record, and a 64 MiB retained-output cap by default. Delegate retains
 up to 64 KiB of the known stripped `message_update` / `thinking_delta` diagnostic
 shape, then omits further records of exactly that shape. Other fields, malformed
 JSON, text, errors, models, usage, and tool records are never discounted.
-The same OMP policy applies to call mode; other engines and stderr retain their
-existing raw-byte limits. An over-limit read can observe at most one extra
-64 KiB chunk before termination.
+OMP call mode keeps its separate 16 MiB retained-output cap while using the same
+thinking compaction and transport safeguards. An over-limit read can observe at
+most one extra 64 KiB chunk before termination.
 
 OMP results disclose `stdoutCapture`: transport/captured byte counts, omitted
 thinking bytes and records, limits, `limitKind`, `truncated`, and a streaming
