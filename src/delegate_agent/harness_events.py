@@ -1285,7 +1285,12 @@ class StreamAccumulator:
                 self.usage = usage
         result = claude_result_text(payload)
         if result is not None:
-            if payload.get("is_error") is True:
+            # `terminal_recorded` means the provider-terminal table classified
+            # this same line as a refusal, cancellation or truncation. Its text
+            # is then a partial answer, not the answer, and promoting it would
+            # overwrite that terminal with `succeeded`. `error_max_turns` is the
+            # live case: it carries partial text and often omits `is_error`.
+            if payload.get("is_error") is True or terminal_recorded:
                 if not terminal_recorded:
                     self._record_terminal_event(event="result", status="failed")
                 self._record_recoverable_assistant_text(result)
