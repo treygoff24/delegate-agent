@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import run_registry, runner
+from delegate_agent import config, run_registry, runner
 
 
 class TrackedOutputBoundsTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(runner, "TRACKED_STREAM_MAX_BYTES", 8192),
+                mock.patch.object(runner, "_tracked_stream_max_bytes", return_value=8192),
                 self.assertRaises(runner.RunnerLaunchError) as caught,
             ):
                 runner.execute_tracked(
@@ -61,6 +61,70 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             self.assertEqual(state["outputLimit"]["stream"], "stdout")
             self.assertEqual(state["outputLimit"]["bytes"], 8192)
 
+    def test_engine_configured_limit_is_honored_and_named_in_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="omp")
+            configured = config.embedded_default_config()
+            configured["omp"]["trackedStreamMaxBytes"] = 8192
+            script = (
+                "import os\nchunk = b'x' * 4095 + b'\\n'\n"
+                "for _ in range(4):\n    os.write(1, chunk)\n"
+            )
+
+            with (
+                mock.patch.object(
+                    runner.delegate_config,
+                    "load_config",
+                    return_value=(configured, "fixture-config"),
+                ),
+                self.assertRaises(runner.RunnerLaunchError) as caught,
+            ):
+                runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "output_limit_exceeded")
+            self.assertIn("engine omp stdout", caught.exception.message)
+            self.assertIn("configured tracked stream limit of 8192 bytes", caught.exception.message)
+            run_path = run_registry.run_directory(context.registry_root, context.run_id)
+            state = run_registry.load_run_state(context.registry_root, context.run_id)
+            self.assertEqual(state["outputLimit"], {"stream": "stdout", "bytes": 8192})
+            self.assertLessEqual((run_path / run_registry.STDOUT_LOG).stat().st_size, 8192)
+
+    def test_pi_family_default_differs_from_codex(self):
+        configured = config.embedded_default_config()
+
+        self.assertEqual(
+            config.resolve_tracked_stream_max_bytes(configured, "codex"),
+            16 * 1024 * 1024,
+        )
+        self.assertEqual(
+            config.resolve_tracked_stream_max_bytes(configured, "pi"),
+            64 * 1024 * 1024,
+        )
+        self.assertEqual(
+            config.resolve_tracked_stream_max_bytes(configured, "omp"),
+            64 * 1024 * 1024,
+        )
+
+    def test_config_rejects_non_positive_or_non_integer_tracked_stream_limit(self):
+        for value in (0, -1, True, 1.5, "67108864"):
+            with self.subTest(value=value):
+                configured = config.embedded_default_config()
+                configured["omp"]["trackedStreamMaxBytes"] = value
+
+                with self.assertRaises(config.ConfigError) as caught:
+                    config.validate_config(configured)
+
+                self.assertEqual(caught.exception.error, "invalid_omp_config")
+                self.assertIn("omp.trackedStreamMaxBytes", caught.exception.message)
+
     def test_many_short_lines_bound_derived_event_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -68,7 +132,7 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             script = "import os\nfor _ in range(10000):\n    os.write(1, b'x\\n')\n"
 
             with (
-                mock.patch.object(runner, "TRACKED_STREAM_MAX_BYTES", 8192),
+                mock.patch.object(runner, "_tracked_stream_max_bytes", return_value=8192),
                 self.assertRaises(runner.RunnerLaunchError),
             ):
                 runner.execute_tracked(

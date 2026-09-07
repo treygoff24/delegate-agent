@@ -178,7 +178,7 @@ class OmpOutputCaptureTests(unittest.TestCase):
             with self.subTest(line=line[:30]), tempfile.TemporaryDirectory() as temp:
                 script = f"import os\nfor _ in range(2000): os.write(1,{line!r})\n"
                 with (
-                    mock.patch.object(runner, "TRACKED_STREAM_MAX_BYTES", 4096),
+                    mock.patch.object(runner, "_tracked_stream_max_bytes", return_value=4096),
                     self.assertRaises(runner.RunnerLaunchError) as error,
                 ):
                     self.tracked(Path(temp), script)
