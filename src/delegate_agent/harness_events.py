@@ -563,6 +563,31 @@ def _normalize_terminal_status(value: JsonValue) -> str | None:
     return None
 
 
+def claude_result_text(payload: JsonObject) -> str | None:
+    """The answer text of a Claude `result` event, from either transport.
+
+    `structured_output` is the only surface the vendor documents for a
+    structured run; the same JSON is also echoed into the `result` string,
+    which delegate has been relying on without a commitment that it stays
+    there. Prefer the documented field, serialized the way the CLI serializes
+    it, and fall back to the string.
+
+    Extraction only. `is_error` and the pure-mode permission-denial check are
+    separate questions and stay with their callers: a run can carry a perfectly
+    readable result and still have failed.
+    """
+    structured = payload.get("structured_output")
+    if structured is not None:
+        try:
+            return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    result = payload.get("result")
+    if isinstance(result, str) and result.strip():
+        return result
+    return None
+
+
 def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
     if not isinstance(value, dict):
         return None
@@ -1223,8 +1248,8 @@ class StreamAccumulator:
             usage = _normalize_reported_usage(payload.get("usage"))
             if usage is not None:
                 self.usage = usage
-        result = payload.get("result")
-        if isinstance(result, str) and result.strip():
+        result = claude_result_text(payload)
+        if result is not None:
             if payload.get("is_error") is True:
                 if not terminal_recorded:
                     self._record_terminal_event(event="result", status="failed")
