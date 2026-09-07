@@ -342,8 +342,10 @@ class LaunchMappingTests(ExecutionTestBase):
                     projections = (
                         cli.dry_run_payload(request),
                         runner.build_manifest(ctx, []),
-                        runner.build_snapshot(
-                            ctx, accumulator=harness_events.StreamAccumulator(harness="codex")
+                        runner.build_run_record(
+                            ctx,
+                            accumulator=harness_events.StreamAccumulator(harness="codex"),
+                            status="running",
                         ),
                     )
                     keys = (
@@ -356,7 +358,11 @@ class LaunchMappingTests(ExecutionTestBase):
                         for payload in projections
                     ]
                     self.assertEqual(selected[0], selected[1])
-                    self.assertEqual(selected[0], selected[2])
+                    record = projections[2]
+                    provenance = record["modelProvenance"]
+                    self.assertEqual(provenance["requestedModel"], model)
+                    self.assertEqual(provenance["resolvedModel"], model)
+                    self.assertEqual(record["status"], "running")
                     self.assertEqual(selected[0]["modelRequested"], model)
                     if fast is None:
                         self.assertNotIn("requestedFast", selected[0])

@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser, errors, request_build, request_models, snapshot_view
+from delegate_agent import config as delegate_config
 from tests.execution_test_base import ExecutionTestBase, make_git_repo
 
 
@@ -44,8 +46,8 @@ class TrackedTimeoutTests(ExecutionTestBase):
         self.addCleanup(repo.cleanup)
         fake_bin = self.make_partial_output_fake_bin("droid")
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self.delegate.Request(
+        workspace = request_build.resolve_workspace(repo.name)
+        request = request_models.Request(
             "droid",
             "safe",
             repo.name,
@@ -56,12 +58,12 @@ class TrackedTimeoutTests(ExecutionTestBase):
         )
         with (
             mock.patch.dict(os.environ, {"PATH": env_path}),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors.DelegateError) as ctx,
         ):
             self.delegate.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -87,7 +89,9 @@ class TrackedTimeoutTests(ExecutionTestBase):
         self.assertTrue(state.get("completionReportWritten"))
         self.assertEqual(state.get("completionReportSource"), "delegate_synthesized")
 
-        snapshot = json.loads((run_dirs[0] / "snapshot.json").read_text(encoding="utf-8"))
+        snapshot = snapshot_view.merge_snapshot_view(
+            registry_root, run_dirs[0].name, None, redact=False, state=state
+        )
         self.assertFalse(snapshot.get("ok"))
         self.assertEqual(snapshot.get("status"), "failed")
         self.assertEqual(snapshot.get("exitCode"), 1)
@@ -143,14 +147,14 @@ class TrackedTimeoutTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_sleeping_fake_bin("agent")
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_build.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_models.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -166,12 +170,12 @@ class TrackedTimeoutTests(ExecutionTestBase):
                 mock.patch.dict(
                     os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
                 ),
-                self.assertRaises(self.delegate.DelegateError) as ctx,
+                self.assertRaises(errors.DelegateError) as ctx,
             ):
                 self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=delegate_config.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -197,14 +201,14 @@ class TrackedTimeoutTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_sleeping_fake_bin("agent")
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_build.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                delegate_config.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_models.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -220,12 +224,12 @@ class TrackedTimeoutTests(ExecutionTestBase):
                 mock.patch.dict(
                     os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
                 ),
-                self.assertRaises(self.delegate.DelegateError) as ctx,
+                self.assertRaises(errors.DelegateError) as ctx,
             ):
                 self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=delegate_config.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -241,7 +245,9 @@ class TrackedTimeoutTests(ExecutionTestBase):
             self.assertEqual(state.get("status"), "failed")
             self.assertEqual(state.get("error"), "call_timeout")
             self.assertEqual(state.get("worktreeStatus"), "present")
-            snapshot = json.loads((run_dirs[0] / "snapshot.json").read_text(encoding="utf-8"))
+            snapshot = snapshot_view.merge_snapshot_view(
+                registry_root, run_dirs[0].name, None, redact=False, state=state
+            )
             self.assertEqual(snapshot.get("status"), "failed")
             self.assertFalse(snapshot.get("ok"))
             self.assertEqual(snapshot.get("exitCode"), 1)
@@ -268,8 +274,8 @@ class TrackedTimeoutTests(ExecutionTestBase):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
         fake_bin = self.make_sleeping_fake_bin("droid")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self.delegate.Request(
+        workspace = request_build.resolve_workspace(repo.name)
+        request = request_models.Request(
             "droid",
             "call",
             repo.name,
@@ -280,11 +286,11 @@ class TrackedTimeoutTests(ExecutionTestBase):
             group="timeout-test",
         )
 
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(errors.DelegateError) as ctx:
             self.delegate.execute_request(
                 request,
                 json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=delegate_config.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="none",
                 source_workspace=workspace,
@@ -302,8 +308,8 @@ class TrackedTimeoutTests(ExecutionTestBase):
             ["--pass-through", "cursor", "call", "--timeout", "5", "x"],
             ["--pass-through", "droid", "work", "--timeout", "5", "x"],
         ):
-            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.parse_cli(argv)
+            with self.subTest(argv=argv), self.assertRaises(errors.DelegateError) as ctx:
+                cli_parser.parse_cli(argv)
             self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_input_json_timeout_rejected_with_pass_through(self):
@@ -323,13 +329,15 @@ class TrackedTimeoutTests(ExecutionTestBase):
                         }
                     )
                 )
-                parsed = self.delegate.ParsedCommand(
+                parsed = request_models.ParsedCommand(
                     "run",
-                    global_options=self.delegate.GlobalOptions(pass_through=True),
-                    run_json=self.delegate.RunJsonOptions(str(task)),
+                    global_options=request_models.GlobalOptions(pass_through=True),
+                    payload=request_models.RunJsonOptions(str(task)),
                 )
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                with self.assertRaises(errors.DelegateError) as ctx:
+                    request_build.request_from_input_json(
+                        parsed, delegate_config.embedded_default_config()
+                    )
                 self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     # -- Acceptance: timeout flows into safe/work requests --------------------
@@ -339,11 +347,11 @@ class TrackedTimeoutTests(ExecutionTestBase):
         self.addCleanup(repo.cleanup)
         for mode in ("safe", "work"):
             with self.subTest(mode=mode):
-                parsed = self.delegate.parse_cli(
+                parsed = cli_parser.parse_cli(
                     ["--cwd", repo.name, "cursor", mode, "--timeout", "30", "hello"]
                 )
-                request = self.delegate.request_from_parsed(
-                    parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+                request = request_build.request_from_parsed(
+                    parsed, delegate_config.embedded_default_config(), io.StringIO("")
                 )
                 self.assertEqual(request.mode, mode)
                 self.assertEqual(request.timeout, 30)
@@ -365,13 +373,13 @@ class TrackedTimeoutTests(ExecutionTestBase):
                         }
                     )
                 )
-                parsed = self.delegate.ParsedCommand(
+                parsed = request_models.ParsedCommand(
                     "run",
-                    global_options=self.delegate.GlobalOptions(json_mode=True),
-                    run_json=self.delegate.RunJsonOptions(str(task)),
+                    global_options=request_models.GlobalOptions(json_mode=True),
+                    payload=request_models.RunJsonOptions(str(task)),
                 )
-                request = self.delegate.request_from_input_json(
-                    parsed, self.delegate.DEFAULT_CONFIG
+                request = request_build.request_from_input_json(
+                    parsed, delegate_config.embedded_default_config()
                 )
                 self.assertEqual(request.mode, mode)
                 self.assertEqual(request.timeout, 30)

@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import notify
+from delegate_agent import cli, cli_parser, notify
+from delegate_agent import config as delegate_config
 from delegate_agent.errors import DelegateError
 
 
@@ -308,9 +309,9 @@ class RunnerHookTests(unittest.TestCase):
             with (
                 mock.patch.object(runner.run_registry, "load_run_state_or_none", return_value=None),
                 mock.patch.object(runner, "write_state"),
-                mock.patch.object(runner, "build_state", return_value={}),
-                mock.patch.object(runner, "build_snapshot", return_value={}),
-                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "build_run_record", return_value={}),
+                mock.patch.object(runner, "build_run_record", return_value={}),
+                mock.patch.object(runner, "write_state"),
                 mock.patch.object(runner, "_send_completion_notification") as hook,
             ):
                 runner._record_tracked_launch_failure(files, ctx, error)
@@ -350,10 +351,10 @@ class RunnerHookTests(unittest.TestCase):
             registration.branch = "b"
             registration.worktree_path = str(Path(temp) / "wt")
             with (
-                mock.patch.object(runner, "build_state", return_value={}),
+                mock.patch.object(runner, "build_run_record", return_value={}),
                 mock.patch.object(runner, "write_state"),
-                mock.patch.object(runner, "build_snapshot", return_value={}),
-                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "build_run_record", return_value={}),
+                mock.patch.object(runner, "write_state"),
                 mock.patch.object(runner, "_send_completion_notification") as hook,
             ):
                 worktree_execution._record_persistent_worktree_failure(
@@ -393,17 +394,17 @@ class ParserAndDryRunTests(unittest.TestCase):
         self.assertIn("call mode does not use --notify", str(caught.exception))
 
     def test_notify_threads_into_global_options_for_launches(self) -> None:
-        parsed = self.delegate.parse_cli(
+        parsed = cli_parser.parse_cli(
             ["--json", "--notify", "channel:machineroom", "codex", "safe", "review"]
         )
         self.assertEqual(parsed.global_options.notify, "channel:machineroom")
 
     def test_notify_rejected_for_non_launch_subcommands_and_call_mode(self) -> None:
         with self.assertRaises(DelegateError) as caught:
-            self.delegate.parse_cli(["--notify", "room:r", "runs"])
+            cli_parser.parse_cli(["--notify", "room:r", "runs"])
         self.assertEqual(caught.exception.error, "invalid_option_combination")
         with self.assertRaises(DelegateError) as caught:
-            self.delegate.parse_cli(["--notify", "nope", "codex", "safe", "x"])
+            cli_parser.parse_cli(["--notify", "nope", "codex", "safe", "x"])
         self.assertEqual(caught.exception.error, "invalid_notify_target")
 
     def test_dry_run_payload_reports_target_and_post_argv(self) -> None:
@@ -415,12 +416,18 @@ class ParserAndDryRunTests(unittest.TestCase):
         base.setUp()
         try:
             request = base.build_git_request(
-                "codex", "safe", None, "/repo", "review", self.delegate.DEFAULT_CONFIG, dry_run=True
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
             )
         except AttributeError:
             self.skipTest("execution test base lacks build_git_request")
         request = dataclasses.replace(request, notify="room:devbox")
-        payload = self.delegate.dry_run_payload(request)
+        payload = cli.dry_run_payload(request)
         self.assertEqual(payload["notify"]["target"], "room:devbox")
         self.assertEqual(payload["notify"]["argv"][:4], ["post", "send", "--to", "devbox"])
 

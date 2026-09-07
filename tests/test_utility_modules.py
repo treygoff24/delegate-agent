@@ -198,9 +198,9 @@ class UtilityModuleTests(unittest.TestCase):
 
         self.assertEqual(parsed.subcommand, "runs")
         self.assertTrue(parsed.global_options.json_mode)
-        self.assertIsNotNone(parsed.runs)
-        self.assertEqual(parsed.runs.limit, 1)
-        self.assertTrue(parsed.runs.structural)
+        self.assertIsNotNone(parsed.payload)
+        self.assertEqual(parsed.payload.limit, 1)
+        self.assertTrue(parsed.payload.structural)
 
     def test_worktree_management_error_normalizes_payload(self):
         error = worktree_mgmt.WorktreeManagementError(
