@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-CURSOR_PROMPT_REDACTION = "<prompt redacted: cursor argv transport>"
 KIMI_PROMPT_REDACTION = "<prompt redacted: kimi argv transport>"
-OMP_PROMPT_REDACTION = "<prompt redacted: omp argv transport>"
 PROMPT_FILE_ARG_PLACEHOLDER = "<delegate-prompt-file>"
 PROMPT_FILE_DISPLAY = "<prompt file>"
 DROID_PROMPT_FILE_ARG_PLACEHOLDER = PROMPT_FILE_ARG_PLACEHOLDER
@@ -40,6 +38,8 @@ PROMPT_TRANSPORT_STDIN = "stdin"
 
 # Engines whose prompt rides child argv and is therefore subject to ARG_MAX.
 # Shared by the workflow interpolation guard and the resume final-prompt guard
-# so the covered-engine set cannot drift between the two.
-ARGV_PROMPT_TRANSPORT_ENGINES = ("cursor", "kimi", "omp")
+# so the covered-engine set cannot drift between the two. Kimi is the last one:
+# cursor (2026.09.02-c22c1a3) and omp (18.1.13) both read a piped prompt, so they
+# use stdin and keep the prompt out of /proc/<pid>/cmdline.
+ARGV_PROMPT_TRANSPORT_ENGINES = ("kimi",)
 ARGV_PROMPT_GUARD_BYTES = 100 * 1024

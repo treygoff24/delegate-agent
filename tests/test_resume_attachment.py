@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import errors as errors_api
 from delegate_agent import private_io, resume_command, worktree_records
+from delegate_agent import run_registry as registry_api
+from delegate_agent import runner as runner_api
+from delegate_agent import worktree_gc as worktree_gc_api
 from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
@@ -40,11 +44,11 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def _source_prompt(self, repo_path: str, run_id: str, text: str = "original task") -> None:
         root = self._registry_root(repo_path)
-        run_path = self.delegate.run_registry.run_directory(root, run_id)
-        self.delegate.run_registry.write_private_text(run_path / "prompt.txt", text)
-        manifest = self.delegate.run_registry.load_run_manifest(root, run_id)
+        run_path = registry_api.run_directory(root, run_id)
+        registry_api.write_private_text(run_path / "prompt.txt", text)
+        manifest = registry_api.load_run_manifest(root, run_id)
         manifest["promptFile"] = "prompt.txt"
-        self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
+        registry_api.write_json_atomic(run_path / "manifest.json", manifest)
 
     def _owner(
         self,
@@ -69,13 +73,13 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
         self._create_worktree_at(repo_path, branch, worktree_path)
         self._source_prompt(repo_path, run_id)
         root = self._registry_root(repo_path)
-        manifest = self.delegate.run_registry.load_run_manifest(root, run_id)
+        manifest = registry_api.load_run_manifest(root, run_id)
         if include_dirty:
             manifest["includeDirty"] = True
         if forbid_commit:
             manifest["commitPolicy"] = {"forbidCommit": True}
-        self.delegate.run_registry.write_json_atomic(
-            self.delegate.run_registry.run_directory(root, run_id) / "manifest.json", manifest
+        registry_api.write_json_atomic(
+            registry_api.run_directory(root, run_id) / "manifest.json", manifest
         )
         return run_id, owner_alias, worktree_path, branch
 
@@ -96,13 +100,13 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def _child_manifest(self, repo_path: str, owner_id: str) -> tuple[str, dict, dict]:
         root = self._registry_root(repo_path)
-        index = self.delegate.run_registry.load_index(root)
+        index = registry_api.load_index(root)
         child_id = next(
             run_id
             for run_id, entry in index["runs"].items()
             if run_id != owner_id and isinstance(entry, dict)
         )
-        run_path = self.delegate.run_registry.run_directory(root, child_id)
+        run_path = registry_api.run_directory(root, child_id)
         return (
             child_id,
             json.loads((run_path / "manifest.json").read_text(encoding="utf-8")),
@@ -111,7 +115,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def _write_live_attachment(self, repo_path: str, worktree_path: str) -> tuple[str, str]:
         root = self._registry_root(repo_path)
-        run_id, alias = self.delegate.run_registry.register_run(
+        run_id, alias = registry_api.register_run(
             root,
             harness="cursor",
             metadata={
@@ -125,11 +129,11 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 },
             },
         )
-        run_path = self.delegate.run_registry.run_directory(root, run_id)
-        self.delegate.run_registry.write_json_atomic(
+        run_path = registry_api.run_directory(root, run_id)
+        registry_api.write_json_atomic(
             run_path / "manifest.json",
             {
-                "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                "schema": registry_api.MANIFEST_SCHEMA,
                 "runId": run_id,
                 "alias": alias,
                 "harness": "cursor",
@@ -147,10 +151,10 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 "startedAt": "2000-01-01T00:00:00Z",
             },
         )
-        self.delegate.run_registry.write_json_atomic(
+        registry_api.write_json_atomic(
             run_path / "state.json",
             {
-                "schema": self.delegate.run_registry.STATE_SCHEMA,
+                "schema": registry_api.STATE_SCHEMA,
                 "runId": run_id,
                 "alias": alias,
                 "status": "running",
@@ -256,11 +260,11 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertEqual(git("worktree", "list", "--porcelain", cwd=repo_path).stdout, before)
 
             root = self._registry_root(repo_path)
-            index = self.delegate.run_registry.load_index(root)
+            index = registry_api.load_index(root)
             child_ids = [run_id for run_id in index["runs"] if run_id != owner_id]
             self.assertEqual(len(child_ids), 2)
             second_id = next(run_id for run_id in child_ids if run_id != first_id)
-            second_manifest = self.delegate.run_registry.load_run_manifest(root, second_id)
+            second_manifest = registry_api.load_run_manifest(root, second_id)
             self.assertEqual(second_manifest["isolationLifecycle"], "attached")
             self.assertEqual(second_manifest["worktreeAttachment"]["sourceRunId"], owner_id)
             self.assertEqual(second_manifest["worktreeAttachment"]["path"], worktree_path)
@@ -279,12 +283,12 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
             payload = json.loads(stdout)
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "worktree_attached")
             self.assertIn(attached_alias, payload["message"])
             self.assertTrue(Path(worktree_path).exists())
 
-            gc_payload = self.delegate.worktree_mgmt.gc_worktrees(root)
+            gc_payload = worktree_gc_api.gc_worktrees(root)
             warning = next(item for item in gc_payload["warnings"] if item.get("runId") == owner_id)
             self.assertEqual(warning["reason"], "live_attachment")
             self.assertIn(attached_alias, {item.get("alias") for item in warning["attachedRuns"]})
@@ -292,13 +296,13 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
             # Make the owner old enough that the only reason it is skipped is
             # the live attachment lease; never delete the records in this test.
-            owner_state = self.delegate.run_registry.load_run_state(root, owner_id)
+            owner_state = registry_api.load_run_state(root, owner_id)
             owner_state["lastActivityAt"] = "2000-01-01T00:00:00Z"
-            self.delegate.run_registry.write_json_atomic(
-                self.delegate.run_registry.run_directory(root, owner_id) / "state.json",
+            registry_api.write_json_atomic(
+                registry_api.run_directory(root, owner_id) / "state.json",
                 owner_state,
             )
-            prune_payload = self.delegate.run_registry.prune_runs(root, older_than_days=0)
+            prune_payload = registry_api.prune_runs(root, older_than_days=0)
             skipped = next(item for item in prune_payload["skipped"] if item["runId"] == owner_id)
             self.assertEqual(skipped["reason"], "live_attachment")
             self.assertIn(attached_alias, json.dumps(skipped))
@@ -310,10 +314,10 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             _owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
             attached_id, attached_alias = self._write_live_attachment(repo_path, worktree_path)
             root = self._registry_root(repo_path)
-            manifest = self.delegate.run_registry.load_run_manifest(root, attached_id)
+            manifest = registry_api.load_run_manifest(root, attached_id)
             manifest["worktreeAttachment"]["path"] = str(Path(fake_home) / "tampered")
-            self.delegate.run_registry.write_json_atomic(
-                self.delegate.run_registry.run_directory(root, attached_id) / "manifest.json",
+            registry_api.write_json_atomic(
+                registry_api.run_directory(root, attached_id) / "manifest.json",
                 manifest,
             )
 
@@ -325,7 +329,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
             payload = json.loads(stdout)
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "worktree_attached")
             self.assertIn(attached_alias, payload["message"])
             self.assertIn("corrupt attachment record", payload["message"])
@@ -333,34 +337,32 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def test_live_attachment_scan_skips_hardlinked_and_oversized_unrelated_records(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            root = registry_api.ensure_registry(Path(tmp), workspace_kind="directory")
             attached_path = str(Path(tmp) / "attached")
-            good_id, good_alias = self.delegate.run_registry.register_run(root, harness="cursor")
-            bad_id, bad_alias = self.delegate.run_registry.register_run(root, harness="cursor")
+            good_id, good_alias = registry_api.register_run(root, harness="cursor")
+            bad_id, bad_alias = registry_api.register_run(root, harness="cursor")
             for run_id, alias in ((good_id, good_alias), (bad_id, bad_alias)):
-                run_path = self.delegate.run_registry.run_directory(root, run_id)
-                self.delegate.run_registry.write_json_atomic(
+                run_path = registry_api.run_directory(root, run_id)
+                registry_api.write_json_atomic(
                     run_path / "manifest.json",
                     {
-                        "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                        "schema": registry_api.MANIFEST_SCHEMA,
                         "runId": run_id,
                         "alias": alias,
                         "worktreeAttachment": {"path": attached_path},
                     },
                 )
-                self.delegate.run_registry.write_json_atomic(
+                registry_api.write_json_atomic(
                     run_path / "state.json",
                     {
-                        "schema": self.delegate.run_registry.STATE_SCHEMA,
+                        "schema": registry_api.STATE_SCHEMA,
                         "status": "running",
                         "pid": os.getpid(),
                     },
                 )
             for kind in ("hardlinked", "oversized"):
                 with self.subTest(kind=kind):
-                    bad_manifest = (
-                        self.delegate.run_registry.run_directory(root, bad_id) / "manifest.json"
-                    )
+                    bad_manifest = registry_api.run_directory(root, bad_id) / "manifest.json"
                     if kind == "hardlinked":
                         outside = Path(tmp) / "outside-manifest.json"
                         outside.write_text("{}", encoding="utf-8")
@@ -374,10 +376,10 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                         worktree_records.live_attachments_for_path(root, attached_path),
                         [{"runId": good_id, "alias": good_alias}],
                     )
-                    self.delegate.run_registry.write_json_atomic(
+                    registry_api.write_json_atomic(
                         bad_manifest,
                         {
-                            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                            "schema": registry_api.MANIFEST_SCHEMA,
                             "runId": bad_id,
                             "alias": bad_alias,
                             "worktreeAttachment": {"path": attached_path},
@@ -386,12 +388,12 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def test_explicit_attachment_owner_path_conflict_refuses_without_legacy_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            index = self.delegate.run_registry.load_index(root)
+            root = registry_api.ensure_registry(Path(tmp), workspace_kind="directory")
+            index = registry_api.load_index(root)
             owner_a = "del_20260731T120000Z_aaaaaa"
             owner_b = "del_20260731T120001Z_bbbbbb"
             index["runs"] = {owner_a: {}, owner_b: {}}
-            self.delegate.run_registry.save_index(root, index)
+            registry_api.save_index(root, index)
             attachment = {
                 "worktreeAttachment": {
                     "sourceRunId": owner_a,
@@ -412,7 +414,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 mock.patch.object(
                     resume_command, "_validate_attach_target", side_effect=owner_target
                 ) as validate,
-                self.assertRaises(self.delegate.DelegateError) as caught,
+                self.assertRaises(errors_api.DelegateError) as caught,
             ):
                 resume_command._attachment_owner_target(root, attachment)
 
@@ -421,12 +423,12 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def test_missing_attachment_owner_still_uses_matching_legacy_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            index = self.delegate.run_registry.load_index(root)
+            root = registry_api.ensure_registry(Path(tmp), workspace_kind="directory")
+            index = registry_api.load_index(root)
             owner_a = "del_20260731T120000Z_aaaaaa"
             owner_b = "del_20260731T120001Z_bbbbbb"
             index["runs"] = {owner_b: {}}
-            self.delegate.run_registry.save_index(root, index)
+            registry_api.save_index(root, index)
             expected_path = str(Path(tmp) / "worktree-b")
             attachment = {"worktreeAttachment": {"sourceRunId": owner_a, "path": expected_path}}
 
@@ -511,7 +513,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             code, payload, _stderr = self._resume(
                 repo_path, fake_home, owner_alias, "continue", include_dirty=True
             )
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "invalid_option_combination")
 
     def test_reentry_validation_refuses_missing_symlink_unregistered_and_branch_mismatch(self):
@@ -530,14 +532,12 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                         real_path = str(Path(fake_home) / "worktree" / "real")
                         git("worktree", "move", worktree_path, real_path, cwd=repo_path)
                         Path(worktree_path).symlink_to(real_path, target_is_directory=True)
-                        manifest = self.delegate.run_registry.load_run_manifest(
+                        manifest = registry_api.load_run_manifest(
                             self._registry_root(repo_path), owner_id
                         )
                         manifest["executionCwd"] = worktree_path
-                        self.delegate.run_registry.write_json_atomic(
-                            self.delegate.run_registry.run_directory(
-                                self._registry_root(repo_path), owner_id
-                            )
+                        registry_api.write_json_atomic(
+                            registry_api.run_directory(self._registry_root(repo_path), owner_id)
                             / "manifest.json",
                             manifest,
                         )
@@ -553,14 +553,14 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                     code, payload, _stderr = self._resume(
                         repo_path, fake_home, owner_alias, "continue"
                     )
-                    self.assertEqual(code, self.delegate.EXIT_USAGE)
+                    self.assertEqual(code, errors_api.EXIT_USAGE)
                     self.assertEqual(payload["error"], expected)
 
     def test_attachment_race_after_registration_terminalizes_without_spawning_child(self):
         _repo, repo_path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
             owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
-            original_register = self.delegate.run_registry.register_run
+            original_register = registry_api.register_run
 
             def register_then_remove(*args, **kwargs):
                 result = original_register(*args, **kwargs)
@@ -568,19 +568,15 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 return result
 
             with (
-                mock.patch.object(
-                    self.delegate.run_registry, "register_run", side_effect=register_then_remove
-                ),
-                mock.patch.object(
-                    self.delegate.delegate_runner, "execute_tracked"
-                ) as execute_tracked,
+                mock.patch.object(registry_api, "register_run", side_effect=register_then_remove),
+                mock.patch.object(runner_api, "execute_tracked") as execute_tracked,
                 # The race under test happens after binary resolution; without this
                 # patch the test silently depends on a real cursor binary on PATH
                 # (present on dev machines, absent on CI -> missing_binary exit 3).
                 mock.patch.object(self.delegate, "ensure_binary"),
             ):
                 code, payload, _stderr = self._resume(repo_path, fake_home, owner_alias, "continue")
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "worktree_missing")
             execute_tracked.assert_not_called()
             child_id, manifest, state = self._child_manifest(repo_path, owner_id)
@@ -614,8 +610,8 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 self.assertEqual(code, 0, stderr)
                 first_id, first_manifest, _state = self._child_manifest(repo_path, owner_id)
                 root = self._registry_root(repo_path)
-                bad_id, _bad_alias = self.delegate.run_registry.register_run(root, harness="cursor")
-                bad_path = self.delegate.run_registry.run_directory(root, bad_id)
+                bad_id, _bad_alias = registry_api.register_run(root, harness="cursor")
+                bad_path = registry_api.run_directory(root, bad_id)
                 outside = Path(fake_home) / "oversized-manifest"
                 outside.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
                 os.link(outside, bad_path / "manifest.json")
@@ -639,11 +635,9 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 self.assertEqual(code, 0, stderr)
                 first_id, first_manifest, _state = self._child_manifest(repo_path, owner_id)
                 root = self._registry_root(repo_path)
-                first_path = self.delegate.run_registry.run_directory(root, first_id)
+                first_path = registry_api.run_directory(root, first_id)
                 first_manifest["worktreeAttachment"]["sourceRunId"] = "del_20200101T000000Z_deadbe"
-                self.delegate.run_registry.write_json_atomic(
-                    first_path / "manifest.json", first_manifest
-                )
+                registry_api.write_json_atomic(first_path / "manifest.json", first_manifest)
 
                 code, _payload, stderr = self._resume(
                     repo_path, fake_home, first_manifest["alias"], "second"

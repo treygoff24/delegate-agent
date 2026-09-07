@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from delegate_agent import cli, run_registry, runner
+from delegate_agent import config as config_api
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import ResolvedWorkspace
 
@@ -107,10 +108,10 @@ class RegistryContentionTests(unittest.TestCase):
                 holder.wait(timeout=5)
 
             with run_registry.registry_lock(root, timeout_seconds=1):
-                pass
+                run_registry.reconcile_finalize_wal_locked(root, run_id)
             run_path = run_registry.run_directory(root, run_id)
             state = json.loads((run_path / run_registry.STATE_FILE).read_text())
-            snapshot = json.loads((run_path / run_registry.SNAPSHOT_FILE).read_text())
+            snapshot = run_registry.load_run_snapshot(root, run_id)
             self.assertEqual(state["status"], run_registry.STATUS_SUCCEEDED)
             self.assertEqual(snapshot["status"], run_registry.STATUS_SUCCEEDED)
             self.assertFalse(run_registry.finalize_wal_path(root, run_id).exists())
@@ -126,7 +127,7 @@ class RegistryContentionTests(unittest.TestCase):
                 while not ready.exists() and time.monotonic() < deadline:
                     time.sleep(0.01)
                 self.assertTrue(ready.exists(), "contention holder did not acquire lock")
-                config = cli.DEFAULT_CONFIG.copy()
+                config = config_api.embedded_default_config().copy()
                 config["tracking"] = {
                     **config["tracking"],
                     "registryLockTimeoutSec": 0.05,

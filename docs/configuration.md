@@ -93,21 +93,32 @@ layers. This is read-only observability; inspecting it does not modify
 
 ## Mail
 
-Mail commands work with mail disabled. The opt-in prompt mailbox seam is
-controlled by a strict object with one key:
+Workspace mail is enabled by default, including when the section or key is
+omitted. A strict object with one key controls launch-time mail setup:
 
 ```json
 {
   "mail": {
-    "enabled": false
+    "enabled": true
   }
 }
 ```
 
-`mail.enabled` must be a boolean; unknown keys are rejected. Enabling it adds
-the pull-mail instruction suffix to wrapped work launches. `--mail-push` and
-input JSON `mailPush: true` also require `mail.enabled: true`, and are limited
-to wrapped work-mode launches. Push is opt-in: enabling mail does not install
+`mail.enabled` must be a boolean; unknown keys are rejected. Wrapped work
+launches receive a pull-mail instruction suffix, and isolated work launches
+receive the harness-specific mailbox grant where supported. Set `enabled` to
+`false`, or pass global `--no-mail`, to disable that setup for a launch. The flag
+does not change saved configuration or suppress explicit `--notify`.
+
+Mail storage is local to `.delegate/mail`; it needs no daemon, network, or
+`post` installation. If mail storage cannot be prepared, the launch continues
+with mail setup disabled, one stderr warning, and a recorded `warnings` entry.
+The run registry itself must still be writable. An isolated sandbox that
+cannot reach mail records a deduplicated manifest warning without stderr noise.
+Explicit mail commands remain available even when launch-time mail is disabled.
+
+`--mail-push` and input JSON `mailPush: true` require mail to be enabled and a
+wrapped work-mode launch. Push remains opt-in; default mail never installs
 hooks. Claude receives launch-scoped settings and both adapters keep cursors
 and markers under `.delegate/mail`; Codex private homes are created under
 `.delegate/runs/<runId>/` and cleaned at terminal finalization or terminal
@@ -289,7 +300,8 @@ Controls local run recording.
     "completionReport": {"defaultMode": "markdown"},
     "retention": {"enabled": true, "rawLogDays": 7},
     "registryLockTimeoutSec": 120,
-    "processGroupTerminationGraceSec": 3
+    "processGroupTerminationGraceSec": 3,
+    "skillReviewPreamble": {"enabled": false}
   }
 }
 ```
@@ -308,6 +320,12 @@ Controls local run recording.
   it before its own mutation. Until replay, readers see the prior canonical
   state. Malformed WAL records are quarantined, and a cancellation marker wins
   over a WAL success.
+- `skillReviewPreamble.enabled`: whether Delegate prepends the skill-review
+  requirement (`SKILL_REVIEW_PREFIX`) to a wrapped child prompt. The default is
+  `false`. When `true`, every wrapped safe- and work-mode prompt is prefixed
+  with it before any persona, safe-mode, or worktree framing is added.
+  `--pass-through` launches and `call`-mode prompts never receive the
+  preamble, regardless of this setting.
 
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,
@@ -356,8 +374,8 @@ ambient pass returns immediately.
 ```
 
 - `binary`: child executable for Droid.
-- `defaultModel`: optional default model ID used when neither a positional alias nor `--model` is given.
-- `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid positional alias that is not present fails with `invalid_alias`. Alias keys must not collide with mode names (`safe`/`work`/`call`), equal the engine's own name, or start with `-`.
+- `defaultModel`: optional default model ID used when `--model` is omitted.
+- `models`: local aliases resolved by `--model`, as with other engines. The map may be empty. Alias keys must not be mode names, the engine name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch. When the model has no matching capability declaration, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
@@ -384,7 +402,12 @@ ambient pass returns immediately.
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
 - `models`: optional map of local aliases to Codex model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
-- `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
+- `profile`: optional Codex CLI config overlay name. Codex reads it as a file:
+  `--profile <name>` layers `$CODEX_HOME/<name>.config.toml` on top of the base
+  user config. It is not a `[profiles.<name>]` table inside `config.toml`, which
+  current Codex no longer consults. A name whose file does not exist is accepted
+  silently and resolves no overlay, so `delegate doctor` warns when the file is
+  missing. It is config-only; JSON run input cannot set it.
 - `fallbackProfile`: optional top-level `profiles.definitions` name for Codex-only quota fallback. The profile must define `env.CODEX_HOME`; a known-blocked credential namespace is not launched.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
@@ -397,8 +420,9 @@ both namespaces are blocked, Delegate keeps the primary attempt and skips the
 fallback.
 
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
-- `codex.profile` is a Codex CLI config overlay. The top-level `profiles`
-  block below is Delegate-injected auth/env and is a separate concept.
+- `codex.profile` names a Codex CLI config overlay file. The top-level `profiles`
+  block below is Delegate-injected auth/env and is a separate concept; it is what
+  supplies the `CODEX_HOME` the overlay file is looked up under.
 
 ### `profiles`
 
@@ -802,6 +826,91 @@ Controls parent progress heartbeats for tracked foreground runs. Heartbeats are 
 Timing resolves as environment override, then config, then embedded default. Non-positive, non-finite, or non-numeric `initialDelaySec`/`intervalSec`, and a non-boolean `enabled`, are rejected at config load. See [CLI reference](cli-reference.md) for the `--progress` / `--no-progress` launch flags.
 
 ### `workflows`
+
+#### Operational settings on pinned workflow attempts
+
+New workflow pins support immutable per-attempt operational snapshots. On a
+normal launch, resume, or approval, Delegate takes the command's already-loaded
+config and copies only these settings over the creation pin:
+
+- `workflows.engineCaps`, `itemThreads`, `structuredOutputRetries`, and
+  `stallMinutes` (including its top-level `stallMinutes` fallback).
+- `tracking.processGroupTerminationGraceSec` and `registryLockTimeoutSec`
+  (including the older `registryLockTimeoutSeconds` spelling).
+- `progress.enabled`, `initialDelaySec`, and `intervalSec`.
+- `worktrees.poolWarnCount`.
+
+Pin creation completes empty or partial input from creation-time defaults and
+preserves explicit scalar nulls. Nullable operational sections are resolved to
+their creation defaults. Later attempts never refill model/security identity
+from a newer CLI's defaults; verifying an existing pin does not rewrite it.
+
+Models, binaries, profile/account selection configuration, permissions,
+isolation, personas, and executable code stay pinned. Cleanup permissions stay
+pinned too: changing `retirementIgnoreGlobs`, retirement enablement, or auto-prune
+policy does not change an existing workflow's authority to remove files.
+There is no restored workflow-timeout/watchdog setting in this allowlist.
+
+New pins also record the resolved Delegate profile identity, not just profile
+definitions. `DELEGATE_PROFILE`, custom `profiles.detectFrom` variables, and
+default/no-selection cases are resolved at creation. A later selector that
+chooses a different profile fails with `workflow_profile_drift` before approval
+or a managed child launch. The effective `HOME`, `CODEX_HOME`, and
+`CLAUDE_CONFIG_DIR` namespaces are bound; configured primary/fallback home
+expansions are frozen as absolute paths. Ambient values hidden by a profile's
+explicit override do not cause false drift refusals. Token contents are never
+recorded, and rotation within the same namespace remains allowed.
+
+New workflow pins require absolute effective credential-home paths. In particular,
+a relative ambient `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is refused instead of binding
+an account whose meaning changes with an isolated child's working directory.
+This creation-time restriction does not migrate existing pins.
+
+This validator covers ambient selection for the supervisor and managed DSL
+children, not arbitrary Python subprocesses, vendor processes, or credential
+stores. A workflow script remains trusted executable code: it can manually launch
+another command with an explicit `--auth-profile`. External harnesses drop both pin
+and attempt bootstrap markers, retaining the effective config data while trusted
+mail-push/private/pure home derivations remain free to operate. Older pins without
+a `profileIdentity` stamp retain their existing execution behavior and report
+`profileIdentityPinned: false` plus an identity-unavailable warning; definitions
+alone are not represented as proof of frozen credential selection.
+
+The operational environment overrides `DELEGATE_STALL_MINUTES`,
+`DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC`,
+`DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`, `DELEGATE_PROGRESS_INITIAL_DELAY_SEC`,
+and `DELEGATE_PROGRESS_INTERVAL_SEC` are captured once at launch, ahead of config
+values. Invalid operational numbers fail before approval or launch-state
+mutation. The supervisor and its Delegate children receive the captured values
+and the same effective config path; a conflicting inherited override is refused,
+not silently applied later. Global and local config overlays are not merged into
+a validated attempt snapshot.
+
+The content-addressed artifact lives under
+`~/.delegate-workflow-pins/attempts/<wfId>/<digest>/`. It contains read-only
+`config.json` and `attempt.json`, bound to the base config and runtime digests.
+Identical snapshots may be reused; different concurrent attempts cannot overwrite
+each other's settings. No user config file is required when embedded defaults
+are sufficient. An explicitly selected missing config remains an error.
+Artifacts are staged privately and published only after both files are complete.
+A failed staging write does not poison an identical retry; leftover staging
+directories and pre-existing partial destinations are retained, never silently
+replaced or deleted. A failed resume/approval launch restores the prior approval
+bytes (or absence) under the workflow lock, including when detachment fails.
+
+Launch responses, journal `attempt_config` events, and supervisor status expose
+`attemptConfig`: `effectiveConfigDigest`, base digests, `opsSource`,
+`opsChangedKeys`, `opsEnvironment`, and allowlisted `opsValues`. The launch
+response also gives `effectiveConfigPath`. Source is a provenance label, not a
+verified source-control revision. Credentials are not included in this projection.
+
+Resumption requires the current workflow format: version-2 structural keys and
+a runtime pin supporting version-1 attempt configuration. Pinless workflows and
+older formats are rejected before child launch; start a new workflow rather
+than migrating old state. Synchronous dry runs use command configuration and
+do not establish an operational snapshot for a live attempt.
+
+#### Workflow defaults
 
 ```json
 {

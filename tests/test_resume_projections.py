@@ -47,9 +47,9 @@ class ResumeProjectionTests(unittest.TestCase):
             "assistantText": "done",
             "recentEvents": [],
         }
+        state.update({key: value for key, value in snapshot.items() if key != "schema"})
         run_registry.write_json_atomic(run_path / "manifest.json", manifest)
         run_registry.write_json_atomic(run_path / "state.json", state)
-        run_registry.write_json_atomic(run_path / "snapshot.json", snapshot)
         return run_id, alias, manifest, snapshot
 
     def test_resumed_metadata_is_added_to_runs_summary_and_snapshot_view(self):

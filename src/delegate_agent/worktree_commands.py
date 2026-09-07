@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import isolation, run_registry, worktree_mgmt
+from delegate_agent import isolation, run_registry, worktree_gc, worktree_mgmt, worktree_remove
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
@@ -36,7 +36,7 @@ class WorktreeCommand:
 
 
 def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObject) -> JsonObject:
-    auto_prune = worktree_mgmt.maybe_auto_prune(
+    auto_prune = worktree_gc.maybe_auto_prune(
         registry_root,
         config,
         no_auto_prune=command.no_auto_prune,
@@ -104,7 +104,7 @@ def _remove_payload(
             handle = str(record.get("alias") or record.get("runId"))
             try:
                 removed.append(
-                    worktree_mgmt.remove_worktree(
+                    worktree_remove.remove_worktree(
                         registry_root,
                         handle=handle,
                         discard_uncommitted=command.discard_uncommitted,
@@ -135,7 +135,7 @@ def _remove_payload(
                 "retrySafe": False,
             }
         )
-    return worktree_mgmt.remove_worktree(
+    return worktree_remove.remove_worktree(
         registry_root,
         handle=command.handle,
         discard_uncommitted=command.discard_uncommitted,
@@ -148,7 +148,7 @@ def _remove_payload(
 def _prune_payload(
     command: WorktreeCommand, registry_root: Path, _config: JsonObject
 ) -> JsonObject:
-    return worktree_mgmt.prune_worktrees(
+    return worktree_gc.prune_worktrees(
         registry_root,
         merged=command.merged,
         older_than_days=command.older_than_days,
@@ -171,7 +171,7 @@ def _gc_pool_data_home(command: WorktreeCommand, config: JsonObject) -> Path | N
 def _gc_payload(
     command: WorktreeCommand, registry_root: Path | None, config: JsonObject
 ) -> JsonObject:
-    return worktree_mgmt.gc_worktrees(
+    return worktree_gc.gc_worktrees(
         registry_root,
         dry_run=command.dry_run,
         pool_data_home=_gc_pool_data_home(command, config),
@@ -184,7 +184,7 @@ def _gc_payload(
 def _reap_payload(
     command: WorktreeCommand, registry_root: Path | None, config: JsonObject
 ) -> JsonObject:
-    return worktree_mgmt.reap_worktrees(
+    return worktree_gc.reap_worktrees(
         registry_root,
         pool_data_home=isolation.worktrees_data_home(config),
         handle=command.handle,

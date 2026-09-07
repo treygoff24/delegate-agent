@@ -292,30 +292,6 @@ def sanitize_inherited_mail_identity(env: dict[str, str] | None) -> None:
     profiles.strip_mail_identity(env)
 
 
-def wire_work_mail_argv(
-    engine: str,
-    argv: list[str],
-    registry_root: Path,
-    *,
-    prompt: str | None = None,
-    prompt_transport: str = "argv",
-    stderr: TextIO | None = None,
-    isolated_workspace: bool = False,
-) -> list[str]:
-    """Compatibility wrapper for one argv; launch seams use ``wire_work_mail_launch``."""
-    wired, _display = wire_work_mail_launch(
-        engine,
-        argv,
-        None,
-        registry_root,
-        prompt=prompt,
-        prompt_transport=prompt_transport,
-        stderr=stderr,
-        isolated_workspace=isolated_workspace,
-    )
-    return wired
-
-
 def _argv_option(argv: list[str], option: str) -> str | None:
     try:
         return argv[argv.index(option) + 1]
@@ -363,7 +339,7 @@ def wire_work_mail_launch(
     *,
     prompt: str | None = None,
     prompt_transport: str = "argv",
-    stderr: TextIO | None = None,
+    warnings: list[str] | None = None,
     isolated_workspace: bool = False,
 ) -> tuple[list[str], list[str] | None]:
     """Wire actual and manifest argv together at a single launch seam."""
@@ -371,13 +347,14 @@ def wire_work_mail_launch(
     needs_grant = isolated_workspace and scope == "scoped"
     inaccessible = isolated_workspace and scope in {"mail-unreachable", "degraded"}
     if not needs_grant:
-        if inaccessible and stderr is not None:
-            print(
-                f"delegate mail: WARNING: {engine} work launch sandbox policy "
+        if inaccessible and warnings is not None:
+            warning = (
+                f"{engine} work launch sandbox policy "
                 f"{_argv_option(argv, '--sandbox') or 'unknown'} cannot reach "
-                ".delegate/mail from this isolated workspace.",
-                file=stderr,
+                ".delegate/mail from this isolated workspace."
             )
+            if warning not in warnings:
+                warnings.append(warning)
         return list(argv), None if display_argv is None else list(display_argv)
     root = str(mail_root(registry_root).resolve(strict=False))
     if engine == "codex":
@@ -392,7 +369,12 @@ def wire_work_mail_launch(
         if flags and not all(flag in updated for flag in flags):
             if engine == "kimi" and "--prompt" in updated:
                 updated[updated.index("--prompt") : updated.index("--prompt")] = flags
-            elif engine in {"codex", "omp"} and prompt_transport == "argv" and updated:
+            elif engine == "codex" and updated:
+                # codex ends its exec argv with a positional: the prompt on argv
+                # transport, or `-` meaning "read the prompt from stdin". Its
+                # parser does accept `-c` after either, but a flag written past
+                # the positional reads as part of the prompt, so the grant goes
+                # before it on both transports.
                 updated[-1:-1] = flags
             else:
                 updated.extend(flags)
@@ -547,7 +529,7 @@ def _blocked_reason(rules: list[JsonObject], sender: str, recipient: str) -> str
     return None
 
 
-def _effective_run(index: JsonObject, registry_root: Path, run_id: str, entry: JsonObject) -> str:
+def _effective_run(registry_root: Path, run_id: str) -> str:
     state = run_registry.load_run_state_or_none(registry_root, run_id)
     return run_status.effective_status(state)
 
@@ -564,7 +546,7 @@ def _recipient_for_alias(
     if not isinstance(entry, dict):
         raise _error("unknown_recipient", f"Recipient is not a registered run: {alias}.")
     mode = entry.get("mode") if isinstance(entry.get("mode"), str) else None
-    status = _effective_run(index, registry_root, run_id, entry)
+    status = _effective_run(registry_root, run_id)
     eligible = mode == "work" and status == run_status.STATUS_RUNNING and run_id != sender.run_id
     reason = None if eligible else f"recipient is {mode or 'unknown'} mode or {status}"
     return Recipient(alias, run_id, run_id, mode, status, eligible, reason)
@@ -586,9 +568,7 @@ def _expand_group(
     return recipients
 
 
-def _match_message_id(
-    registry_root: Path, value: str, *, sent_only: bool = False
-) -> tuple[str, Path, JsonObject]:
+def _match_message_id(registry_root: Path, value: str) -> tuple[str, Path, JsonObject]:
     candidates: list[tuple[str, Path, JsonObject]] = []
     roots = [sent_root(registry_root)]
     for root in roots:
@@ -774,7 +754,7 @@ def _reply_watcher_allowed(registry_root: Path, ledger: JsonObject, identity: Ma
 
 def _validate_reply(registry_root: Path, reply_to: str, identity: MailIdentity) -> JsonObject:
     _message_id(reply_to)
-    _matched_message_id, _path, ledger = _match_message_id(registry_root, reply_to, sent_only=True)
+    _matched_message_id, _path, ledger = _match_message_id(registry_root, reply_to)
     if not _reply_sender_allowed(registry_root, ledger, identity):
         raise _error(
             "reply_not_participant",
@@ -921,7 +901,7 @@ def _send_payload(ledger: JsonObject, identity: MailIdentity) -> JsonObject:
     }
 
 
-def _current_recipient(registry_root: Path, identity: MailIdentity) -> str:
+def _current_recipient(identity: MailIdentity) -> str:
     return COORDINATOR_BOX if identity.is_coordinator else identity.run_id or ""
 
 
@@ -965,7 +945,7 @@ def inbox(
     env: Mapping[str, str | None] | None = None,
 ) -> JsonObject:
     identity = _identity(registry_root, env=env)
-    box_key = _current_recipient(registry_root, identity)
+    box_key = _current_recipient(identity)
     rows = [
         _message_view(envelope, body)
         for _path, envelope, body in _iter_box_messages(registry_root, box_key)
@@ -988,8 +968,10 @@ def read_message(
     if command.message_id is None:
         raise _error("missing_message", "mail read requires a message id prefix.")
     identity = _identity(registry_root, env=env)
-    if command.peek:
-        box_key = _current_recipient(registry_root, identity)
+    with nullcontext() if command.peek else run_registry.registry_lock(registry_root):
+        if not command.peek:
+            _ensure_mail_tree(registry_root)
+        box_key = _current_recipient(identity)
         found: list[tuple[Path, JsonObject, str, str]] = []
         for folder_name in ("inbox", "read"):
             for path, envelope, body in _iter_box_messages(registry_root, box_key, folder_name):
@@ -1004,28 +986,9 @@ def read_message(
                 "ambiguous_message", f"Mail message prefix is ambiguous: {command.message_id}."
             )
         path, envelope, body, folder_name = found[0]
-    else:
-        with run_registry.registry_lock(registry_root):
-            _ensure_mail_tree(registry_root)
-            box_key = _current_recipient(registry_root, identity)
-            found = []
-            for folder_name in ("inbox", "read"):
-                for path, envelope, body in _iter_box_messages(registry_root, box_key, folder_name):
-                    if str(envelope.get("msgId", "")).startswith(command.message_id):
-                        found.append((path, envelope, body, folder_name))
-            if not found:
-                raise _error(
-                    "unknown_message",
-                    f"Unknown message for {identity.alias}: {command.message_id}.",
-                )
-            if len(found) > 1:
-                raise _error(
-                    "ambiguous_message", f"Mail message prefix is ambiguous: {command.message_id}."
-                )
-            path, envelope, body, folder_name = found[0]
-            if folder_name == "inbox":
-                target = _box_dir(registry_root, box_key) / "read" / path.name
-                os.rename(path, target)
+        if not command.peek and folder_name == "inbox":
+            target = _box_dir(registry_root, box_key) / "read" / path.name
+            os.rename(path, target)
     return {
         "schema": MAIL_READ_SCHEMA,
         "ok": True,
@@ -1048,9 +1011,7 @@ def status(
     identity = _identity(registry_root, env=env)
     if command.message_id is None:
         raise _error("missing_message", "mail status requires a message id.")
-    _matched_message_id, _path, ledger = _match_message_id(
-        registry_root, command.message_id, sent_only=True
-    )
+    _matched_message_id, _path, ledger = _match_message_id(registry_root, command.message_id)
     ledger = dict(ledger)
     ledger["recipients"] = _status_rows(registry_root, ledger)
     return {
@@ -1083,7 +1044,7 @@ def _watch_once(
     command: MailCommand,
     identity: MailIdentity,
 ) -> tuple[list[JsonObject], bool]:
-    box_key = _current_recipient(registry_root, identity)
+    box_key = _current_recipient(identity)
     lines: list[JsonObject] = []
     try:
         messages = _iter_box_messages(registry_root, box_key)
@@ -1112,7 +1073,7 @@ def _watch_once(
 
 
 def _watch_inbox_stamp(registry_root: Path, identity: MailIdentity) -> tuple[int, int] | None:
-    folder = _box_dir(registry_root, _current_recipient(registry_root, identity)) / "inbox"
+    folder = _box_dir(registry_root, _current_recipient(identity)) / "inbox"
     if not folder.is_dir() or folder.is_symlink():
         return None
     try:
@@ -1132,9 +1093,7 @@ def watch(
     allowed: set[str] | None = None
     if command.reply_to:
         _message_id(command.reply_to)
-        _matched_message_id, _path, ledger = _match_message_id(
-            registry_root, command.reply_to, sent_only=True
-        )
+        _matched_message_id, _path, ledger = _match_message_id(registry_root, command.reply_to)
         if not _reply_watcher_allowed(registry_root, ledger, identity):
             raise _error(
                 "reply_not_participant",

@@ -381,7 +381,17 @@ class CapabilityCommandTests(unittest.TestCase):
                 )
 
             self.assertEqual(summary["configResolution"], full["configResolution"])
-            self.assertEqual(summary["commands"], full["commands"])
+            self.assertEqual(
+                summary["commands"],
+                [
+                    {
+                        "command": row["command"],
+                        "summary": row["summary"],
+                        "helpTopic": row["command"],
+                    }
+                    for row in full["commands"]
+                ],
+            )
 
     def _discovery_scrub_config(self):
         from delegate_agent.config import embedded_default_config
@@ -452,6 +462,7 @@ class CapabilityCommandTests(unittest.TestCase):
                     True,
                     stdout,
                     workspace=workspace_path,
+                    **({"full": True} if name == "describe" else {}),
                 )
                 self.assertEqual(code, 0)
                 outputs[name] = json.loads(stdout.getvalue())
@@ -571,6 +582,7 @@ class CapabilityCommandTests(unittest.TestCase):
                         stdout,
                         workspace=Path(workspace),
                         summary=summary,
+                        **({"full": not summary} if name == "emit_describe" else {}),
                     )
                     output = stdout.getvalue()
                     self.assertEqual(code, 0)

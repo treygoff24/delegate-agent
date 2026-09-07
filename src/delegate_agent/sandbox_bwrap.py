@@ -14,7 +14,8 @@ with parity masks. The probed-working shape on lxcfs/containers is deliberate:
 
 ``$HOME`` is a tmpfs so ambient credentials (e.g. ``~/.ai-profiles/*``
 secret files) are invisible while the one engine home directory named by the
-child env (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``) is rw-bound on top of it.
+child env (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``, ``KIMI_CODE_HOME``) is
+rw-bound on top of it.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import shutil
 import subprocess  # nosec B404 - Delegate launches a fixed bwrap probe argv with shell=False.
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -32,6 +34,7 @@ from delegate_agent.config import (
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git_bytes
+from delegate_agent.json_types import JsonObject
 
 SAFE_BACKEND_ENV = "DELEGATE_SAFE_BACKEND"
 SAFE_BACKEND_COPY = "copy"
@@ -45,7 +48,12 @@ REGISTRY_DIR_NAME = ".delegate"
 
 # Engine home override per engine: only the SELECTED engine's home is rw-bound
 # (a Codex child must never receive Claude's credential home or vice versa).
-_ENGINE_HOME_ENV_VAR = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
+_ENGINE_HOME_ENV_VAR = {
+    "codex": "CODEX_HOME",
+    "claude": "CLAUDE_CONFIG_DIR",
+    "kimi": "KIMI_CODE_HOME",
+}
+_ENGINE_HOME_DEFAULT_DIR = {"kimi": ".kimi-code"}
 
 # Engine config directories that live directly under $HOME. They are ro-bound
 # whenever they exist; an explicit env override (CODEX_HOME,
@@ -54,7 +62,6 @@ _OPTIONAL_ENGINE_DOT_DIRS = {
     "codex": ".codex",
     "claude": ".claude",
     "droid": ".factory",
-    "kimi": ".kimi",
     "grok": ".grok",
     "pi": ".pi",
     "omp": ".omp",
@@ -66,6 +73,23 @@ _OPTIONAL_HOME_RO_BINDS = (".local", ".cargo/bin", ".bun")
 # /run/systemd/resolve backs /etc/resolv.conf on systemd-resolved hosts, and
 # without it DNS fails inside the boundary.
 _OPTIONAL_SYSTEM_RO_BINDS = ("/opt", "/run/systemd/resolve")
+
+
+def _engine_home_path(engine: str, env: Mapping[str, str], home: str) -> str | None:
+    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
+    if home_var:
+        override = env.get(home_var, "")
+        if override.strip():
+            return os.path.expanduser(override)
+    default_dir = _ENGINE_HOME_DEFAULT_DIR.get(engine)
+    if not default_dir:
+        return None
+    # bwrap refuses a bind whose source does not exist, so a machine that has an
+    # engine installed but has never run it must not have the default home bound.
+    # The explicit override above stays unguarded: a bad KIMI_CODE_HOME is an
+    # operator error and should fail loudly rather than be silently dropped.
+    candidate = os.path.join(home, default_dir)
+    return candidate if os.path.isdir(candidate) else None
 
 
 class Mask(NamedTuple):
@@ -81,6 +105,67 @@ class Bind(NamedTuple):
 
 
 BIND_MODES = ("ro", "rw")
+
+
+@dataclass(frozen=True)
+class SandboxPlan:
+    """Validated in-memory bwrap inputs; serialize only for public metadata."""
+
+    bwrap_path: str | None
+    masks: tuple[Mask, ...] = ()
+    binds: tuple[Bind, ...] = ()
+
+    @property
+    def backend(self) -> str:
+        return "bwrap"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.masks, tuple) or not isinstance(self.binds, tuple):
+            raise DelegateError(
+                "invalid_bwrap_plan", "Sandbox masks and binds must be immutable tuples."
+            )
+        if self.bwrap_path is not None and (
+            not isinstance(self.bwrap_path, str)
+            or not os.path.isabs(self.bwrap_path)
+            or "\0" in self.bwrap_path
+        ):
+            raise DelegateError("invalid_bwrap_plan", "bwrap executable must be an absolute path.")
+        if len(self.masks) > MASK_OVERFLOW_LIMIT:
+            raise DelegateError("bwrap_mask_overflow", "Sandbox plan has too many parity masks.")
+        for mask in self.masks:
+            if (
+                not isinstance(mask, Mask)
+                or not isinstance(mask.kind, str)
+                or mask.kind not in {MASK_KIND_TMPFS, MASK_KIND_DEVNULL}
+                or not isinstance(mask.path, str)
+                or not mask.path
+                or "\0" in mask.path
+                or os.path.isabs(mask.path)
+                or any(part in {"", ".", ".."} for part in mask.path.split("/"))
+            ):
+                raise DelegateError(
+                    "invalid_bwrap_plan", "Sandbox mask must stay inside its workspace."
+                )
+        for bind in self.binds:
+            if (
+                not isinstance(bind, Bind)
+                or not isinstance(bind.mode, str)
+                or bind.mode not in BIND_MODES
+                or not isinstance(bind.path, str)
+                or not os.path.isabs(bind.path)
+                or "\0" in bind.path
+            ):
+                raise DelegateError(
+                    "invalid_bwrap_plan", "Sandbox bind must have an absolute path and ro/rw mode."
+                )
+
+    def payload(self) -> JsonObject:
+        return {
+            "backend": self.backend,
+            "bwrapPath": self.bwrap_path,
+            "masks": [{"path": mask.path, "kind": mask.kind} for mask in self.masks],
+            "binds": [{"path": bind.path, "mode": bind.mode} for bind in self.binds],
+        }
 
 
 class BwrapMaskOverflow(Exception):
@@ -127,8 +212,7 @@ def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> t
     entry may never intersect the workspace in either direction: a rw mount of
     the workspace or an ancestor would shadow the read-only bind, and a rw
     mount of a descendant would re-open that subtree (or the masked registry)
-    for writes. Only the tracked launcher's own run directory is ever rw-bound
-    inside the workspace.
+    for writes. No writable bind is permitted inside the workspace.
     """
     isolation = config.get("isolation")
     entries = isolation.get("bwrapBinds") if isinstance(isolation, Mapping) else None
@@ -253,9 +337,9 @@ def parity_masks(git_root: str) -> tuple[Mask, ...]:
     directory when a directory entry covers them. Directories become tmpfs
     masks; files become ``/dev/null`` ro-binds. ``.delegate/`` is skipped here
     because ``wrap_engine_argv`` always masks the whole registry with a tmpfs
-    (prior runs' prompts, logs and manifests must stay invisible) and then
-    rw-binds only the current run's scratch on top. Non-git workspaces have no
-    masks by construction (callers pass an empty tuple).
+    (prior runs' prompts, logs and manifests must stay invisible). Current-run
+    scratch is mounted from a neutral path outside the workspace. Non-git
+    workspaces have no masks by construction (callers pass an empty tuple).
     """
     result = run_git_bytes(
         git_root,
@@ -309,11 +393,13 @@ def build_bwrap_argv(
     Mount targets are deduplicated keep-first across every bind/tmpfs/mask so
     no mount point is declared twice. Only the selected ``engine``'s home
     override from the child env (``CODEX_HOME`` for codex, ``CLAUDE_CONFIG_DIR``
-    for claude) is appended to ``rw_roots``; sibling engine homes stay hidden.
+    for claude, ``KIMI_CODE_HOME`` for kimi) is appended to ``rw_roots``;
+    Kimi falls back to ``$HOME/.kimi-code`` and sibling engine homes stay hidden.
     Emission order matters: core system roots first, then ``$HOME`` tmpfs,
     then the optional read-only roots (several live under ``$HOME``), then the
     read-only workspace, then masks stacked on top of the workspace, then
-    writable roots (run scratch, mail-push homes, engine homes) stacked last.
+    writable roots (neutral run scratch, declared external roots, engine homes)
+    stacked last.
     """
     mounted: set[str] = set()
     argv: list[str] = [
@@ -353,10 +439,8 @@ def build_bwrap_argv(
             bind("--tmpfs", target)
         else:
             bind("--ro-bind", "/dev/null", target)
-    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
-    engine_homes = (
-        [os.path.expanduser(env[home_var])] if home_var and env.get(home_var, "").strip() else []
-    )
+    engine_home = _engine_home_path(engine, env, home)
+    engine_homes = [engine_home] if engine_home else []
     for root in [*rw_roots, *engine_homes]:
         bind("--bind", root, root)
     argv.extend(("--chdir", workspace))
@@ -387,15 +471,17 @@ def wrap_engine_argv(
 
     Pure assembly lives in ``build_bwrap_argv``; this wrapper resolves the
     host-dependent inputs: real HOME, existing optional ro-bind roots (home
-    dirs, the per-engine dot-directory, system roots), the run scratch dir
-    (rw), and any extra ro/rw roots (configured ``isolation.bwrapBinds``,
-    mail-push private homes). The workspace's ``.delegate/`` registry is always
-    masked with a tmpfs so prior runs' prompts and logs are invisible; the
-    current run's scratch (under it) is then rw-bound on top. Any rw root that
-    equals or contains the workspace is refused.
+    dirs, the per-engine dot-directory, system roots, configured
+    ``isolation.bwrapBinds`` in ``extra_ro_roots``), and the writable roots:
+    the current run's scratch plus ``extra_rw_roots``, which carries the
+    mail-push private home sidecar. All of those writable paths are neutral
+    locations outside the workspace. The workspace's ``.delegate/`` registry is
+    always masked with a tmpfs so prior runs' prompts and logs are invisible.
+    Any rw root that intersects the workspace is refused, with no exception.
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())
+    engine_home = _engine_home_path(engine, environment, resolved_home)
     ro_roots: list[str] = []
     candidates = [
         *(os.path.join(resolved_home, rel) for rel in _OPTIONAL_HOME_RO_BINDS),
@@ -407,10 +493,10 @@ def wrap_engine_argv(
         *_OPTIONAL_SYSTEM_RO_BINDS,
     ]
     for candidate in candidates:
-        if candidate not in ro_roots and os.path.isdir(candidate):
+        if candidate != engine_home and candidate not in ro_roots and os.path.isdir(candidate):
             ro_roots.append(candidate)
     for root in extra_ro_roots or []:
-        if root not in ro_roots:
+        if root != engine_home and root not in ro_roots:
             ro_roots.append(root)
     for engine_file in _engine_binary_files(engine_argv, environment):
         if not _visible_inside(engine_file, ro_roots) and engine_file not in ro_roots:
@@ -419,23 +505,10 @@ def wrap_engine_argv(
     for root in extra_rw_roots or []:
         if root not in rw_roots:
             rw_roots.append(root)
-    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
-    engine_home = (
-        os.path.expanduser(environment[home_var])
-        if home_var and environment.get(home_var, "").strip()
-        else None
-    )
     registry = os.path.join(cwd, REGISTRY_DIR_NAME)
-    run_dir = (
-        os.path.dirname(os.path.realpath(scratch_dir))
-        if scratch_dir
-        and Path(os.path.realpath(scratch_dir)).is_relative_to(Path(registry).resolve())
-        else None
-    )
     _refuse_rw_roots_intersecting_workspace(
         cwd,
         [*rw_roots, *([engine_home] if engine_home else [])],
-        internal_allowed=run_dir,
     )
     if os.path.isdir(registry) and not any(mask.path == REGISTRY_DIR_NAME for mask in masks):
         masks = (*masks, Mask(path=REGISTRY_DIR_NAME, kind=MASK_KIND_TMPFS))
@@ -515,22 +588,16 @@ def _paths_intersect(a: Path, b: Path) -> bool:
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 
-def _refuse_rw_roots_intersecting_workspace(
-    workspace: str, rw_roots: list[str], *, internal_allowed: str | None
-) -> None:
+def _refuse_rw_roots_intersecting_workspace(workspace: str, rw_roots: list[str]) -> None:
     """Refuse any rw mount that intersects the workspace in either direction.
 
-    The one permitted exception is the current run's own directory under the
-    masked ``.delegate/`` registry (``internal_allowed``): scratch and the
-    mail-push private homes live there and must stay writable on top of the
-    registry tmpfs.
+    Active scratch is outside the workspace. Old mixed-layout scratch and any
+    other in-registry writable root are refused rather than reopening part of
+    the masked registry.
     """
     resolved_workspace = Path(workspace).resolve()
-    allowed = Path(internal_allowed).resolve() if internal_allowed else None
     for root in rw_roots:
         target = Path(root).resolve()
-        if allowed is not None and (target == allowed or target.is_relative_to(allowed)):
-            continue
         if _paths_intersect(target, resolved_workspace):
             raise DelegateError(
                 "bwrap_bind_conflict",

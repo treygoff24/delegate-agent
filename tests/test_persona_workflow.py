@@ -10,8 +10,9 @@ from subprocess import CompletedProcess
 from unittest import mock
 
 from delegate_agent import config, describe_payload, run_registry, runner
-from delegate_agent.cli import parse_cli, request_from_parsed
+from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
+from delegate_agent.request_build import request_from_parsed
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 
@@ -55,7 +56,7 @@ class PersonaWorkflowTests(unittest.TestCase):
         )
 
     def _child_result(self, calls: list[dict[str, object]]):
-        def run_child(argv, *, cwd, timeout):
+        def run_child(argv, *, cwd, timeout, environment=None, cancel_event=None):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -281,7 +282,9 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def mutate_before_child_resolution(argv, *, cwd, timeout):
+        def mutate_before_child_resolution(
+            argv, *, cwd, timeout, cancel_event=None, environment=None
+        ):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -328,7 +331,9 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def delete_before_child_resolution(argv, *, cwd, timeout):
+        def delete_before_child_resolution(
+            argv, *, cwd, timeout, cancel_event=None, environment=None
+        ):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
@@ -393,7 +398,7 @@ class PersonaWorkflowTests(unittest.TestCase):
         state = self._state()
         calls: list[dict[str, object]] = []
 
-        def create_workspace_shadow(argv, *, cwd, timeout):
+        def create_workspace_shadow(argv, *, cwd, timeout, cancel_event=None, environment=None):
             input_path = Path(argv[argv.index("--input-json") + 1])
             calls.append(json.loads(input_path.read_text(encoding="utf-8")))
             workspace_persona.write_text("shadow", encoding="utf-8")

@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import errors as errors_api
+from delegate_agent import run_registry as registry_api
+from delegate_agent import worktree_mgmt as worktree_api
 from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
@@ -16,11 +19,11 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             ["--cwd", path, "--json", "worktree", "list"],
             home=repo.name,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         payload = json.loads(out)
         self.assertEqual(payload["code"], "no_registry")
         self.assertEqual(payload["error"], "no_registry")
-        self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+        self.assertEqual(payload["exitCode"], errors_api.EXIT_USAGE)
 
     def test_worktree_list_json_schema_and_status(self):
         _repo, path = self._make_repo()
@@ -90,8 +93,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             porcelain_calls = []
             summary_status_calls = 0
-            original_porcelain_status = self.delegate.worktree_mgmt.porcelain_status
-            original_summary_run_git = self.delegate.worktree_mgmt.worktree_summary.run_git
+            original_porcelain_status = worktree_api.porcelain_status
+            original_summary_run_git = worktree_api.worktree_summary.run_git
 
             def counting_porcelain_status(execution_cwd, *, limit=None):
                 porcelain_calls.append((execution_cwd, limit))
@@ -105,17 +108,17 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "porcelain_status",
                     counting_porcelain_status,
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt.worktree_summary,
+                    worktree_api.worktree_summary,
                     "run_git",
                     counting_summary_run_git,
                 ),
             ):
-                payload = self.delegate.worktree_mgmt.show_worktree(
+                payload = worktree_api.show_worktree(
                     self._registry_root(path),
                     handle="cursor-porcelain-cache",
                 )
@@ -152,11 +155,11 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
 
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "detect_worktree_status",
                 return_value=("unknown", ["forced unknown for inspection"]),
             ):
-                payload = self.delegate.worktree_mgmt.show_worktree(
+                payload = worktree_api.show_worktree(
                     self._registry_root(path),
                     handle="cursor-show-unknown",
                 )
@@ -195,7 +198,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self._seed_persistent_run(path, alias="cursor-a", harness="cursor")
             self._seed_persistent_run(path, alias="cursor-b", harness="cursor")
             self._seed_persistent_run(path, alias="droid-c", harness="droid")
-            result = self.delegate.worktree_mgmt.list_worktrees(
+            result = worktree_api.list_worktrees(
                 self._registry_root(path),
                 harness="cursor",
             )
@@ -221,13 +224,13 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 path,
                 alias="cursor-corrupt",
             )
-            corrupt_run_path = self.delegate.run_registry.run_directory(
+            corrupt_run_path = registry_api.run_directory(
                 self._registry_root(path),
                 corrupt_run_id,
             )
             (corrupt_run_path / "state.json").write_text("{garbage", encoding="utf-8")
 
-            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            result = worktree_api.list_worktrees(self._registry_root(path))
 
             self.assertEqual(result["summary"]["totalPersistentWorktrees"], 2)
             by_alias = {entry["alias"]: entry for entry in result["entries"]}
@@ -259,13 +262,13 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch_a, wt_path_a)
             # Worktree at wt_path_b doesn't exist (simulates removed)
-            present_result = self.delegate.worktree_mgmt.list_worktrees(
+            present_result = worktree_api.list_worktrees(
                 self._registry_root(path),
                 status="present",
             )
             self.assertEqual(len(present_result["entries"]), 1)
             self.assertEqual(present_result["entries"][0]["alias"], "cursor-present")
-            removed_result = self.delegate.worktree_mgmt.list_worktrees(
+            removed_result = worktree_api.list_worktrees(
                 self._registry_root(path),
                 status="removed",
             )
@@ -286,7 +289,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 worktree_status="present",
             )
 
-            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            result = worktree_api.list_worktrees(self._registry_root(path))
 
             entry = result["entries"][0]
             self.assertEqual(entry["registryWorktreeStatus"], "present")
@@ -305,8 +308,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
 
-            list_payload = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
-            show_payload = self.delegate.worktree_mgmt.show_worktree(
+            list_payload = worktree_api.list_worktrees(self._registry_root(path))
+            show_payload = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle="cursor-public",
             )
@@ -321,18 +324,18 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             from datetime import UTC, datetime, timedelta
 
             old_ts = (datetime.now(UTC) - timedelta(days=2)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_persistent_run(
                 path, alias="droid-old", harness="droid", last_activity_at=old_ts
             )
             recent_ts = (datetime.now(UTC) - timedelta(hours=1)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_persistent_run(
                 path, alias="droid-recent", harness="droid", last_activity_at=recent_ts
             )
-            result = self.delegate.worktree_mgmt.show_worktree(
+            result = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle=None,
                 latest_harness="droid",
@@ -345,7 +348,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             from datetime import UTC, datetime, timedelta
 
             worktree_ts = (datetime.now(UTC) - timedelta(hours=2)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_persistent_run(
                 path,
@@ -354,11 +357,11 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 last_activity_at=worktree_ts,
             )
             plain_ts = (datetime.now(UTC) - timedelta(minutes=5)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_plain_run(path, harness="droid", last_activity_at=plain_ts)
 
-            result = self.delegate.worktree_mgmt.show_worktree(
+            result = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle=None,
                 latest_harness="droid",
@@ -372,7 +375,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             from datetime import UTC, datetime, timedelta
 
             worktree_ts = (datetime.now(UTC) - timedelta(hours=2)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             worktree_run_id, worktree_alias = self._seed_persistent_run(
                 path,
@@ -381,11 +384,11 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 last_activity_at=worktree_ts,
             )
             plain_ts = (datetime.now(UTC) - timedelta(minutes=5)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_plain_run(path, harness="cursor", last_activity_at=plain_ts)
 
-            result = self.delegate.worktree_mgmt.show_worktree(
+            result = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle="cursor",
             )
@@ -402,8 +405,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self._seed_plain_run(path, harness="cursor")
             self._seed_persistent_run(path, alias="cursor-worktree", harness="cursor")
 
-            with self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx:
-                self.delegate.worktree_mgmt.show_worktree(
+            with self.assertRaises(worktree_api.WorktreeManagementError) as ctx:
+                worktree_api.show_worktree(
                     self._registry_root(path),
                     handle="cursorx",
                 )
@@ -528,12 +531,10 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             git("commit", "-m", "new source commit", cwd=path)
             new_commit = git("rev-parse", "HEAD", cwd=path).stdout.strip()
             self.assertNotEqual(new_commit, base_oid)
-            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            index = registry_api.load_index(self._registry_root(path))
             run_id = index["aliases"].get("cursor-ahead")
-            record = self.delegate.worktree_mgmt._record_for_run(
-                self._registry_root(path), run_id, {}
-            )
-            result = self.delegate.worktree_mgmt.ahead_behind(record, "present")
+            record = worktree_api._record_for_run(self._registry_root(path), run_id, {})
+            result = worktree_api.ahead_behind(record, "present")
             self.assertIsNotNone(result)
             self.assertEqual(result["vsCreationBase"]["baseOid"], base_oid)
             self.assertEqual(result["vsCurrentHead"]["baseOid"], new_commit)
@@ -562,7 +563,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             git("merge", "--no-ff", branch, cwd=path, check=False)
             (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
 
-            payload = self.delegate.worktree_mgmt.show_worktree(
+            payload = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle="cursor-merged-dirty",
             )
@@ -598,7 +599,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             git("commit", "-m", "feature", cwd=wt_path)
             git("merge", "--no-ff", branch, cwd=path, check=False)
 
-            payload = self.delegate.worktree_mgmt.show_worktree(
+            payload = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle="cursor-merged-clean",
             )
@@ -630,7 +631,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             git("commit", "-m", "feature", cwd=wt_path)
             (Path(wt_path) / "local.txt").write_text("dirty\n", encoding="utf-8")
 
-            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            result = worktree_api.list_worktrees(self._registry_root(path))
             entry = result["entries"][0]
 
             self.assertFalse(entry["branchMergedIntoSource"])
@@ -657,7 +658,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             git("add", "feature.txt", cwd=wt_path)
             git("commit", "-m", "feature", cwd=wt_path)
 
-            payload = self.delegate.worktree_mgmt.show_worktree(
+            payload = worktree_api.show_worktree(
                 self._registry_root(path),
                 handle="cursor-unmerged-clean",
             )
@@ -685,17 +686,17 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, branch, wt_path)
 
             with mock.patch.object(
-                self.delegate.worktree_mgmt.worktree_summary,
+                worktree_api.worktree_summary,
                 "build_work_summary",
             ) as summary_mock:
-                result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+                result = worktree_api.list_worktrees(self._registry_root(path))
 
             self.assertEqual(len(result["entries"]), 1)
             self.assertNotIn("workSummary", result["entries"][0])
             summary_mock.assert_not_called()
 
     def test_suggested_commands_signature_drops_dead_dirty_parameter(self):
-        params = inspect.signature(self.delegate.worktree_mgmt.suggested_commands).parameters
+        params = inspect.signature(worktree_api.suggested_commands).parameters
         self.assertNotIn("dirty", params)
 
 

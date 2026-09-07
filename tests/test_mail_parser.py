@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import profile_guard
-from delegate_agent.cli import DelegateError, parse_cli
+from delegate_agent.cli_parser import parse_cli
+from delegate_agent.errors import DelegateError
 
 
 class MailParserTests(unittest.TestCase):
@@ -19,10 +20,10 @@ class MailParserTests(unittest.TestCase):
 
         parsed = parse_cli(["mail", "send", "--group", "reviewers", "--subject", "subject", "body"])
         self.assertEqual(parsed.global_options.group, None)
-        self.assertIsNotNone(parsed.mail_command)
-        self.assertEqual(parsed.mail_command.group, "reviewers")
-        self.assertEqual(parsed.mail_command.body, "body")
-        self.assertEqual(parsed.mail_command.subject, "subject")
+        self.assertIsNotNone(parsed.payload)
+        self.assertEqual(parsed.payload.group, "reviewers")
+        self.assertEqual(parsed.payload.body, "body")
+        self.assertEqual(parsed.payload.subject, "subject")
 
         launch = parse_cli(["--group", "launch-group", "codex", "work", "prompt"])
         self.assertEqual(launch.global_options.group, "launch-group")
@@ -47,7 +48,7 @@ class MailParserTests(unittest.TestCase):
             with self.subTest(action=action):
                 parsed = parse_cli(["mail", action, *args])
                 self.assertEqual(parsed.subcommand, "mail")
-                command = parsed.mail_command
+                command = parsed.payload
                 self.assertIsNotNone(command)
                 self.assertEqual(command.action, action)
                 for field, value in expected.items():
@@ -59,14 +60,14 @@ class MailParserTests(unittest.TestCase):
                 parse_cli(["mail", "watch", "--interval-ms", value])
             self.assertEqual(caught.exception.error, "invalid_interval")
         self.assertEqual(
-            parse_cli(["mail", "watch", "--interval-ms", "100"]).mail_command.interval_ms, 100
+            parse_cli(["mail", "watch", "--interval-ms", "100"]).payload.interval_ms, 100
         )
         self.assertEqual(
-            parse_cli(["mail", "watch", "--interval-ms", "60000"]).mail_command.interval_ms,
+            parse_cli(["mail", "watch", "--interval-ms", "60000"]).payload.interval_ms,
             60000,
         )
         self.assertEqual(
-            parse_cli(["mail", "watch"]).mail_command.interval_ms,
+            parse_cli(["mail", "watch"]).payload.interval_ms,
             1000,
         )
 

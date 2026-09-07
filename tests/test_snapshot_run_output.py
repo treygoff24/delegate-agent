@@ -4,6 +4,9 @@ import os
 import sys
 import unittest
 
+from delegate_agent import errors as errors_api
+from delegate_agent import run_output_commands as run_output_api
+from delegate_agent import run_registry as registry_api
 from tests.snapshot_commands_test_base import ROOT, SnapshotCommandTestBase
 
 
@@ -118,7 +121,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             stdout=sys.stdout,
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("Suggestions", stderr.getvalue())
         self.assertIn(first_alias, stderr.getvalue())
 
@@ -186,7 +189,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(stale_run["effectiveStatus"], "stale")
         self.assertEqual(stale_run["staleReason"], "dead_pid")
         self.assertIn(
-            self.delegate.run_registry.snapshot_command(stale_alias, cwd=str(self.workspace)),
+            registry_api.snapshot_command(stale_alias, cwd=str(self.workspace)),
             stale_run["nextActions"],
         )
 
@@ -202,7 +205,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(len(payload["runs"]), 1)
         self.assertEqual(
             payload["runs"][0]["snapshotCommand"],
-            self.delegate.run_registry.snapshot_command(alias, cwd=str(self.workspace)),
+            registry_api.snapshot_command(alias, cwd=str(self.workspace)),
         )
 
     def test_run_output_completion_report(self):
@@ -622,7 +625,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ),
             json.dumps({"type": "turn.completed"}),
         ]
-        lines = [filler] * (self.delegate.RECOVERY_STDOUT_TAIL_LINES + 500) + final
+        lines = [filler] * (run_output_api.RECOVERY_STDOUT_TAIL_LINES + 500) + final
         (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
         stdout = io.StringIO()
         code = self.delegate.main(
@@ -651,7 +654,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                     "type": "command_execution",
                     "command": "noise",
                     "status": "completed",
-                    "aggregated_output": "x" * (self.delegate.RECOVERY_STDOUT_TAIL_BYTES + 1000),
+                    "aggregated_output": "x" * (run_output_api.RECOVERY_STDOUT_TAIL_BYTES + 1000),
                 },
             }
         )
@@ -676,7 +679,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())["sections"]["completionReport"]
         self.assertTrue(report["truncated"])
-        self.assertEqual(report["tailBytes"], self.delegate.RECOVERY_STDOUT_TAIL_BYTES)
+        self.assertEqual(report["tailBytes"], run_output_api.RECOVERY_STDOUT_TAIL_BYTES)
         self.assertIn("final", report["content"])
         self.assertNotIn("stale", report["content"])
 
@@ -699,7 +702,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                     "type": "command_execution",
                     "command": "noise",
                     "status": "completed",
-                    "aggregated_output": "x" * (self.delegate.RECOVERY_STDOUT_TAIL_BYTES + 1000),
+                    "aggregated_output": "x" * (run_output_api.RECOVERY_STDOUT_TAIL_BYTES + 1000),
                 },
             }
         )
@@ -711,7 +714,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ["--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_json_failure_includes_diagnostics(self):
@@ -731,7 +734,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stdout=stdout,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "missing_completion_report")
@@ -740,7 +743,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertGreater(payload["diagnostics"]["stdout"]["bytes"], 0)
         self.assertTrue(payload["diagnostics"]["stderr"]["present"])
         self.assertIn(
-            f"--stdout --tail {self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES}",
+            f"--stdout --tail {run_output_api.RUN_OUTPUT_DEFAULT_TAIL_LINES}",
             payload["nextActions"][0],
         )
         self.assertIn("--stderr", payload["nextActions"][1])
@@ -777,7 +780,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_rejects_droid_interim_message(self):
@@ -805,7 +808,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
         json_stdout = io.StringIO()
@@ -820,7 +823,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stdout=json_stdout,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         payload = json.loads(json_stdout.getvalue())
         self.assertEqual(payload["error"], "missing_completion_report")
         self.assertEqual(payload["diagnostics"]["recovery"]["quality"], "housekeeping_fallback")
@@ -1004,7 +1007,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_ignores_superseded_codex_progress(self):
@@ -1048,7 +1051,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_requires_codex_turn_completion(self):
@@ -1078,7 +1081,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stderr=stderr,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_stdout_tail_renders_structured_events_not_raw_jsonl(self):
@@ -1145,7 +1148,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
     def test_run_output_default_falls_back_to_bounded_diagnostics(self):
         run_id, alias = self.write_run(status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
-        lines = [f"line{i}" for i in range(self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES + 5)]
+        lines = [f"line{i}" for i in range(run_output_api.RUN_OUTPUT_DEFAULT_TAIL_LINES + 5)]
         (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
         stdout = io.StringIO()
         code = self.delegate.main(
@@ -1169,7 +1172,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("status detail: raw=running effective=stale", output)
         self.assertIn("stale reason: dead_pid", output)
         self.assertIn(
-            self.delegate.run_registry.snapshot_command(alias, cwd=str(self.workspace)),
+            registry_api.snapshot_command(alias, cwd=str(self.workspace)),
             output,
         )
 
@@ -1185,7 +1188,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(payload["effectiveStatus"], "stale")
         self.assertEqual(payload["staleReason"], "dead_pid")
         self.assertIn(
-            self.delegate.run_registry.run_output_command(
+            registry_api.run_output_command(
                 alias,
                 completion_report=True,
                 cwd=str(self.workspace),
@@ -1354,7 +1357,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
     def test_run_output_stdout_without_tail_or_raw_defaults_to_bounded_tail(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)
-        lines = [f"line{i}" for i in range(self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES + 1)]
+        lines = [f"line{i}" for i in range(run_output_api.RUN_OUTPUT_DEFAULT_TAIL_LINES + 1)]
         (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
         stdout = io.StringIO()
         code = self.delegate.main(

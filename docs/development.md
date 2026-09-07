@@ -1,24 +1,39 @@
 # Development notes
 
-Delegate Agent is intentionally small and shell-first. This page is for contributors working in the repository checkout.
+Use the repository checkout for development; the installed command may run different code.
 
 ## Main modules
 
-- `bin/delegate.py` runs the checkout directly without installing it.
-- `src/delegate_agent/cli.py` contains CLI parsing, request validation, command construction, prompt transforms, and high-level dispatch.
-- `src/delegate_agent/config.py` owns config defaults, merge precedence, validation, isolation defaults, and policy settings.
-- `src/delegate_agent/isolation.py` owns isolation planning and Git worktree creation helpers.
-- `src/delegate_agent/runner.py` launches tracked child processes and writes manifests, state, snapshots, and completion reports.
-- `src/delegate_agent/run_registry.py`, `rendering.py`, `retention.py`, and `archived_logs.py` implement local run tracking, bounded output, redaction, and archive-only retention.
-- `src/delegate_agent/worktree_mgmt.py` owns persistent-worktree lifecycle commands.
-- `tests/` covers parser, validation, command construction, execution output, snapshots, retention, run registry, isolation, and worktree management.
+`bin/delegate.py` runs the checkout without installation. Implementation modules
+live under `src/delegate_agent/`:
+
+| Change | Owning module |
+| --- | --- |
+| Command syntax, discovery, help | `cli_parser.py`, `command_help.py`, `describe_payload.py` |
+| CLI dispatch and human/JSON responses | `cli.py` |
+| Config defaults, precedence, validation | `config.py` |
+| CLI/JSON launch validation and isolation planning | `request_build.py`, `isolation.py` |
+| Request policy copied into execution | `run_context.py`; do not duplicate this mapping for worktrees |
+| Engine-specific flags and prompt delivery | `argv_builders.py`, `prompt_transport.py` |
+| Process lifetime, terminal outcomes, byte budgets | `runner.py`, `harness_events.py`, `stream_capture.py` |
+| Record paths and bounded reads | `record_io.py`; it does not import registry mutations |
+| Registry mutations versus read-only status | `run_registry.py` versus `run_status.py`, `snapshot_view.py` |
+| Shared metadata fields | `run_metadata.py`; manifest, state, and snapshot remain separate records |
+| Persistent-worktree identity and retirement | `worktree_records.py`, `worktree_mgmt.py` |
+| Workflow replay, lifecycle commands, immutable runtime pins | `workflows/runtime.py`, `workflows/commands.py`, `workflow_pinning.py` |
+
+Unit tests should call the module that owns the behavior. Keep CLI tests for
+parsing/dispatch/output contracts and subprocess fixtures for launch boundaries.
+Adding a request field needs non-default propagation checks across ordinary,
+temporary, persistent, attached, and grouped-call paths, not another copied
+constructor block.
 
 ## Development entrypoint
 
 Use the checkout-local entrypoint while developing:
 
 ```bash
-python3 bin/delegate.py --json describe
+python3 bin/delegate.py --json describe --overview
 python3 bin/delegate.py --json dry-run codex safe "Review only."
 ```
 
@@ -45,9 +60,11 @@ child binaries. Engine event tests use captured fixtures under
 When implementing or testing persistent-worktree behavior:
 
 - Tests that create worktrees must set `HOME` to a temporary directory and assert generated paths are under that temporary home.
-- Keep parsing in `cli.py` and lifecycle logic in `worktree_mgmt.py`.
+- Keep parsing in `cli_parser.py` and lifecycle logic in `worktree_mgmt.py`.
 - Preserve default safe-mode behavior when changing isolation plumbing.
-- Dry-run must never create branches, worktrees, registry runs, or filesystem artifacts.
+- Ordinary launch dry-run must not create branches, worktrees, or run records.
+  Workflow dry-run is different: it executes the script's Python, so filesystem
+  writes remain live unless the script branches on dry-run.
 - Worktree cleanup commands must refuse dirty or unmerged work unless the caller passes explicit destructive flags.
 
 See [Worktrees](worktrees.md) for the public lifecycle contract.
@@ -59,12 +76,20 @@ Run focused tests first, then the broader checks before handoff:
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
-`-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
-`sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
-summary to stderr — pipe with `2>&1` when capturing output.
+`tests/acceptance.sh` runs all four required gates, including Ruff lint and
+format checks. It reports Python and Ruff versions and selects the pinned Ruff
+from the checkout's `.venv`, the main checkout's `.venv` when in a linked
+worktree, or PATH when its version matches the dev extra. A mismatched ambient
+Ruff fails before running the gates; install the dev extra rather than accepting
+different lint behavior on different machines.
+
+Collection imports `tests/__init__.py`, which shims `src` onto `sys.path`,
+installs a private HOME/temp environment, and strips ambient env.
+`pyproject.toml` sets `testpaths = ["tests"]`, so a test file placed outside
+`tests/` is never collected and never runs.
 
 Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin,
 OpenCode, Pi, Oh My Pi, or Kimi binaries.

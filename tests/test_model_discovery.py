@@ -129,29 +129,29 @@ class ModelsCommandParseTests(unittest.TestCase):
     def test_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "cursor", "--live"])
         self.assertEqual(parsed.subcommand, "models")
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "cursor")
-        self.assertTrue(parsed.inspection.live)
-        self.assertFalse(parsed.inspection.summary)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "cursor")
+        self.assertTrue(parsed.payload.live)
+        self.assertFalse(parsed.payload.summary)
 
     def test_opencode_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "opencode", "--live"])
         self.assertEqual(parsed.subcommand, "models")
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "opencode")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "opencode")
+        self.assertTrue(parsed.payload.live)
 
     def test_pi_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "pi", "--live"])
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "pi")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "pi")
+        self.assertTrue(parsed.payload.live)
 
     def test_omp_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "omp", "--live"])
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "omp")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "omp")
+        self.assertTrue(parsed.payload.live)
 
 
 class LiveProbeParseHelpersTests(unittest.TestCase):
@@ -177,35 +177,6 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
                 {"id": "grok-4.5-fast-xhigh", "note": "Grok 4.5 Fast"},
             ],
         )
-
-    def test_parse_opencode_models_output_skips_junk(self):
-        from delegate_agent.model_discovery import parse_opencode_models_output
-
-        models = parse_opencode_models_output(
-            "\n"
-            "openai/gpt-5\n"
-            "not a model line\n"
-            "warning:\n"
-            "loading\n"
-            "anthropic/claude-sonnet-4-5\n"
-            "\t\n"
-            "openrouter/deepseek-v4\n"
-        )
-        self.assertEqual(
-            models,
-            [
-                {"id": "openai/gpt-5"},
-                {"id": "anthropic/claude-sonnet-4-5"},
-                {"id": "openrouter/deepseek-v4"},
-            ],
-        )
-
-    def test_parse_opencode_models_output_rejects_all_junk(self):
-        from delegate_agent.model_discovery import parse_opencode_models_output
-
-        with self.assertRaises(RuntimeError) as ctx:
-            parse_opencode_models_output("warning:\nloading\n\n  spaced id\n")
-        self.assertIn("no parseable model lines", str(ctx.exception))
 
     def test_parse_pi_models_output(self):
         from delegate_agent.model_discovery import parse_pi_models_output
@@ -256,12 +227,17 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
 
         models = parse_droid_custom_models(
             [
-                {"id": "custom:explicit", "displayName": "Explicit"},
+                {"id": "custom:ignored", "displayName": "Explicit"},
                 {"displayName": "My Cool Model"},
             ]
         )
-        self.assertEqual(models[0]["id"], "custom:explicit")
-        self.assertEqual(models[1]["id"], "custom:My-Cool-Model")
+        self.assertEqual(
+            models,
+            [
+                {"id": "custom:Explicit-0", "note": "Explicit"},
+                {"id": "custom:My-Cool-Model-1", "note": "My Cool Model"},
+            ],
+        )
 
 
 class LiveProbeIntegrationTests(unittest.TestCase):
@@ -388,7 +364,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 json.dumps(
                     {
                         "customModels": [
-                            {"id": "custom:live-droid", "displayName": "Live Droid"},
+                            {"model": "live-droid", "displayName": "Live Droid"},
                         ]
                     }
                 ),
@@ -404,7 +380,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             )
             self.assertIs(payload["live"], True)
             by_id = {item["id"]: item for item in payload["models"]}
-            self.assertEqual(by_id["custom:live-droid"]["source"], "live")
+            self.assertEqual(by_id["custom:Live-Droid-0"]["source"], "live")
             self.assertIn("claude-opus-4-8", by_id)
 
     def test_devin_live_merge(self):

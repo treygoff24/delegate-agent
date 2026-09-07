@@ -16,16 +16,21 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from delegate_agent import personas, redaction, run_registry
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry as workflow_registry
+
+if TYPE_CHECKING:
+    from delegate_agent.workflow_attempts import WorkflowAttempt
 
 PIN_SCHEMA = "delegate.workflow-pin.v1"
 PIN_VERSION = 1
@@ -84,6 +89,7 @@ class WorkflowPin:
     python_executable: str
     personas: JsonObject
     created_at: str
+    profile_identity: JsonObject
 
     @property
     def cli_argv(self) -> list[str]:
@@ -98,11 +104,16 @@ class WorkflowPin:
         if current:
             current_entries = [entry for entry in current.split(os.pathsep) if entry != pythonpath]
             pythonpath = os.pathsep.join((pythonpath, *current_entries))
-        return {
+        environment = {
             "DELEGATE_CONFIG": str(self.config_path),
             "DELEGATE_WORKFLOW_PIN": str(self.path),
             "PYTHONPATH": pythonpath,
         }
+        namespaces = self.profile_identity["namespaces"]
+        # HOME remains the pin/registry owner's home. A profile-specific
+        # HOME is already frozen in its definition for external engines.
+        environment.update({name: namespaces[name] for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR")})
+        return environment
 
 
 def pin_root(home: Path | None = None) -> Path:
@@ -153,7 +164,9 @@ def _non_secret_config(value: JsonValue, *, key: str | None = None) -> JsonValue
             if not isinstance(child_key, str) or redaction.key_looks_secret(child_key):
                 continue
             cleaned = _non_secret_config(child, key=child_key)
-            if cleaned is not None:
+            # Preserve explicit null defaults. An attempt config is loaded
+            # exactly, without merging mutable machine defaults back into it.
+            if cleaned is not None or child is None:
                 result[child_key] = cleaned
         return result
     if isinstance(value, list):
@@ -243,8 +256,8 @@ _install()
 '''
 
 
-def _runtime_source_files() -> list[tuple[str, bytes]]:
-    source_root = Path(__file__).resolve().parents[1]
+def _runtime_source_files(source_root: Path | None = None) -> list[tuple[str, bytes]]:
+    source_root = source_root or Path(__file__).resolve().parents[1]
     package_root = source_root / "delegate_agent"
     files: list[tuple[str, bytes]] = []
     for source in sorted(package_root.rglob("*")):
@@ -296,13 +309,90 @@ def entrypoint_path(home: Path | None = None) -> Path | None:
 
 
 def entrypoint_digest(home: Path | None = None) -> str | None:
-    path = entrypoint_path(home)
+    identity = _file_identity(entrypoint_path(home))
+    digest = identity.get("sha256") if identity is not None else None
+    return digest if isinstance(digest, str) else None
+
+
+def _file_identity(path: Path | None) -> JsonObject | None:
+    """Record bytes and symlink routing without executing an untrusted launcher."""
     if path is None:
         return None
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
+        links: list[JsonValue] = []
+        current = Path(os.path.abspath(path))
+        seen: set[Path] = set()
+        while current.is_symlink():
+            if current in seen or len(links) >= 40:
+                return None
+            seen.add(current)
+            target = os.readlink(current)
+            links.append({"path": str(current), "target": target})
+            current = Path(os.path.abspath(current.parent / target))
+        resolved = current.resolve(strict=True)
+        fd = os.open(resolved, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            digest = hashlib.sha256()
+            while chunk := os.read(fd, 1024 * 1024):
+                digest.update(chunk)
+        finally:
+            os.close(fd)
+        return {
+            "path": str(path.absolute()),
+            "resolvedPath": str(resolved),
+            "sha256": digest.hexdigest(),
+            "symlinks": links,
+        }
+    except (OSError, RuntimeError):
         return None
+
+
+def _runtime_provenance(home: Path | None = None) -> JsonObject:
+    executing_root = Path(__file__).resolve().parents[1]
+    installed_root = (home or Path.home()) / ".delegate" / "src"
+    launcher = entrypoint_path(home)
+    outer = shutil.which("delegate")
+    # Wheel/console-script installs have no HOME-level payload. Do not classify
+    # an arbitrary checkout as installed merely because it is on PYTHONPATH.
+    if not (installed_root / "delegate_agent").is_dir() and executing_root.name in {
+        "site-packages",
+        "dist-packages",
+    }:
+        installed_root = executing_root
+        launcher = Path(outer) if outer else None
+    installed_files = (
+        _runtime_source_files(installed_root)
+        if (installed_root / "delegate_agent").is_dir()
+        else []
+    )
+    installed_digest = _runtime_digest(installed_files) if installed_files else None
+    entry = _file_identity(launcher)
+    outer_identity = _file_identity(Path(outer)) if outer else None
+    manifest: JsonObject = {
+        "importRoot": str(installed_root.resolve()),
+        "runtimeDigest": installed_digest,
+        "files": [
+            {"path": name, "sha256": hashlib.sha256(raw).hexdigest()}
+            for name, raw in installed_files
+            if name.startswith("src/delegate_agent/")
+        ],
+        "entrypoint": entry,
+        "pathLauncher": outer_identity,
+        "sitecustomize": _file_identity(installed_root / "sitecustomize.py"),
+        "executingInterpreter": _file_identity(Path(sys.executable)),
+    }
+    executing_installed = executing_root == installed_root.resolve() and bool(installed_files)
+    return {
+        "executingImportRoot": str(executing_root),
+        "executionMode": "installed" if executing_installed else "checkout-or-pinned",
+        "executingMatchesInstalled": executing_installed,
+        "installedRuntimeDigest": installed_digest,
+        "installedArtifact": manifest,
+        "installedArtifactDigest": _json_digest(manifest),
+        "installedArtifactComplete": bool(installed_files and entry and outer_identity),
+    }
 
 
 def _runtime_directory_digest(root: Path) -> str:
@@ -408,6 +498,20 @@ def _write_persona_snapshots(root: Path, records: JsonObject) -> None:
         target_root.chmod(0o500)
 
 
+def _complete_pin_config(defaults: JsonObject, config: JsonObject) -> JsonObject:
+    from delegate_agent import config as delegate_config
+
+    merged = delegate_config.merge_config_layer(defaults, config)
+    # Null optional operational sections mean defaults, not an absent mapping.
+    # Scalar nulls (including explicit model defaults) remain untouched.
+    for section in ("workflows", "tracking", "progress", "worktrees"):
+        if merged.get(section) is None and isinstance(defaults.get(section), dict):
+            merged[section] = defaults[section]
+    cleaned = _non_secret_config(merged)
+    assert isinstance(cleaned, dict)
+    return cleaned
+
+
 def create_pin(
     workflow_id: str,
     *,
@@ -417,6 +521,9 @@ def create_pin(
     home: Path | None = None,
 ) -> WorkflowPin:
     """Create (or verify) the immutable pin for a new workflow."""
+    from delegate_agent import config as delegate_config
+    from delegate_agent import workflow_identity
+
     _validate_workflow_id(workflow_id)
     root = pin_directory(workflow_id, home=home)
     configured_pool = (
@@ -427,13 +534,29 @@ def create_pin(
             "pin_root_inside_worktree_pool",
             "workflow pin root must be outside worktrees.dataHome",
         )
+    existing_pin = load_pin(workflow_id, home=home)
+    if existing_pin is not None:
+        requested = _complete_pin_config(existing_pin.config, config)
+        workflow_identity.validate(existing_pin.profile_identity, existing_pin.config)
+        workflow_identity.freeze(requested)
+        if (
+            requested != existing_pin.config
+            or live_runtime_digest() != existing_pin.runtime_digest
+            or sys.executable != existing_pin.python_executable
+            or _persona_records(workspace) != existing_pin.personas
+        ):
+            raise WorkflowPinError(
+                "pin_collision", "existing pin differs from the requested inputs"
+            )
+        return existing_pin
+    # Raw partial input is supported by this internal entry point too. Freeze
+    # defaults only on creation, never during verification or attempt loading.
+    cleaned_config = _complete_pin_config(delegate_config.embedded_default_config(), config)
+    profile_identity = workflow_identity.freeze(cleaned_config)
     run_registry.ensure_private_dir(root.parent)
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
     digest, runtime_root, import_root, entrypoint = _write_runtime_snapshot(root, home=home)
-    cleaned_config = _non_secret_config(config)
-    if not isinstance(cleaned_config, dict):
-        cleaned_config = {}
     config_path = root / PIN_CONFIG_FILE
     if config_path.exists():
         existing_config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -457,10 +580,13 @@ def create_pin(
             "importRoot": str(import_root),
             "entrypoint": str(entrypoint),
             "pythonExecutable": sys.executable,
+            "attemptConfigVersion": 1,
         },
         "configPath": str(config_path),
         "configDigest": _json_digest(cleaned_config),
         "config": cleaned_config,
+        "profileIdentity": profile_identity,
+        "profileIdentityDigest": _json_digest(profile_identity),
         "personas": records,
     }
     if path.exists():
@@ -480,7 +606,7 @@ def create_pin(
 
 
 def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | None:
-    """Load and validate a pin; ``None`` is the explicit pre-pinning path."""
+    """Load and validate a current pin, returning ``None`` when none exists."""
     _validate_workflow_id(workflow_id)
     path = pin_path(workflow_id, home=home)
     if not path.exists():
@@ -489,13 +615,17 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise WorkflowPinError("invalid_pin", f"could not read workflow pin: {path}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != PIN_SCHEMA:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != PIN_SCHEMA
+        or payload.get("version") != PIN_VERSION
+    ):
         raise WorkflowPinError("invalid_pin", f"unsupported workflow pin: {path}")
     if payload.get("workflowId") != workflow_id:
         raise WorkflowPinError("invalid_pin", "workflow pin id does not match its path")
     runtime = payload.get("runtime")
     config = payload.get("config")
-    personas_payload = payload.get("personas", {})
+    personas_payload = payload.get("personas")
     if (
         not isinstance(runtime, dict)
         or not isinstance(config, dict)
@@ -504,6 +634,8 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         raise WorkflowPinError(
             "invalid_pin", "workflow pin is missing runtime, config, or personas"
         )
+    if runtime.get("attemptConfigVersion") != 1:
+        raise WorkflowPinError("invalid_pin", "workflow pin uses an unsupported attempt format")
     config_path_value = payload.get("configPath")
     if not isinstance(config_path_value, str):
         raise WorkflowPinError("invalid_pin", "workflow pin config path is invalid")
@@ -524,6 +656,7 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         not runtime_root.resolve(strict=False).is_relative_to(runtime_pool)
         or not runtime_root.is_dir()
         or not import_root.is_dir()
+        or not import_root.resolve(strict=False).is_relative_to(runtime_root.resolve(strict=False))
         or not entrypoint.is_file()
         or not entrypoint.resolve(strict=False).is_relative_to(runtime_root.resolve(strict=False))
     ):
@@ -546,6 +679,20 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         raise WorkflowPinError("invalid_pin", "workflow pin config is unreadable") from exc
     if disk_config != config or payload.get("configDigest") != _json_digest(config):
         raise WorkflowPinError("invalid_pin", "workflow pin config does not match its digest")
+    profile_identity = payload.get("profileIdentity")
+    from delegate_agent import workflow_identity
+
+    if not (import_root / "delegate_agent" / "workflow_identity.py").is_file():
+        raise WorkflowPinError(
+            "invalid_pin", "pinned runtime does not support profile identity validation"
+        )
+    if not isinstance(profile_identity, dict) or payload.get(
+        "profileIdentityDigest"
+    ) != _json_digest(profile_identity):
+        raise WorkflowPinError("invalid_pin", "workflow profile identity digest differs")
+    if not (import_root / "delegate_agent" / "workflow_attempts.py").is_file():
+        raise WorkflowPinError("invalid_pin", "pinned runtime does not support attempts")
+    workflow_identity.validate_stamp(profile_identity, config)
     return WorkflowPin(
         workflow_id=workflow_id,
         path=path,
@@ -558,15 +705,24 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         python_executable=python_executable,
         personas=personas_payload,
         created_at=created_at,
+        profile_identity=profile_identity,
     )
 
 
-def temporarily_apply_environment(pin: WorkflowPin) -> dict[str, str | None]:
+def temporarily_apply_environment(
+    pin: WorkflowPin, *, attempt: WorkflowAttempt | None = None
+) -> dict[str, str | None]:
     """Apply pin env in the current process, returning prior values for restore."""
     previous: dict[str, str | None] = {}
-    for key, value in pin.environment.items():
+    environment: dict[str, str | None] = {**pin.environment, "DELEGATE_WORKFLOW_ATTEMPT": None}
+    if attempt is not None:
+        environment.update(attempt.environment)
+    for key, value in environment.items():
         previous[key] = os.environ.get(key)
-        os.environ[key] = value
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
     return previous
 
 
@@ -669,27 +825,38 @@ def register_active_supervisor(
         return result
 
 
-def doctor(*, home: Path | None = None) -> JsonObject:
-    """Return the machine-local runtime view: live digest, promotion stamp, supervisors.
+def doctor(*, home: Path | None = None, extra_warnings: Sequence[str] = ()) -> JsonObject:
+    """Read executing/installed artifact identities, stamp, and pinned supervisors.
 
-    The digest comparison is what makes a stamp-less promotion visible: an
-    rsync into ``~/.delegate/src`` changes the live digest while the stamp
-    keeps naming the previous runtime, so the two disagree until someone runs
-    ``delegate promote``.
+    ``extra_warnings`` carries checks this module must not perform itself:
+    ``profiles`` imports ``workflow_pinning``, so config-derived findings such
+    as a missing Codex profile overlay are resolved by the caller and appended
+    here rather than pulling config knowledge into the runtime-identity seam.
     """
     index = active_supervisors_view(home=home)
     entries = index.get("supervisors")
     promotion = _read_promotion(home=home)
     live_digest = live_runtime_digest()
+    provenance = _runtime_provenance(home)
     live_entrypoint = entrypoint_path(home)
     live_entrypoint_digest = entrypoint_digest(home)
     stamped_digest = promotion.get("runtimeDigest") if promotion is not None else None
     stamped_entrypoint_digest = promotion.get("entrypointDigest") if promotion is not None else None
-    matches = isinstance(stamped_digest, str) and stamped_digest == live_digest
+    matches = bool(
+        promotion
+        and promotion.get("artifactVerified") is True
+        and provenance["executingMatchesInstalled"]
+        and provenance["installedArtifactComplete"]
+        and stamped_digest == live_digest == provenance["installedRuntimeDigest"]
+        and promotion.get("installedArtifact") == provenance["installedArtifact"]
+        and promotion.get("installedArtifactDigest") == provenance["installedArtifactDigest"]
+    )
     payload: JsonObject = {
         "ok": True,
         "schema": DOCTOR_SCHEMA,
         "runtimeDigest": live_digest,
+        "executingRuntimeDigest": live_digest,
+        **provenance,
         "entrypoint": str(live_entrypoint) if live_entrypoint is not None else None,
         "entrypointDigest": live_entrypoint_digest,
         "promotion": promotion,
@@ -704,10 +871,9 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         )
     elif not matches:
         warnings.append(
-            f"runtime digest {live_digest[:12]} does not match the last promotion stamp "
-            f"{str(stamped_digest)[:12]} (promoted {promotion.get('promotedAt')} by "
-            f"{promotion.get('actor')} from {promotion.get('source')}); the installed "
-            "runtime changed without 'delegate promote'."
+            "installed artifact parity is not verified: the executing package, installed "
+            "package, launcher manifest, or verified stamp is missing or differs; an artifact "
+            "may have changed without 'delegate promote'."
         )
     if (
         isinstance(stamped_entrypoint_digest, str)
@@ -720,6 +886,9 @@ def doctor(*, home: Path | None = None) -> JsonObject:
         )
     if isinstance(entries, dict) and entries:
         warnings.append(f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes.")
+    if not provenance["executingMatchesInstalled"]:
+        warnings.append("executing checkout or pinned package is not the installed import root.")
+    warnings.extend(extra_warnings)
     if warnings:
         payload["warnings"] = warnings
     return payload
@@ -743,8 +912,8 @@ def promote(
 ) -> JsonObject:
     """Stamp a deploy/promotion event for the doctor surface.
 
-    ``runtime_digest=None`` records the live runtime, read under the promotion
-    lock so two promoters cannot stamp a digest that was already superseded.
+    ``runtime_digest=None`` records observed executing-package bytes. The lock
+    serializes stamp writers, not external installers replacing those bytes.
 
     Actual deploy mechanics belong to hq tooling; this local seam records only
     the immutable runtime identity, actor, source, and timestamp.
@@ -755,18 +924,26 @@ def promote(
         raise WorkflowPinError("invalid_promotion", "runtime digest must not be blank")
     path = promotion_path(home)
     run_registry.ensure_private_dir(path.parent)
-    # Serialize concurrent promoters: the live digest is read, the timestamp
-    # taken, and the stamp written under one lock, so the file always names
-    # the runtime that was installed at the moment of the latest promotion
-    # rather than whichever process happened to os.replace last.
+    # Observe and write under one lock so concurrent promoters cannot reorder
+    # their observations. Installer atomicity is outside this seam.
     with run_registry.file_lock(path.with_name(PROMOTION_LOCK_FILE)):
+        executing_digest = live_runtime_digest()
+        provenance = _runtime_provenance(home)
         payload: JsonObject = {
             "schema": PROMOTION_SCHEMA,
             "actor": actor,
             "source": source,
-            "runtimeDigest": runtime_digest
-            if runtime_digest is not None
-            else live_runtime_digest(),
+            "runtimeDigest": runtime_digest if runtime_digest is not None else executing_digest,
+            "executingRuntimeDigest": executing_digest,
+            **provenance,
+            "sourceVerified": False,
+            "runtimeDigestOverride": runtime_digest is not None,
+            "artifactVerified": bool(
+                runtime_digest is None
+                and provenance["executingMatchesInstalled"]
+                and provenance["installedArtifactComplete"]
+                and executing_digest == provenance["installedRuntimeDigest"]
+            ),
             "promotedAt": _utc_now(),
         }
         live_entrypoint = entrypoint_path(home)
@@ -786,12 +963,20 @@ def promote(
     return payload
 
 
-def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = False) -> int:
-    payload = doctor(home=home)
+def emit_doctor(
+    *,
+    home: Path | None = None,
+    stdout: TextIO,
+    json_mode: bool = False,
+    extra_warnings: Sequence[str] = (),
+) -> int:
+    payload = doctor(home=home, extra_warnings=extra_warnings)
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
-        print(f"runtime digest: {payload['runtimeDigest']}", file=stdout)
+        print(f"executing runtime digest: {payload['runtimeDigest']}", file=stdout)
+        print(f"execution mode: {payload['executionMode']}", file=stdout)
+        print(f"installed runtime digest: {payload['installedRuntimeDigest']}", file=stdout)
         promotion = payload.get("promotion")
         if isinstance(promotion, dict):
             print(

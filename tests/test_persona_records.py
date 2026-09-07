@@ -21,10 +21,12 @@ from delegate_agent import (
     snapshot_view,
     worktree_execution,
 )
-from delegate_agent.cli import main, parse_cli, request_from_parsed
+from delegate_agent.cli import main
+from delegate_agent.cli_parser import parse_cli
 from delegate_agent.constants import MODE_WORK
 from delegate_agent.errors import DelegateError
 from delegate_agent.isolation import IsolationContext
+from delegate_agent.request_build import request_from_parsed
 from delegate_agent.request_models import Request, ResolvedWorkspace
 
 

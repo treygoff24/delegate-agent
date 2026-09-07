@@ -4,15 +4,13 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from delegate_agent import archived_logs
+from delegate_agent import archived_logs, record_io
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.terminal_states import COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, STALLED
 
 LARGE_LOG_WARN_MIB = 50
-# 1 << 20 == 1 MiB == run_registry.BYTES_PER_MIB. Inlined so this module needs no
-# import-time run_registry reference, which would otherwise create an import-order
-# cycle (run_registry re-exports this module after defining BYTES_PER_MIB).
+# One MiB, shared as a value rather than an import from the mutation layer.
 LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * (1 << 20)
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
@@ -59,13 +57,9 @@ _UNSET = object()
 def large_log_warnings(stdout_bytes: int, stderr_bytes: int) -> list[str]:
     warnings: list[str] = []
     if stdout_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(
-            f"{run_registry.STDOUT_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stdout_bytes} bytes)"
-        )
+        warnings.append(f"{record_io.STDOUT_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stdout_bytes} bytes)")
     if stderr_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(
-            f"{run_registry.STDERR_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stderr_bytes} bytes)"
-        )
+        warnings.append(f"{record_io.STDERR_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stderr_bytes} bytes)")
     return warnings
 
 
@@ -122,18 +116,18 @@ def status_fields(state: JsonObject | None) -> JsonObject:
 
 def stale_next_actions(alias_or_run_id: str, *, cwd: str | None = None) -> list[str]:
     return [
-        run_registry.snapshot_command(alias_or_run_id, cwd=cwd),
-        run_registry.run_output_command(alias_or_run_id, completion_report=True, cwd=cwd),
-        f"{run_registry.run_output_command(alias_or_run_id, cwd=cwd)} --stderr --tail 100",
+        record_io.snapshot_command(alias_or_run_id, cwd=cwd),
+        record_io.run_output_command(alias_or_run_id, completion_report=True, cwd=cwd),
+        f"{record_io.run_output_command(alias_or_run_id, cwd=cwd)} --stderr --tail 100",
     ]
 
 
 def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    run_path = run_registry.run_directory(registry_root, run_id)
+    run_path = record_io.run_directory(registry_root, run_id)
     stdout_bytes = 0
     stderr_bytes = 0
-    stdout_path = run_path / run_registry.STDOUT_LOG
-    stderr_path = run_path / run_registry.STDERR_LOG
+    stdout_path = run_path / record_io.STDOUT_LOG
+    stderr_path = run_path / record_io.STDERR_LOG
     if stdout_path.exists():
         stdout_bytes = stdout_path.stat().st_size
     if stderr_path.exists():
@@ -150,21 +144,21 @@ def effective_log_byte_sizes(
     run_id: str,
     state: JsonObject | None = _UNSET,  # type: ignore[assignment]
 ) -> tuple[int, int]:
-    run_path = run_registry.run_directory(registry_root, run_id)
-    stdout_path = run_path / run_registry.STDOUT_LOG
-    stderr_path = run_path / run_registry.STDERR_LOG
+    run_path = record_io.run_directory(registry_root, run_id)
+    stdout_path = run_path / record_io.STDOUT_LOG
+    stderr_path = run_path / record_io.STDERR_LOG
     if stdout_path.exists() or stderr_path.exists():
         return log_byte_sizes(registry_root, run_id)
     if raw_logs_archived(registry_root, run_id):
         if state is _UNSET:
-            state = run_registry.load_run_state(registry_root, run_id)
+            state = record_io.load_run_state(registry_root, run_id)
         state_sizes = archived_logs.state_log_byte_sizes(state)
         if state_sizes is not None:
             return state_sizes
         return archived_logs.archive_log_byte_sizes(
             archived_logs.archive_path(registry_root, run_id),
-            stdout_log=run_registry.STDOUT_LOG,
-            stderr_log=run_registry.STDERR_LOG,
+            stdout_log=record_io.STDOUT_LOG,
+            stderr_log=record_io.STDERR_LOG,
         )
     return 0, 0
 
@@ -184,7 +178,7 @@ def activity_timestamp(
         if isinstance(started, str) and started:
             return started
     if run_id:
-        return run_registry.timestamp_from_run_id(run_id)
+        return record_io.timestamp_from_run_id(run_id)
     return ""
 
 
@@ -193,19 +187,29 @@ def activity_datetime(
     manifest: JsonObject | None,
     run_id: str | None = None,
 ) -> datetime | None:
-    return run_registry.parse_utc_timestamp(activity_timestamp(state, manifest, run_id))
+    return record_io.parse_utc_timestamp(activity_timestamp(state, manifest, run_id))
 
 
 def build_run_summary(
     registry_root: Path,
     run_id: str,
     index_entry: JsonObject,
+    *,
+    include_logs: bool = True,
+    state: JsonObject | object | None = _UNSET,
+    manifest: JsonObject | object | None = _UNSET,
 ) -> JsonObject:
-    state = run_registry.load_run_state_or_none(registry_root, run_id)
-    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    if state is _UNSET:
+        state = record_io.load_run_state_or_none(registry_root, run_id)
+    if manifest is _UNSET:
+        manifest = record_io.load_run_manifest_or_none(registry_root, run_id)
+    assert state is None or isinstance(state, dict)
+    assert manifest is None or isinstance(manifest, dict)
     source_cwd = _source_workspace(registry_root, index_entry, state, manifest)
 
-    stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id, state)
+    stdout_bytes, stderr_bytes = (
+        effective_log_byte_sizes(registry_root, run_id, state) if include_logs else (0, 0)
+    )
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
     handle = alias if isinstance(alias, str) else run_id
@@ -284,7 +288,7 @@ def build_run_summary(
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
     if isinstance(alias, str):
-        summary["snapshotCommand"] = run_registry.snapshot_command(alias, cwd=source_cwd)
+        summary["snapshotCommand"] = record_io.snapshot_command(alias, cwd=source_cwd)
 
     # Isolation metadata: detect persistent worktree runs.
     worktree_status = None
@@ -328,9 +332,9 @@ def list_run_summaries(
 ) -> tuple[list[JsonObject], int, int]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    summaries: list[JsonObject] = []
+    candidates: list[tuple[JsonObject, JsonObject | None, bool, JsonObject]] = []
     scope_total = 0
-    for run_id, entry in run_registry.index_run_entries(index):
+    for run_id, entry in record_io.index_run_entries(index):
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
             continue
@@ -338,7 +342,29 @@ def list_run_summaries(
         if group is not None and entry_group != group:
             continue
         scope_total += 1
-        summary = build_run_summary(registry_root, run_id, entry)
+        from delegate_agent import run_registry
+
+        projected_state = run_registry.terminal_selection_state(registry_root, run_id, entry)
+        state = (
+            projected_state
+            if projected_state is not None
+            else record_io.load_run_state_or_none(registry_root, run_id)
+        )
+        needs_manifest = not any(
+            isinstance(state, dict) and isinstance(state.get(key), str) and state.get(key)
+            for key in ("finishedAt", "lastActivityAt", "startedAt")
+        )
+        manifest = (
+            record_io.load_run_manifest_or_none(registry_root, run_id) if needs_manifest else None
+        )
+        summary = build_run_summary(
+            registry_root,
+            run_id,
+            entry,
+            include_logs=False,
+            state=state,
+            manifest=manifest,
+        )
         status = summary.get("status")
         if active and status not in (STATUS_RUNNING, STATUS_STALE):
             continue
@@ -346,14 +372,36 @@ def list_run_summaries(
             continue
         if status_filter == STATUS_FILTER_STALE and status != STATUS_STALE:
             continue
-        summaries.append(summary)
-    summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
-    total = len(summaries)
-    return summaries[:limit], total, scope_total
-
-
-# Deferred to the bottom to break the run_registry<->run_status facade cycle:
-# run_registry re-exports this module's surface (a top-level import here would
-# fail when run_status is imported first). Every `run_registry.<name>` access
-# above is call-time, so binding the module after our own definitions suffices.
-from delegate_agent import run_registry  # noqa: E402
+        candidates.append((summary, state, projected_state is not None, entry))
+    candidates.sort(key=lambda item: item[0].get("activityAt", ""), reverse=True)
+    total = len(candidates)
+    selected: list[JsonObject] = []
+    for summary, candidate_state, projected, entry in candidates[:limit]:
+        full_state = (
+            record_io.load_run_state_or_none(registry_root, summary["runId"])
+            if projected
+            else candidate_state
+        )
+        manifest = record_io.load_run_manifest_or_none(registry_root, summary["runId"])
+        summary = build_run_summary(
+            registry_root,
+            summary["runId"],
+            entry,
+            include_logs=False,
+            state=full_state,
+            manifest=manifest,
+        )
+        stdout_bytes, stderr_bytes = effective_log_byte_sizes(
+            registry_root,
+            summary["runId"],
+            full_state,
+        )
+        summary["stdoutBytes"] = stdout_bytes
+        summary["stderrBytes"] = stderr_bytes
+        warnings = large_log_warnings(stdout_bytes, stderr_bytes)
+        for warning in summary["warnings"]:
+            if warning not in warnings:
+                warnings.append(warning)
+        summary["warnings"] = warnings
+        selected.append(summary)
+    return selected, total, scope_total

@@ -1,35 +1,33 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-01 (late night; doctor/promote CLI + Claude schema lift shipped and promoted)
+Updated: 2026-09-07 (harness-compat audit shipped, promoted, published)
 
-- **Engine at main db50f3d; installed runtime (~/.delegate/src) promoted to
-  db50f3d** with a real stamp (`delegate promote` at 23:34Z, `delegate doctor`
-  → `promotionMatchesRuntime: true`). Rollback trees: `~/.delegate/src.prev-pre-db50f3d`
-  (pre-tonight) and `~/.delegate/src.prev-1a74bec`.
-- **Tonight's lane (bead dlg-cn8, closed):** `delegate doctor` / `delegate
-  promote` wired into the CLI (docs/live-runtime.md "Promotion ritual",
-  docs/cli-reference.md "Runtime doctor and promotion"); Claude
-  `--output-schema` accepted in safe/work modes; workflow schema subset now
-  mirrors Claude's `--json-schema` preflight. Five Sol xhigh review rounds,
-  round 5 SHIP: docs/reviews/2026-09-01-doctor-promote-sol/. CHANGELOG
-  Unreleased carries the entries. Papercuts pc2_02c321c1 and pc2_105033d7
-  resolved.
-- **Earlier today:** Stack Upgrade lane (dlg-nek, #stack-upgrade) — typed
-  terminal receipts, model provenance, `--continuity-mode`, launch_cwd
-  (2721a7b, 9dbfe06, 9379aad, fa5c1d0); watchdog rewritten by deletion
-  (1a74bec; docs/evidence/runkillers/).
-- **writing-plans is fully live** at 779585f; dlg-4v1 closed fixed-upstream.
-- **Work ledger is beads** (`bd ready`). Open follow-ups: dlg-80z
-  (already_integrated retry guard, P3), dlg-1bg/dlg-oub/dlg-50p (polish),
-  dlg-87d (blocked external), dlg-3w5 (pointer repaired to bead + a1e2601).
-  Human decisions labeled `human`: dlg-507 (burst capacity), dlg-adl
-  (ops-knob freeze; docs/evidence/runkillers/2026-09-01-adl-config-freeze.md).
-  dlg-swn GitHub push stays GATED on Trey — main is ~313 commits ahead of the
-  GitHub mirror.
-- **Known gap:** doctor's launcher check covers `~/.delegate/bin/delegate.py`
-  only; the outer `~/.local/bin/delegate` profile shim is not hashed.
-- **Next:** dogfood `delegate doctor` in the promotion ritual (hq tooling
-  should call `promote` after every rsync); wp-zq7 in writing-plans
-  (restore-chain adversarial pass) is the top engine follow-up.
-- **Worktrees:** .worktrees/plan-burndown* kept (hold run records cited by
-  bead close-reasons) — prune only with Trey's ok.
+- `main` = `4c62010` (code at `a4c0b1d`), pushed to Forgejo. The 2026-09-07
+  harness-compatibility audit is merged: every confirmed defect across the ten
+  harnesses at current releases, structured-output eligibility unified, Cursor
+  and omp prompts on stdin, workspace mail on by default with global
+  `--no-mail`, skill-review preamble behind `tracking.skillReviewPreamble`
+  (default off). Story and decisions:
+  [REPORT](docs/audits/2026-09-07-harness-compat/REPORT.md); run log and
+  rulings: [handoff](docs/handoffs/2026-09-07-overnight-harness-compat.md).
+- Validation: 3,278 passed / 15 skipped at `a4c0b1d` via `scripts/gate.sh`;
+  three cross-model reviews triaged in `docs/audits/2026-09-07-harness-compat/REVIEW-*.md`;
+  live smoke rows in `SMOKE.md` there. CHANGELOG carries `0.31.0 - Unreleased`;
+  no version bump, tag, or release.
+- Installed runtime: `~/.delegate/releases/a4c0b1d23e95953f-573c837cc75f4d49`,
+  `promotionMatchesRuntime: true`, previous payload retained. Installed config
+  sets `mail.enabled: true` and `tracking.skillReviewPreamble.enabled: false`.
+  Discovery cache re-probed for codex/claude/cursor/grok/omp; pi's `estate-pi`
+  wrapper fails the version fingerprint (launches still work): `dlg-3em`.
+  Ritual: [live runtime](docs/live-runtime.md), now with step 7.
+- GitHub `main` (`8043bec`) is the *filtered* history — raw audit artifacts
+  removed from every commit after `8e2b0d2` — mirrored as Forgejo
+  `publish/main`. Forgejo `main` keeps them, so a direct GitHub push is
+  non-fast-forward by design; procedure in
+  [publishing checklist](docs/publishing-checklist.md). GitHub lags Forgejo by
+  the publish-doc and ledger commits only.
+- Open for Trey: Devin behavioral probe before widening the 3000.4.x gate;
+  cursor safe stays without a harness mode (both read-only modes block the
+  shell); eight dirty `delegate/*` worktrees under
+  `~/Code/delegate-worktrees/e06d04efc0d7/` and nine merged `lane/*` branches
+  await a deletion ruling. Open beads: `dlg-3em`, `dlg-cjz.4`, `dlg-o7i`, `dlg-y5c`.

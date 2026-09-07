@@ -8,7 +8,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
 from delegate_agent import private_io
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import resume_command as resume_api
+from delegate_agent import run_registry as registry_api
+from delegate_agent import runner as runner_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -18,23 +24,23 @@ class ResumeStaleTests(CommandTestBase):
         self.workspace_temp = tempfile.TemporaryDirectory(prefix="delegate-resume-stale-")
         self.addCleanup(self.workspace_temp.cleanup)
         self.workspace = Path(self.workspace_temp.name)
-        self.registry_root = self.delegate.run_registry.ensure_registry(
+        self.registry_root = registry_api.ensure_registry(
             self.workspace, workspace_kind="directory"
         )
         Path(self._config_env["DELEGATE_CONFIG"]).write_text("{}", encoding="utf-8")
 
     def seed_run(self, *, status: str, report: str, snapshot: dict) -> tuple[str, Path]:
-        run_id, alias = self.delegate.run_registry.register_run(
+        run_id, alias = registry_api.register_run(
             self.registry_root,
             harness="cursor",
             metadata={"engine": "cursor", "mode": "work", "cwd": str(self.workspace)},
         )
-        run_path = self.delegate.run_registry.run_directory(self.registry_root, run_id)
+        run_path = registry_api.run_directory(self.registry_root, run_id)
         started = "2026-07-31T18:10:00Z"
-        self.delegate.run_registry.write_json_atomic(
+        registry_api.write_json_atomic(
             run_path / "manifest.json",
             {
-                "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                "schema": registry_api.MANIFEST_SCHEMA,
                 "runId": run_id,
                 "alias": alias,
                 "harness": "cursor",
@@ -45,38 +51,38 @@ class ResumeStaleTests(CommandTestBase):
                 "startedAt": started,
             },
         )
-        self.delegate.run_registry.write_json_atomic(
+        registry_api.write_json_atomic(
             run_path / "state.json",
             {
-                "schema": self.delegate.run_registry.STATE_SCHEMA,
+                "schema": registry_api.STATE_SCHEMA,
                 "runId": run_id,
                 "alias": alias,
                 "status": status,
                 "lastActivityAt": started,
             },
         )
-        self.delegate.run_registry.write_json_atomic(
+        registry_api.write_json_atomic(
             run_path / "snapshot.json",
             {
-                "schema": self.delegate.run_registry.SNAPSHOT_SCHEMA,
+                "schema": registry_api.SNAPSHOT_SCHEMA,
                 "ok": True,
                 "runId": run_id,
                 "alias": alias,
                 **snapshot,
             },
         )
-        self.delegate.run_registry.write_private_text(run_path / "prompt.txt", "original task")
-        self.delegate.run_registry.write_private_text(run_path / "completion-report.md", report)
+        registry_api.write_private_text(run_path / "prompt.txt", "original task")
+        registry_api.write_private_text(run_path / "completion-report.md", report)
         return alias, run_path
 
     def build_plan(self, alias: str):
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--json", "--cwd", str(self.workspace), "resume", "--dry-run", alias, "continue"]
         )
-        config, _source = self.delegate.load_config(workspace=self.workspace)
-        return self.delegate.resume_command.build_resume_plan(
+        config, _source = request_api.load_config(workspace=self.workspace)
+        return resume_api.build_resume_plan(
             parsed,
-            self.delegate.ResolvedWorkspace(str(self.workspace), "directory"),
+            request_types.ResolvedWorkspace(str(self.workspace), "directory"),
             config,
             stderr=io.StringIO(),
         )
@@ -93,7 +99,7 @@ class ResumeStaleTests(CommandTestBase):
         )
 
         plan = self.build_plan(alias)
-        continuation = plan.parsed.launch.prompt_parts[0]
+        continuation = plan.parsed.payload.prompt_parts[0]
 
         self.assertIn("REPORT IS THE TERMINAL RECORD", continuation)
         self.assertNotIn("SNAPSHOT MUST NOT REPLACE REPORT", continuation)
@@ -113,7 +119,7 @@ class ResumeStaleTests(CommandTestBase):
             return real_replace(*args, **kwargs)
 
         with mock.patch.object(private_io.os, "replace", side_effect=observe_replace):
-            self.delegate.delegate_runner.write_completion_report(run_path, "NEW COMPLETE REPORT")
+            runner_api.write_completion_report(run_path, "NEW COMPLETE REPORT")
 
         self.assertEqual(observed, ["OLD COMPLETE REPORT"])
         self.assertEqual(
@@ -135,7 +141,7 @@ class ResumeStaleTests(CommandTestBase):
         )
         state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
         state["pid"] = 999999
-        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
+        registry_api.write_json_atomic(run_path / "state.json", state)
         opened = threading.Event()
         release = threading.Event()
 
@@ -155,7 +161,7 @@ class ResumeStaleTests(CommandTestBase):
         finally:
             release.set()
             finalizer.join(timeout=5)
-        continuation = plan.parsed.launch.prompt_parts[0]
+        continuation = plan.parsed.payload.prompt_parts[0]
 
         self.assertNotIn("PARTIAL REPORT FROM BLOCKED FINALIZER", continuation)
         self.assertIn("SNAPSHOT ASSISTANT TEXT", continuation)

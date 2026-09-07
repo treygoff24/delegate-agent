@@ -7,6 +7,18 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import argv_builders as argv_builders_api
+from delegate_agent import config as config_api
+from delegate_agent import git_utils as git_api
+from delegate_agent import isolation as isolation_api
+from delegate_agent import profiles as profiles_api
+from delegate_agent import prompt_transport as transport_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import run_registry as registry_api
+from delegate_agent import runner as runner_api
+from delegate_agent import worktree_execution as worktree_execution_api
+from delegate_agent import worktree_mgmt as worktree_api
 from tests.execution_test_base import ExecutionTestBase, safe_temp_dirs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,27 +31,75 @@ from delegate_agent import worktree_summary  # noqa: E402
 
 
 class ExecutionWorktreeRunTests(ExecutionTestBase):
+    def test_persistent_worktree_preserves_launch_policies(self):
+        for continuity_mode, grace_seconds in (
+            (None, None),
+            ("fungible", 9.5),
+            ("pinned", 7.25),
+            ("panel", 0.0),
+        ):
+            with (
+                self.subTest(continuity_mode=continuity_mode, grace_seconds=grace_seconds),
+                tempfile.TemporaryDirectory() as fake_home,
+                mock.patch.dict(os.environ, {"HOME": fake_home}),
+            ):
+                repo, _git_cd = self._make_git_repo_with_commit()
+                fake_bin = self.make_cursor_safe_fake_agent()
+                request = self._make_persistent_worktree_request(
+                    "cursor", "work", repo.name, config_api.embedded_default_config()
+                )
+                request.argv[0] = str(fake_bin / "agent")
+                if continuity_mode is not None:
+                    request.continuity_mode = continuity_mode
+                    request.process_group_termination_grace_sec = grace_seconds
+                else:
+                    self.assertEqual(request.continuity_mode, "fungible")
+
+                runner = worktree_execution_api.delegate_runner
+                with mock.patch.object(runner, "execute_tracked", return_value=(0, None)) as launch:
+                    code, _ = self.delegate.execute_request(
+                        request,
+                        json_mode=False,
+                        config=config_api.embedded_default_config(),
+                        pass_through=False,
+                        completion_report_mode="none",
+                        source_workspace=request_api.resolve_workspace(repo.name),
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+
+                self.assertEqual(code, 0)
+                launch.assert_called_once()
+                ctx = launch.call_args.args[2]
+                self.assertEqual(ctx.continuity_mode, request.continuity_mode)
+                self.assertEqual(
+                    ctx.process_group_termination_grace_sec,
+                    request.process_group_termination_grace_sec,
+                )
+                manifest = registry_api.load_run_manifest(ctx.registry_root, ctx.run_id)
+                self.assertEqual(manifest["continuityMode"], request.continuity_mode)
+
     def test_persistent_worktree_launch_checks_pool_guardrail(self):
         execution = mock.Mock(config={"worktrees": {}}, stderr=io.StringIO())
         preflight = mock.sentinel.preflight
         with (
             mock.patch.object(
-                self.delegate.worktree_execution,
+                worktree_execution_api,
                 "_validate_persistent_worktree_request",
                 return_value=preflight,
             ),
             mock.patch.object(
-                self.delegate.worktree_execution,
+                worktree_execution_api,
                 "_warn_if_worktree_pool_large",
             ) as warn,
             mock.patch.object(
-                self.delegate.worktree_execution,
+                worktree_execution_api,
                 "_register_persistent_worktree_run",
                 side_effect=RuntimeError("stop after guardrail"),
             ),
             self.assertRaisesRegex(RuntimeError, "stop after guardrail"),
         ):
-            self.delegate.worktree_execution.execute_persistent_worktree(execution)
+            worktree_execution_api.execute_persistent_worktree(execution)
 
         warn.assert_called_once_with(execution.config, execution.stderr)
 
@@ -48,7 +108,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             pool = Path(fake_home) / "pool"
             worktree = pool / "abc123def456" / "old-worktree"
             worktree.mkdir(parents=True)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["worktrees"] = {
                 **config["worktrees"],
                 "dataHome": str(pool),
@@ -56,7 +116,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             }
             stderr = io.StringIO()
 
-            self.delegate.worktree_execution._warn_if_worktree_pool_large(config, stderr)
+            worktree_execution_api._warn_if_worktree_pool_large(config, stderr)
 
             self.assertEqual(stderr.getvalue(), "")
 
@@ -65,7 +125,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             pool = Path(fake_home) / "pool"
             for name in ("old-worktree", "new-worktree"):
                 (pool / "abc123def456" / name).mkdir(parents=True)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["worktrees"] = {
                 **config["worktrees"],
                 "dataHome": str(pool),
@@ -73,7 +133,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             }
             stderr = io.StringIO()
 
-            self.delegate.worktree_execution._warn_if_worktree_pool_large(config, stderr)
+            worktree_execution_api._warn_if_worktree_pool_large(config, stderr)
 
             warning = stderr.getvalue()
             self.assertIn("WARNING", warning)
@@ -91,15 +151,13 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             for parent in ("abc123def456", "some-other-directory"):
                 (pool / parent / "cursor-1").mkdir(parents=True)
 
-            self.assertEqual(self.delegate.worktree_execution._worktree_pool_count(pool), 1)
+            self.assertEqual(worktree_execution_api._worktree_pool_count(pool), 1)
 
     def test_worktree_pool_guardrail_survives_an_unreadable_pool_root(self):
         """An advisory count must never block a launch."""
         with tempfile.TemporaryDirectory() as fake_home:
             self.assertEqual(
-                self.delegate.worktree_execution._worktree_pool_count(
-                    Path(fake_home) / "never-created"
-                ),
+                worktree_execution_api._worktree_pool_count(Path(fake_home) / "never-created"),
                 0,
             )
 
@@ -113,15 +171,15 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
             # Replace argv with fake binary
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -149,7 +207,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _payload = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -183,14 +241,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -218,7 +276,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -248,14 +306,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -287,7 +345,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -310,10 +368,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_fake_bin()
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["droid"] = dict(config["droid"])
             config["droid"]["models"] = {"qwen": "real-model-id"}
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "droid",
                 "work",
@@ -322,7 +380,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 model_alias="qwen",
             )
             # Replace argv with fake binary (pointed at source cwd, will be rewritten)
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -386,15 +444,15 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             log_file = str(Path(fake_home) / "child-argv.log")
             fake_bin = self._make_logging_fake_bin("grok", log_file)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "grok",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
             secret_prompt = "TOP SECRET GROK PROMPT TEXT"
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -414,7 +472,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -431,12 +489,12 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             runs_dir = Path(repo.name) / ".delegate" / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(run_dirs)
-            manifest = self.delegate.json.loads((run_dirs[0] / "manifest.json").read_text())
+            manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
             manifest_argv = manifest["argv"]
             manifest_cwd = manifest_argv[manifest_argv.index("--cwd") + 1]
             self.assertIn("/worktrees/", manifest_cwd)
             self.assertNotEqual(manifest_cwd, repo.name)
-            self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, manifest_argv)
+            self.assertIn(transport_api.PROMPT_FILE_DISPLAY, manifest_argv)
             self.assertNotIn(secret_prompt, manifest_argv)
 
     def test_persistent_worktree_child_receives_registered_fresh_mail_identity(self):
@@ -456,7 +514,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             fake.chmod(0o755)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
             config["profiles"] = {
                 **config["profiles"],
@@ -471,7 +529,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     }
                 },
             }
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
 
             code, _payload = self.delegate.execute_request(
@@ -506,9 +564,9 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             fake.chmod(0o755)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
 
             with mock.patch.dict(
@@ -529,7 +587,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
 
             self.assertEqual(code, 0)
             registry_root = Path(repo.name) / ".delegate"
-            index = self.delegate.run_registry.load_index(registry_root)
+            index = registry_api.load_index(registry_root)
             run_id = next(iter(index["runs"]))
             self.assertEqual(index["runs"][run_id]["initiatorRoot"], "claude:session-1")
             self.assertEqual(observed_path.read_text(encoding="utf-8").strip(), "claude:session-1")
@@ -544,18 +602,18 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            config = dict(self.delegate.DEFAULT_CONFIG)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            config = dict(config_api.embedded_default_config())
+            workspace = request_api.resolve_workspace(repo.name)
             git_root, git_common_dir, head_oid, head_ref, branch_name = (
-                self.delegate.capture_git_metadata(repo.name)
+                git_api.capture_git_metadata(repo.name)
             )
-            effective = self.delegate.delegate_config.resolve_isolation(
+            effective = config_api.resolve_isolation(
                 cli_value="worktree",
                 loaded_config=config,
                 engine="cursor",
                 mode="safe",
             )
-            isolation_context = self.delegate.build_isolation_context(
+            isolation_context = isolation_api.build_isolation_context(
                 source_workspace=workspace.path,
                 resolved_isolation=effective,
                 engine="cursor",
@@ -568,12 +626,12 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 source_head_ref=head_ref,
                 source_branch=branch_name,
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 "cursor",
                 "safe",
                 repo.name,
-                self.delegate.prefix_cursor_safe_prompt(
-                    self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+                argv_builders_api.prefix_cursor_safe_prompt(
+                    runner_api.SKILL_REVIEW_PREFIX + "hello"
                 ),
                 [
                     str(fake_bin / "agent"),
@@ -585,8 +643,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     "composer-2.5",
                     "--output-format",
                     "text",
-                    self.delegate.prefix_cursor_safe_prompt(
-                        self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+                    argv_builders_api.prefix_cursor_safe_prompt(
+                        runner_api.SKILL_REVIEW_PREFIX + "hello"
                     ),
                 ],
                 "composer-2.5",
@@ -622,14 +680,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -657,7 +715,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -669,7 +727,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(len(run_dirs) > 0, "No run directory found")
-            state = self.delegate.json.loads((run_dirs[0] / "state.json").read_text())
+            state = json.loads((run_dirs[0] / "state.json").read_text())
             self.assertEqual(state.get("worktreeStatus"), "present")
 
     # -- Manifest includes creationContext ------------------------------------
@@ -682,14 +740,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -717,7 +775,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -729,7 +787,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(len(run_dirs) > 0)
-            manifest = self.delegate.json.loads((run_dirs[0] / "manifest.json").read_text())
+            manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
             self.assertIn("creationContext", manifest)
             cc = manifest["creationContext"]
             self.assertIn("sourceHeadOid", cc)
@@ -741,7 +799,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
     def test_persistent_worktree_context_carries_codex_failover_identities(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, git_common_dir = self._make_git_repo_with_commit()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             worktree_path = Path(fake_home) / "worktree"
             worktree_path.mkdir()
             attempts = Path(fake_home) / "attempts.txt"
@@ -754,7 +812,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 encoding="utf-8",
             )
             script.chmod(0o755)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             request = self._make_persistent_worktree_request("codex", "work", repo.name, config)
             request.argv = [str(script), "exec", "--json", "-"]
             request.env_overrides = {"CODEX_HOME": "/primary"}
@@ -762,7 +820,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             request.fallback_auth_profile = "fallback"
             request.codex_failover_identity = "auth=/primary/auth.json\0profile="
             request.codex_fallback_failover_identity = "auth=/fallback/auth.json\0profile="
-            request.profile_resolution = self.delegate.profiles.ProfileResolution(
+            request.profile_resolution = profiles_api.ProfileResolution(
                 name="primary",
                 source="default",
                 env={"CODEX_HOME": "/primary"},
@@ -771,10 +829,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 codex_failover_identity=request.codex_failover_identity,
                 codex_fallback_failover_identity=request.codex_fallback_failover_identity,
             )
-            registry_root = self.delegate.run_registry.ensure_registry(
-                Path(repo.name), workspace_kind="git"
-            )
-            preflight = self.delegate.worktree_execution.PersistentWorktreePreflight(
+            registry_root = registry_api.ensure_registry(Path(repo.name), workspace_kind="git")
+            preflight = worktree_execution_api.PersistentWorktreePreflight(
                 iso_ctx=request.isolation_context,
                 source_git_root=repo.name,
                 base_oid="base",
@@ -788,9 +844,9 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 dirty_example_paths=(),
                 dirty_snapshot=None,
             )
-            run_id, alias = self.delegate.run_registry.register_run(registry_root, harness="codex")
-            ctx = self.delegate.worktree_execution._build_persistent_worktree_run_context(
-                self.delegate.worktree_execution.PersistentWorktreeExecution(
+            run_id, alias = registry_api.register_run(registry_root, harness="codex")
+            ctx = worktree_execution_api._build_persistent_worktree_run_context(
+                worktree_execution_api.PersistentWorktreeExecution(
                     request=request,
                     json_mode=True,
                     config=config,
@@ -817,10 +873,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(ctx.fallback_env_overrides["CODEX_HOME"], "/fallback")
 
             with mock.patch.dict(os.environ, {"HOME": fake_home}, clear=False):
-                self.delegate.delegate_runner.failover_state.write_block(
+                runner_api.failover_state.write_block(
                     "codex", request.codex_failover_identity, 4_102_444_800
                 )
-                code, _payload = self.delegate.delegate_runner.execute_tracked(
+                code, _payload = runner_api.execute_tracked(
                     request.argv,
                     str(worktree_path),
                     ctx,
@@ -870,14 +926,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             log_file = str(Path(fake_home) / "child-argv.log")
             fake_bin = self._make_logging_fake_bin("agent", log_file)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -905,7 +961,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -923,14 +979,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -958,7 +1014,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -976,8 +1032,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(run_dirs)
-            state = self.delegate.json.loads((run_dirs[0] / "state.json").read_text())
-            snapshot = self.delegate.json.loads((run_dirs[0] / "snapshot.json").read_text())
+            state = json.loads((run_dirs[0] / "state.json").read_text())
+            snapshot = registry_api.load_run_snapshot(run_dirs[0].parent.parent, run_dirs[0].name)
             self.assertEqual(state["workSummary"]["changedFilesCount"], 1)
             self.assertEqual(snapshot["workSummary"]["changedFilesCount"], 1)
 
@@ -1064,14 +1120,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self._make_commit_fake_bin()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1100,7 +1156,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1124,14 +1180,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1175,7 +1231,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1200,14 +1256,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self._make_commit_fake_bin()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1235,7 +1291,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, payload = self.delegate.execute_request(
                     request,
                     json_mode=True,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1260,14 +1316,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             log_file = str(Path(fake_home) / "child-argv.log")
             fake_bin = self._make_logging_fake_bin("agent", log_file)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1296,7 +1352,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _payload = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1316,14 +1372,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             log_file = str(Path(fake_home) / "child-argv.log")
             fake_bin = self._make_logging_fake_bin("codex", log_file)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "codex",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1348,7 +1404,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _ = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1368,10 +1424,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             log_file = str(Path(fake_home) / "child-argv.log")
             fake_bin = self._make_logging_fake_bin("droid", log_file)
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["droid"] = dict(config["droid"])
             config["droid"]["models"] = {"qwen": "real-model-id"}
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "droid",
                 "work",
@@ -1379,7 +1435,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 config,
                 model_alias="qwen",
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1416,10 +1472,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 )
             self.assertEqual(code, 0)
             registry_root = Path(repo.name) / ".delegate"
-            index = self.delegate.run_registry.load_index(registry_root)
+            index = registry_api.load_index(registry_root)
             run_id = next(iter(index["runs"]))
             index_entry = index["runs"][run_id]
-            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            manifest = registry_api.load_run_manifest(registry_root, run_id)
             self.assertEqual(index_entry["modelAlias"], "qwen")
             self.assertEqual(index_entry["modelResolved"], "real-model-id")
             self.assertEqual(manifest["modelAlias"], "qwen")
@@ -1447,10 +1503,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
             fake_bin = self.make_fake_bin()
-            config = dict(self.delegate.DEFAULT_CONFIG)
+            config = dict(config_api.embedded_default_config())
             config["droid"] = dict(config["droid"])
             config["droid"]["models"] = {"qwen": "custom:OpenRouter-:-Qwen-3.7-Max-0"}
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "droid",
                 "work",
@@ -1458,7 +1514,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 config,
                 model_alias="qwen",
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1538,14 +1594,14 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertNotEqual(sym_ref.returncode, 0, "HEAD should be detached")
 
             fake_bin = self.make_cursor_safe_fake_agent()
-            workspace = self.delegate.resolve_workspace(repo.name)
+            workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
                 "work",
                 repo.name,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 request.engine,
                 request.mode,
                 request.workspace,
@@ -1573,7 +1629,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 code, _payload = self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="none",
                     source_workspace=workspace,
@@ -1587,7 +1643,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
             self.assertTrue(len(run_dirs) > 0, "No run directory found")
-            state = self.delegate.json.loads((run_dirs[0] / "state.json").read_text())
+            state = json.loads((run_dirs[0] / "state.json").read_text())
             cc = state.get("creationContext", {})
             self.assertIsNone(
                 cc.get("sourceHeadRef"),
@@ -1597,7 +1653,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             # Assert worktree_mgmt.show_worktree includes the warning
             alias = state.get("alias")
             self.assertIsNotNone(alias, "state must record alias")
-            show_payload = self.delegate.worktree_mgmt.show_worktree(
+            show_payload = worktree_api.show_worktree(
                 registry_root,
                 handle=alias,
             )
@@ -1619,18 +1675,18 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             repo, _git_cd = self._make_git_repo_with_commit()
             # Fake binary that exits non-zero (child failure).
             fake_bin = self.make_cursor_safe_fake_agent()
-            config = dict(self.delegate.DEFAULT_CONFIG)
-            workspace = self.delegate.resolve_workspace(repo.name)
+            config = dict(config_api.embedded_default_config())
+            workspace = request_api.resolve_workspace(repo.name)
             git_root, git_common_dir, head_oid, head_ref, branch_name = (
-                self.delegate.capture_git_metadata(repo.name)
+                git_api.capture_git_metadata(repo.name)
             )
-            effective = self.delegate.delegate_config.resolve_isolation(
+            effective = config_api.resolve_isolation(
                 cli_value="worktree",
                 loaded_config=config,
                 engine="cursor",
                 mode="safe",
             )
-            isolation_context = self.delegate.build_isolation_context(
+            isolation_context = isolation_api.build_isolation_context(
                 source_workspace=workspace.path,
                 resolved_isolation=effective,
                 engine="cursor",
@@ -1643,12 +1699,12 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 source_head_ref=head_ref,
                 source_branch=branch_name,
             )
-            request = self.delegate.Request(
+            request = request_types.Request(
                 "cursor",
                 "safe",
                 repo.name,
-                self.delegate.prefix_cursor_safe_prompt(
-                    self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+                argv_builders_api.prefix_cursor_safe_prompt(
+                    runner_api.SKILL_REVIEW_PREFIX + "hello"
                 ),
                 [
                     str(fake_bin / "agent"),
@@ -1660,8 +1716,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     "composer-2.5",
                     "--output-format",
                     "text",
-                    self.delegate.prefix_cursor_safe_prompt(
-                        self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+                    argv_builders_api.prefix_cursor_safe_prompt(
+                        runner_api.SKILL_REVIEW_PREFIX + "hello"
                     ),
                 ],
                 "composer-2.5",

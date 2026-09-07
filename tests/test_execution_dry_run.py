@@ -1,21 +1,24 @@
 import contextlib
 import io
-import json
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import request_build as request_api
 from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionDryRunTests(ExecutionTestBase):
     def test_call_dry_run_reports_temporary_call_cwd_not_source_workspace(self):
-        parsed = self.delegate.parse_cli(["--json", "dry-run", "codex", "call", "summarize"])
-        request = self.delegate.request_from_parsed(
+        parsed = parser_api.parse_cli(["--json", "dry-run", "codex", "call", "summarize"])
+        request = request_api.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             io.StringIO(""),
         )
         payload = self.delegate.dry_run_payload(request)
@@ -32,7 +35,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review only",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -41,11 +44,11 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertIn("temporary detached git worktree", payload["isolation"])
 
     def test_dry_run_reports_reasoning_fields(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["codex"] = dict(config["codex"])
         config["codex"]["defaultModel"] = "gpt-5.5"
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "--cwd",
                     tmp,
@@ -58,7 +61,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     "review",
                 ]
             )
-            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
             payload = self.delegate.dry_run_payload(request)
         self.assertEqual(payload["requestedReasoningEffort"], "high")
         self.assertEqual(payload["resolvedReasoningEffort"], "high")
@@ -74,7 +77,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
             fast=False,
         )
@@ -84,7 +87,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         self.assertIs(self.delegate.dry_run_payload(explicit)["requestedFast"], False)
@@ -92,12 +95,12 @@ class ExecutionDryRunTests(ExecutionTestBase):
 
     def test_dry_run_reports_progress_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "--json", "dry-run", "codex", "safe", "--progress", "review"]
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 io.StringIO(""),
             )
             payload = self.delegate.dry_run_payload(request)
@@ -119,7 +122,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             schema = Path(launch_dir) / "schema.json"
             schema.write_text("{}", encoding="utf-8")
             with contextlib.chdir(launch_dir):
-                parsed = self.delegate.parse_cli(
+                parsed = parser_api.parse_cli(
                     [
                         "--cwd",
                         str(nested),
@@ -132,9 +135,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
                         "review",
                     ]
                 )
-                request = self.delegate.request_from_parsed(
+                request = request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     io.StringIO(""),
                 )
             payload = self.delegate.dry_run_payload(request)
@@ -174,7 +177,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "--cwd",
                     repo_dir,
@@ -188,9 +191,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     "fix",
                 ]
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 io.StringIO(""),
             )
             payload = self.delegate.dry_run_payload(request)
@@ -198,13 +201,13 @@ class ExecutionDryRunTests(ExecutionTestBase):
 
     def test_forbid_commit_requires_persistent_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 ["--cwd", tmp, "--json", "dry-run", "cursor", "work", "--forbid-commit", "fix"]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     io.StringIO(""),
                 )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
@@ -218,8 +221,8 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.parse_cli(
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                parser_api.parse_cli(
                     [
                         "--cwd",
                         repo_dir,
@@ -239,7 +242,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
 
     def test_codex_reasoning_without_model_uses_harness_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "--cwd",
                     tmp,
@@ -252,9 +255,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     "review",
                 ]
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 io.StringIO(""),
             )
         payload = self.delegate.dry_run_payload(request)
@@ -264,7 +267,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
 
     def test_forbid_commit_rejects_safe_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parsed = self.delegate.parse_cli(
+            parsed = parser_api.parse_cli(
                 [
                     "--cwd",
                     tmp,
@@ -278,10 +281,10 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     "review",
                 ]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                request_api.request_from_parsed(
                     parsed,
-                    self.delegate.DEFAULT_CONFIG,
+                    config_api.embedded_default_config(),
                     io.StringIO(""),
                 )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
@@ -293,7 +296,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -312,7 +315,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "hello",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -329,7 +332,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -345,7 +348,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             None,
             "/repo",
             "review",
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
@@ -385,7 +388,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            _config, _ = self.delegate.load_config()
+            _config, _ = request_api.load_config()
             stdout_buf = io.StringIO()
             code = self.delegate.main(
                 [
@@ -401,7 +404,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 ],
                 stdout=stdout_buf,
             )
-            self.assertEqual(code, self.delegate.EXIT_OK)
+            self.assertEqual(code, errors_api.EXIT_OK)
             worktree_dir = Path(fake_home) / ".delegate" / "worktrees"
             self.assertFalse(worktree_dir.exists())
             branch_result = subprocess.run(
@@ -460,7 +463,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 ],
                 stdout=stdout_buf,
             )
-            self.assertEqual(code, self.delegate.EXIT_OK)
+            self.assertEqual(code, errors_api.EXIT_OK)
             worktree_dir = Path(fake_home) / ".delegate" / "worktrees"
             self.assertFalse(worktree_dir.exists())
             branch_result = subprocess.run(
@@ -474,11 +477,11 @@ class ExecutionDryRunTests(ExecutionTestBase):
 
     def test_dry_run_isolated_workspace_contract_by_harness_mode(self):
         """Work mode stays in place; all safe harnesses with auto isolation are isolated."""
-        droid_config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        droid_config = config_api.embedded_default_config()
         droid_config["droid"]["models"] = {"test-model": "real-model-id"}
         cases = (
-            ("cursor", "work", None, self.delegate.DEFAULT_CONFIG, False),
-            ("cursor", "safe", None, self.delegate.DEFAULT_CONFIG, True),
+            ("cursor", "work", None, config_api.embedded_default_config(), False),
+            ("cursor", "safe", None, config_api.embedded_default_config(), True),
             ("droid", "safe", "test-model", droid_config, True),
         )
 
@@ -509,9 +512,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
             isolation="worktree",
         )
-        request = self.delegate.request_from_parsed(
+        request = request_api.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             io.StringIO(),
         )
         payload = self.delegate.dry_run_payload(request)
@@ -533,9 +536,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
             isolation="worktree",
         )
-        request = self.delegate.request_from_parsed(
+        request = request_api.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             io.StringIO(),
         )
         payload = self.delegate.dry_run_payload(request)
@@ -565,9 +568,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
             prompt_parts=["review"],
             dry_run=True,
         )
-        request = self.delegate.request_from_parsed(
+        request = request_api.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             io.StringIO(),
         )
 
@@ -604,9 +607,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
             isolation="worktree",
         )
-        request = self.delegate.request_from_parsed(
+        request = request_api.request_from_parsed(
             parsed,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
             io.StringIO(),
         )
         payload = self.delegate.dry_run_payload(request)
@@ -630,11 +633,11 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
             isolation="worktree",
         )
-        config = dict(self.delegate.DEFAULT_CONFIG)
+        config = dict(config_api.embedded_default_config())
         config["droid"] = dict(config["droid"])
         config["droid"]["models"] = dict(config["droid"]["models"])
         config["droid"]["models"]["qwen"] = "real-model-id"
-        request = self.delegate.request_from_parsed(
+        request = request_api.request_from_parsed(
             parsed,
             config,
             io.StringIO(),
@@ -668,7 +671,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 ],
                 stdout=stdout_buf,
             )
-            self.assertEqual(code, self.delegate.EXIT_OK)
+            self.assertEqual(code, errors_api.EXIT_OK)
             output = stdout_buf.getvalue()
             # The argv line should show the planned path in --workspace, not the source
             self.assertIn("--workspace", output)
@@ -689,9 +692,9 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 dry_run=True,
                 isolation="worktree",
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 parsed,
-                self.delegate.DEFAULT_CONFIG,
+                config_api.embedded_default_config(),
                 io.StringIO(),
             )
             payload = self.delegate.dry_run_payload(request)
@@ -702,10 +705,10 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertTrue(payload["isolatedWorkspace"])
 
     def test_dry_run_unsupported_reasoning_effort_includes_discovery_hint(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["codex"] = dict(config["codex"])
         config["codex"]["defaultModel"] = "gpt-5.5"
-        with self.assertRaises(self.delegate.DelegateError) as caught:
+        with self.assertRaises(errors_api.DelegateError) as caught:
             self.build_git_request(
                 "codex",
                 "safe",
@@ -722,8 +725,8 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertIn("delegate --json capabilities", caught.exception.message)
 
     def test_dry_run_kimi_reasoning_effort_reports_unsupported_alias_summary(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        with self.assertRaises(self.delegate.DelegateError) as caught:
+        config = config_api.embedded_default_config()
+        with self.assertRaises(errors_api.DelegateError) as caught:
             self.build_git_request(
                 "kimi",
                 "safe",

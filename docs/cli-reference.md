@@ -2,6 +2,16 @@
 
 Use `delegate --help` for the exact command list from the installed version. Global options may appear anywhere before `--`. Tokens after `--` remain literal child-prompt text.
 
+Start agent discovery with `delegate --json describe --overview`, then use
+`delegate --json help <command>` for the arguments and options you need.
+
+Errors rendered by the shared CLI error handler retain `ok`, `error`, `message`,
+and `exitCode`. JSON adds `schema: "delegate.error.v1"`, `command`, `helpTopic`,
+and `nextActions`. Command/help topics are null when no command was resolved;
+the fallback action is `delegate help`. Existing diagnostics and recovery actions
+remain available. Typo suggestions are advisory: Delegate never executes a
+suggested correction.
+
 ## Global options
 
 ```text
@@ -14,6 +24,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, models, capabilities, and setup.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 --notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` after a tracked launch or resume; dry-run shows the plan. Rejected by call and --pass-through.
+--no-mail                     Skip workspace-mail setup, prompt suffix, and sandbox grants for this launch. Explicit `mail` commands and --notify still work.
 ```
 
 The notification contains the run ID, terminal status, engine/model, elapsed
@@ -24,9 +35,15 @@ persistent-worktree setup failures.
 
 ## Workspace mail
 
-Mail is a parent-owned pull mailbox under `.delegate/mail`; mail commands are
-available even when `mail.enabled` is false. Mail's `--group` is command-local
-and must not be confused with launch `--group`:
+Mail is a parent-owned pull mailbox under `.delegate/mail`, enabled by default
+for work launches. Global `--no-mail` or `mail.enabled: false` disables the
+launch-time prompt suffix and sandbox grants, not explicit mail commands or
+`--notify`. Mail does not use `post`. Unavailable mail storage disables mail
+setup for that launch with one stderr warning and a `warnings` entry; an
+unreachable isolated mailbox produces only a deduplicated manifest warning.
+Dry-run reports `mailPromptSuffix` when injected and includes any planned mail
+grant in `argv`, without creating mail storage or exposing the user's prompt.
+Mail's `--group` is command-local and must not be confused with launch `--group`:
 
 ```text
 delegate mail send (--to ALIAS|coordinator | --group NAME) [--reply-to ID] [--subject S] (BODY|--file FILE|-)
@@ -95,7 +112,7 @@ with a warning), and OpenCode agent-config merge. OpenCode preserves existing
 root keys, agent keys, and prompts, appending the persona after an existing
 agent prompt. Safe mode always prepends. Claude native-file keeps the persona
 body out of argv, dry-run JSON, and the manifest; prepend engines using argv
-transport (Cursor, Kimi, and Oh My Pi) expose it in the live process argv.
+transport (Kimi alone) expose it in the live process argv.
 Tracked runs retain it only in the private
 `persona.txt` artifact.
 
@@ -108,9 +125,9 @@ delegate cursor safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--pr
 delegate cursor work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate droid [MODEL_ALIAS] safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid [MODEL_ALIAS] work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
@@ -142,13 +159,13 @@ delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] 
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
-Delegate resolves the prompt, Codex, Claude, OpenCode, and Pi prompts are passed to the child runtime over
-stdin. Oh My Pi receives a positional prompt because 17.0.4 did not consume piped stdin in the verified
-non-interactive invocation. Droid and Grok prompts are written to a private temporary prompt file and passed
-with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
-positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
-so those Harnesses also use argv transport; Delegate redacts Cursor, Oh My Pi, and Kimi
-prompt argv in dry-run output and run manifests.
+Delegate resolves the prompt, Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi prompts are passed to
+the child runtime over stdin; Cursor Agent 2026.09.02-c22c1a3 and Oh My Pi 18.1.13 both consume a piped
+prompt in the verified non-interactive invocation. Droid and Grok prompts are written to a private temporary
+prompt file and passed with Droid's documented `--file` option or Grok's `--prompt-file`. Kimi Code prompt
+mode still takes `--prompt`, so Kimi alone uses argv transport; Delegate redacts Kimi prompt argv in dry-run
+output and run manifests, which keeps the prompt out of Delegate's own records but not out of the child's
+`/proc/<pid>/cmdline`.
 `--prompt-file /dev/stdin` (also `-`, `/dev/fd/0`, and equivalent non-regular
 stdin descriptors) is treated as the stdin source itself, so a pipe is read
 exactly once rather than rejected as a second prompt source.
@@ -174,9 +191,13 @@ commands own them: `--group` on `runs`, `ps`, `wait`, `mail send`, and
 `--model <alias-or-model>` is optional on every engine and is parsed only before
 prompt text begins. The value is resolved against `<engine>.models` when it
 matches an alias key; otherwise it is passed through verbatim as a raw model ID
-(the harness validates unknown IDs). Droid also accepts an optional positional
-`MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
-both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
+(the harness validates unknown IDs). Droid uses this same grammar; its former
+positional alias is rejected. Without `--model`, Droid uses `droid.defaultModel`
+when set. A Droid custom model is now named the way Factory documents it,
+`custom:<Display-Name>-<index>`, where the display name has its spaces replaced
+by hyphens and the index is the entry's position in Factory's settings. The
+older id-based selectors no longer resolve, so re-read `delegate models droid`
+and update any `droid.models` alias that pinned one. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
@@ -212,6 +233,14 @@ config. When neither flag is set, config `progress.enabled` applies (default
 `false`). Heartbeat labels are credential-scrubbed before printing. Timing
 resolves as env override > config > built-in default (30s initial / 60s
 interval). It is incompatible with `--pass-through`.
+
+Delegate also watches a tracked run's stream for a stall. Kimi and Devin are
+exempt from the engine-default detector, but only when the run carries a finite
+deadline: their stdout is silent by design while a tool executes, so a
+default-threshold stall on those two is normally a false positive, and a run with
+`--timeout` already has something that will end it. A standalone tracked run with
+no deadline keeps the detector, because nothing else would stop it. An explicit
+operator `stallMinutes` is always honored, on every engine, deadline or not.
 
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
 worktree isolation; when isolation is omitted, it implies `--isolation worktree`
@@ -305,6 +334,7 @@ delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--mode
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
 - Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, user settings, output styles, or other non-MCP customization surfaces are disabled. Use `claude.bare: true` for a more minimal/reproducible Claude invocation, and keep safe-mode work review-only.
 - Prompt text is delivered on stdin to `claude -p`; dry-run argv and tracked run manifests do not contain the prompt.
+- Safe mode and `claude call --read-only` also emit `--permission-prompts none`, but only when discovery has observed the flag in the installed Claude's `--help`. Anything that would otherwise prompt is then denied outright instead of hanging. An installed Claude that predates the flag runs without it and without a warning.
 - JSON-streaming runs use `--output-format stream-json --input-format text`; pass-through runs use `--output-format text`.
 - Work mode uses `claude.workPermissionMode` from config, unless Delegate policy explicitly enables `policy.harness.claude.work.bypassApprovalsAndSandbox`, which maps to Claude `--permission-mode bypassPermissions`.
 - Model selection uses `--model` (alias from `claude.models` or a raw model ID), the run-input JSON `model`, or `claude.defaultModel`.
@@ -332,7 +362,7 @@ delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or
 - Prompt text is delivered via Grok `--prompt-file` from a Delegate temp file; dry-run argv and tracked run manifests do not contain the prompt.
 - Work mode uses `grok.workPermissionMode` and `grok.workSandbox` from config, unless Delegate policy explicitly enables `policy.harness.grok.work.bypassApprovalsAndSandbox`, which maps to Grok `--permission-mode bypassPermissions`.
 - Model selection uses `--model` (alias from `grok.models` or a raw model ID), the run-input JSON `model`, or `grok.defaultModel`.
-- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
+- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, or `xhigh`. Grok has no `max`.
 - `--output-schema` is unsupported for Grok in v1 because Grok `--json-schema` forces final JSON output and weakens live snapshot parity.
 
 Examples:
@@ -362,6 +392,11 @@ delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-o
   `DELEGATE_DEVIN_BEHAVIOR_TEST` smoke against the operator's Devin version. Work and
   default call use `--permission-mode dangerous` because non-interactive Devin
   rejects unapproved edit/exec tools.
+- The read-only argv is documented-compatible with Devin 3000.6.14, but its
+  read-only behavior on that release is unproven: Devin is not installed here,
+  so nothing observed a 3000.6.x child refusing a write. The 3000.4.x version
+  gate is therefore retained, and it is lifted only once
+  `DELEGATE_DEVIN_BEHAVIOR_TEST` passes against the newer release.
 - Prompt text is materialized in a private temporary file and passed with
   Devin `--prompt-file` plus `-p`; dry-run argv and tracked manifests do not
   contain the prompt.
@@ -423,15 +458,21 @@ delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alia
   names, so a typo can have no effect.
 - `--agent NAME` selects an OpenCode agent for one run. With no flag,
   `opencode.defaultAgent` is used when configured.
-- `delegate models opencode --live` runs `opencode --pure models`. Live discovery has
+- `delegate models opencode --live` runs `opencode --pure models --verbose`. Live discovery has
   returned 452+ models and includes any provider in OpenCode's models.dev
   catalog, plus configured custom or local providers.
 - OpenCode is available to workflow `agent()` calls and
   `workflows.engineCaps` like other engines.
-- OpenCode currently buffers stdout until completion, so progress can remain
-  silent even though `--print-logs` stderr is visible. Sessions accumulate in
-  the user's global OpenCode state. Call mode has no Delegate timeout unless
-  `--timeout` is set.
+- Delegate no longer claims OpenCode buffers stdout until completion. That claim
+  came from an observation against v1.17.17 and did not reproduce: the emit
+  pattern OpenCode's runner uses delivered each write about a millisecond later
+  through a pipe, not batched at exit. The test used a standalone Bun, not the
+  Bun embedded in the shipped binary, and OpenCode is not installed on the
+  machine that ran the audit, so neither buffering nor streaming is proven here.
+  What is evidenced is a different failure: OpenCode exits through
+  `process.exit()`, which discards whatever the pipe has not accepted, so a large
+  final burst can lose its tail. Sessions accumulate in the user's global
+  OpenCode state. Call mode has no Delegate timeout unless `--timeout` is set.
 
 Examples:
 
@@ -454,7 +495,7 @@ delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-m
 - Delegate launches `pi -p --no-session --mode json` and sends the resolved prompt over stdin.
 - Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-prompt-templates --no-approve`; safe mode also uses Delegate's isolated throwaway workspace.
 - Model aliases accept either a Pi `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
-- `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select Pi's additional `off` or `minimal` levels.
+- `--reasoning-effort` maps directly to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases select the same levels. Pi has no `auto`.
 - All modes are stateless at Pi's session layer; Delegate's run registry remains the durable record.
 - JSON call responses retain the standard `text` field and also populate `assistantText`, matching tracked safe/work envelopes.
 - `delegate models pi --live` queries Pi's visible provider/model catalog.
@@ -476,10 +517,10 @@ delegate [--json] [--isolation auto|none|worktree] omp {safe,work} [--model <ali
 delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-- Delegate launches `omp -p --no-session --mode json` and passes the resolved prompt as a positional argument.
+- Delegate launches `omp -p --no-session --mode json` and sends the resolved prompt over stdin.
 - Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`; the approval mode is the load-bearing write/exec denial in headless mode, and safe mode also uses Delegate's isolated throwaway workspace.
 - Model aliases accept either a `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
-- `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select `off` or `minimal`.
+- `--reasoning-effort` maps directly to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and Oh My Pi's additional `auto`. Structured aliases select the same levels.
 - Delegate never emits Oh My Pi's `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*` role flags.
 - `delegate models omp --live` uses `omp models --json --no-extensions`.
 
@@ -529,12 +570,14 @@ Usage:
 delegate [--json] workflow check <script.py>
 delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]
 delegate [--json] workflow run --resume <wfId> [--budget N]
+delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
-delegate [--json] workflow watch <wfId> [--since SEQ]
+delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]
 delegate [--json] workflow wait [<wfId>] [--timeout SEC]
 delegate [--json] workflow result [<wfId>] [--field KEY]
 delegate [--json] workflow approve <wfId>
+delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
 delegate [--json] workflow save <script.py> --name NAME
@@ -542,15 +585,21 @@ delegate [--json] workflow save <script.py> --name NAME
 
 - `check` validates the workflow script, including literal preflight checks for
   unsupported `agent()` combinations.
+- `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
+  status record. It overrides `--json` buffering; ordinary `--json` still returns
+  the existing single envelope. A successful watch observes the workflow; inspect
+  its final workflow status to distinguish successful work from failed work.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
   without launching child agents or consuming real budget. Each entry in
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
-  and UTF-8 `promptBytes`; Cursor/Kimi/OMP prompts over 102400 bytes add a warning
-  before their argv transport limit can fail a real run.
+  and UTF-8 `promptBytes`; Kimi prompts over 102400 bytes add a warning before its
+  argv transport limit can fail a real run. Kimi is the only engine still on argv.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work. Resuming a completed `--dry-run` starts
   its planned agents live under the same workflow ID; simulated journal events
   remain visible for audit but are excluded from replay and live budget.
+  `workflow resume <wfId>` is an alias for `workflow run --resume <wfId>`;
+  it uses the same pinned arguments and validation.
 - `events` returns the public workflow journal. For each tracked child launch,
   an `agent_child` event binds `runId` to the structural `key` (also emitted as
   `workflowAgentKey`) and includes `label` when the `agent()` call supplied one;
@@ -558,6 +607,9 @@ delegate [--json] workflow save <script.py> --name NAME
 - `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
   the latest eligible workflow. JSON output for implicit selection includes the
   selected `wfId` and `resolutionKind: "latest"`.
+- `wait` returns at completion or an attention-required pause/stall. An explicit
+  ID can select a completed dry-run; implicit latest selection excludes dry-runs.
+  Returning from wait does not by itself prove that the requested work completed.
 - `result --field KEY` extracts a top-level field from an object result. Text
   mode prints strings directly and JSON-encodes other values; JSON mode returns
   a field/value envelope.
@@ -565,6 +617,9 @@ delegate [--json] workflow save <script.py> --name NAME
   `run --resume` for the same gate — approve already is that resume. `kill`
   validates the supervisor process group before signaling and always attempts
   child fan-out cancellation.
+- `reject` records an agent-result rejection by structural key or unambiguous
+  label, with a non-empty reason. It refuses a live supervisor; use the script's
+  `reject()` in that case. It does not relaunch the workflow automatically.
 - JSON-capable workflow commands return the normal `{ok: ...}` envelope. Invalid
   scripts fail with `invalid_workflow_script`.
 
@@ -580,6 +635,9 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `invalid_workflow_script` | Script failed `check` / load validation. |
 | `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
 | `missing_workflow_result_field` | `result --field` was invoked without a key. |
+| `missing_workflow_reject_args` | Rejection is missing a workflow ID or target. |
+| `missing_workflow_reject_target` | `reject` needs a structural key or label. |
+| `missing_workflow_reject_reason` | `reject` needs a non-empty `--reason`. |
 | `missing_workflow_save_args` | `save` needs both `<script.py>` and `--name`. |
 | `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
@@ -587,6 +645,8 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `workflow_locked` | Another supervisor already holds the workflow flock. |
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
+| `workflow_reject_unresolved` | Rejection target does not resolve to one agent key. |
+| `workflow_running` | Rejection was refused because the supervisor is running or locked. |
 | `workflow_result_missing` | `result` before `result.json` exists. |
 | `workflow_result_field_missing` | The requested top-level result field does not exist. |
 | `workflow_result_not_object` | `--field` was requested for a non-object result. |
@@ -613,7 +673,9 @@ delegate --json claude call --pure --timeout 60 --output-schema verdict.json < r
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
 it deletes that cwd after the child exits. It does not create snapshots, inject
 safe/work skill or completion-report framing, emit progress heartbeats, or honor
-persistent worktree/commit policy options. JSON
+persistent worktree/commit policy options. The skill-review preamble that safe
+and work runs can carry is off by default and never applies here; see
+[`tracking.skillReviewPreamble`](configuration.md#tracking) for the switch. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
 `model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`, `usage`,
 `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`, reasoning
@@ -691,7 +753,7 @@ delegate --json dry-run claude safe --reasoning-effort high "Review only."
 delegate --json dry-run grok safe --reasoning-effort high "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run codex work --mail-push "Run with opt-in stop-hook mail push."
-delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
+delegate --json dry-run droid safe --model reviewer "Investigate only."  # uses the configured 'reviewer' alias
 ```
 
 Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the throwaway copy is not materialized until a real run — and safe mode's working-tree sync (uncommitted tracked edits and untracked, non-ignored files mirrored into the isolated copy; only gitignored paths excluded) happens only on a real launch, not in dry-run.
@@ -708,7 +770,7 @@ Typical dry-run JSON fields:
   "cwd": "/path/to/workspace",
   "workspaceKind": "git",
   "promptTransport": "stdin",
-  "argv": ["codex", "--ask-for-approval", "never", "exec", "..."],
+  "argv": ["codex", "exec", "--cd", "/path/to/workspace", "--sandbox", "read-only", "-c", "approval_policy=\"never\"", "..."],
   "requestedReasoningEffort": "high",
   "resolvedReasoningEffort": "high",
   "reasoningEffortSource": "cli",
@@ -890,7 +952,7 @@ Supported input keys:
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
 - The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
-- `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
+- `model`: optional alias-or-id for every engine, resolved exactly like `--model`. A matching `<engine>.models` alias is expanded; other values pass through as raw model IDs.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
@@ -912,23 +974,24 @@ override ambient profile detection for that run.
 
 ```bash
 delegate --json setup
-delegate --json describe --summary
-delegate --json models --summary
 delegate --json describe
+delegate --json describe --full
+delegate --json models --summary
 delegate --json models
 delegate --json models <engine>
 delegate --json models <engine> --live
 delegate --json capabilities
 delegate --json capabilities refresh
 delegate --json capabilities refresh <engine> [...]
-delegate agent-help
+delegate --json help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt
-transforms, effective policy, top-level profile config metadata, representative
-argv shapes, and a command catalog. Full `describe` is a strict superset of
-`describe --summary`, so fields present in summary keep the same names in the
-full payload.
+`describe` gives a compact public command index with version, engines, modes,
+and focused help pointers. It omits internal commands, option descriptions,
+and config bodies. Use `describe --full` for supported isolation values,
+prompt transforms, effective policy, profile config metadata, representative
+argv shapes, and expanded command options. Use `help <command>` when only one
+command's contract is needed.
 
 `models` reports configured settings and cached discovery for Cursor, Droid,
 Codex, Kimi, Claude, Grok, Devin, OpenCode, Pi, and Oh My Pi. A per-engine
@@ -1086,22 +1149,27 @@ For worktree actions, a `--help` token anywhere in the args wins and performs no
 ### Scratch directory for isolated runs
 
 Tracked safe-mode and isolated runs get a per-run scratch directory at
-`.delegate/runs/<run-id>/scratch`. Delegate exports `TMPDIR`, `TMP`, and `TEMP`
-to that path after applying profile env overrides, so the scratch directory wins
-over profile-provided temp variables. The scratch directory persists with the
-run directory for inspection and is cleaned up only when the run directory is
-cleaned up.
+`~/.delegate/run-scratch/<registry-hash>/<run-id>`, outside the source registry
+and every Git worktree. If the user's valid home directory is itself inside a
+Git worktree, Delegate uses the private persistent fallback
+`/var/tmp/delegate-<uid>/run-scratch/`. A symlinked or foreign-owned default
+fails closed instead of selecting the fallback. Delegate preserves the existing
+mode of the shared `~/.delegate` directory and hardens only scratch-owned
+descendants to `0700`.
 
-For Codex safe/isolated runs, Delegate also passes `--add-dir <scratch>` along
-with `--sandbox read-only`. Verified live 2026-07-04: the Codex read-only sandbox
-still denies scratch writes despite `--add-dir` ("operation not permitted"), so
-Codex safe children currently cannot use the scratch TMPDIR; the flag is kept so
-scratch access starts working automatically if a future Codex honors it. Prompts
-for Codex safe runs should not depend on temp-file writes. The scratch export is
-verified working on the copy-isolated lanes (Cursor, Droid, Kimi, Grok, Claude).
-Cursor, Droid, Kimi, Grok, and Claude receive the scratch path through the temp
-environment variables only. This does not change the isolation semantics of the
-repo copy or persistent worktree itself.
+Delegate exports `TMPDIR`, `TMP`, and `TEMP` to the exact manifest-recorded path
+after applying profile env overrides. Scratch survives failure and cancellation.
+`delegate runs prune` removes it with the terminal run record only when the
+recorded path still equals the deterministic current owned path; moving the
+registry or changing `HOME` causes a refusal rather than deletion through an
+untrusted pointer. Legacy run-local scratch remains part of its run record.
+
+For Codex read-only runs, Delegate selects a high-entropy named permissions
+profile extending `:read-only` with exactly the neutral scratch path writable.
+Isolated work-mode Codex keeps its configured workspace sandbox and receives the
+same temp environment. Other engines receive the neutral scratch path through the
+temp environment only; repo-copy and persistent-worktree isolation semantics
+are unchanged.
 
 ### Run registry inspection
 
@@ -1170,6 +1238,10 @@ accepts the same harness, group, limit, and structural selectors (including `tot
 `truncated`, and the empty-filter workspace-scope warning).
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
+
+Command-local options belong after the command path: use `runs --group NAME`
+or `wait HANDLE --completion-report`. Their global launch spellings are not
+substitutes; for example, `--completion-report markdown wait HANDLE` is refused.
 
 Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as
@@ -1271,14 +1343,34 @@ Run-output JSON uses schema `delegate.run-output.v1` and returns selected comple
 
 Tracked stdout and stderr logs are capped independently at 16 MiB. Exceeding a
 cap terminates the child and records `output_limit_exceeded` plus an
-`outputLimit` object naming the stream and byte limit. After an explicit
+`outputLimit` object naming the stream and byte limit.
+
+OMP stdout has a separate, finite transport budget: 256 MiB received per attempt,
+16 MiB per JSON record, and the same 16 MiB retained-output cap. Delegate retains
+up to 64 KiB of the known stripped `message_update` / `thinking_delta` diagnostic
+shape, then omits further records of exactly that shape. Other fields, malformed
+JSON, text, errors, models, usage, and tool records are never discounted.
+The same OMP policy applies to call mode; other engines and stderr retain their
+existing raw-byte limits. An over-limit read can observe at most one extra
+64 KiB chunk before termination.
+
+OMP results disclose `stdoutCapture`: transport/captured byte counts, omitted
+thinking bytes and records, limits, `limitKind`, `truncated`, and a streaming
+`transportSha256` of observed child bytes. These counters describe the final
+attempt; existing top-level byte counts may combine retries. Compaction adds a
+warning and one `delegate.capture` marker to retained stdout. `--raw` returns
+that retained stream, not omitted thinking. Captured bytes include the marker;
+the transport digest does not. Compaction preserves the existing stall detector,
+timeouts, terminal handling, and process-group cleanup.
+
+After an explicit
 terminal-success event, Delegate gives the harness one second to exit and then
 stops a lingering process; successful envelopes disclose this as
 `stoppedAfterCompletion: true`. Harnesses must emit that terminal event only
 after flushing their final payload.
 
-Each tracked Run also keeps `events.jsonl`, an append-only raw diagnostic mirror
-of child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
+Each tracked Run also keeps `events.jsonl`, an append-only diagnostic mirror
+of retained child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
 records (including a final unterminated line when the child exits mid-line).
 The mirror retains at most 500 stdout-line records, followed by one
 `stream.lines_truncated` marker when additional lines are omitted. Normalized
@@ -1321,6 +1413,13 @@ recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are
 registered and can be selected for cancellation.
 
+`cancelled` records operator intent; it is not proof that every process exited.
+If SIGKILL is denied, the direct-cancel response keeps that status and its warning
+and adds `signalRefusal: {"signal": "SIGKILL", "reason": "permission_denied"}`.
+Inspect the refusal before assuming cleanup finished. Workflow child cancellation
+treats it as a failure, attempts the remaining siblings, and cannot claim a
+recovered approval gate while a signal refusal remains.
+
 Before sending any signal, cancel stamps a `cancelRequested: true` marker (with
 a `cancelRequestedAt` timestamp) on the run state under the registry lock, so
 that a runner finalizer observing the marker persists `cancelled` even if the
@@ -1330,8 +1429,8 @@ the persisted state, and the eventual reconciled registry entry in agreement
 regardless of which side finishes first. The marker is never stamped on an
 already-terminal run.
 
-A cancelled run has no child completion report (the child was killed mid-flight),
-so Delegate synthesizes one with `completionReportSource: delegate_synthesized`.
+For a cancelled run without a child completion report, Delegate synthesizes one
+with `completionReportSource: delegate_synthesized`.
 The synthesized cancelled report records `Status: cancelled`, the failure reason
 (`cancelled_by_user` for an operator cancel, `harness_cancelled` for a harness
 terminal cancellation event), a bounded redacted stderr tail when present, and a

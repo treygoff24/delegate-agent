@@ -25,7 +25,7 @@ delegate --isolation worktree claude work "Implement the scoped change and repor
 delegate --isolation worktree grok work "Implement the scoped change and report changed files."
 delegate --isolation worktree devin work "Implement the scoped change and report changed files."
 delegate --isolation worktree opencode work "Implement the scoped change and report changed files."
-delegate --isolation worktree droid implementer work "Implement the scoped change and report changed files."
+delegate --isolation worktree droid work --model implementer "Implement the scoped change and report changed files."
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```
 
@@ -52,6 +52,22 @@ on disk and the completion JSON includes `worktreeRetained` with a reason. Set
 `worktrees.retireWorktreeOnCompletion` to `false` to preserve the previous
 manual-cleanup behavior. If `worktrees.autoPrune.enabled` is true, its existing
 merged-and-age-filtered pass also runs at completion.
+
+Worktree inspection reads the canonical state and immutable manifest once per
+run. Older snapshot files remain raw ownership evidence when present. Missing older projections can fall back to
+consistent surviving records. Corrupt records, mismatched run IDs, or conflicting
+branch/source/execution identities produce warnings and withhold the source
+metadata required for destructive cleanup. Even forced removal cannot turn
+contradictory ownership records into permission to delete a directory. Completion
+retirement retains the worktree when required evidence cannot be verified.
+Mutation and GC paths still reload records under their existing registry locks;
+an inspection bundle is not a cached authorization to remove anything.
+
+The `runs` listing checks every in-scope run. Terminal rows may use a small
+projection in the existing index only while the state file identity matches and
+no finalization journal is pending. Other rows read current state. Log sizes and
+archive metadata are read only for returned rows; ordering and total counts
+still cover the full selection.
 
 A few boundaries are worth stating explicitly:
 

@@ -41,6 +41,9 @@ class MailPushTests(unittest.TestCase):
                 "alias": self.alias,
                 "status": run_status.STATUS_RUNNING,
                 "pid": os.getpid(),
+                "recentEvents": [],
+                "eventsTotal": 0,
+                "warnings": [],
             },
         )
         self.env = {
@@ -154,9 +157,10 @@ class MailPushTests(unittest.TestCase):
         self.assertTrue(Path(codex.codex_home or "").joinpath("auth.json").is_file())
         self.assertTrue(
             Path(codex.codex_home or "").is_relative_to(
-                run_registry.run_directory(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id)
             )
         )
+        self.assertFalse(Path(codex.codex_home or "").is_relative_to(self.workspace.resolve()))
         self.assertFalse(
             (mail.boxes_root(self.registry_root) / self.run_id / "codex-home").exists()
         )
@@ -275,8 +279,6 @@ class MailPushTests(unittest.TestCase):
         fallback_env = mail.mail_push_fallback_env_overrides(
             provision,
             {},
-            self.registry_root,
-            self.run_id,
         )
         fallback_home = Path(fallback_env["CODEX_HOME"])
         self.assertNotEqual(fallback_home, Path(provision.codex_home or ""))
@@ -286,9 +288,10 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertTrue(
             fallback_home.is_relative_to(
-                run_registry.run_directory(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id)
             )
         )
+        self.assertFalse(fallback_home.is_relative_to(self.workspace.resolve()))
 
     def test_fallback_home_failure_reverts_to_pull_without_aborting_launch(self):
         source = self.workspace / "source-codex-home"
@@ -366,8 +369,6 @@ class MailPushTests(unittest.TestCase):
             mail_push=True,
         )
         self.assertIsNone(runner._mail_push_failure_marker(context, reason))
-        run_path = run_registry.run_directory(self.registry_root, self.run_id)
-        runner.write_snapshot(run_path, {"recentEvents": [], "eventsTotal": 0, "warnings": []})
         runner.record_mail_push_degradation(
             self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
         )
@@ -392,11 +393,6 @@ class MailPushTests(unittest.TestCase):
         )
 
     def test_degradation_is_recorded_once_in_state_events_and_snapshot(self):
-        run_path = run_registry.run_directory(self.registry_root, self.run_id)
-        runner.write_snapshot(
-            run_path,
-            {"recentEvents": [], "eventsTotal": 0, "warnings": []},
-        )
         first = runner.record_mail_push_degradation(
             self.registry_root,
             self.run_id,

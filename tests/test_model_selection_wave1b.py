@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import harness_discovery as discovery_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 # Expected key sets from embedded_default_config().
@@ -129,7 +135,7 @@ class ModelOverrideDryRunTests(CommandTestBase):
     def test_model_flag_lands_in_request_and_argv_for_all_engines(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         config["droid"]["defaultModel"] = "droid-default-id"
         config["codex"]["defaultModel"] = "gpt-5.5"
@@ -154,8 +160,8 @@ class ModelOverrideDryRunTests(CommandTestBase):
         )
         for engine, argv, expected in cases:
             with self.subTest(engine=engine):
-                parsed = self.delegate.parse_cli(["--cwd", repo.name, "dry-run", *argv])
-                request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+                parsed = parser_api.parse_cli(["--cwd", repo.name, "dry-run", *argv])
+                request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(request.model, expected)
                 _assert_argv_has_model(self, request.argv, expected)
                 payload = self.delegate.dry_run_payload(request)
@@ -165,7 +171,7 @@ class ModelOverrideDryRunTests(CommandTestBase):
     def test_alias_resolution_and_verbatim_pass_through_per_engine(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         for engine in ("cursor", "codex", "claude", "grok", "devin", "kimi"):
             config[engine]["models"] = {"fast": f"{engine}-fast-id"}
             if config[engine].get("defaultModel") in (None, ""):
@@ -182,10 +188,10 @@ class ModelOverrideDryRunTests(CommandTestBase):
         for engine, flag_value, expected in alias_cases:
             with self.subTest(engine=engine, kind="alias"):
                 mode = "work" if engine == "devin" else "safe"
-                parsed = self.delegate.parse_cli(
+                parsed = parser_api.parse_cli(
                     ["--cwd", repo.name, "dry-run", engine, mode, "--model", flag_value, "x"]
                 )
-                request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+                request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(request.model, expected)
                 _assert_argv_has_model(self, request.argv, expected)
 
@@ -193,83 +199,74 @@ class ModelOverrideDryRunTests(CommandTestBase):
             with self.subTest(engine=engine, kind="passthrough"):
                 raw = f"raw-{engine}-id"
                 mode = "work" if engine == "devin" else "safe"
-                parsed = self.delegate.parse_cli(
+                parsed = parser_api.parse_cli(
                     ["--cwd", repo.name, "dry-run", engine, mode, "--model", raw, "x"]
                 )
-                request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+                request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(request.model, raw)
                 _assert_argv_has_model(self, request.argv, raw)
 
 
 class DroidModelSelectionTests(CommandTestBase):
-    def test_positional_and_model_flag_conflict(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-        repo = make_git_repo(with_commit=True)
-        self.addCleanup(repo.cleanup)
-        parsed = self.delegate.parse_cli(
-            ["--cwd", repo.name, "droid", "reviewer", "safe", "--model", "other", "review"]
-        )
-        self.assertEqual(parsed.launch.model_alias, "reviewer")
-        self.assertEqual(parsed.launch.model, "other")
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "model_conflict")
+    def test_retired_positional_model_is_rejected_even_with_model_flag(self):
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            parser_api.parse_cli(["droid", "reviewer", "safe", "--model", "other", "review"])
+        self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
         self.assertIn("positional", ctx.exception.message.lower())
         self.assertIn("--model", ctx.exception.message)
 
-    def test_optional_positional_with_model_flag(self):
+    def test_model_flag_without_positional_alias(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "raw-droid", "review"]
         )
-        self.assertIsNone(parsed.launch.model_alias)
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.model, "raw-droid")
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertIsNone(parsed.payload.model_alias)
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.model, "raw-droid")
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "raw-droid")
         _assert_argv_has_model(self, request.argv, "raw-droid")
 
     def test_plain_droid_safe_uses_default_model(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         config["droid"]["defaultModel"] = "factory/default-model"
-        parsed = self.delegate.parse_cli(["--cwd", repo.name, "dry-run", "droid", "safe", "review"])
-        self.assertIsNone(parsed.launch.model_alias)
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = parser_api.parse_cli(["--cwd", repo.name, "dry-run", "droid", "safe", "review"])
+        self.assertIsNone(parsed.payload.model_alias)
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "factory/default-model")
         _assert_argv_has_model(self, request.argv, "factory/default-model")
 
     def test_plain_droid_safe_without_default_requires_model(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         config["droid"].pop("defaultModel", None)
-        parsed = self.delegate.parse_cli(["--cwd", repo.name, "dry-run", "droid", "safe", "review"])
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        parsed = parser_api.parse_cli(["--cwd", repo.name, "dry-run", "droid", "safe", "review"])
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(ctx.exception.error, "missing_model")
 
-    def test_strict_positional_vs_pass_through_flag_asymmetry(self):
+    def test_retired_positional_syntax_and_raw_model_flag(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
 
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            parsed = self.delegate.parse_cli(
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            parsed = parser_api.parse_cli(
                 ["--cwd", repo.name, "dry-run", "droid", "unknown-alias", "safe", "review"]
             )
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "invalid_alias")
+            request_api.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
 
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -281,19 +278,19 @@ class DroidModelSelectionTests(CommandTestBase):
                 "review",
             ]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "unknown-raw-id")
         _assert_argv_has_model(self, request.argv, "unknown-raw-id")
 
     def test_droid_model_flag_alias_resolves(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5", "fast": "glm-5.1"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "fast", "review"]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "glm-5.1")
         # A map-key hit via --model keeps alias metadata, matching the
         # positional and input-JSON alias paths.
@@ -305,12 +302,12 @@ class DroidModelSelectionTests(CommandTestBase):
         # `codex:fast` selectors work for CLI launches.
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["codex"]["models"] = {"fast": "gpt-5.4-mini"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "codex", "safe", "--model", "fast", "review"]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "gpt-5.4-mini")
         self.assertEqual(request.model_alias, "fast")
 
@@ -318,58 +315,57 @@ class DroidModelSelectionTests(CommandTestBase):
         # Raw IDs keep input-JSON parity: the selection token is recorded.
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        parsed = self.delegate.parse_cli(
+        config = config_api.embedded_default_config()
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "codex", "safe", "--model", "gpt-5.5", "review"]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "gpt-5.5")
         self.assertEqual(request.model_alias, "gpt-5.5")
 
     def test_cursor_model_flag_alias_keeps_alias_metadata(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["models"] = {"fast": "grok-4.5-fast-xhigh"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "cursor", "safe", "--model", "fast", "review"]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "grok-4.5-fast-xhigh")
         self.assertEqual(request.model_alias, "fast")
 
     def test_model_flag_rejects_empty_value(self):
         for value in ("", "   "):
             with self.subTest(value=repr(value)):
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.parse_cli(["codex", "safe", "--model", value, "review"])
+                with self.assertRaises(errors_api.DelegateError) as ctx:
+                    parser_api.parse_cli(["codex", "safe", "--model", value, "review"])
                 self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_droid_model_flag_raw_id_has_no_alias_metadata(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "custom:raw", "review"]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "custom:raw")
         self.assertIsNone(request.model_alias)
 
-    def test_droid_null_models_map_degrades_cleanly(self):
-        # `"droid": {"models": null}` passes shared config validation (null is
-        # treated as absent); the runtime must error cleanly, not TypeError.
+    def test_droid_null_models_map_accepts_raw_model_selection(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = None
-        parsed = self.delegate.parse_cli(
-            ["--cwd", repo.name, "dry-run", "droid", "reviewer", "safe", "review"]
+        parsed = parser_api.parse_cli(
+            ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "raw-model", "review"]
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "invalid_alias")
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "raw-model")
+        self.assertIsNone(request.model_alias)
+        _assert_argv_has_model(self, request.argv, "raw-model")
 
     def test_droid_input_json_omitted_model_uses_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,21 +374,21 @@ class DroidModelSelectionTests(CommandTestBase):
                 json.dumps({"engine": "droid", "mode": "safe", "cwd": tmp, "prompt": "review"}),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["droid"]["defaultModel"] = "factory/json-default"
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "factory/json-default")
 
     def test_devin_effort_error_names_overridden_model(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        parsed = self.delegate.parse_cli(
+        config = config_api.embedded_default_config()
+        parsed = parser_api.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -406,16 +402,16 @@ class DroidModelSelectionTests(CommandTestBase):
                 "review",
             ]
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
         self.assertIn("swe-1.7-lightning", ctx.exception.message)
 
     def test_kimi_effort_error_names_overridden_model(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        parsed = self.delegate.parse_cli(
+        config = config_api.embedded_default_config()
+        parsed = parser_api.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -429,8 +425,8 @@ class DroidModelSelectionTests(CommandTestBase):
                 "review",
             ]
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        with self.assertRaises(errors_api.DelegateError) as ctx:
+            request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
         self.assertIn("my-kimi-model", ctx.exception.message)
 
@@ -462,10 +458,10 @@ class CursorModelOverrideTests(CommandTestBase):
         }
 
     def test_discovered_cursor_family_routes_explicit_model_to_exact_selector(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["reasoningEffortModels"] = {"max": "global-config-max"}
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=self._cursor_route_discovery(),
         ):
@@ -486,11 +482,11 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertTrue(any("replaced" in warning for warning in request.warnings))
 
     def test_configured_cursor_routes_precede_discovery_without_explicit_pin(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["defaultModel"] = "cursor-grok-4.5-low"
         config["cursor"]["reasoningEffortModels"] = {"max": "global-config-max"}
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=self._cursor_route_discovery(),
         ):
@@ -508,11 +504,11 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "config")
 
     def test_unsupported_discovered_route_degrades_config_default_to_base_selector(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["defaultModel"] = "cursor-grok-4.5-low"
         config["cursor"]["defaultReasoningEffort"] = "xhigh"
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=self._cursor_route_discovery(),
         ):
@@ -522,14 +518,14 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertTrue(any("defaultReasoningEffort" in warning for warning in request.warnings))
 
     def test_authoritative_cursor_family_missing_effort_fails_closed(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         with (
             mock.patch.object(
-                self.delegate.harness_discovery,
+                discovery_api,
                 "load_discovery_cache",
                 return_value=self._cursor_route_discovery(),
             ),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+            self.assertRaises(errors_api.DelegateError) as ctx,
         ):
             self.build_git_request(
                 "cursor",
@@ -546,9 +542,9 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertIn("low, max", ctx.exception.message)
 
     def test_pinned_cursor_without_route_evidence_warns_and_proceeds(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=self._cursor_route_discovery(),
         ):
@@ -568,7 +564,7 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
     def test_unrelated_config_mapping_does_not_override_explicit_model_pin(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
         request = self.build_git_request(
             "cursor",
@@ -589,9 +585,9 @@ class CursorModelOverrideTests(CommandTestBase):
     def test_cli_model_and_effort_without_exact_route_warn_and_proceed(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -605,12 +601,12 @@ class CursorModelOverrideTests(CommandTestBase):
                 "review",
             ]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "pinned-cursor-model")
         self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
     def test_config_sourced_effort_with_pin_bypasses_routing_and_warns(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["cursor"]["defaultReasoningEffort"] = "high"
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
         request = self.build_git_request(
@@ -642,13 +638,13 @@ class CursorModelOverrideTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-            request = self.delegate.request_from_input_json(parsed, config)
+            config = config_api.embedded_default_config()
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "input-json-cursor")
             _assert_argv_has_model(self, request.argv, "input-json-cursor")
 
@@ -668,14 +664,14 @@ class CursorModelOverrideTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "input-json-cursor")
             self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
@@ -694,14 +690,14 @@ class CursorModelOverrideTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             # Must not raise invalid_model for mismatch with defaultModel.
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "not-the-default")
 
 
@@ -721,14 +717,14 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["codex"]["models"] = {"fast": "gpt-5.5"}
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "gpt-5.5")
 
     def test_droid_model_flag_alias_worktree_plan_matches_alias(self):
@@ -736,9 +732,9 @@ class InputJsonModelResolutionTests(CommandTestBase):
         # execution path records: --model alias-hit plans a droid-<alias> branch.
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"fast": "glm-5.1"}
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             [
                 "--cwd",
                 repo.name,
@@ -752,7 +748,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 "task",
             ]
         )
-        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         payload = self.delegate.dry_run_payload(request)
         self.assertEqual(request.model_alias, "fast")
         self.assertIn("droid-fast", str(payload["plannedBranch"]))
@@ -772,14 +768,14 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["droid"]["models"] = {"minimax": "custom:minimax-e2e"}
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertEqual(request.model_alias, "minimax")
             self.assertEqual(request.model, "custom:minimax-e2e")
 
@@ -800,14 +796,14 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config = config_api.embedded_default_config()
             config["droid"]["models"] = {"minimax": "custom:minimax-e2e"}
-            request = self.delegate.request_from_input_json(parsed, config)
+            request = request_api.request_from_input_json(parsed, config)
             self.assertIsNone(request.model_alias)
             self.assertEqual(request.model, "custom:raw-model-id")
             _assert_argv_has_model(self, request.argv, "custom:raw-model-id")
@@ -828,13 +824,15 @@ class InputJsonModelResolutionTests(CommandTestBase):
                     ),
                     encoding="utf-8",
                 )
-                parsed = self.delegate.ParsedCommand(
+                parsed = request_types.ParsedCommand(
                     "run",
-                    global_options=self.delegate.GlobalOptions(json_mode=True),
-                    run_json=self.delegate.RunJsonOptions(str(task)),
+                    global_options=request_types.GlobalOptions(json_mode=True),
+                    payload=request_types.RunJsonOptions(str(task)),
                 )
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                with self.assertRaises(errors_api.DelegateError) as ctx:
+                    request_api.request_from_input_json(
+                        parsed, config_api.embedded_default_config()
+                    )
                 self.assertEqual(ctx.exception.error, error)
 
     def test_whitespace_default_model_treated_as_unset(self):
@@ -857,22 +855,22 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand(
+            parsed = request_types.ParsedCommand(
                 "run",
-                global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                global_options=request_types.GlobalOptions(json_mode=True),
+                payload=request_types.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            with self.assertRaises(errors_api.DelegateError) as ctx:
+                request_api.request_from_input_json(parsed, config_api.embedded_default_config())
             self.assertEqual(ctx.exception.error, "missing_model")
 
 
 class EffortCouplingRegressionTests(CommandTestBase):
     def test_codex_model_override_changes_effort_validation(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["codex"]["defaultModel"] = "gpt-5.5"
         # gpt-5.5 supports low/medium/high/xhigh — not "max".
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(errors_api.DelegateError) as ctx:
             self.build_git_request(
                 "codex",
                 "safe",
@@ -888,10 +886,10 @@ class EffortCouplingRegressionTests(CommandTestBase):
         self.assertIn("gpt-5.5", ctx.exception.message)
 
     def test_droid_model_override_changes_effort_validation(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = config_api.embedded_default_config()
         config["droid"]["models"] = {"reviewer": "claude-opus-4-8"}
         # glm-5.1 supports only off|high — not "max".
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(errors_api.DelegateError) as ctx:
             self.build_git_request(
                 "droid",
                 "safe",

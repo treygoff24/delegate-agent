@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def effective_changed_files_from_porcelain_lines(
     execution_cwd: str,
     creation_context: JsonObject | None,
     total: int | None = None,
+    ignore_globs: tuple[str, ...] = (),
 ) -> tuple[list[JsonObject], int, int]:
     """Filter launch-seeded paths whose content is unchanged at completion.
 
@@ -93,13 +95,13 @@ def effective_changed_files_from_porcelain_lines(
     Returns ``(effective_entries, effective_total, raw_total)``.
     """
 
-    raw_total = len(lines) if total is None else total
-    raw_entries = [_parse_porcelain_line(line) for line in lines]
+    raw_entries, raw_total = all_changed_files_from_porcelain_lines(lines, total)
     return effective_changed_files(
         raw_entries,
         execution_cwd=execution_cwd,
         creation_context=creation_context,
         raw_total=raw_total,
+        ignore_globs=ignore_globs,
     )
 
 
@@ -109,6 +111,7 @@ def effective_changed_files(
     execution_cwd: str,
     creation_context: JsonObject | None,
     raw_total: int,
+    ignore_globs: tuple[str, ...] = (),
 ) -> tuple[list[JsonObject], int, int]:
     """Apply seeded-content filtering to already parsed status entries."""
 
@@ -124,6 +127,12 @@ def effective_changed_files(
         old_path = entry.get("oldPath")
         if isinstance(old_path, str):
             candidate_paths.append(old_path)
+        if ignore_globs and all(
+            isinstance(path, str)
+            and any(fnmatch.fnmatch(path, pattern) for pattern in ignore_globs)
+            for path in candidate_paths
+        ):
+            continue
         seeded_only = True
         for candidate in candidate_paths:
             if not isinstance(candidate, str) or candidate not in seeded:

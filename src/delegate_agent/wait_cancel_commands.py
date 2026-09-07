@@ -10,7 +10,14 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, profiles, run_registry, snapshot_view, terminal_states
+from delegate_agent import (
+    command_errors,
+    profiles,
+    redaction,
+    run_registry,
+    snapshot_view,
+    terminal_states,
+)
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
@@ -116,7 +123,11 @@ def _resolve_targets(
 
 def _merged_view(registry_root: Path, run_id: str, target: run_registry.RunTarget) -> JsonObject:
     snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
-    view = snapshot_view.merge_snapshot_view(registry_root, run_id, snapshot, redact=True)
+    view = (
+        redaction.redact_value(snapshot)
+        if snapshot is not None
+        else snapshot_view.merge_snapshot_view(registry_root, run_id, None, redact=True)
+    )
     run_registry.add_run_target_resolution(view, target)
     return dict(view)
 
@@ -452,7 +463,6 @@ def _persist_cancelled_terminal_locked(
     warnings: list[str],
 ) -> None:
     """Persist the canonical cancelled outcome while registry_lock is held."""
-    run_path = run_registry.run_directory(registry_root, target.run_id)
     stdout_bytes, stderr_bytes = run_registry.effective_log_byte_sizes(
         registry_root, target.run_id, state
     )
@@ -491,12 +501,9 @@ def _persist_cancelled_terminal_locked(
             *existing,
             *(warning for warning in warnings if warning not in existing),
         ]
-    run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, updated)
-
-    snapshot = dict(run_registry.load_run_snapshot_or_none(registry_root, target.run_id) or {})
-    snapshot.update(
+    updated.update(
         {
-            "schema": run_registry.SNAPSHOT_SCHEMA,
+            "schema": run_registry.STATE_SCHEMA,
             "ok": False,
             "runId": target.run_id,
             "alias": target.alias,
@@ -506,14 +513,8 @@ def _persist_cancelled_terminal_locked(
             "stderrBytes": stderr_bytes,
         }
     )
-    terminal_states.apply_operator_cancel_override(snapshot)
-    if warnings:
-        existing = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
-        snapshot["warnings"] = [
-            *existing,
-            *(warning for warning in warnings if warning not in existing),
-        ]
-    run_registry.write_snapshot(run_path, snapshot)
+    terminal_states.apply_operator_cancel_override(updated)
+    run_registry.publish_terminal_record_locked(registry_root, target.run_id, updated)
 
 
 def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
@@ -521,6 +522,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
     # the initial selection under it too, so cancel waits for a primary Popen to
     # publish pid/pgid instead of racing the temporary no-state window.
     with run_registry.registry_lock(registry_root):
+        run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
         state = run_registry.load_run_state_or_none(registry_root, target.run_id)
         fields = run_registry.status_fields(state)
         effective = fields.get("effectiveStatus")
@@ -532,6 +534,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         generation = _cancel_signal_generation(state, target)
     warnings: list[str] = []
     cancel_marker_written = False
+    signal_refusal: JsonObject | None = None
     for _attempt in range(CANCEL_GENERATION_MAX_ATTEMPTS):
         pid, pgid, signal_value, process_group = generation
 
@@ -544,6 +547,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         already_terminal = False
         generation_changed = False
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
             pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
             pre_fields = run_registry.status_fields(pre_signal)
             pre_effective = pre_fields.get("effectiveStatus")
@@ -559,10 +563,8 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
                 stamped["cancelRequested"] = True
                 if not isinstance(stamped.get("cancelRequestedAt"), str):
                     stamped["cancelRequestedAt"] = run_registry.utc_now_iso()
-                run_registry.write_json_atomic(
-                    run_registry.run_directory(registry_root, target.run_id)
-                    / run_registry.STATE_FILE,
-                    stamped,
+                run_registry.write_run_state(
+                    run_registry.run_directory(registry_root, target.run_id), stamped
                 )
                 cancel_marker_written = True
 
@@ -593,6 +595,10 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
             except ProcessLookupError:
                 pass
             except PermissionError:
+                signal_refusal = {
+                    "signal": "SIGKILL",
+                    "reason": "permission_denied",
+                }
                 warnings.append(
                     "SIGKILL was not permitted after SIGTERM; run state marked cancelled"
                 )
@@ -602,6 +608,7 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         # live generation goes through the same identity/marker/signal protocol.
         follow_generation = False
         with run_registry.registry_lock(registry_root):
+            run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
             latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
             latest_fields = run_registry.status_fields(latest)
             latest_effective = latest_fields.get("effectiveStatus")
@@ -621,6 +628,8 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         payload = _terminal_payload(registry_root, target)
         if warnings:
             payload["warnings"] = warnings
+        if signal_refusal is not None:
+            payload["signalRefusal"] = signal_refusal
         return payload
 
     marker_note = (

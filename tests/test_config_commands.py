@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import errors as errors_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 
@@ -46,7 +48,7 @@ class ConfigCommandTests(unittest.TestCase):
             work_config = json.loads(work_path.read_text(encoding="utf-8"))
             personal_config = json.loads(personal_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         self.assertEqual(payload["path"], str(path))
         self.assertEqual(config["droid"]["models"]["reviewer"], "replace-with-read-only-model-id")
         self.assertEqual(
@@ -66,7 +68,7 @@ class ConfigCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             env = {"HOME": home, "PATH": os.environ.get("PATH", "")}
             code, _, stderr = self.run_main(["--json", "config", "init"], env=env)
-            self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+            self.assertEqual(code, errors_api.EXIT_OK, stderr)
             root = Path(home) / ".delegate"
             work_path = root / "config.work.json"
             personal_path = root / "config.personal.json"
@@ -79,7 +81,7 @@ class ConfigCommandTests(unittest.TestCase):
             work_config = json.loads(work_path.read_text(encoding="utf-8"))
             personal_config = json.loads(personal_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         self.assertEqual(payload["action"], "sync-profiles")
         self.assertIn(str(work_path), payload["profileConfigs"]["created"])
         self.assertIn(str(personal_path), payload["profileConfigs"]["existing"])
@@ -94,7 +96,7 @@ class ConfigCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
+        self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "config_not_found")
 
     def test_config_sync_profiles_rejects_invalid_profile_env_before_writing(self):
@@ -121,7 +123,7 @@ class ConfigCommandTests(unittest.TestCase):
             payload = json.loads(stdout)
             work_exists = (root / "config.work.json").exists()
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
+        self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "secret_in_profile_env")
         self.assertFalse(work_exists)
 
@@ -136,7 +138,7 @@ class ConfigCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
+        self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "config_exists")
 
     def test_config_init_text_recommends_setup(self):
@@ -146,7 +148,7 @@ class ConfigCommandTests(unittest.TestCase):
                 env={"HOME": home, "PATH": os.environ.get("PATH", "")},
             )
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         self.assertIn("run delegate setup for automatic harness discovery", stdout)
 
     def test_config_init_honors_delegate_config_with_force(self):
@@ -164,7 +166,7 @@ class ConfigCommandTests(unittest.TestCase):
             payload = json.loads(stdout)
             config = json.loads(path.read_text(encoding="utf-8"))
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         self.assertEqual(payload["path"], str(path))
         self.assertIn("codex", config)
 
@@ -181,7 +183,7 @@ class ConfigCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
+        self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "windows_path")
         self.assertIn("wslpath", payload["message"])
 
@@ -451,7 +453,7 @@ class ProfileGuardCliTests(unittest.TestCase):
                 ["codex", "safe", "hello"], env=self.base_env(home, profile="work")
             )
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(stdout, "")
         self.assertIn("AI_PROFILE=work", stderr)
         self.assertIn("refusing to run a launch or mutation command", stderr)
@@ -466,7 +468,7 @@ class ProfileGuardCliTests(unittest.TestCase):
             env["DELEGATE_CONFIG"] = str(explicit_config)
             code, stdout, stderr = self.run_main(["codex", "safe", "hello"], env=env)
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(stdout, "")
         self.assertIn("AI_PROFILE=work", stderr)
         self.assertIn("config.work.json", stderr)
@@ -478,7 +480,7 @@ class ProfileGuardCliTests(unittest.TestCase):
                 env=self.base_env(home, profile="personal"),
             )
 
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(stdout, "")
         self.assertIn("AI_PROFILE=personal", stderr)
         self.assertIn("refusing to run a launch or mutation command", stderr)
@@ -493,11 +495,11 @@ class ProfileGuardCliTests(unittest.TestCase):
                 ["--json", "--cwd", home, "capabilities"], env=env
             )
 
-        self.assertEqual(block_code, self.delegate.EXIT_USAGE)
+        self.assertEqual(block_code, errors_api.EXIT_USAGE)
         self.assertEqual(block_stdout, "")
         self.assertIn("refusing to run a launch or mutation command", block_stderr)
 
-        self.assertEqual(allow_code, self.delegate.EXIT_OK, allow_stderr)
+        self.assertEqual(allow_code, errors_api.EXIT_OK, allow_stderr)
         json.loads(allow_stdout)  # capabilities still produced its normal payload
         self.assertIn("continuing because 'capabilities' is read-only", allow_stderr)
 
@@ -511,10 +513,10 @@ class ProfileGuardCliTests(unittest.TestCase):
                 ["--json", "models", "codex"], env=env
             )
 
-        self.assertEqual(block_code, self.delegate.EXIT_USAGE)
+        self.assertEqual(block_code, errors_api.EXIT_USAGE)
         self.assertEqual(block_stdout, "")
         self.assertIn("refusing to run a launch or mutation command", block_stderr)
-        self.assertEqual(allow_code, self.delegate.EXIT_OK, allow_stderr)
+        self.assertEqual(allow_code, errors_api.EXIT_OK, allow_stderr)
         self.assertEqual(json.loads(allow_stdout)["engine"], "codex")
         self.assertIn("continuing because 'models' is read-only", allow_stderr)
 
@@ -523,7 +525,7 @@ class ProfileGuardCliTests(unittest.TestCase):
             env = self.base_env(home, profile="work")
             code, stdout, stderr = self.run_main(["--json", "--cwd", home, "profiles"], env=env)
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         json.loads(stdout)
         self.assertIn("AI_PROFILE=work", stderr)
         self.assertIn("continuing because 'profiles' is read-only", stderr)
@@ -537,7 +539,7 @@ class ProfileGuardCliTests(unittest.TestCase):
             env = self.base_env(home, profile="work")
             code, stdout, stderr = self.run_main(["--json", "--cwd", home, "ps"], env=env)
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         json.loads(stdout)
         self.assertNotIn("refusing to run a launch or mutation command", stderr)
         self.assertIn("continuing because 'ps' is read-only", stderr)
@@ -567,7 +569,7 @@ class ProfileGuardCliTests(unittest.TestCase):
                 ["--json", "--cwd", home, "worktree", "show", "cursor-1"], env=env
             )
 
-        self.assertEqual(block_code, self.delegate.EXIT_USAGE)
+        self.assertEqual(block_code, errors_api.EXIT_USAGE)
         self.assertIn("refusing to run a launch or mutation command", block_stderr)
         # worktree show on a handle that was never registered fails downstream
         # (not_found), but that failure must come from worktree_commands, not
@@ -599,7 +601,7 @@ class ProfileGuardCliTests(unittest.TestCase):
             env = self.base_env(home, profile="Work")
             code, stdout, stderr = self.run_main(["--json", "--cwd", home, "describe"], env=env)
 
-        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
         json.loads(stdout)
         self.assertIn("AI_PROFILE='Work' is not a recognized profile (work|personal)", stderr)
         self.assertIn("running on the base account", stderr)

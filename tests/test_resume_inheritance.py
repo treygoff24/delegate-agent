@@ -8,7 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import argv_utils as argv_api
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import errors as errors_api
 from delegate_agent import request_build
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import resume_command as resume_api
+from delegate_agent import run_registry as registry_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -18,7 +25,7 @@ class ResumeFixture(CommandTestBase):
         self.workspace_temp = tempfile.TemporaryDirectory(prefix="delegate-resume-")
         self.addCleanup(self.workspace_temp.cleanup)
         self.workspace = Path(self.workspace_temp.name)
-        self.registry_root = self.delegate.run_registry.ensure_registry(
+        self.registry_root = registry_api.ensure_registry(
             self.workspace, workspace_kind="directory"
         )
 
@@ -37,15 +44,15 @@ class ResumeFixture(CommandTestBase):
         snapshot: dict | None = None,
         prompt: str = "original prompt bytes\nsecond line",
     ) -> tuple[str, str, Path]:
-        run_id, alias = self.delegate.run_registry.register_run(
+        run_id, alias = registry_api.register_run(
             self.registry_root,
             harness=engine,
             metadata={"engine": engine, "mode": mode, "cwd": str(self.workspace)},
         )
-        run_path = self.delegate.run_registry.run_directory(self.registry_root, run_id)
+        run_path = registry_api.run_directory(self.registry_root, run_id)
         started = "2026-07-31T18:00:00Z"
         source_manifest = {
-            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+            "schema": registry_api.MANIFEST_SCHEMA,
             "runId": run_id,
             "alias": alias,
             "harness": engine,
@@ -56,14 +63,14 @@ class ResumeFixture(CommandTestBase):
         }
         source_manifest.update(manifest or {})
         source_state = {
-            "schema": self.delegate.run_registry.STATE_SCHEMA,
+            "schema": registry_api.STATE_SCHEMA,
             "runId": run_id,
             "alias": alias,
             "status": status,
             "lastActivityAt": started,
         }
         source_snapshot = {
-            "schema": self.delegate.run_registry.SNAPSHOT_SCHEMA,
+            "schema": registry_api.SNAPSHOT_SCHEMA,
             "ok": True,
             "runId": run_id,
             "alias": alias,
@@ -74,11 +81,11 @@ class ResumeFixture(CommandTestBase):
         }
         if snapshot:
             source_snapshot.update(snapshot)
-        self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", source_manifest)
-        self.delegate.run_registry.write_json_atomic(run_path / "state.json", source_state)
-        self.delegate.run_registry.write_json_atomic(run_path / "snapshot.json", source_snapshot)
-        self.delegate.run_registry.write_private_text(run_path / "prompt.txt", prompt)
-        self.delegate.run_registry.write_private_text(
+        registry_api.write_json_atomic(run_path / "manifest.json", source_manifest)
+        registry_api.write_json_atomic(run_path / "state.json", source_state)
+        registry_api.write_json_atomic(run_path / "snapshot.json", source_snapshot)
+        registry_api.write_private_text(run_path / "prompt.txt", prompt)
+        registry_api.write_private_text(
             run_path / "completion-report.md", "terminal completion report"
         )
         return run_id, alias, run_path
@@ -100,7 +107,7 @@ class ResumeFixture(CommandTestBase):
 
     def loaded_config(self) -> dict:
         with mock.patch.dict(os.environ, self._config_env, clear=False):
-            config, _source = self.delegate.load_config(workspace=self.workspace)
+            config, _source = request_api.load_config(workspace=self.workspace)
         return config
 
 
@@ -205,7 +212,7 @@ class ResumeInheritanceTests(ResumeFixture):
                 "continue",
             ]
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
 
     def test_reasoning_from_config_is_reresolved_against_target(self):
@@ -311,22 +318,22 @@ class ResumeInheritanceTests(ResumeFixture):
         _run_id, alias, _run_path = self.seed_run(
             manifest={"outputSchema": schema_text, "isolationMode": "none"}
         )
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--json", "--cwd", str(self.workspace), "resume", "--dry-run", alias, "next"]
         )
 
         with mock.patch.dict(os.environ, self._config_env, clear=False):
-            plan = self.delegate.resume_command.build_resume_plan(
+            plan = resume_api.build_resume_plan(
                 parsed,
-                self.delegate.ResolvedWorkspace(str(self.workspace), "directory"),
+                request_types.ResolvedWorkspace(str(self.workspace), "directory"),
                 self.loaded_config(),
                 stderr=io.StringIO(),
             )
-        self.assertIsNone(plan.parsed.launch.output_schema)
-        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertIsNone(plan.parsed.payload.output_schema)
+        self.assertEqual(plan.parsed.payload.output_schema_text, schema_text)
         self.assertFalse(list((self.workspace / ".delegate" / "tmp").glob("resume-schema-*")))
         with mock.patch.object(request_build, "resolve_output_schema") as resolve:
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 plan.parsed, self.loaded_config(), io.StringIO()
             )
         resolve.assert_not_called()
@@ -343,25 +350,25 @@ class ResumeInheritanceTests(ResumeFixture):
             mode="safe",
             manifest={"outputSchema": schema_text, "isolationMode": "none"},
         )
-        parsed = self.delegate.parse_cli(
+        parsed = parser_api.parse_cli(
             ["--json", "--cwd", str(self.workspace), "resume", "--dry-run", alias, "next"]
         )
         stderr = io.StringIO()
         with mock.patch.dict(os.environ, self._config_env, clear=False):
-            plan = self.delegate.resume_command.build_resume_plan(
+            plan = resume_api.build_resume_plan(
                 parsed,
-                self.delegate.ResolvedWorkspace(str(self.workspace), "directory"),
+                request_types.ResolvedWorkspace(str(self.workspace), "directory"),
                 self.loaded_config(),
                 stderr=stderr,
             )
-            request = self.delegate.request_from_parsed(
+            request = request_api.request_from_parsed(
                 plan.parsed, self.loaded_config(), io.StringIO()
             )
         self.assertNotIn("output schema dropped", stderr.getvalue())
-        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertEqual(plan.parsed.payload.output_schema_text, schema_text)
         self.assertEqual(request.argv[request.argv.index("--json-schema") + 1], schema_text)
         self.assertEqual(request.argv[request.argv.index("--output-format") + 1], "stream-json")
-        self.assertNotIn(schema_text, self.delegate.argv_utils.public_argv(request))
+        self.assertNotIn(schema_text, argv_api.public_argv(request))
 
     def test_inherited_timeout_accepts_integral_float_and_refuses_invalid_values(self):
         self.write_config({})
@@ -387,7 +394,7 @@ class ResumeInheritanceTests(ResumeFixture):
                         "continue",
                     ]
                 )
-                self.assertEqual(code, self.delegate.EXIT_USAGE)
+                self.assertEqual(code, errors_api.EXIT_USAGE)
                 self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
 
     def test_runs_prune_removes_only_old_dead_legacy_resume_schema(self):
@@ -396,11 +403,7 @@ class ResumeInheritanceTests(ResumeFixture):
         tmp.mkdir()
         orphan = tmp / "resume-schema-999999-deadbeef.json"
         orphan.write_text('{"type":"object"}', encoding="utf-8")
-        old = (
-            orphan.stat().st_mtime
-            - self.delegate.run_registry.LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS
-            - 1
-        )
+        old = orphan.stat().st_mtime - registry_api.LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS - 1
         os.utime(orphan, (old, old))
         unrelated = tmp / "resume-schema-crashed.json"
         unrelated.write_text('{"type":"object"}', encoding="utf-8")
@@ -408,7 +411,7 @@ class ResumeInheritanceTests(ResumeFixture):
         live.write_text('{"type":"object"}', encoding="utf-8")
         os.utime(live, (old, old))
 
-        payload = self.delegate.run_registry.prune_runs(self.registry_root, older_than_days=30)
+        payload = registry_api.prune_runs(self.registry_root, older_than_days=30)
 
         self.assertFalse(orphan.exists())
         self.assertEqual(payload["staleResumeSchemas"], [orphan.name])

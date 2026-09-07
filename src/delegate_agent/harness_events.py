@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
+from delegate_agent.constants import CLAUDE_FAMILY_ALIASES, CURSOR_EFFORT_LABELS, claude_alias_base
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
+from delegate_agent.redaction import redact_string
 from delegate_agent.run_metadata import clean_harness_session_id
 from delegate_agent.terminal_states import (
     PROVIDER_CANCELLED,
@@ -169,6 +171,23 @@ EVENT_HEAD = 100
 EVENT_TAIL = 400
 EVENT_TEXT_LIMIT = 500
 
+# kimi, opencode and pi must never have a raw stdout line promoted to an
+# answer: their tool results carry arbitrary command output. Dropping such a
+# line silently, which is what used to happen, loses a CLI banner, an auth error
+# printed to stdout, or the truncated tail of a killed child. These bounds keep
+# a diagnostic without turning the event stream into a copy of the child's
+# stdout.
+MALFORMED_SAMPLE_LIMIT = 3
+MALFORMED_SAMPLE_CHARS = 200
+
+# Every parser here is an allowlist enforced by omission: an event type that
+# matches no branch is dropped with no trace, so a vendor adding an error event
+# or renaming a field ships silently and the run reports empty output rather
+# than a problem. Counting the types that reach no handler makes the next
+# rename visible. Bounded because the type string comes from the child.
+UNHANDLED_EVENT_TYPE_LIMIT = 32
+UNHANDLED_EVENT_TYPE_CHARS = 64
+
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
     """Bound retained event text for raw and normalized event surfaces.
@@ -202,6 +221,13 @@ def _add_bounded_event_field(payload: JsonObject, key: str, value: str) -> None:
 ASSISTANT_RECOVERY_HARNESSES = frozenset(
     {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
+
+# Engines whose stdout may carry arbitrary tool output, so a line that is not a
+# JSON object is recorded as a diagnostic rather than becoming a text event.
+# `omp` shares pi's parser but not this list: it reaches the same handler
+# through `_ingest_pi_event`, and its stdout is a serialized event stream with
+# no raw passthrough.
+MALFORMED_LINE_PROTECTED_HARNESSES = frozenset({"kimi", "opencode", "pi"})
 
 
 @dataclass
@@ -300,8 +326,41 @@ _PROVIDER_CANCELLED_CODES = frozenset(
     {"cancelled", "canceled", "provider_cancelled", "provider_canceled", "stop_cancelled"}
 )
 _PROVIDER_MAX_TURNS_CODES = frozenset(
-    {"max_turns", "maximum_turns", "error_max_turns", "turn_limit"}
+    {
+        "max_turns",
+        "maximum_turns",
+        "error_max_turns",
+        "turn_limit",
+        # grok 1.0.13's documented `end.stopReason` vocabulary, in both the
+        # snake_case the binary emits and the CamelCase the 0.2.73 fixtures use.
+        # `max_tokens` truncates the answer mid-turn rather than at a turn
+        # boundary, but the state either way is "the provider truncated the
+        # turn", and typing it is what puts a `failureReason` on the run record.
+        "max_turn_requests",
+        "maxturnrequests",
+        "max_tokens",
+        "maxtokens",
+    }
 )
+# grok emits this as a standalone event type rather than a stop reason. The
+# vendor guide names it alongside `max_turn_requests` as the same truncation.
+_MAX_TURNS_EVENT_TYPES = frozenset({"max_turns_reached"})
+
+
+# Pi 0.85.1 renamed its compaction events to the bare spelling and uses it for
+# manual and automatic compaction alike; Oh My Pi 18.1.13 still emits the
+# `auto_` prefix. The field names on the payload (`aborted`, `willRetry`,
+# `errorMessage`) are identical, so both spellings are accepted on both engines.
+_PI_COMPACTION_START_TYPES = frozenset({"auto_compaction_start", "compaction_start"})
+_PI_COMPACTION_END_TYPES = frozenset({"auto_compaction_end", "compaction_end"})
+
+# Pi's StopReason union. `toolUse` and `pending` are mid-turn and correctly
+# ignored; `deferred` is a real terminal state for batch provider responses and
+# a deferred turn would otherwise end with no terminal at all on an exit code
+# that is always 0.
+# A tuple, not a set: a malformed stop reason can be an unhashable dict or
+# list, and a membership test must not raise on the drain thread.
+_PI_TERMINAL_STOP_REASONS = ("stop", "error", "aborted", "length", "deferred")
 
 
 def _event_timestamp(payload: JsonObject) -> str:
@@ -371,7 +430,7 @@ def _structured_terminal_codes(payload: JsonObject) -> set[str]:
 def _provider_terminal_state(payload: JsonObject, event_type: str) -> tuple[str, str] | None:
     codes = _structured_terminal_codes(payload)
     reason = _trusted_terminal_reason(payload, event_type)
-    if codes & _PROVIDER_MAX_TURNS_CODES:
+    if event_type in _MAX_TURNS_EVENT_TYPES or codes & _PROVIDER_MAX_TURNS_CODES:
         return PROVIDER_MAX_TURNS, reason
     if codes & _PROVIDER_REFUSAL_CODES:
         return PROVIDER_REFUSAL, reason
@@ -407,6 +466,87 @@ def _served_model(payload: JsonObject) -> str | None:
     return None
 
 
+# Cursor's stream reports the model's DISPLAY NAME, never the id passed to
+# `--model`, so a pinned run comparing the two fails 100% of the time. The
+# authoritative mapping is the `displayName` that `parse_cursor_catalog` records
+# for each selector; `requested_model_display_name` carries it when a caller has
+# the catalog to hand. Without one, the selector's own documented shape
+# (`<family>-<effort>[-fast]`, rendered as "<Family> <Effort Label>[ Fast]") is
+# enough to reconstruct the expected label, from the same table discovery uses.
+_CURSOR_SELECTOR_PATTERN = re.compile(
+    r"(?P<family>.+)-(?P<effort>none|low|medium|high|xhigh|max)(?P<fast>-fast)?$"
+)
+
+# Claude reports the fully dated served id, so every documented alias trips a
+# pinned run. The two evidenced equivalences are the dated suffix on a concrete
+# id and the family segment of a family alias. The unpinnable aliases
+# (`best`, `opusplan`, `default`) map to no single family and are deliberately
+# absent from CLAUDE_FAMILY_ALIASES: they fail pinned preflight.
+_CLAUDE_SERVED_FAMILY_PATTERN = re.compile(r"^claude-(?P<family>[a-z]+)-")
+
+
+def _label_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _cursor_expected_label_keys(requested: str) -> set[str]:
+    keys = {_label_key(requested)}
+    match = _CURSOR_SELECTOR_PATTERN.fullmatch(requested)
+    if match is not None:
+        label = CURSOR_EFFORT_LABELS[match.group("effort")]
+        suffix = "fast" if match.group("fast") else ""
+        keys.add(_label_key(match.group("family")) + _label_key(label) + suffix)
+    keys.discard("")
+    return keys
+
+
+def _cursor_pin_matches(requested: str, served: str, display_name: str | None) -> bool:
+    if display_name is not None and served == display_name:
+        return True
+    served_key = _label_key(served)
+    if not served_key:
+        return False
+    return served_key in _cursor_expected_label_keys(requested)
+
+
+def _claude_pin_matches(requested: str, served: str) -> bool:
+    # `opus[1m]` and `claude-opus-5[1m]` name a context-window variant of the
+    # same model, so the documented bracket suffix is stripped before comparing,
+    # by the same helper the request-build preflight uses.
+    base = claude_alias_base(requested).strip()
+    if not base:
+        return False
+    if served == base:
+        return True
+    if base.lower() in CLAUDE_FAMILY_ALIASES:
+        match = _CLAUDE_SERVED_FAMILY_PATTERN.match(served)
+        return match is not None and match.group("family") == base.lower()
+    return re.fullmatch(rf"{re.escape(base)}-\d{{8}}", served) is not None
+
+
+def served_model_matches_requested(
+    harness: str | None,
+    requested: str,
+    served: str,
+    *,
+    display_name: str | None = None,
+) -> bool:
+    """Is a served model id the pinned one, under this engine's own naming?
+
+    Exact identity always matches. Beyond that only engine-specific equivalences
+    evidenced against the vendor apply; there is deliberately no substring or
+    containment rule, which would accept a genuinely different model whose name
+    happens to embed the requested one.
+    """
+    if served == requested:
+        return True
+    if harness == "cursor":
+        return _cursor_pin_matches(requested, served, display_name)
+    if harness == "claude":
+        return _claude_pin_matches(requested, served)
+    return False
+
+
 def _normalize_terminal_status(value: JsonValue) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -420,18 +560,67 @@ def _normalize_terminal_status(value: JsonValue) -> str | None:
     return None
 
 
+def claude_result_text(payload: JsonObject) -> str | None:
+    """The answer text of a Claude `result` event, from either transport.
+
+    `structured_output` is the only surface the vendor documents for a
+    structured run; the same JSON is also echoed into the `result` string,
+    which delegate has been relying on without a commitment that it stays
+    there. Prefer the documented field and fall back to the string.
+
+    A PRESENT `structured_output` wins even when it is null, because on a
+    `--json-schema` run the field is the model's answer and `null` is a
+    representable one. `allow_nan=False` sends a non-serializable value to the
+    fallback rather than emitting invalid JSON.
+
+    Extraction only. `is_error` and the pure-mode permission-denial check are
+    separate questions and stay with their callers: a run can carry a perfectly
+    readable result and still have failed.
+    """
+    if "structured_output" in payload:
+        try:
+            return json.dumps(payload["structured_output"], allow_nan=False)
+        except (TypeError, ValueError):
+            pass
+    result = payload.get("result")
+    if isinstance(result, str) and result.strip():
+        return result
+    return None
+
+
 def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
     if not isinstance(value, dict):
         return None
     usage: JsonObject = {"basis": "reported"}
-    for camel_case, snake_case in (
-        ("inputTokens", "input_tokens"),
-        ("outputTokens", "output_tokens"),
-        ("cacheReadTokens", "cache_read_tokens"),
-        ("cacheWriteTokens", "cache_write_tokens"),
+    # Cursor uses the camelCase spellings; grok and codex spell the cache
+    # counters out in full and disagree with each other on the prefix.
+    for canonical, keys in (
+        ("inputTokens", ("inputTokens", "input_tokens")),
+        ("outputTokens", ("outputTokens", "output_tokens")),
+        (
+            "cacheReadTokens",
+            (
+                "cacheReadTokens",
+                "cache_read_tokens",
+                "cacheReadInputTokens",
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+            ),
+        ),
+        (
+            "cacheWriteTokens",
+            (
+                "cacheWriteTokens",
+                "cache_write_tokens",
+                "cacheCreationInputTokens",
+                "cache_creation_input_tokens",
+                "cache_write_input_tokens",
+            ),
+        ),
     ):
-        token_count = value.get(camel_case, value.get(snake_case))
-        usage[camel_case] = token_count if is_non_negative_int(token_count) else None
+        usage[canonical] = next(
+            (value[key] for key in keys if is_non_negative_int(value.get(key))), None
+        )
     return usage
 
 
@@ -439,6 +628,9 @@ def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
 class StreamAccumulator:
     harness: str | None = None
     requested_model: str | None = None
+    # The catalog `displayName` for `requested_model`, when the caller has the
+    # discovery catalog to hand. Only cursor reports a display name.
+    requested_model_display_name: str | None = None
     continuity_mode: str = "fungible"
     assistant_chunks: list[str] = field(default_factory=list)
     events: EventBuffer = field(default_factory=EventBuffer)
@@ -451,10 +643,12 @@ class StreamAccumulator:
     _last_substantive_assistant_text: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
+    _grok_sealed_response: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
     _last_error_message: str | None = field(default=None, repr=False)
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     _pi_text_buffer: str = field(default="", repr=False)
+    _pi_recovery_error: str | None = field(default=None, repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     provider_terminal_state: str | None = None
@@ -470,6 +664,11 @@ class StreamAccumulator:
     usage: JsonObject | None = None
     session_id: str | None = None
     structured_events_seen: int = 0
+    terminal_exit_armed: bool = True
+    malformed_lines: int = 0
+    malformed_samples: list[str] = field(default_factory=list)
+    unhandled_event_types: dict[str, int] = field(default_factory=dict)
+    unhandled_event_types_truncated: bool = False
 
     def _record_terminal_event(
         self,
@@ -477,13 +676,33 @@ class StreamAccumulator:
         event: str,
         status: str,
         reason: str | None = None,
+        arm_exit: bool = True,
     ) -> None:
+        """Record the terminal. `arm_exit` says whether the runner may stop the child.
+
+        The runner reads `terminal_exit_armed` alongside `terminal_status` and
+        SIGTERMs a child that has not exited within `TERMINAL_EXIT_GRACE_SEC` of
+        an armed terminal. A harness that still has work to do after announcing
+        its terminal passes False so its own exit is what ends the run.
+        """
         self.terminal_status = status
+        self.terminal_exit_armed = arm_exit
+        if status == "succeeded":
+            # The run got past whatever it reported. `_last_error_message` is the
+            # fallback reason for a terminal that carries none of its own, so
+            # leaving it set lets a later bodiless failure inherit an error the
+            # run already recovered from.
+            self._last_error_message = None
         payload: JsonObject = {"event": event, "status": status}
-        if reason:
-            _add_bounded_event_field(payload, "reason", reason)
+        # The reason is child-supplied text and both sinks below are persisted to
+        # the run record: `terminalEvent` directly and the `run.completed` event
+        # through `recentEvents`. Redact once and use the redacted text for both;
+        # a raw mirror of a credential-bearing message is a leak, not a diagnostic.
+        redacted = redact_string(reason) if reason else None
+        if redacted:
+            _add_bounded_event_field(payload, "reason", redacted)
         self.terminal_event = payload
-        self.events.append(NormalizedEvent(kind="run.completed", status=status, message=reason))
+        self.events.append(NormalizedEvent(kind="run.completed", status=status, message=redacted))
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -504,24 +723,48 @@ class StreamAccumulator:
             payload: JsonValue = json.loads(stripped)
         except RecursionError:
             # Kimi tool results can contain arbitrary command output. If an
-            # excessively nested envelope cannot be classified, dropping it is
-            # safer than exposing the raw line as a text event.
-            if self.harness in ("kimi", "opencode", "pi"):
+            # excessively nested envelope cannot be classified, exposing the raw
+            # line as a text event would let it become the answer.
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
-        except json.JSONDecodeError:
-            if self.harness in ("kimi", "opencode", "pi"):
+        except ValueError:
+            # The interpreter's integer-digit limit raises plain ValueError,
+            # not JSONDecodeError. Malformed child data must not kill the drain
+            # thread and hide a later valid completion.
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
         if not isinstance(payload, dict):
-            if self.harness in ("kimi", "opencode", "pi"):
+            if self.harness in MALFORMED_LINE_PROTECTED_HARNESSES:
+                self._record_malformed_line(stripped)
                 return
             self._ingest_text_fallback(stripped)
             return
         self.structured_events_seen += 1
         self._ingest_object(payload)
+
+    def _record_malformed_line(self, text: str) -> None:
+        """Keep a bounded, redacted trace of a stdout line that is not an event.
+
+        The line is never surfaced as assistant text, so the protection against
+        promoting a raw tool envelope to an answer is unchanged. The line is not
+        counted in `structured_events_seen`, which stays a count of parsed event
+        objects: a child whose whole stdout is plain text parsed no events, and
+        the runner must still be able to fall back to that raw stdout rather
+        than return an empty answer. Readers that want "the stream produced
+        something" read `malformed_lines` alongside it.
+        """
+        self.malformed_lines += 1
+        if len(self.malformed_samples) >= MALFORMED_SAMPLE_LIMIT:
+            return
+        sample = redact_string(text)[:MALFORMED_SAMPLE_CHARS]
+        self.malformed_samples.append(sample)
+        self.events.append(NormalizedEvent(kind="stream.malformed", message=sample))
 
     def _ingest_text_fallback(self, text: str) -> None:
         bounded, truncated, original_chars = bounded_event_text(text)
@@ -545,11 +788,21 @@ class StreamAccumulator:
         if self.continuity_violation is not None:
             return
         provider_terminal = _provider_terminal_state(payload, event_type)
+        # A provider terminal recorded for THIS event already published a
+        # run.completed; the generic error/result handlers below must not add a
+        # second one for the same line.
+        terminal_recorded = provider_terminal is not None
         if provider_terminal is not None:
             self.provider_terminal_state, self.provider_terminal_reason = provider_terminal
+            # A cancellation is its own terminal status, not a failure. The
+            # harness handlers that also see this line recorded `cancelled`
+            # after this call and so overwrote it; recording it correctly here
+            # is what lets those handlers stand down.
             self._record_terminal_event(
                 event=event_type,
-                status="failed",
+                status=(
+                    "cancelled" if self.provider_terminal_state == PROVIDER_CANCELLED else "failed"
+                ),
                 reason=self.provider_terminal_reason,
             )
         self._capture_session_id(payload, event_type)
@@ -567,10 +820,23 @@ class StreamAccumulator:
             self._ingest_grok_text(payload)
             return
         if event_type == "end" and self.harness == "grok":
-            self._ingest_grok_end(payload)
+            self._ingest_grok_end(payload, terminal_recorded=terminal_recorded)
             return
         if event_type == "error" and self.harness == "grok":
             self._ingest_grok_error(payload)
+            return
+        if self.harness == "grok" and event_type == "usage":
+            # grok emits exactly one terminal `end` per run; `usage` is the
+            # documented per-response boundary. Sealing here is what keeps a
+            # tool preamble out of the delivered answer.
+            self._seal_grok_response()
+            return
+        if self.harness == "grok" and event_type == "tool_call_update":
+            self._ingest_grok_tool_update(payload)
+            return
+        if self.harness == "grok" and event_type in _MAX_TURNS_EVENT_TYPES:
+            # Already recorded as a provider max-turns terminal above; this
+            # branch only keeps it out of the unhandled-type tally.
             return
         if event_type == "error":
             # Codex --json emits {"type":"error","message":...} on stdout for
@@ -578,6 +844,23 @@ class StreamAccumulator:
             # profile-failover classifier and the synthesized completion report
             # both read it from the accumulator.
             self._ingest_error_event(payload)
+            # Text sealed before the error is pre-error output, not the turn's
+            # answer. Dropping the candidate is what stops `turn.completed` from
+            # promoting a preamble over the top of the failure.
+            self._codex_completion_candidate = None
+            if not terminal_recorded:
+                # An error event is a terminal signal, as the grok and pi
+                # handlers already treat it. Without this a child that errors
+                # and still exits 0 promotes its pre-error preamble as a clean
+                # completion report.
+                self._record_terminal_event(
+                    event=event_type,
+                    status="failed",
+                    reason=self._terminal_error_reason(payload),
+                )
+            return
+        if event_type == "goal.summary" and self.harness == "kimi":
+            self._ingest_kimi_goal_summary(payload)
             return
         if event_type == "tool_result":
             return
@@ -591,6 +874,10 @@ class StreamAccumulator:
             self._ingest_message(payload)
             return
         if event_type == "tool_call":
+            if self.harness == "cursor":
+                # Cursor's type is dotless; the phase rides on `subtype`.
+                self._ingest_cursor_tool(payload, _string_field(payload, "subtype") or "started")
+                return
             self._ingest_tool_call(payload)
             return
         if event_type == "completion":
@@ -606,10 +893,10 @@ class StreamAccumulator:
             self._ingest_user_event(payload)
             return
         if event_type in ("tool_call.started", "tool_call.completed"):
-            self._ingest_cursor_tool(payload, event_type)
+            self._ingest_cursor_tool(payload, event_type.rsplit(".", 1)[1])
             return
         if event_type == "result":
-            self._ingest_result_event(payload)
+            self._ingest_result_event(payload, terminal_recorded=terminal_recorded)
             return
         if event_type in ("turn.failed", "turn.error"):
             self._record_terminal_event(
@@ -619,21 +906,39 @@ class StreamAccumulator:
             )
             return
         if event_type in ("turn.cancelled", "turn.canceled"):
-            self._record_terminal_event(event=event_type, status="cancelled")
+            # The provider-terminal table classifies this event type as
+            # `provider_cancelled` and has already published a run.completed for
+            # it, exactly as it does for `error` and `result`.
+            if not terminal_recorded:
+                self._record_terminal_event(event=event_type, status="cancelled")
             return
         if event_type in ("item.started", "item.completed"):
             self._ingest_codex_item(payload, completed=event_type == "item.completed")
             return
         if event_type == "turn.completed":
-            self._ingest_codex_turn_completed()
+            self._ingest_codex_turn_completed(payload)
             return
         if event_type == "turn.started":
             self._codex_completion_candidate = None
             return
-        # Anything else with a "type" is intentionally dropped here. That
-        # includes kimi 0.26.0 meta lines such as
-        # {"role":"meta","type":"session.resume_hint",...}, which carry no
-        # assistant text, tool activity, or terminal signal worth normalizing.
+        # Anything else with a "type" reached no handler. That includes benign
+        # lines such as kimi 0.26.0's {"role":"meta","type":"session.resume_hint"},
+        # and it also includes whatever a vendor adds next, so it is counted
+        # rather than dropped in silence.
+        self._record_unhandled_event_type(event_type)
+
+    def _record_unhandled_event_type(self, event_type: str) -> None:
+        name = event_type.strip()
+        if not name or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            return
+        name = name[:UNHANDLED_EVENT_TYPE_CHARS]
+        if name in self.unhandled_event_types:
+            self.unhandled_event_types[name] += 1
+            return
+        if len(self.unhandled_event_types) >= UNHANDLED_EVENT_TYPE_LIMIT:
+            self.unhandled_event_types_truncated = True
+            return
+        self.unhandled_event_types[name] = 1
 
     def _observe_model(self, payload: JsonObject, event_type: str) -> None:
         model = _served_model(payload)
@@ -659,7 +964,12 @@ class StreamAccumulator:
                 self.continuity_mode == "pinned"
                 and isinstance(requested, str)
                 and requested
-                and model != requested
+                and not served_model_matches_requested(
+                    self.harness,
+                    requested,
+                    model,
+                    display_name=self.requested_model_display_name,
+                )
             ):
                 self.continuity_violation = {
                     "reason": "served_model_mismatch",
@@ -711,6 +1021,8 @@ class StreamAccumulator:
                 candidate = payload.get("chat_id", payload.get("chatId"))
         elif self.harness == "omp" and event_type == "session":
             candidate = payload.get("id")
+        elif self.harness == "grok" and event_type == "end":
+            candidate = payload.get("sessionId")
         if (
             isinstance(candidate, str)
             and candidate
@@ -722,9 +1034,19 @@ class StreamAccumulator:
             self.session_id = candidate
 
     def _ingest_error_event(self, payload: JsonObject) -> None:
-        message = payload.get("message")
-        if isinstance(message, str) and message.strip():
-            self._last_error_message = message.strip()
+        # Anthropic- and OpenAI-shaped errors nest the text under `error`; codex
+        # and grok put it at the top level. `_terminal_error_reason` already read
+        # both, so reading only the top level here dropped the whole event.
+        message = _string_field(payload, "message")
+        if message is None:
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = _string_field(error, "message")
+        if message:
+            # Redact at the source: `_last_error_message` feeds the terminal
+            # reason, the failover classifier and the synthesized completion
+            # report, and both the `error` event and `current` are persisted.
+            self._last_error_message = redact_string(message)
             self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
             self.current = _bounded_current_line(self._last_error_message)
 
@@ -815,6 +1137,30 @@ class StreamAccumulator:
                 )
             )
             self.current = _tool_current(tool, target)
+
+    def _ingest_kimi_goal_summary(self, payload: JsonObject) -> None:
+        """Preserve the only accounting a Kimi `/goal` run ever emits.
+
+        A `/goal` prompt in print mode exits 0 on `complete`, 3 on `blocked` and
+        6 on `paused`, and writes one extra `goal.summary` line. The line has a
+        `type` but no `role`, so it fell through every branch: a paused goal was
+        published as a bare non-zero failure with no reason at all.
+        """
+        status = _string_field(payload, "status")
+        parts: list[str] = []
+        if status:
+            parts.append(f"status={status}")
+        if reason := _string_field(payload, "reason"):
+            parts.append(f"reason={reason}")
+        for key, label in (("turnsUsed", "turns"), ("tokensUsed", "tokens")):
+            value = payload.get(key)
+            if is_non_negative_int(value):
+                parts.append(f"{label}={value}")
+        self._record_terminal_event(
+            event="kimi.goal_summary",
+            status="succeeded" if status == "complete" else "failed",
+            reason=" ".join(parts) or None,
+        )
 
     def _ingest_kimi_tool_result(self, payload: JsonObject) -> None:
         tool_id = _string_field(payload, "tool_call_id")
@@ -930,18 +1276,35 @@ class StreamAccumulator:
         if isinstance(final_text, str) and final_text.strip():
             self._record_successful_completion_text(final_text)
 
-    def _ingest_result_event(self, payload: JsonObject) -> None:
+    def _ingest_result_event(self, payload: JsonObject, *, terminal_recorded: bool = False) -> None:
         if self.harness == "cursor":
             usage = _normalize_reported_usage(payload.get("usage"))
             if usage is not None:
                 self.usage = usage
-        result = payload.get("result")
-        if isinstance(result, str) and result.strip():
-            if payload.get("is_error") is True:
-                self._record_terminal_event(event="result", status="failed")
+        result = claude_result_text(payload)
+        if result is not None:
+            # `terminal_recorded` means the provider-terminal table classified
+            # this same line as a refusal, cancellation or truncation. Its text
+            # is then a partial answer, not the answer, and promoting it would
+            # overwrite that terminal with `succeeded`. `error_max_turns` is the
+            # live case: it carries partial text and often omits `is_error`.
+            if payload.get("is_error") is True or terminal_recorded:
+                if not terminal_recorded:
+                    self._record_terminal_event(event="result", status="failed")
                 self._record_recoverable_assistant_text(result)
                 return
             self._record_successful_completion_text(result)
+            return
+        if payload.get("is_error") is True and not terminal_recorded:
+            # `error_during_execution`, `error_api` and any unlisted subtype
+            # arrive with no string `result`. Only `error_max_turns` is rescued
+            # upstream by the provider-terminal table, so without this the whole
+            # event -- terminal, reason and all -- was dropped.
+            self._record_terminal_event(
+                event="result",
+                status="failed",
+                reason=_string_field(payload, "subtype"),
+            )
 
     def _ingest_codex_item(self, payload: JsonObject, *, completed: bool) -> None:
         item = payload.get("item")
@@ -958,6 +1321,13 @@ class StreamAccumulator:
             else:
                 self._codex_completion_candidate = None
             return
+        # Every other item type is activity, not the turn's answer: an
+        # `agent_message` followed by one is preamble. `apply_patch` surfaces as
+        # `file_change`, and there are also `mcp_tool_call`, `collab_tool_call`,
+        # `web_search`, `todo_list`, `reasoning` and `error` items, so clearing
+        # only on `command_execution` let a run that ended in a patch or a
+        # search promote its "I'll start by..." intro as the completion report.
+        self._codex_completion_candidate = None
         if item_type == "command_execution":
             self._ingest_codex_command_execution(item, completed=completed)
 
@@ -965,12 +1335,6 @@ class StreamAccumulator:
         command = _string_field(item, "command")
         status = _codex_command_status(_string_field(item, "status"), completed=completed)
         kind = "tool.completed" if completed else "tool.started"
-        # Clear the completion candidate: an agent_message followed by a command is
-        # preamble/progress, not the turn's final answer. Only a message emitted
-        # after the last tool activity (then sealed by turn.completed) is promoted,
-        # which is the shape real Codex runs produce. Promoting a pre-command
-        # message would surface an intro line ("I'll start by…") as the report.
-        self._codex_completion_candidate = None
         self.events.append(
             NormalizedEvent(
                 kind=kind,
@@ -981,9 +1345,23 @@ class StreamAccumulator:
         )
         self.current = _tool_current("command_execution", command)
 
-    def _ingest_codex_turn_completed(self) -> None:
-        if self._codex_completion_candidate:
-            self.completion_text = self._codex_completion_candidate
+    def _ingest_codex_turn_completed(self, payload: JsonObject) -> None:
+        usage = _normalize_reported_usage(payload.get("usage"))
+        if usage is not None:
+            self.usage = usage
+        if not self._codex_completion_candidate:
+            return
+        self.completion_text = self._codex_completion_candidate
+        # `turn.completed` sealing a fresh agent message is codex's success
+        # terminal. Recording it is what lets a run that errored and then
+        # recovered end clean, while a turn with nothing left to seal keeps
+        # whatever failure the stream already reported.
+        #
+        # It does not arm the terminal-exit kill. codex keeps working after the
+        # turn is announced -- the rollout flush and, on a `--resumable` run,
+        # finalizing the session file -- and putting that on a one-second clock
+        # would truncate it. The natural exit ends the run instead.
+        self._record_terminal_event(event="turn.completed", status="succeeded", arm_exit=False)
 
     def _ingest_grok_text(self, payload: JsonObject) -> None:
         data = payload.get("data")
@@ -997,50 +1375,65 @@ class StreamAccumulator:
         self.current = _bounded_current_line(self._grok_current_line.strip())
         self._invalidate_assistant_text_cache()
 
-    def _ingest_grok_end(self, payload: JsonObject) -> None:
+    def _grok_live_text(self) -> str:
+        """The current response: the open buffer, else the last sealed one."""
+        return self._grok_text_buffer.strip() or self._grok_sealed_response
+
+    def _seal_grok_response(self) -> None:
         text = self._grok_text_buffer.strip()
+        if text:
+            self._grok_sealed_response = text
         self._grok_text_buffer = ""
         self._grok_current_line = ""
         self._invalidate_assistant_text_cache()
-        if text:
-            # The thought/text/end stream shape and the "EndTurn" success spelling
-            # are validated against grok 0.2.73; non-success stopReason spellings
-            # (MaxTokens/Refusal/etc.) are best-effort, so classification is
-            # conservative — anything not recognized as success stays recoverable.
-            stop_reason = payload.get("stopReason")
-            terminal_status = _normalize_terminal_status(stop_reason)
-            if _grok_stop_reason_succeeded(stop_reason):
+
+    def _take_grok_text(self) -> str:
+        text = self._grok_live_text()
+        self._grok_text_buffer = ""
+        self._grok_sealed_response = ""
+        self._grok_current_line = ""
+        self._invalidate_assistant_text_cache()
+        return text
+
+    def _ingest_grok_end(self, payload: JsonObject, *, terminal_recorded: bool = False) -> None:
+        text = self._take_grok_text()
+        usage = _normalize_reported_usage(payload.get("usage"))
+        if usage is not None:
+            cost = payload.get("total_cost_usd")
+            if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+                usage["costUsd"] = float(cost)
+            self.usage = usage
+        # The event shape, the single terminal `end`, and the snake_case
+        # stopReason vocabulary (end_turn, max_tokens, max_turn_requests,
+        # refusal, cancelled) are validated against grok 1.0.13. The 0.2.73
+        # CamelCase spellings normalize onto the same tokens.
+        stop_reason = payload.get("stopReason")
+        reason = stop_reason if isinstance(stop_reason, str) else None
+        # Every truncation reason grok emits is in `_PROVIDER_MAX_TURNS_CODES`,
+        # so the provider-terminal table has already recorded the terminal by
+        # the time this runs. What is left here is the ordinary vocabulary.
+        terminal_status = _normalize_terminal_status(stop_reason)
+        if _grok_stop_reason_succeeded(stop_reason):
+            if text:
                 self._record_successful_completion_text(text)
-            elif terminal_status in {"cancelled", "failed"}:
-                self._record_terminal_event(
-                    event="grok.end",
-                    status=terminal_status,
-                    reason=stop_reason if isinstance(stop_reason, str) else None,
-                )
-                self._record_recoverable_assistant_text(text)
             else:
-                self._record_recoverable_assistant_text(text)
-        elif _grok_stop_reason_succeeded(payload.get("stopReason")):
-            self._record_terminal_event(event="grok.end", status="succeeded")
-        else:
-            terminal_status = _normalize_terminal_status(payload.get("stopReason"))
-            if terminal_status in {"cancelled", "failed"}:
-                reason = payload.get("stopReason")
-                self._record_terminal_event(
-                    event="grok.end",
-                    status=terminal_status,
-                    reason=reason if isinstance(reason, str) else None,
-                )
+                self._record_terminal_event(event="grok.end", status="succeeded")
+            return
+        if terminal_status in {"cancelled", "failed"} and not terminal_recorded:
+            # A cancelled or refused stop reason is already in the
+            # provider-terminal table, which published a run.completed for this
+            # same line before the handler ran. Recording a second one left the
+            # event stream claiming the run both failed and was cancelled.
+            self._record_terminal_event(event="grok.end", status=terminal_status, reason=reason)
+        if text:
+            self._record_recoverable_assistant_text(text)
 
     def _ingest_grok_error(self, payload: JsonObject) -> None:
         # Grok streaming-json emits {"type":"error","message":...} on failure and
         # then exits nonzero, so the runner already marks the run failed via exit
         # code. Surface the message (plus any partial buffered text) as recoverable
         # assistant text so it lands in the snapshot instead of being dropped.
-        partial = self._grok_text_buffer.strip()
-        self._grok_text_buffer = ""
-        self._grok_current_line = ""
-        self._invalidate_assistant_text_cache()
+        partial = self._take_grok_text()
         if partial:
             self._record_recoverable_assistant_text(partial)
         message = payload.get("message")
@@ -1067,6 +1460,7 @@ class StreamAccumulator:
             return
         part = payload.get("part")
         if not isinstance(part, dict):
+            self._record_unhandled_event_type(_opencode_unhandled_key(event_type, payload))
             return
         part_type = part.get("type")
         if event_type == "step_start" and part_type == "step-start":
@@ -1080,6 +1474,8 @@ class StreamAccumulator:
             return
         if event_type == "step_finish" and part_type == "step-finish":
             self._ingest_opencode_step_finish(part)
+            return
+        self._record_unhandled_event_type(_opencode_unhandled_key(event_type, payload))
 
     def _ingest_opencode_text(self, part: JsonObject) -> None:
         text = part.get("text")
@@ -1104,7 +1500,7 @@ class StreamAccumulator:
         # continues as ordinary text with exit 0. Do not infer denial here.
         tool = _string_field(part, "tool") or "tool"
         state = part.get("state")
-        status = _opencode_tool_status(state.get("status") if isinstance(state, dict) else None)
+        status = _completed_tool_status(state.get("status") if isinstance(state, dict) else None)
         target = _opencode_tool_target(part)
         self.events.append(
             NormalizedEvent(
@@ -1172,8 +1568,45 @@ class StreamAccumulator:
         self._invalidate_assistant_text_cache()
 
     def _ingest_pi_event(self, payload: JsonObject, event_type: str) -> None:
+        if event_type == "auto_retry_start":
+            self._clear_pi_terminal()
+            self._pi_recovery_error = (
+                _string_field(payload, "errorMessage")
+                or self._pi_recovery_error
+                or self._last_error_message
+                or "Provider retry ended without a terminal result."
+            )
+            self.completion_text = None
+            return
+        if event_type in _PI_COMPACTION_START_TYPES:
+            if (
+                self.terminal_status in {"failed", "cancelled"}
+                or self._pi_recovery_error is not None
+            ):
+                self._clear_pi_terminal()
+                self.completion_text = None
+            return
+        if event_type == "auto_retry_end" or event_type in _PI_COMPACTION_END_TYPES:
+            failed = (
+                payload.get("success") is False
+                if event_type == "auto_retry_end"
+                else _pi_compaction_failed(payload, self._pi_recovery_error, self.terminal_status)
+            )
+            if failed:
+                reason = (
+                    _string_field(payload, "finalError", "errorMessage")
+                    or self._pi_recovery_error
+                    or "Provider recovery failed."
+                )
+                self._pi_recovery_error = reason
+                self._ingest_error_event({"message": reason})
+                self._record_terminal_event(
+                    event=f"{self.harness}.{event_type}", status="failed", reason=reason
+                )
+            return
         if event_type == "turn_start":
             self._reset_pi_turn_text()
+            self._clear_pi_terminal()
             return
         if event_type == "message_update":
             update = payload.get("assistantMessageEvent")
@@ -1201,17 +1634,74 @@ class StreamAccumulator:
                 if isinstance(message, dict)
                 else payload.get("stopReason")
             )
-            if role != "assistant" or stop_reason != "stop":
+            if role != "assistant":
                 return
-            if isinstance(message, dict):
-                text = _extract_text(message.get("content"))
-                if text:
-                    self._publish_pi_text(text, completion=True)
-            self._record_terminal_event(event=f"{self.harness}.turn_end", status="succeeded")
+            error_status = message.get("errorStatus")
+            http_error = (
+                isinstance(error_status, int)
+                and not isinstance(error_status, bool)
+                and error_status >= 400
+            )
+            if stop_reason not in _PI_TERMINAL_STOP_REASONS and not http_error:
+                return
+            status = (
+                "cancelled"
+                if stop_reason == "aborted"
+                else "succeeded"
+                if stop_reason == "stop" and not http_error
+                else "failed"
+            )
+            text = _extract_text(message.get("content"))
+            if text:
+                self._publish_pi_text(text, completion=status == "succeeded")
+            reason = None
+            if status != "succeeded":
+                self.completion_text = None
+                reason = (
+                    _string_field(message, "errorMessage") or f"Provider stopped: {stop_reason}"
+                )
+                self._ingest_error_event({"message": reason})
+            self._pi_recovery_error = reason
+            self._record_terminal_event(
+                event=f"{self.harness}.turn_end", status=status, reason=reason
+            )
             return
         if event_type == "error":
             self._ingest_error_event(payload)
             self._record_terminal_event(event=f"{self.harness}.error", status="failed")
+            return
+        if event_type == "notice":
+            if _string_field(payload, "level") == "error":
+                # A session-layer error notice is not a terminal on its own, but
+                # its text is what the failover classifier and the synthesized
+                # completion report read out of the accumulator.
+                self._ingest_error_event(payload)
+            return
+        self._record_unhandled_event_type(event_type)
+
+    def _clear_pi_terminal(self) -> None:
+        # A new turn/compaction suspends terminal shutdown, not the obligation
+        # to recover from an observed failure before an exit-zero EOF.
+        if self.terminal_status in {"failed", "cancelled"}:
+            self._pi_recovery_error = (
+                _string_field(self.terminal_event or {}, "reason")
+                or self._last_error_message
+                or "Provider recovery ended without a successful terminal result."
+            )
+        self.terminal_status = None
+        self.terminal_event = None
+        self.terminal_exit_armed = True
+        self.provider_terminal_state = None
+        self.provider_terminal_reason = None
+
+    def finish_stream(self) -> None:
+        """An interrupted harness recovery cannot turn an exit-zero child into success."""
+        if self._pi_recovery_error is not None and self.terminal_status is None:
+            self._record_terminal_event(
+                event=f"{self.harness}.recovery_incomplete",
+                status="failed",
+                reason=self._pi_recovery_error,
+            )
 
     def _ingest_pi_tool(self, payload: JsonObject, *, completed: bool) -> None:
         tool = _string_field(payload, "toolName") or "tool"
@@ -1234,22 +1724,75 @@ class StreamAccumulator:
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
-        kind = "tool.started"
+        tool_id = _string_field(payload, "toolCallId", "call_id", "id")
+        if tool_id:
+            # grok resolves the call later on a `tool_call_update` that carries
+            # only the id, so the name and target have to be remembered here.
+            self._pending_tool_uses[tool_id] = (tool, target)
         self.events.append(
-            NormalizedEvent(kind=kind, tool=tool, target=target, path=target),
+            NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target),
         )
         self.current = _tool_current(tool, target)
 
-    def _ingest_cursor_tool(self, payload: JsonObject, event_type: str) -> None:
+    def _ingest_grok_tool_update(self, payload: JsonObject) -> None:
+        status = _string_field(payload, "status")
+        if status is None:
+            # grok emits a first update with `status: null` carrying only
+            # `locations`. The tool has not resolved, so nothing completes.
+            return
+        tool_id = _string_field(payload, "toolCallId")
+        tool, target = (
+            self._pending_tool_uses.pop(tool_id, (None, None)) if tool_id else (None, None)
+        )
+        tool = tool or "tool"
+        if target is None:
+            target = _grok_update_target(payload)
+        self.events.append(
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=_completed_tool_status(status),
+            )
+        )
+        self.current = _tool_current(tool, target)
+
+    def _ingest_cursor_tool(self, payload: JsonObject, subtype: str) -> None:
         tool_call = payload.get("tool_call")
         if not isinstance(tool_call, dict):
             return
-        tool = _string_field(tool_call, "name", "tool") or "tool"
-        target = _tool_target(tool_call)
-        kind = "tool.completed" if event_type.endswith("completed") else "tool.started"
-        status = "success" if kind == "tool.completed" else None
+        named = _cursor_tool_body(tool_call)
+        if named is None:
+            tool = _string_field(tool_call, "name", "tool") or "tool"
+            body = tool_call
+        else:
+            tool, body = named
+        target = _tool_target(body) or _tool_target(tool_call)
+        call_id = _string_field(payload, "call_id") or _string_field(tool_call, "toolCallId")
+        completed = subtype == "completed"
+        if not completed:
+            if call_id:
+                self._pending_tool_uses[call_id] = (tool, target)
+            self.events.append(
+                NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target)
+            )
+            self.current = _tool_current(tool, target)
+            return
+        pending_tool, pending_target = (
+            self._pending_tool_uses.pop(call_id, (None, None)) if call_id else (None, None)
+        )
+        if named is None and pending_tool:
+            tool = pending_tool
+        target = target or pending_target
         self.events.append(
-            NormalizedEvent(kind=kind, tool=tool, target=target, path=target, status=status),
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=_cursor_tool_status(body),
+            )
         )
         self.current = _tool_current(tool, target)
 
@@ -1268,7 +1811,7 @@ class StreamAccumulator:
     def assistant_text(self) -> str:
         if self._assistant_text_cache is None:
             base = "\n\n".join(chunk for chunk in self.assistant_chunks if chunk).strip()
-            grok = self._grok_text_buffer.strip()
+            grok = self._grok_live_text()
             if grok:
                 base = f"{base}\n\n{grok}" if base else grok
             self._assistant_text_cache = base
@@ -1306,7 +1849,7 @@ class StreamAccumulator:
         return self._last_recoverable_assistant_text
 
     def _refresh_grok_recovery_text(self) -> None:
-        text = self._grok_text_buffer.strip()
+        text = self._grok_live_text()
         if not text:
             return
         self._last_recoverable_assistant_text = text
@@ -1320,6 +1863,29 @@ class StreamAccumulator:
         if not text:
             return None
         return assistant_recovery_quality_for_text(text)
+
+    def stream_diagnostics(self) -> JsonObject:
+        """What this run's stdout contained that the parser could not use.
+
+        A malformed line and an unrecognized event type are both survivable —
+        the run keeps its text and its terminal — but both mean delegate read
+        the child's stdout with a parser the vendor has moved past, and neither
+        was visible anywhere a reader looks. They are reported together or not
+        at all, so a consumer that sees a count also sees the samples behind it,
+        and an empty block is the positive statement that the stream was clean.
+        """
+        if not (
+            self.malformed_lines
+            or self.unhandled_event_types
+            or self.unhandled_event_types_truncated
+        ):
+            return {}
+        return {
+            "malformedLines": self.malformed_lines,
+            "malformedSamples": list(self.malformed_samples),
+            "unhandledEventTypes": dict(self.unhandled_event_types),
+            "unhandledEventTypesTruncated": self.unhandled_event_types_truncated,
+        }
 
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]
@@ -1340,6 +1906,28 @@ class StreamAccumulator:
             "eventsOmittedMiddle": max(omitted, 0),
         }
         return serialized, meta
+
+
+def _pi_compaction_failed(
+    payload: JsonObject, recovery_error: str | None, terminal_status: str | None
+) -> bool:
+    """Did a compaction end in a way the run cannot come back from?
+
+    An abort with no retry queued is terminal on its own: pi's `--mode json`
+    exits 0 regardless, so an unclassified abort is published as a success.
+    Requiring a preceding provider error, as this once did, made the guard dead
+    for exactly the case it was written for.
+
+    Three things are not failures: an abort that will retry, a plain successful
+    compaction, and an abort that lands after a turn has already sealed a
+    successful answer. Compaction is context housekeeping, and housekeeping
+    cannot retract a delivered result.
+    """
+    aborted = payload.get("aborted") is True
+    will_retry = payload.get("willRetry")
+    if aborted and will_retry is not True and terminal_status != "succeeded":
+        return True
+    return recovery_error is not None and (aborted or will_retry is False)
 
 
 def _extract_text(content: JsonValue) -> str:
@@ -1373,6 +1961,30 @@ def _grok_stop_reason_succeeded(value: JsonValue) -> bool:
     return normalized in {"endturn", "stop", "complete", "done"}
 
 
+# opencode dispatches on the (`type`, `part.type`) pair, so a known `type` can
+# still go unhandled because the part shape changed. These are the `type` halves
+# that have a handler.
+_OPENCODE_PAIRED_EVENT_TYPES = frozenset({"step_start", "text", "tool_use", "step_finish"})
+
+
+def _opencode_unhandled_key(event_type: str, payload: JsonObject) -> str:
+    """Name the half of the pair that did not match.
+
+    Filing a known `type` under its own name reports a handled type as
+    unhandled and hides which half of the pair changed, so a known type is
+    keyed with the part type it actually arrived with.
+    """
+    if event_type not in _OPENCODE_PAIRED_EVENT_TYPES:
+        return event_type
+    part = payload.get("part")
+    if not isinstance(part, dict):
+        return f"{event_type}/<no part>"
+    part_type = part.get("type")
+    if not isinstance(part_type, str) or not part_type.strip():
+        return f"{event_type}/<no part.type>"
+    return f"{event_type}/{part_type.strip()}"
+
+
 def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if not completed:
         return status
@@ -1381,13 +1993,62 @@ def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     return status
 
 
-def _opencode_tool_status(status: JsonValue) -> str | None:
+# Cursor names the tool by the KEY of the single `*ToolCall` member of
+# `tool_call` -- `readToolCall`, `writeToolCall` -- with its arguments nested
+# one level inside under `args`. There is no `name` field to read.
+_CURSOR_TOOL_KEY_SUFFIX = "ToolCall"
+
+
+def _cursor_tool_body(tool_call: JsonObject) -> tuple[str, JsonObject] | None:
+    for key, value in tool_call.items():
+        if (
+            key.endswith(_CURSOR_TOOL_KEY_SUFFIX)
+            and len(key) > len(_CURSOR_TOOL_KEY_SUFFIX)
+            and isinstance(value, dict)
+        ):
+            return key[: -len(_CURSOR_TOOL_KEY_SUFFIX)], value
+    return None
+
+
+def _cursor_tool_status(body: JsonObject) -> str | None:
+    """Read the outcome Cursor reports, rather than assuming a success.
+
+    A completed call carries `result: {"success": {...}}` or an error member.
+    An unrecognized result shape leaves the status unknown; an unknown outcome
+    is not a good one.
+    """
+    result = body.get("result")
+    if not isinstance(result, dict):
+        return None
+    if "success" in result:
+        return "success"
+    if result.keys() & {"error", "failure", "failed"}:
+        return "error"
+    return None
+
+
+def _completed_tool_status(status: JsonValue) -> str | None:
+    """Normalize a harness's completed-tool status onto delegate's vocabulary.
+
+    An unrecognized status is passed through rather than invented into a
+    success: an unknown outcome is not a good one.
+    """
     if not isinstance(status, str) or not status.strip():
         return None
     stripped = status.strip()
     if stripped == "completed":
         return "success"
     return stripped
+
+
+def _grok_update_target(payload: JsonObject) -> str | None:
+    locations = payload.get("locations")
+    if not isinstance(locations, list):
+        return None
+    for location in locations:
+        if isinstance(location, dict) and (path := _string_field(location, "path")):
+            return path
+    return None
 
 
 def _opencode_tool_target(part: JsonObject) -> str | None:
@@ -1433,15 +2094,23 @@ def _kimi_tool_target(arguments: JsonValue) -> str | None:
     return _tool_use_target({"input": arguments})
 
 
+# grok puts tool arguments under `rawInput` and names a file `target_file`
+# (ACP leaf naming); cursor and the generic shape use `args` with `path`.
+_TOOL_TARGET_KEYS = ("path", "file", "command", "target", "target_file", "uri")
+_TOOL_ARGUMENT_CONTAINERS = ("args", "rawInput")
+
+
 def _tool_target(payload: JsonObject) -> str | None:
-    for key in ("path", "file", "command", "target", "uri"):
+    for key in _TOOL_TARGET_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    args = payload.get("args")
-    if isinstance(args, dict):
-        for key in ("path", "file", "command", "target"):
-            value = args.get(key)
+    for container in _TOOL_ARGUMENT_CONTAINERS:
+        arguments = payload.get(container)
+        if not isinstance(arguments, dict):
+            continue
+        for key in _TOOL_TARGET_KEYS:
+            value = arguments.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None

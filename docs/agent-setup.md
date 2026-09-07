@@ -31,7 +31,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 3. Install and authenticate the child runtimes you plan to use:
 
    ```bash
-   command -v agent || echo "Cursor Agent CLI missing"
+   cursor-agent --version || echo "Cursor Agent CLI missing"
    command -v droid || echo "Factory Droid CLI missing"
    command -v codex || echo "Codex CLI missing"
    command -v claude || echo "Claude Code CLI missing"
@@ -136,7 +136,7 @@ and the [security model](security-model.md#zero-copy-safe-isolation-linux-isolat
    delegate --json dry-run pi safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run omp safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
-   delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
+   delegate --json dry-run droid safe --model reviewer "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
@@ -253,7 +253,7 @@ where needed:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests -t .
+python3 -m pytest -q
 ```
 
 Real runtime authentication is only required for integration smoke tests that intentionally launch a child agent.

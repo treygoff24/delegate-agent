@@ -255,7 +255,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         config_path: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self.write_fake_binaries(include_completion=include_completion)
-        args = [*(global_args or []), "droid", "minimax", "safe", prompt]
+        args = [*(global_args or []), "droid", "safe", "--model", "minimax", prompt]
         return self.run_cli(args, config_path=config_path, fake_exit=fake_exit)
 
     def lookup_run(self, alias: str) -> tuple[str, Path]:
@@ -269,13 +269,13 @@ class EndToEndTrackingTests(unittest.TestCase):
         for name in (
             "manifest.json",
             "state.json",
-            "snapshot.json",
             "stdout.log",
             "stderr.log",
             "events.jsonl",
         ):
             with self.subTest(file=name):
                 self.assertTrue((run_path / name).exists(), f"missing {name}")
+        self.assertFalse((run_path / "snapshot.json").exists())
         if expect_completion_report:
             self.assertTrue((run_path / "completion-report.md").exists())
         index = self.registry.load_index(self.registry_root)
@@ -343,8 +343,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "json e2e",
             ],
             text=True,
@@ -382,8 +383,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "json fail",
             ],
             text=True,
@@ -427,8 +429,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "silent work",
             ],
             text=True,
@@ -476,8 +479,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "--progress",
                 "silent work",
             ],
@@ -601,8 +605,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "droid",
-                "minimax",
                 "safe",
+                "--model",
+                "minimax",
                 "legacy",
             ],
             text=True,
@@ -728,7 +733,7 @@ class EndToEndTrackingTests(unittest.TestCase):
             path.write_text(secret_script, encoding="utf-8")
             path.chmod(0o755)
 
-        completed = self.run_cli(["droid", "minimax", "safe", "secret run"])
+        completed = self.run_cli(["droid", "safe", "--model", "minimax", "secret run"])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         alias = parse_alias_from_bounded_stdout(completed.stdout)
 
@@ -866,7 +871,9 @@ class EndToEndTrackingTests(unittest.TestCase):
 
     def test_pass_through_preserves_raw_output_without_tracked_run(self):
         self.write_fake_binaries(passthrough=True)
-        completed = self.run_cli(["--pass-through", "droid", "minimax", "safe", "legacy"])
+        completed = self.run_cli(
+            ["--pass-through", "droid", "safe", "--model", "minimax", "legacy"]
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("OUT:pass-through", completed.stdout)
         self.assertIn("ERR:pass-through", completed.stderr)
@@ -964,7 +971,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertIn("--prompt-file", recorded)
         self.assertIn("streaming-json", recorded)
         self.assert_registry_files(run_id)
-        snapshot_payload = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+        snapshot_payload = self.registry.load_run_snapshot(self.registry_root, run_id)
         self.assertEqual(snapshot_payload["harness"], "grok")
         self.assertIn("delegate grok fixture ok", snapshot_payload.get("assistantText", ""))
         report = self.run_cli(["run-output", alias, "--completion-report"])

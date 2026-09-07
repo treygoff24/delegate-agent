@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import run_registry as registry_api
 from tests.delegate_fixtures import seed_persistent_worktree_run, seed_plain_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,12 +111,12 @@ class WorktreeMgmtTestBase(unittest.TestCase):
 
     def _tag_run_group(self, repo_path: str, run_id: str, group: str) -> None:
         registry_root = self._registry_root(repo_path)
-        index = self.delegate.run_registry.load_index(registry_root)
+        index = registry_api.load_index(registry_root)
         entry = index["runs"][run_id]
         if isinstance(entry, dict):
             entry["group"] = group
-        self.delegate.run_registry.save_index(registry_root, index)
-        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+        registry_api.save_index(registry_root, index)
+        run_path = registry_api.run_directory(registry_root, run_id)
         for filename in ("manifest.json", "state.json", "snapshot.json"):
             path = run_path / filename
             if not path.exists():
@@ -123,7 +124,7 @@ class WorktreeMgmtTestBase(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 payload["group"] = group
-                self.delegate.run_registry.write_json_atomic(path, payload)
+                registry_api.write_json_atomic(path, payload)
 
     def _create_worktree_at(
         self,

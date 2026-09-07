@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import config as delegate_config
-from delegate_agent import mail, runner
+from delegate_agent import mail, run_registry, runner
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH
 from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
@@ -179,7 +179,7 @@ class MailPushGatingTests(CommandTestBase):
             self.assertEqual(
                 warning_events, [{"kind": runner.MAIL_PUSH_EVENT_KIND, "message": warning}]
             )
-            snapshot = json.loads((run_path / runner.SNAPSHOT_FILE).read_text())
+            snapshot = run_registry.load_run_snapshot(run_path.parent.parent, run_path.name)
             self.assertEqual(
                 [
                     event

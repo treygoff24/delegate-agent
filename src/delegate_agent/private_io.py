@@ -12,6 +12,42 @@ from pathlib import Path
 
 from delegate_agent.json_types import JsonObject, JsonValue
 
+
+def rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing any destination inode.
+
+    Linux renameat2(RENAME_NOREPLACE=1), documented by rename(2), and Darwin
+    renamex_np(RENAME_EXCL=4), declared in XNU bsd/sys/stdio.h. Unsupported
+    kernels/filesystems/libcs fail closed; ordinary rename is not a fallback.
+    """
+    import ctypes
+    import sys
+
+    old, new = os.fsencode(source), os.fsencode(destination)
+    if b"\0" in old or b"\0" in new:
+        raise ValueError("directory publication paths must not contain NUL")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
+        name = "renameat2"
+        types = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        arguments = (-100, old, -100, new, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        name = "renamex_np"
+        types = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        arguments = (old, new, 4)  # RENAME_EXCL
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace directory publication is unavailable")
+    try:
+        rename = getattr(libc, name)
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, f"{name} is unavailable; refusing ordinary rename") from exc
+    rename.argtypes = types
+    rename.restype = ctypes.c_int
+    if rename(*arguments) != 0:
+        error = ctypes.get_errno() or errno.EIO
+        raise OSError(error, os.strerror(error), os.fspath(destination))
+
+
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
@@ -216,6 +252,83 @@ def ensure_private_dir(path: Path) -> None:
             os.fchmod(fd, PRIVATE_DIR_MODE)
     finally:
         os.close(fd)
+
+
+def _ensure_owned_dir_fd(path: Path) -> int:
+    """Create/open one directory and return a no-follow, current-owner fd."""
+    parent_fd, name = _open_parent(path, create=True)
+    created = False
+    try:
+        try:
+            entry = os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
+            created = True
+            entry = os.lstat(name, dir_fd=parent_fd)
+        if stat.S_ISLNK(entry.st_mode):
+            raise OSError(errno.ELOOP, "private directory is a symlink", str(path))
+        if not stat.S_ISDIR(entry.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "private path is not a directory", str(path))
+        if hasattr(os, "geteuid") and entry.st_uid != os.geteuid():
+            raise PermissionError(errno.EPERM, "private directory has a foreign owner", str(path))
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            current = os.fstat(fd)
+            if hasattr(os, "geteuid") and current.st_uid != os.geteuid():
+                raise PermissionError(
+                    errno.EPERM, "private directory has a foreign owner", str(path)
+                )
+            if created and supports_private_modes():
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def ensure_owned_dir(path: Path) -> None:
+    """Create a missing owner-only directory; preserve an existing owned directory's mode."""
+    os.close(_ensure_owned_dir_fd(path))
+
+
+def ensure_private_owned_dir(path: Path) -> None:
+    """Create/harden one directory while refusing foreign ownership and symlinks."""
+    fd = _ensure_owned_dir_fd(path)
+    try:
+        if supports_private_modes():
+            os.fchmod(fd, PRIVATE_DIR_MODE)
+            if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
+                raise PermissionError(
+                    errno.EPERM, "private directory could not be hardened", str(path)
+                )
+    finally:
+        os.close(fd)
+
+
+def create_private_owned_dir(path: Path) -> None:
+    """Atomically create a new owner-only directory without following symlinks."""
+    parent_fd, name = _open_parent(path, create=False)
+    try:
+        os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            info = os.fstat(fd)
+            if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+                raise PermissionError(
+                    errno.EPERM, "private directory has a foreign owner", str(path)
+                )
+            if supports_private_modes():
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
+                    raise PermissionError(
+                        errno.EPERM, "private directory is not owner-only", str(path)
+                    )
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
 
 
 def ensure_private_file(path: Path) -> None:

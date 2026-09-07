@@ -6,6 +6,13 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import errors as errors_api
+from delegate_agent import isolation as isolation_api
+from delegate_agent import request_build as request_api
+from delegate_agent import request_models as request_types
+from delegate_agent import runner as runner_api
+from delegate_agent import safe_workspace as safe_api
 from tests.execution_test_base import GIT_TEST_IDENTITY, ExecutionTestBase, make_git_repo
 
 
@@ -68,8 +75,8 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 )
 
             payload = json.loads(stdout_buf.getvalue())
-            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
-            self.assertEqual(payload["exitCode"], self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(code, errors_api.EXIT_MISSING_BINARY)
+            self.assertEqual(payload["exitCode"], errors_api.EXIT_MISSING_BINARY)
             self.assertEqual(payload["error"], "missing_binary")
             self.assertEqual(payload["configPath"], str(config_path))
             self.assertEqual(payload["configKey"], "cursor.argvPrefix")
@@ -103,7 +110,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 )
 
             payload = json.loads(stdout_buf.getvalue())
-            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(code, errors_api.EXIT_MISSING_BINARY)
             self.assertEqual(payload["error"], "missing_binary")
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
             self.assertFalse((Path(repo.name) / ".delegate" / "runs").exists())
@@ -149,7 +156,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 )
 
             payload = json.loads(stdout_buf.getvalue())
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "dirty_source_workspace")
             self.assertIn("Submodule dirt cannot be synced", payload["message"])
             self.assertIn("'sub'", payload["message"])
@@ -176,7 +183,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 )
 
             payload = json.loads(stdout_buf.getvalue())
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(payload["error"], "missing_git_head")
             self.assertNotEqual(payload["error"], "missing_binary")
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
@@ -187,8 +194,8 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
     def test_persistent_worktree_non_git_fails_clearly(self):
         """Non-Git workspace with --isolation worktree fails before creating artifacts."""
         with tempfile.TemporaryDirectory() as non_git:
-            workspace = self.delegate.resolve_workspace(non_git)
-            request = self.delegate.Request(
+            workspace = request_api.resolve_workspace(non_git)
+            request = request_types.Request(
                 "cursor",
                 "work",
                 non_git,
@@ -196,7 +203,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 ["agent", "--workspace", non_git, "-p", "--trust", "hello"],
                 "composer-2.5",
                 workspace_kind="directory",
-                isolation_context=self.delegate.IsolationContext(
+                isolation_context=isolation_api.IsolationContext(
                     source_workspace=non_git,
                     effective_isolation="worktree",
                     isolation_mode="worktree",
@@ -204,11 +211,11 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                     preserved_workspace=True,
                 ),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
+            with self.assertRaises(errors_api.DelegateError) as ctx:
                 self.delegate.execute_request(
                     request,
                     json_mode=False,
-                    config=self.delegate.DEFAULT_CONFIG,
+                    config=config_api.embedded_default_config(),
                     pass_through=False,
                     completion_report_mode="markdown",
                     source_workspace=workspace,
@@ -223,15 +230,15 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         """Clean but unborn Git repo fails with missing_git_head."""
         repo = make_git_repo()  # no commits
         self.addCleanup(repo.cleanup)
-        workspace = self.delegate.resolve_workspace(repo.name)
-        isolation_context = self.delegate.IsolationContext(
+        workspace = request_api.resolve_workspace(repo.name)
+        isolation_context = isolation_api.IsolationContext(
             source_workspace=repo.name,
             effective_isolation="worktree",
             isolation_mode="worktree",
             isolation_lifecycle="persistent",
             preserved_workspace=True,
         )
-        request = self.delegate.Request(
+        request = request_types.Request(
             "cursor",
             "work",
             repo.name,
@@ -241,11 +248,11 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             workspace_kind="git",
             isolation_context=isolation_context,
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(errors_api.DelegateError) as ctx:
             self.delegate.execute_request(
                 request,
                 json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=config_api.embedded_default_config(),
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -259,18 +266,18 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
     def test_persistent_worktree_rejects_pass_through(self):
         """--pass-through with persistent worktree fails before creating artifacts."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        workspace = self.delegate.resolve_workspace(repo.name)
+        workspace = request_api.resolve_workspace(repo.name)
         request = self._make_persistent_worktree_request(
             "cursor",
             "work",
             repo.name,
-            self.delegate.DEFAULT_CONFIG,
+            config_api.embedded_default_config(),
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
+        with self.assertRaises(errors_api.DelegateError) as ctx:
             self.delegate.execute_request(
                 request,
                 json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
+                config=config_api.embedded_default_config(),
                 pass_through=True,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -288,9 +295,9 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         source_cursor_config = Path(repo.name) / ".cursor" / "cli.json"
         self.assertFalse(source_cursor_config.exists())
         self.assertEqual(
-            self.delegate.delegate_config.resolve_isolation(
+            config_api.resolve_isolation(
                 cli_value="none",
-                loaded_config=self.delegate.DEFAULT_CONFIG,
+                loaded_config=config_api.embedded_default_config(),
                 engine="cursor",
                 mode="safe",
             ),
@@ -304,7 +311,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
     def test_safe_isolated_request_preserves_request_metadata(self):
         """Temporary safe isolation must not shift Request dataclass fields."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        isolation_context = self.delegate.IsolationContext(
+        isolation_context = isolation_api.IsolationContext(
             source_workspace=repo.name,
             effective_isolation="worktree",
             isolation_mode="worktree",
@@ -312,7 +319,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             preserved_workspace=False,
             source_git_root=repo.name,
         )
-        request = self.delegate.Request(
+        request = request_types.Request(
             engine="cursor",
             mode="safe",
             workspace=repo.name,
@@ -335,7 +342,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             fast=False,
         )
 
-        with self.delegate.safe_isolated_request(request) as isolated:
+        with safe_api.safe_isolated_request(request) as isolated:
             self.assertEqual(isolated.model, "composer-2.5")
             self.assertEqual(isolated.model_alias, "composer")
             self.assertIs(isolated.fast, False)
@@ -355,7 +362,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         )
 
         user_prompt = "Implement the fix."
-        skill_prefix = self.delegate.delegate_runner.SKILL_REVIEW_PREFIX
+        skill_prefix = runner_api.SKILL_REVIEW_PREFIX
         full_prompt = skill_prefix + user_prompt
         result = prepend_persistent_worktree_context(full_prompt)
 

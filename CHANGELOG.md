@@ -5,7 +5,180 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.31.0] - Unreleased
+
+### Harness compatibility audit (2026-09-07)
+
+Eleven audits, one per supported harness plus a shared pass, checked Delegate's
+assumptions against each vendor's current release. Every finding that could
+produce a wrong run outcome is fixed below.
+
+#### Per-engine fixes
+- Codex: `--search` and `--ask-for-approval` are declared on the interactive TUI
+  and never reached `codex exec`, so `policy.webSearch` was a no-op and the
+  approval policy was never stated. Both now ride `exec` as `-c
+  web_search="live"` and `-c approval_policy="never"`. Codex usage survives a
+  patch, and a preamble is no longer promoted to an answer after one.
+- Claude: safe and read-only call emit `--permission-prompts none` when
+  discovery has seen the flag, so a prompt is denied rather than hanging. A
+  pinned run judges the served model by Claude's own naming instead of string
+  equality, and `--continuity-mode pinned` refuses an alias that names no family
+  (`best`, `opusplan`, `default`) at preflight.
+- Cursor: `cursor call --read-only` emits `--mode ask`, which Cursor documents as
+  read-only; safe mode deliberately does not, and keeps relying on the isolated
+  workspace copy and the safe-review prefix. Tool events are parsed from the
+  shape Cursor actually emits, and a pinned run accepts the display name Cursor
+  reports in place of the requested selector.
+- Grok: a response is sealed on usage rather than on `end`, so a multi-response
+  stream keeps every part. The effort vocabulary is `low, medium, high, xhigh`;
+  `max` was never accepted.
+- Oh My Pi: work mode pins `--approval-mode yolo` and names its working
+  directory with `--cwd`. An omp selector missing from a fresh account catalog
+  now warns, because omp resolves an unknown id by fuzzy match.
+- Pi and Oh My Pi: the `--thinking` vocabulary is `off, minimal, low, medium,
+  high, xhigh, max`, and omp additionally accepts `auto`.
+- Kimi: the goal summary is kept rather than dropped, pass-through runs pin
+  `--output-format text`, and bwrap binds the selected Kimi home.
+- OpenCode: read-only runs set `OPENCODE_DISABLE_CLAUDE_CODE=1`, and discovery
+  probes with `--pure models --verbose`.
+- Devin: the read-only argv is documented-compatible with 3000.6.14, but that
+  release's read-only behavior is unproven, so the 3000.4.x gate is retained
+  until `DELEGATE_DEVIN_BEHAVIOR_TEST` passes against it.
+
+#### Transports
+- Cursor Agent and Oh My Pi prompts move to stdin, verified live against
+  2026.09.02-c22c1a3 and 18.1.13. That deletes their argv redaction constants,
+  their membership in the 100 KiB argv guard, and the omp flag-like-prompt
+  rejection, and it takes the prompt out of `/proc/<pid>/cmdline`. Kimi is now
+  the only engine on argv transport and the only one whose prompt Delegate
+  redacts.
+
+#### Stream parsing
+- An error event with a `message` or `error.message` now records a `failed`
+  terminal on every harness, and a `result` carrying only `is_error: true` does
+  the same instead of being read as a clean success.
+- A non-JSON stdout line from kimi, opencode, or pi is no longer discarded in
+  silence: it is counted and sampled, bounded and redacted, while the
+  malformed-tool-output protection that stops a raw envelope becoming an answer
+  is unchanged.
+- Event types no parser branch handles are counted, so the next vendor rename
+  is visible rather than silent.
+- Run records and snapshots carry `malformedLines`, `malformedSamples`,
+  `unhandledEventTypes`, and `unhandledEventTypesTruncated`. The block appears
+  only when there is something to report, and it survives a retry or auth
+  fallback instead of being reset with the accumulator. A merged usage record
+  keeps grok's `costUsd`.
+- The stall watchdog tracks opencode and grok tool lifecycles. Kimi and Devin,
+  whose stdout is silent by design during tool execution, are exempt from the
+  engine-default detector only when the run carries a finite timeout; an
+  explicit `stallMinutes` is always honored.
+
+#### Structured output
+- One engine-keyed eligibility helper decides whether a schema can be enforced
+  natively. Claude and Codex both require an explicit object root, and Claude
+  additionally requires the serialized argv value to stay under the Linux
+  argument-length limit. An ineligible workflow schema falls back to
+  prompt-and-parse with the reason journaled; a direct `claude --output-schema`
+  fails at preflight with `schema_not_native` instead of forwarding an argv the
+  API will reject.
+- In the structured retry loop, an attempt that fails with no assistant text
+  clears native enforcement for the remaining attempts and embeds the original
+  schema in the correction prompt, including on the resumable path.
+
+#### Deferred, recorded as decisions rather than omissions
+- Devin's 3000.4.x read-only version gate stays until a behavioral probe passes
+  on 3000.6.x; Devin is not installed on the machine that ran the audit.
+- Claude's `ultracode` effort is not added. Discovery overrides the static enum
+  with a warning list that omits the level, so an enum edit alone is unreachable
+  and would need a compatibility exception with its own proof.
+- Usage-limit cooldowns stay Codex-only. Widening the valid-tool set alone
+  changes nothing; the write and check paths are engine-specific.
+- Followup and resume support for grok, droid, opencode, pi, kimi, and devin is
+  verified possible and additive, but each needs a live round trip to prove and
+  none was run.
+- Grok stays on its current stream format, and `validate_schema_subset` still
+  rejects `$defs` and `format`.
+
+### Added
+- `describe` provides a compact command index; `describe --full` expands the
+  command/config catalog. Help is generated from the same command specifications
+  used to validate supported global options.
+- `workflow resume` aliases `workflow run --resume`; focused reject help,
+  workflow typo suggestions, and additive error recovery fields reduce guesswork.
+  `workflow watch --jsonl` streams events without retaining the full response.
+- Workflow pins use immutable per-attempt operational settings with effective
+  values, origins, and digests, and bind the selected profile and credential
+  namespaces.
+
+### Fixed
+- `delegate doctor` warns when `codex.profile` names an overlay file that does
+  not exist. Codex reads the setting as `$CODEX_HOME/<name>.config.toml` and
+  accepts a missing file silently, so a stale profile cost every run its overlay
+  without a word.
+- A recognized option name typed after the prompt warns that it is being treated
+  as prompt text.
+- A terminal reason is redacted before it reaches the run record.
+- Persistent-worktree launches preserve requested continuity and process-group
+  termination grace through the shared request-to-run mapping.
+- Doctor distinguishes executing, installed, and last-promoted artifacts and
+  verifies the outer launcher chain instead of equating matching version strings.
+- PI/OMP failed, aborted, and exhausted turns no longer become successful merely
+  because the process exits zero. Later retry/compaction recovery remains supported.
+- Noisy OMP thinking deltas use bounded diagnostic sampling with explicit capture
+  receipts. Useful output, individual records, and total ingress retain finite caps.
+- Safe Codex runs can write their designated scratch directory without granting
+  source or metadata write access. Unsupported native permission configuration
+  fails closed rather than falling back to broader workspace permissions.
+- Workflow replay reads the journal once; watch tails new bytes and handles
+  interrupted final records. Approval/resume handles draining supervisors and
+  rolls back approval when launch publication fails.
+- Attempt publication atomically refuses an existing destination, including empty
+  directories. Conflicting worktree identity retains files instead of guessing a
+  removal target, and limited run listings avoid probing logs for excluded rows.
+
+### Changed
+- The auto-injected skill-review preamble is behind
+  `tracking.skillReviewPreamble.enabled`, default `false`. Call, slash
+  pass-through, and `--pass-through` prompts never receive it either way.
+- Workspace mail setup is on by default; global `--no-mail` or
+  `mail.enabled: false` opts out without suppressing `--notify`. Push remains
+  opt-in.
+- Mail storage failures warn and disable launch-time mail instead of refusing
+  the run; unreachable isolated mailboxes record manifest-only warnings.
+- The wrapped work prompt gains 303 UTF-8 bytes, which count toward the argv
+  size guard; `--no-mail` avoids that overhead near the boundary.
+- Droid uses the same `--model <alias-or-model>` grammar as other engines. The
+  positional model-alias form is retired.
+- Droid custom-model selectors use Factory's documented
+  `custom:<Display-Name>-<index>` form. The previous id-based selectors no longer
+  resolve: re-read `delegate models droid` and update any `droid.models` alias
+  that pinned one.
+- Workflow resume requires current-format pins, attempt configuration and
+  version-2 structural keys. Legacy formats are refused before child launch;
+  start a new workflow instead of migrating old state. Gate approvals require
+  the matching result hash.
+- Run progress, finalization and cancellation share one bounded mutable record.
+  Snapshot output is computed from that record; new runs do not maintain a
+  second mutable `snapshot.json`. Keep old and new runtime writers in separate
+  workspace registries during development or cutover.
+- Routine progress updates recover only their own pending finalization record.
+  Inspection remains lock-free and can observe a valid pending completion.
+  Automatic retention is throttled and is not on the cancellation path.
+- Nested workflows share runtime state without replaying the journal again.
+  New-agent and followup execution share locked replay and lifecycle decisions,
+  including concurrent rejection and interrupted-result recovery.
+- Worktree maintenance shares safety predicates while retaining command-specific
+  policies, retirement ignore-globs, and fresh checks before destructive changes.
+- CLI and input JSON normalize into one launch builder for tracked and call
+  modes, retaining input-specific validation and workflow-session checks.
+  Invalid JSON instruction modes return usage errors; Droid raw model IDs no
+  longer become spurious worktree-planning aliases.
+- Shared metadata projections, typed isolation plans and retirement inputs, and
+  a read-only record module reduce duplicated policy and circular imports.
+- Unit tests use owning modules while CLI contracts retain entrypoint coverage.
+  Acceptance selects the pinned Ruff toolchain. Pytest uses private temporary
+  state and ownership-checked process cleanup; runner parity retains complete
+  logs and cancellation regressions.
 
 ### Fixed
 - Claude `--output-schema` is accepted in tracked `safe`/`work` modes, not only

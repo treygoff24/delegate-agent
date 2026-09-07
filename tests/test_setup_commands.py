@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import errors as errors_api
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 if SRC not in sys.path:
@@ -212,7 +214,7 @@ class SetupCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_config_write_failed")
             self.assertEqual(payload["configState"], "present-unverified")
             self.assertTrue(target.is_symlink())
@@ -239,7 +241,7 @@ class SetupCommandTests(unittest.TestCase):
             code, stdout, stderr, probe = self._run(
                 ["--json", "setup"], home=home, attempts=self._attempts(codex=codex)
             )
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(json.loads(stdout)["error"], "invalid_config_json")
             probe.assert_not_called()
 
@@ -265,7 +267,7 @@ class SetupCommandTests(unittest.TestCase):
                     ["--json", "setup"], home=home, attempts=self._attempts(codex=codex)
                 )
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(json.loads(stdout)["error"], "config_changed_during_setup")
             probe.assert_not_called()
 
@@ -278,7 +280,7 @@ class SetupCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_MISSING_BINARY, stderr)
+            self.assertEqual(code, errors_api.EXIT_MISSING_BINARY, stderr)
             self.assertEqual(payload["error"], "no_harnesses_found")
             self.assertFalse(payload["discoveryReady"])
             self.assertFalse(payload["ready"])
@@ -357,7 +359,7 @@ class SetupCommandTests(unittest.TestCase):
                 )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "config_changed_during_setup")
             self.assertEqual(payload["configState"], "race-winner")
             self.assertIn("Rerun delegate setup", payload["nextActions"][0])
@@ -395,7 +397,7 @@ class SetupCommandTests(unittest.TestCase):
             )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "config_changed_during_setup")
             self.assertEqual(payload["configState"], "changed")
             self.assertEqual(payload["cacheState"], "unchanged")
@@ -577,7 +579,7 @@ class SetupCommandTests(unittest.TestCase):
                 )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_config_write_failed")
             self.assertEqual(payload["configState"], "absent")
             self.assertEqual(payload["cacheState"], "unchanged")
@@ -607,7 +609,7 @@ class SetupCommandTests(unittest.TestCase):
                 )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_config_write_failed")
             self.assertEqual(payload["configState"], "present-unverified")
             self.assertEqual(payload["cacheState"], "unchanged")
@@ -628,7 +630,7 @@ class SetupCommandTests(unittest.TestCase):
             code, stdout, stderr, _ = self._run(["--json", "setup"], home=home, attempts=attempts)
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_selector_unsafe")
             self.assertEqual(payload["cacheState"], "unchanged")
             self.assertFalse((home / ".delegate" / "config.json").exists())
@@ -650,7 +652,7 @@ class SetupCommandTests(unittest.TestCase):
                 )
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_cache_write_failed")
             self.assertEqual(payload["configState"], "created")
             self.assertEqual(payload["cacheState"], "error")
@@ -678,7 +680,7 @@ class SetupCommandTests(unittest.TestCase):
             write.assert_called_once()
             payload = json.loads(stdout)
 
-            self.assertEqual(code, cli.EXIT_OK, stderr)
+            self.assertEqual(code, errors_api.EXIT_OK, stderr)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["cacheState"], "unchanged")
             self.assertIn("newer delegate", payload["cacheWriteSkipped"])
@@ -696,7 +698,7 @@ class SetupCommandTests(unittest.TestCase):
                 extra_env={"AI_PROFILE": "work"},
             )
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(json.loads(stdout)["error"], "profile_config_missing")
             probe.assert_not_called()
             self.assertFalse((home / ".delegate" / "config.json").exists())
@@ -711,7 +713,7 @@ class SetupCommandTests(unittest.TestCase):
                 attempts=self._attempts(codex=codex),
             )
 
-            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(code, errors_api.EXIT_USAGE, stderr)
             self.assertEqual(json.loads(stdout)["error"], "unknown_profile")
             probe.assert_not_called()
             self.assertFalse((home / ".delegate" / "config.json").exists())

@@ -60,8 +60,348 @@ class HarnessEventsTests(unittest.TestCase):
             with self.subTest(message=message):
                 acc = self.events.StreamAccumulator(harness="codex")
                 acc.ingest_line(json.dumps({"type": "error", "message": message}))
+                # The run is failed because an error event arrived, but the
+                # typed provider state stays unset: error prose cannot forge it.
                 self.assertIsNone(acc.provider_terminal_state)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_generic_error_event_records_failed_terminal(self):
+        """shared B1: an error event is a terminal signal on every harness."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Partial answer"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate limit"}))
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "error", "status": "failed", "reason": "429 rate limit"},
+        )
+        self.assertEqual(acc._last_error_message, "429 rate limit")
+        # The pre-error preamble must not be promoted over the failure.
+        self.assertIsNone(acc.completion_text)
+
+    def test_codex_error_followed_by_a_fresh_sealed_message_recovers(self):
+        """An error the stream recovers from must not fail an exit-zero run."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps({"type": "error", "message": "stream cancelled while reconnecting"})
+        )
+        self.assertEqual(acc.terminal_status, "failed")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed after reconnect."},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "Status: completed after reconnect.")
+
+    def test_a_terminal_reason_is_redacted_before_it_is_persisted(self):
+        """terminalEvent reaches the run record; recentEvents is the raw mirror."""
+        secret = "Authorization: Bearer sk-abcdef1234567890"
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": f"Usage limit for {secret}"}))
+
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        self.assertIn("Usage limit for", acc.terminal_event["reason"])
+
+    def test_no_sink_of_an_error_message_keeps_the_bearer_token(self):
+        """The error text reaches terminalEvent, recentEvents and `current`; all redact."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": f"401 from api: {secret}"}))
+
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        recent = acc.bounded_recent_events()[0]
+        self.assertNotIn(secret, json.dumps(recent))
+        kinds = {event["kind"] for event in recent}
+        self.assertIn("error", kinds)
+        self.assertIn("run.completed", kinds)
+        self.assertNotIn(secret, json.dumps(acc.current))
+        self.assertNotIn(secret, json.dumps(acc._last_error_message))
+        self.assertIn("401 from api:", acc.terminal_event["reason"])
+
+    def test_a_terminal_reason_from_outside_the_error_path_is_redacted_in_both_sinks(self):
+        """opencode builds its reason from the payload without touching _ingest_error_event."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": {"name": "AuthError", "data": {"message": f"sent {secret}"}},
+                }
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        self.assertIn("AuthError", acc.terminal_event["reason"])
+        self.assertNotIn(secret, json.dumps(acc.bounded_recent_events()[0]))
+
+    def test_a_recovered_error_does_not_supply_a_later_failures_reason(self):
+        """A bodiless turn.failed must not inherit the 429 the run already recovered from."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: recovered"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.terminal_status, "succeeded")
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn("reason", acc.terminal_event)
+
+    def test_an_unrecovered_error_still_supplies_a_later_failures_reason(self):
+        """The planted negative: only a success terminal clears the message."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_event["reason"], "429 rate_limit_exceeded")
+
+    def test_error_event_reads_nested_error_message(self):
+        """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "error", "error": {"message": "429 rate_limit_exceeded"}})
+        )
+
+        self.assertEqual(acc._last_error_message, "429 rate_limit_exceeded")
+        error_events = [event for event in acc.events if event.kind == "error"]
+        self.assertEqual([event.message for event in error_events], ["429 rate_limit_exceeded"])
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "error", "status": "failed", "reason": "429 rate_limit_exceeded"},
+        )
+
+    def test_a_max_turns_result_with_text_and_no_is_error_stays_failed(self):
+        """`error_max_turns` carries partial text and often omits `is_error`."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "error_max_turns", "result": "partial"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "partial")
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["failed"])
+
+    def test_a_refusal_result_with_text_is_not_promoted_either(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "safety_refusal", "result": "I cannot"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "I cannot")
+
+    def test_an_ordinary_success_result_is_still_promoted(self):
+        """The planted negative: the guard must not demote a real answer."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "result", "subtype": "success", "is_error": False, "result": "the answer"}
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_typed_provider_error_records_exactly_one_terminal(self):
+        """A provider-typed error must not publish a second run.completed."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "error", "code": "provider_refusal", "message": "Provider refusal: policy"}
+            )
+        )
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pi_error_event_still_records_exactly_one_terminal(self):
+        """pi/omp own their error branch; the generic path must not double up."""
+        for harness in ("pi", "omp"):
+            with self.subTest(harness=harness):
+                acc = self.events.StreamAccumulator(harness=harness)
+                acc.ingest_line(json.dumps({"type": "error", "message": "provider exploded"}))
+                completed = [event for event in acc.events if event.kind == "run.completed"]
+                self.assertEqual(len(completed), 1)
+                self.assertEqual(acc.terminal_event["event"], f"{harness}.error")
+
+    def test_cursor_effort_labels_cover_every_selector_effort(self):
+        """The shared label table must render every effort the selector accepts.
+
+        Discovery and the pinned-run comparison now read one table in
+        ``constants``, so the drift that remains is between that table and the
+        selector grammar beside it: an effort the pattern parses but the table
+        cannot render raises ``KeyError`` mid-run instead of failing the pin.
+        """
+        pattern_efforts = set(
+            self.events._CURSOR_SELECTOR_PATTERN.pattern.split("(?P<effort>")[1]
+            .split(")")[0]
+            .split("|")
+        )
+
+        self.assertEqual(pattern_efforts, set(self.events.CURSOR_EFFORT_LABELS))
+        for effort in pattern_efforts:
+            with self.subTest(effort=effort):
+                self.assertTrue(
+                    self.events._cursor_pin_matches(
+                        f"composer-{effort}",
+                        f"Composer {self.events.CURSOR_EFFORT_LABELS[effort]}",
+                        None,
+                    )
+                )
+
+    def test_pinned_cursor_accepts_the_served_display_name(self):
+        """cursor B1: cursor reports a display name, never the requested id."""
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="composer-2.5",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "29e13e2f-2ddd-49c7-a5d5-8b1d6b672db5",
+                    "model": "Composer 2.5",
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "result", "subtype": "success", "result": "Done."}))
+
+        self.assertIsNone(acc.continuity_violation)
+        self.assertEqual(acc.served_model, "Composer 2.5")
+        self.assertEqual(acc.completion_text, "Done.")
+        self.assertEqual(acc.session_id, "29e13e2f-2ddd-49c7-a5d5-8b1d6b672db5")
+
+    def test_pinned_cursor_accepts_the_effort_suffixed_catalog_label(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="cursor-grok-4.6-xhigh",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(
+            json.dumps({"type": "system", "subtype": "init", "model": "Cursor Grok 4.6 Extra High"})
+        )
+        self.assertIsNone(acc.continuity_violation)
+
+    def test_pinned_cursor_still_rejects_a_different_model(self):
+        for served in ("Composer 2.6", "Cursor Grok 4.6 Extra High"):
+            with self.subTest(served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="cursor",
+                    requested_model="composer-2.5",
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": served}))
+                self.assertIsNotNone(acc.continuity_violation)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pinned_cursor_uses_a_supplied_catalog_display_name(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="cursor-mystery-1",
+            requested_model_display_name="Mystery One",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": "Mystery One"}))
+        self.assertIsNone(acc.continuity_violation)
+
+    def test_pinned_claude_accepts_the_dated_served_id_for_an_alias(self):
+        """claude L4: every documented alias trips a pinned run today."""
+        for requested, served in (
+            ("haiku", "claude-haiku-4-5-20251001"),
+            ("opus", "claude-opus-5-20260101"),
+            ("fable", "claude-fable-5-1-20260601"),
+            ("sonnet[1m]", "claude-sonnet-5-20260101"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+            ("claude-opus-5[1m]", "claude-opus-5"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="claude",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(
+                    json.dumps(
+                        {"type": "system", "subtype": "init", "session_id": "s1", "model": served}
+                    )
+                )
+                self.assertIsNone(acc.continuity_violation)
                 self.assertIsNone(acc.terminal_status)
+
+    def test_pinned_claude_rejects_a_different_family_or_an_unmapped_alias(self):
+        for requested, served in (
+            ("haiku", "claude-opus-5-20260101"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-turbo"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-2025100"),
+            ("best", "claude-opus-5-20260101"),
+            ("opusplan", "claude-opus-5-20260101"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="claude",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": served}))
+                self.assertIsNotNone(acc.continuity_violation)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pinned_equivalence_is_not_generic_containment(self):
+        """A served id that merely embeds the requested one is a different model."""
+        acc = self.events.StreamAccumulator(
+            harness="codex",
+            requested_model="gpt-5.6",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "turn.started", "model": "gpt-5.6-sol-preview"}))
+        self.assertIsNotNone(acc.continuity_violation)
+
+    def test_mid_run_model_switch_check_is_unchanged_for_cursor(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="composer-2.5",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": "Composer 2.5"}))
+        self.assertIsNone(acc.continuity_violation)
+        acc.ingest_line(json.dumps({"type": "assistant", "model": "Composer 2.6"}))
+        self.assertEqual((acc.continuity_violation or {}).get("reason"), "mid_session_model_switch")
 
     def test_provider_max_turns_is_typed_from_result_metadata(self):
         acc = self.events.StreamAccumulator(harness="claude")
@@ -460,6 +800,52 @@ class HarnessEventsTests(unittest.TestCase):
             ],
         )
 
+        # turn.completed carries the run's token accounting.
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 1597930,
+                "outputTokens": 9862,
+                "cacheReadTokens": 1404544,
+                "cacheWriteTokens": None,
+            },
+        )
+
+    def test_codex_preamble_is_cleared_by_every_non_message_item(self):
+        """codex L3: only command_execution cleared the candidate."""
+        for item_type in ("file_change", "mcp_tool_call", "web_search", "todo_list", "reasoning"):
+            with self.subTest(item_type=item_type):
+                acc = self.events.StreamAccumulator(harness="codex")
+                acc.ingest_line(
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": "I'll start by reading."},
+                        }
+                    )
+                )
+                acc.ingest_line(json.dumps({"type": "item.completed", "item": {"type": item_type}}))
+                acc.ingest_line(json.dumps({"type": "turn.completed"}))
+                self.assertIsNone(acc.completion_text)
+                self.assertIn("I'll start by reading.", acc.assistant_text)
+
+    def test_codex_message_sealed_after_the_last_item_is_still_promoted(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps({"type": "item.completed", "item": {"type": "file_change", "id": "f1"}})
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.completion_text, "Status: completed")
+
     def test_opencode_simple_text_fixture_sets_completion_from_stop_step(self):
         acc = self.ingest_opencode_fixture("simple_text.ndjson")
         expected = self.opencode_text_parts("simple_text.ndjson")[-1].strip()
@@ -557,7 +943,12 @@ class HarnessEventsTests(unittest.TestCase):
         )
 
     def test_pi_non_stop_turn_end_is_not_terminal_success(self):
-        for stop_reason in ("error", "aborted", "length", "toolUse"):
+        for stop_reason, terminal_status in (
+            ("error", "failed"),
+            ("aborted", "cancelled"),
+            ("length", "failed"),
+            ("toolUse", None),
+        ):
             acc = self.events.StreamAccumulator(harness="pi")
             acc.ingest_line(
                 json.dumps(
@@ -571,8 +962,9 @@ class HarnessEventsTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertIsNone(
+            self.assertEqual(
                 acc.terminal_status,
+                terminal_status,
                 f"stopReason={stop_reason} must not record a succeeded terminal",
             )
 
@@ -622,7 +1014,12 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIn("omp", self.events.ASSISTANT_RECOVERY_HARNESSES)
 
     def test_omp_non_stop_turn_end_matrix_is_not_terminal_success(self):
-        for stop_reason in ("error", "aborted", "length", "toolUse"):
+        for stop_reason, terminal_status in (
+            ("error", "failed"),
+            ("aborted", "cancelled"),
+            ("length", "failed"),
+            ("toolUse", None),
+        ):
             acc = self.events.StreamAccumulator(harness="omp")
             acc.ingest_line(
                 json.dumps(
@@ -636,9 +1033,10 @@ class HarnessEventsTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertIsNone(acc.terminal_status, stop_reason)
+            self.assertEqual(acc.terminal_status, terminal_status, stop_reason)
             self.assertEqual(
-                len([event for event in acc.events if event.kind == "run.completed"]), 0
+                len([event for event in acc.events if event.kind == "run.completed"]),
+                int(terminal_status is not None),
             )
 
     def test_pi_tool_result_content_is_not_exposed(self):
@@ -812,7 +1210,10 @@ class HarnessEventsTests(unittest.TestCase):
             acc.ingest_line(line)
 
         self.assertEqual(acc.assistant_text, "")
-        self.assertEqual(acc.events, [])
+        # Only the last line is malformed; the five structured-but-unmodelled
+        # ones are still dropped without an event.
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
+        self.assertEqual(acc.malformed_lines, 1)
         self.assertIsNone(acc.completion_text)
         self.assertIsNone(acc.terminal_status)
 
@@ -826,7 +1227,158 @@ class HarnessEventsTests(unittest.TestCase):
         kimi = self.events.StreamAccumulator(harness="kimi")
         kimi.ingest_line("plain Kimi progress")
         kimi.ingest_line(json.dumps(["non-object Kimi output"]))
-        self.assertEqual(kimi.events, [])
+        # Recorded as a diagnostic, never as text the run can deliver.
+        self.assertEqual([event.kind for event in kimi.events], ["stream.malformed"] * 2)
+        self.assertEqual(kimi.malformed_lines, 2)
+        self.assertEqual(kimi.assistant_text, "")
+        self.assertIsNone(kimi.recoverable_assistant_text)
+        self.assertIsNone(kimi.current)
+
+    def test_malformed_lines_are_bounded_counted_and_redacted(self):
+        """shared B4: these lines used to vanish with no event and no counter."""
+        acc = self.events.StreamAccumulator(harness="opencode")
+        for index in range(5):
+            acc.ingest_line(f"Error {index}: 401 authentication_error from provider anthropic")
+
+        self.assertEqual(acc.malformed_lines, 5)
+        malformed = [event for event in acc.events if event.kind == "stream.malformed"]
+        self.assertEqual(len(malformed), self.events.MALFORMED_SAMPLE_LIMIT)
+        self.assertEqual(
+            [event.message for event in malformed],
+            [
+                f"Error {index}: 401 authentication_error from provider anthropic"
+                for index in range(3)
+            ],
+        )
+
+    def test_a_malformed_sample_is_bounded_and_redacted(self):
+        acc = self.events.StreamAccumulator(harness="pi")
+        acc.ingest_line("token sk-ant-api03-" + "A" * 400)
+        sample = acc.malformed_samples[0]
+        self.assertLessEqual(len(sample), self.events.MALFORMED_SAMPLE_CHARS)
+        self.assertNotIn("sk-ant-api03-AAAA", sample)
+
+    def test_a_malformed_line_is_counted_apart_from_parsed_events(self):
+        """structured_events_seen decides whether the parser owned stdout; a plain
+        line did not come from the parser, so it must not inflate that count."""
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: fatal: no credentials configured")
+        self.assertEqual(acc.structured_events_seen, 0)
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "")
+
+    def test_a_parsed_event_beside_a_malformed_line_still_counts_as_structured(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: warning: retrying")
+        acc.ingest_line(json.dumps({"type": "tool_call", "toolName": "read"}))
+        self.assertEqual(acc.structured_events_seen, 1)
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "")
+
+    def test_a_later_valid_assistant_message_clears_the_textless_state(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: warning: retrying")
+        acc.ingest_line(
+            json.dumps({"role": "assistant", "content": "Status: completed\n- recovered"})
+        )
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "Status: completed\n- recovered")
+        self.assertEqual(acc.recoverable_assistant_text, "Status: completed\n- recovered")
+
+    def test_omp_keeps_the_plain_text_fallback(self):
+        """omp shares pi's parser but its stdout carries no raw passthrough."""
+        acc = self.events.StreamAccumulator(harness="omp")
+        acc.ingest_line("omp banner line")
+        self.assertEqual([event.kind for event in acc.events], ["text"])
+        self.assertEqual(acc.malformed_lines, 0)
+
+    def test_unhandled_event_types_are_counted(self):
+        """shared L9: an event that matches no branch shipped in silence."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "stream_error", "message": "gone"}))
+        acc.ingest_line(json.dumps({"type": "stream_error", "message": "gone again"}))
+        acc.ingest_line(json.dumps({"type": "rate_limit_event"}))
+
+        self.assertEqual(acc.unhandled_event_types, {"stream_error": 2, "rate_limit_event": 1})
+        self.assertFalse(acc.unhandled_event_types_truncated)
+
+    def test_handled_and_deliberately_dropped_types_are_not_counted(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        for payload in (
+            {"type": "system", "subtype": "init", "session_id": "s1"},
+            {"type": "reasoning", "text": "hidden"},
+            {"type": "thought", "data": "hidden"},
+            {"type": "tool_result"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            {"type": "result", "subtype": "success", "result": "done"},
+        ):
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.unhandled_event_types, {})
+
+    def test_unhandled_event_types_are_bounded_to_32_distinct(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        for index in range(40):
+            acc.ingest_line(json.dumps({"type": f"vendor_event_{index}"}))
+        self.assertEqual(len(acc.unhandled_event_types), self.events.UNHANDLED_EVENT_TYPE_LIMIT)
+        self.assertTrue(acc.unhandled_event_types_truncated)
+
+    def test_an_unhandled_event_type_name_is_bounded_and_control_safe(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "V" * 200}))
+        acc.ingest_line(json.dumps({"type": "bad\u0000type"}))
+        self.assertEqual(
+            list(acc.unhandled_event_types), ["V" * self.events.UNHANDLED_EVENT_TYPE_CHARS]
+        )
+
+    def test_unhandled_event_types_are_counted_for_pi_and_opencode(self):
+        pi = self.events.StreamAccumulator(harness="pi")
+        pi.ingest_line(json.dumps({"type": "queue_update", "size": 2}))
+        pi.ingest_line(json.dumps({"type": "notice", "level": "info", "message": "ok"}))
+        self.assertEqual(pi.unhandled_event_types, {"queue_update": 1})
+
+        opencode = self.events.StreamAccumulator(harness="opencode")
+        opencode.ingest_line(json.dumps({"type": "session.idle"}))
+        opencode.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
+        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text/reasoning": 1})
+
+    def test_an_opencode_part_shape_mismatch_names_both_halves_of_the_pair(self):
+        """Filing it under `text` reports a handled type as unhandled."""
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
+        acc.ingest_line(json.dumps({"type": "tool_use", "part": {"type": "tool-result"}}))
+        acc.ingest_line(json.dumps({"type": "text"}))
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": 7}}))
+        acc.ingest_line(json.dumps({"type": "session.idle", "part": {"type": "anything"}}))
+
+        self.assertEqual(
+            acc.unhandled_event_types,
+            {
+                "text/reasoning": 1,
+                "tool_use/tool-result": 1,
+                "text/<no part>": 1,
+                "text/<no part.type>": 1,
+                "session.idle": 1,
+            },
+        )
+
+    def test_a_matching_opencode_pair_is_not_counted_as_unhandled(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "text", "text": "hello"}}))
+        self.assertEqual(acc.unhandled_event_types, {})
+
+    def test_the_real_captures_leave_a_readable_unhandled_tally(self):
+        claude = self.events.StreamAccumulator(harness="claude")
+        fixture = ROOT / "tests" / "fixtures" / "claude" / "structured_output.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            claude.ingest_line(line)
+        self.assertEqual(claude.unhandled_event_types, {"rate_limit_event": 1})
+        self.assertEqual(claude.completion_text, '{"ok": true}')
+
+        grok = self.events.StreamAccumulator(harness="grok")
+        fixture = ROOT / "tests" / "fixtures" / "grok" / "tool_read_multi_response.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            grok.ingest_line(line)
+        self.assertEqual(grok.unhandled_event_types, {"available_commands": 4})
 
     def test_deeply_nested_json_line_falls_back_to_text_event(self):
         acc = self.events.StreamAccumulator()
@@ -900,6 +1452,94 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial output")
 
+    def test_error_result_without_result_text_records_failed_terminal(self):
+        """shared B3: a bodiless error result was dropped entirely."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": True,
+                    "num_turns": 3,
+                }
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "result", "status": "failed", "reason": "error_during_execution"},
+        )
+        self.assertIsNone(acc.completion_text)
+
+    def test_error_max_turns_result_records_exactly_one_terminal(self):
+        """The provider-terminal table already owns this subtype; do not double up."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True})
+        )
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_bodiless_success_result_records_no_terminal(self):
+        """A result with neither text nor is_error stays as silent as it was."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "result", "subtype": "success", "is_error": False}))
+
+        self.assertIsNone(acc.terminal_status)
+        self.assertEqual([event.kind for event in acc.events], [])
+
+    def test_claude_result_text_prefers_the_documented_structured_field(self):
+        """claude S1/L5: `structured_output` is the only documented surface."""
+        self.assertEqual(
+            self.events.claude_result_text(
+                {"result": "stale echo", "structured_output": {"ok": True, "n": 2}}
+            ),
+            '{"ok": true, "n": 2}',
+        )
+        self.assertEqual(self.events.claude_result_text({"result": "plain answer"}), "plain answer")
+        self.assertEqual(self.events.claude_result_text({"structured_output": [1, 2]}), "[1, 2]")
+        self.assertIsNone(self.events.claude_result_text({"result": "   "}))
+        # A PRESENT structured_output wins even when null: on a --json-schema
+        # run the field is the answer, and null is a representable one.
+        self.assertEqual(self.events.claude_result_text({"structured_output": None}), "null")
+        self.assertEqual(self.events.claude_result_text({"structured_output": float("nan")}), None)
+        self.assertIsNone(self.events.claude_result_text({"is_error": True, "num_turns": 3}))
+
+    def test_claude_result_text_does_not_judge_is_error(self):
+        """Extraction and failure detection are separate questions."""
+        self.assertEqual(
+            self.events.claude_result_text({"is_error": True, "structured_output": {"ok": False}}),
+            '{"ok": false}',
+        )
+
+    def test_claude_result_event_reads_structured_output_when_result_is_absent(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "success", "structured_output": {"ok": True}})
+        )
+        self.assertEqual(acc.completion_text, '{"ok": true}')
+        self.assertEqual(acc.terminal_status, "succeeded")
+
+    def test_claude_real_capture_delivers_the_structured_answer(self):
+        fixture = ROOT / "tests" / "fixtures" / "claude" / "structured_output.jsonl"
+        acc = self.events.StreamAccumulator(harness="claude")
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        # The vendor echoes `{"ok":true}` into `result`; delegate delivers the
+        # documented `structured_output` field, so the spacing differs and the
+        # parsed value does not.
+        self.assertEqual(acc.completion_text, '{"ok": true}')
+        self.assertEqual(json.loads(acc.completion_text), {"ok": True})
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.session_id, "226e1bf3-7bd8-43c7-8958-89966432300c")
+        self.assertEqual(acc.harness_session_id, "226e1bf3-7bd8-43c7-8958-89966432300c")
+
     def test_claude_success_result_still_emits_success_completion(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(
@@ -946,18 +1586,93 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "Cancelled"}))
         self.assertEqual(acc.terminal_status, "cancelled")
+        # The provider-terminal table owns this terminal, as it does for every
+        # other classified stop reason, so the terminal is named for the raw
+        # event type and carries the trusted reason.
         self.assertEqual(
-            acc.terminal_event, {"event": "grok.end", "status": "cancelled", "reason": "Cancelled"}
+            acc.terminal_event,
+            {"event": "end", "status": "cancelled", "reason": "end Cancelled"},
         )
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial report")
 
-    def test_grok_maxtokens_stop_reason_stays_exit_code_derived(self):
+    def test_grok_truncation_stop_reasons_are_incomplete_terminals(self):
+        """grok L1: max_tokens and max_turn_requests were silent successes."""
+        for stop_reason in ("max_tokens", "MaxTokens", "max_turn_requests"):
+            with self.subTest(stop_reason=stop_reason):
+                acc = self.events.StreamAccumulator(harness="grok")
+                acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+                acc.ingest_line(json.dumps({"type": "end", "stopReason": stop_reason}))
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.recoverable_assistant_text, "partial report")
+                completed = [event for event in acc.events if event.kind == "run.completed"]
+                self.assertEqual(len(completed), 1)
+
+    def test_grok_max_turn_requests_is_typed_as_provider_max_turns(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "max_turn_requests"}))
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+
+    def test_grok_max_tokens_is_typed_like_the_other_truncations(self):
+        """Without a provider state the run record carries no failureReason."""
+        for stop_reason in ("max_tokens", "MaxTokens"):
+            with self.subTest(stop_reason=stop_reason):
+                acc = self.events.StreamAccumulator(harness="grok")
+                acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+                acc.ingest_line(json.dumps({"type": "end", "stopReason": stop_reason}))
+                self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_grok_end_turn_is_not_typed_as_a_truncation(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_a_cancelled_grok_end_records_exactly_one_terminal(self):
+        """The provider table already recorded it; the end handler must not repeat it."""
         acc = self.events.StreamAccumulator(harness="grok")
         acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
-        acc.ingest_line(json.dumps({"type": "end", "stopReason": "MaxTokens"}))
-        self.assertIsNone(acc.terminal_status)
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
         self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_a_cancelled_codex_turn_records_exactly_one_terminal(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "turn.cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
+
+    def test_an_uncancelled_grok_end_still_records_its_own_terminal(self):
+        """The planted negative: the guard must not swallow the ordinary path."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["succeeded"])
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_grok_max_turns_reached_event_is_a_terminal(self):
+        """grok L4: the second, independent truncation signal was discarded."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+        acc.ingest_line(json.dumps({"type": "max_turns_reached", "limit": 20}))
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertEqual(acc.terminal_status, "failed")
 
     def test_codex_explicit_terminal_error_sets_failed(self):
         acc = self.events.StreamAccumulator(harness="codex")
@@ -1387,7 +2102,7 @@ class HarnessEventsTests(unittest.TestCase):
 
         acc.ingest_line(line)
 
-        self.assertEqual(acc.events, [])
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
         self.assertIsNone(acc.current)
         self.assertNotIn(secret, acc.assistant_text)
         self.assertIsNone(acc.recoverable_assistant_text)
@@ -1399,7 +2114,7 @@ class HarnessEventsTests(unittest.TestCase):
 
         acc.ingest_line('{"role":"tool","content":"' + secret)
 
-        self.assertEqual(acc.events, [])
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
         self.assertIsNone(acc.current)
         self.assertNotIn(secret, acc.assistant_text)
         self.assertIsNone(acc.recoverable_assistant_text)
@@ -1565,20 +2280,22 @@ class HarnessEventsTests(unittest.TestCase):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(json.dumps({"type": "error", "message": long_error}))
         self.assertEqual(acc._last_error_message, long_error)
-        self.assertEqual(acc.events[-1].message, long_error)
-        error_payload = acc.events[-1].to_dict()
+        error_event = next(event for event in acc.events if event.kind == "error")
+        self.assertEqual(error_event.message, long_error)
+        error_payload = error_event.to_dict()
         self.assertTrue(error_payload["truncated"])
         self.assertEqual(error_payload["textChars"], 5000)
         self.assertTrue(error_payload["message"].endswith("…"))
         self.assertEqual(len(error_payload["message"]), self.events.EVENT_TEXT_LIMIT)
         recent, _meta = acc.bounded_recent_events()
-        self.assertEqual(recent[-1]["message"], error_payload["message"])
-        self.assertTrue(recent[-1]["truncated"])
+        recent_error = next(event for event in recent if event["kind"] == "error")
+        self.assertEqual(recent_error["message"], error_payload["message"])
+        self.assertTrue(recent_error["truncated"])
 
         short = "short error"
         short_acc = self.events.StreamAccumulator()
         short_acc.ingest_line(json.dumps({"type": "error", "message": short}))
-        short_payload = short_acc.events[-1].to_dict()
+        short_payload = next(event for event in short_acc.events if event.kind == "error").to_dict()
         self.assertEqual(short_payload["message"], short)
         self.assertNotIn("truncated", short_payload)
         self.assertNotIn("textChars", short_payload)
@@ -1786,20 +2503,223 @@ class HarnessEventsTests(unittest.TestCase):
             )
         )
 
-    def test_grok_multiturn_tool_use_end_does_not_promote_preamble(self):
+    def test_grok_usage_boundary_keeps_the_preamble_out_of_the_answer(self):
+        """grok B3: `usage`, not `end`, is the per-response boundary in 1.0.13."""
         acc = self.events.StreamAccumulator(harness="grok")
         for payload in [
             {"type": "text", "data": "I'll inspect the repo first."},
-            {"type": "end", "stopReason": "ToolUse"},
-            {"type": "tool_call", "tool": "Bash", "args": {"command": "git status"}},
+            {"type": "usage", "usage": {"input_tokens": 12, "output_tokens": 8}},
+            {
+                "type": "tool_call",
+                "toolCallId": "call-1",
+                "toolName": "read_file",
+                "rawInput": {"target_file": "README.md"},
+            },
+            {"type": "tool_call_update", "toolCallId": "call-1", "status": "completed"},
             {"type": "text", "data": "Status: completed\n- final answer"},
-            {"type": "end", "stopReason": "EndTurn"},
+            {"type": "usage", "usage": {"input_tokens": 3, "output_tokens": 9}},
+            {"type": "end", "stopReason": "end_turn"},
         ]:
             acc.ingest_line(json.dumps(payload))
         self.assertEqual(acc.completion_text, "Status: completed\n- final answer")
-        self.assertNotEqual(acc.completion_text, "I'll inspect the repo first.")
+        self.assertEqual(acc.assistant_text, "Status: completed\n- final answer")
         completed = [event for event in acc.events if event.kind == "run.completed"]
         self.assertEqual(len(completed), 1)
+
+    def test_grok_single_response_usage_before_end_still_delivers_text(self):
+        """The seal must not swallow a stream whose only `usage` precedes `end`."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        for payload in [
+            {"type": "text", "data": "the only answer"},
+            {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 2}},
+            {"type": "end", "stopReason": "end_turn"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.completion_text, "the only answer")
+
+    def test_grok_sealed_response_is_visible_before_end(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "sealed answer"}))
+        acc.ingest_line(json.dumps({"type": "usage", "usage": {"input_tokens": 1}}))
+        self.assertEqual(acc.assistant_text, "sealed answer")
+        self.assertEqual(acc.recoverable_assistant_text, "sealed answer")
+
+    def test_grok_usage_with_no_new_text_keeps_the_previous_response(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        for payload in [
+            {"type": "text", "data": "the answer"},
+            {"type": "usage", "usage": {"input_tokens": 1}},
+            {"type": "usage", "usage": {"input_tokens": 2}},
+            {"type": "end", "stopReason": "end_turn"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_grok_real_capture_delivers_only_the_final_response(self):
+        fixture = ROOT / "tests" / "fixtures" / "grok" / "tool_read_multi_response.jsonl"
+        acc = self.events.StreamAccumulator(harness="grok")
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.completion_text, "ZQ-1147")
+        self.assertNotIn("I'll read", acc.assistant_text)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.session_id, "01a07a75-f34b-7e70-9f82-1ca6f7161365")
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 26387,
+                "outputTokens": 172,
+                "cacheReadTokens": 37632,
+                "cacheWriteTokens": 0,
+                "costUsd": 0.01234574,
+            },
+        )
+        tool_events = [event for event in acc.events if event.kind.startswith("tool.")]
+        self.assertEqual(
+            [(event.kind, event.tool, event.target, event.status) for event in tool_events],
+            [
+                ("tool.started", "read_file", "marker.txt", None),
+                ("tool.completed", "read_file", "marker.txt", "success"),
+            ],
+        )
+
+    def test_grok_tool_update_without_a_status_does_not_complete_the_tool(self):
+        """The first update carries only `locations`; the tool is still running."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "toolCallId": "call-1",
+                    "toolName": "read_file",
+                    "rawInput": {"target_file": "marker.txt"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "status": None,
+                    "locations": [{"path": "marker.txt"}],
+                }
+            )
+        )
+        self.assertEqual([event.kind for event in acc.events], ["tool.started"])
+
+    def test_grok_failed_tool_update_is_not_reported_as_success(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps({"type": "tool_call", "toolCallId": "call-1", "toolName": "read_file"})
+        )
+        acc.ingest_line(
+            json.dumps({"type": "tool_call_update", "toolCallId": "call-1", "status": "failed"})
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual([event.status for event in completed], ["failed"])
+
+    def test_cursor_tool_events_are_named_and_targeted_from_the_real_shape(self):
+        """cursor B2: the type is dotless and the tool is named by its key."""
+        acc = self.events.StreamAccumulator(harness="cursor")
+        fixture = ROOT / "tests" / "fixtures" / "cursor" / "tool_read.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        tool_events = [event for event in acc.events if event.kind.startswith("tool.")]
+        self.assertEqual(
+            [(event.kind, event.tool, event.target, event.status) for event in tool_events],
+            [
+                ("tool.started", "read", "/var/tmp/lane-E-cap/marker.txt", None),
+                ("tool.completed", "read", "/var/tmp/lane-E-cap/marker.txt", "success"),
+            ],
+        )
+        self.assertEqual(acc.completion_text, "ZQ-1147")
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 9854,
+                "outputTokens": 114,
+                "cacheReadTokens": 25047,
+                "cacheWriteTokens": 0,
+            },
+        )
+
+    def test_cursor_tool_completion_does_not_invent_a_success(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "started",
+                    "call_id": "c1",
+                    "tool_call": {
+                        "shellToolCall": {"args": {"command": "pytest"}},
+                        "toolCallId": "c1",
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": {
+                        "shellToolCall": {
+                            "args": {"command": "pytest"},
+                            "result": {"error": {"message": "exit 1"}},
+                        },
+                        "toolCallId": "c1",
+                    },
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(
+            [(e.tool, e.target, e.status) for e in completed], [("shell", "pytest", "error")]
+        )
+
+    def test_cursor_tool_completion_with_an_unreadable_result_has_no_status(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {"args": {"path": "a.txt"}}, "toolCallId": "c1"},
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual([e.status for e in completed], [None])
+
+    def test_cursor_tool_call_without_a_subtype_is_a_start(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {"args": {"path": "a.txt"}}},
+                }
+            )
+        )
+        self.assertEqual([event.kind for event in acc.events], ["tool.started"])
+
+    def test_non_cursor_tool_call_keeps_the_flat_shape(self):
+        """The generic flat `tool_call` used by grok and droid is untouched."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps({"type": "tool_call", "tool": "Bash", "args": {"command": "git status"}})
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual([(e.tool, e.target) for e in started], [("Bash", "git status")])
 
     def test_top_level_grok_shapes_are_ignored_for_non_grok_harnesses(self):
         acc = self.events.StreamAccumulator(harness="cursor")
@@ -1813,6 +2733,49 @@ class HarnessEventsTests(unittest.TestCase):
         grok.ingest_line(json.dumps({"type": "end", "stopReason": "EndTurn"}))
         self.assertEqual(grok.assistant_text, "x")
         self.assertEqual(grok.completion_text, "x")
+
+    def test_kimi_goal_summary_is_preserved_as_a_terminal_reason(self):
+        """kimi L2: a paused goal reported a bare failure with no reason."""
+        for status, expected in (
+            ("complete", "succeeded"),
+            ("blocked", "failed"),
+            ("paused", "failed"),
+        ):
+            with self.subTest(status=status):
+                acc = self.events.StreamAccumulator(harness="kimi")
+                acc.ingest_line(
+                    json.dumps(
+                        {
+                            "type": "goal.summary",
+                            "goalId": "g-1",
+                            "status": status,
+                            "reason": "waiting on a human decision",
+                            "turnsUsed": 7,
+                            "tokensUsed": 41234,
+                            "wallClockMs": 90210,
+                        }
+                    )
+                )
+                self.assertEqual(acc.terminal_status, expected)
+                self.assertEqual(
+                    acc.terminal_event["reason"],
+                    f"status={status} reason=waiting on a human decision turns=7 tokens=41234",
+                )
+
+    def test_kimi_goal_summary_reason_is_bounded(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps({"type": "goal.summary", "status": "blocked", "reason": "R" * 5000})
+        )
+        completed = next(event for event in acc.events if event.kind == "run.completed")
+        payload = completed.to_dict()
+        self.assertEqual(len(payload["message"]), self.events.EVENT_TEXT_LIMIT)
+        self.assertTrue(payload["truncated"])
+
+    def test_goal_summary_is_ignored_for_other_harnesses(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "goal.summary", "status": "paused"}))
+        self.assertIsNone(acc.terminal_status)
 
     def test_codex_thread_started_captures_harness_session_id(self):
         acc = self.events.StreamAccumulator(harness="codex")
