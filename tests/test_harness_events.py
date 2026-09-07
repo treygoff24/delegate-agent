@@ -117,6 +117,40 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(acc.terminal_event))
         self.assertIn("Usage limit for", acc.terminal_event["reason"])
 
+    def test_no_sink_of_an_error_message_keeps_the_bearer_token(self):
+        """The error text reaches terminalEvent, recentEvents and `current`; all redact."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": f"401 from api: {secret}"}))
+
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        recent = acc.bounded_recent_events()[0]
+        self.assertNotIn(secret, json.dumps(recent))
+        kinds = {event["kind"] for event in recent}
+        self.assertIn("error", kinds)
+        self.assertIn("run.completed", kinds)
+        self.assertNotIn(secret, json.dumps(acc.current))
+        self.assertNotIn(secret, json.dumps(acc._last_error_message))
+        self.assertIn("401 from api:", acc.terminal_event["reason"])
+
+    def test_a_terminal_reason_from_outside_the_error_path_is_redacted_in_both_sinks(self):
+        """opencode builds its reason from the payload without touching _ingest_error_event."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": {"name": "AuthError", "data": {"message": f"sent {secret}"}},
+                }
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        self.assertIn("AuthError", acc.terminal_event["reason"])
+        self.assertNotIn(secret, json.dumps(acc.bounded_recent_events()[0]))
+
     def test_error_event_reads_nested_error_message(self):
         """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
         acc = self.events.StreamAccumulator(harness="claude")
