@@ -1807,7 +1807,13 @@ class StreamAccumulator:
         # but do not record that replay as a second assistant chunk. Non-
         # terminal messages intentionally remain append-only, even when their
         # text repeats.
-        if not (completion and self.assistant_chunks and self.assistant_chunks[-1] == stripped):
+        normalized = " ".join(stripped.split())
+        duplicate_completion = (
+            completion
+            and self.assistant_chunks
+            and " ".join(self.assistant_chunks[-1].split()) == normalized
+        )
+        if not duplicate_completion:
             self.assistant_chunks.append(stripped)
         self._invalidate_assistant_text_cache()
         self.current = _current_from_text(stripped)
