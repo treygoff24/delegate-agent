@@ -997,6 +997,47 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial output")
 
+    def test_error_result_without_result_text_records_failed_terminal(self):
+        """shared B3: a bodiless error result was dropped entirely."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": True,
+                    "num_turns": 3,
+                }
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "result", "status": "failed", "reason": "error_during_execution"},
+        )
+        self.assertIsNone(acc.completion_text)
+
+    def test_error_max_turns_result_records_exactly_one_terminal(self):
+        """The provider-terminal table already owns this subtype; do not double up."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True})
+        )
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_bodiless_success_result_records_no_terminal(self):
+        """A result with neither text nor is_error stays as silent as it was."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "result", "subtype": "success", "is_error": False}))
+
+        self.assertIsNone(acc.terminal_status)
+        self.assertEqual([event.kind for event in acc.events], [])
+
     def test_claude_success_result_still_emits_success_completion(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(
