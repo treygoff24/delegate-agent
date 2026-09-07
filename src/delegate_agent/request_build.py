@@ -3320,6 +3320,7 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.mode,
         model,
         resolved_thinking,
+        build.resolved.path,
         call_read_only=build.call_read_only,
         pure=build.pure,
         persist_session=build.persist_session,

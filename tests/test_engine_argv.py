@@ -929,6 +929,7 @@ class EngineArgvTests(CommandTestBase):
             "safe",
             None,
             None,
+            "/repo",
             persist_session=True,
             resume_session_id="omp-session",
         )
@@ -2929,6 +2930,8 @@ class EngineArgvTests(CommandTestBase):
                 "--no-session",
                 "--mode",
                 "json",
+                "--cwd",
+                "/repo",
                 "--tools",
                 "read",
                 "--no-extensions",
@@ -2940,7 +2943,7 @@ class EngineArgvTests(CommandTestBase):
             ],
         )
         # --approval-mode always-ask is the load-bearing read-only enforcer: omp
-        # 17.0.4's --tools read allowlist does NOT bind on its own (write/bash/python
+        # 18.1.13's --tools read allowlist does NOT bind on its own (write/bash/python
         # still execute under it), so dropping always-ask silently makes omp safe
         # mode write-capable. Verified by live write/bash/read/config-override probes;
         # tests/test_omp_read_only_behavior.py is the gated behavioral backstop.
@@ -3028,6 +3031,10 @@ class EngineArgvTests(CommandTestBase):
                 "--no-session",
                 "--mode",
                 "json",
+                "--cwd",
+                "/repo",
+                "--approval-mode",
+                "yolo",
                 "--model",
                 "openai-codex/gpt-5.6-sol",
                 "--thinking",

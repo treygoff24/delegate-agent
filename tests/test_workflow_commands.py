@@ -733,7 +733,7 @@ class WorkflowCommandTests(unittest.TestCase):
         prompt = "x" * (PROMPT_ARGV_GUARD_BYTES + 1)
         script = self.write_workflow(
             f"""
-            meta = {{"name": "dry-argv-limit", "defaults": {{"engine": "cursor"}}}}
+            meta = {{"name": "dry-argv-limit", "defaults": {{"engine": "kimi"}}}}
             return agent({prompt!r})
             """
         )
@@ -743,7 +743,7 @@ class WorkflowCommandTests(unittest.TestCase):
         call = payload["runTree"]["calls"][0]
         self.assertEqual(call["promptBytes"], PROMPT_ARGV_GUARD_BYTES + 1)
         self.assertIn(f"{PROMPT_ARGV_GUARD_BYTES}-byte", call["warnings"][0])
-        self.assertIn("cursor", call["warnings"][0])
+        self.assertIn("kimi", call["warnings"][0])
         runs = self.run_delegate(["--json", "runs", "--group", payload["wfId"]])
         self.assertEqual(runs.returncode, 0, runs.stderr)
         self.assertEqual(json.loads(runs.stdout)["runs"], [])
@@ -5574,13 +5574,14 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn(snap.get("effectiveStatus") or snap.get("status"), {"cancelled", "failed"})
 
     def test_argv_transport_prompt_size_guard(self) -> None:
-        # §2.4: cursor/kimi/omp argv transport rejects oversized agent prompts.
+        # §2.4: kimi argv transport rejects oversized agent prompts (cursor and
+        # omp moved to stdin and no longer carry the ARG_MAX ceiling).
         from delegate_agent.workflows.runtime import PROMPT_ARGV_GUARD_BYTES
 
         oversized = "x" * (PROMPT_ARGV_GUARD_BYTES + 1)
         script = self.write_workflow(
             f"""
-            meta = {{"name": "argv-guard", "defaults": {{"engine": "cursor", "mode": "safe"}}}}
+            meta = {{"name": "argv-guard", "defaults": {{"engine": "kimi", "mode": "safe"}}}}
             return agent({oversized!r})
             """
         )
@@ -5596,9 +5597,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )["events"]
         failed = [event for event in events if event["type"] == "agent_failed"]
         self.assertTrue(failed)
-        self.assertIn(
-            "stage output too large for cursor/kimi/omp argv transport", failed[0]["error"]
-        )
+        self.assertIn("stage output too large for kimi argv transport", failed[0]["error"])
         self.assertIn("route this stage to codex/claude/droid/opencode", failed[0]["error"])
 
     def test_judges_spawns_call_read_only_children_per_engine(self) -> None:
