@@ -1,18 +1,7 @@
-"""Worktree prune and gc pipelines plus opportunistic auto-prune.
+"""Worktree prune, registry reconciliation, pool reaping and automatic pruning.
 
-Implements ``delegate worktree prune`` (filtered batch removal), ``delegate
-worktree gc`` (registry reconciliation against the live ``git worktree list``),
-the guarded ``delegate worktree reap`` pool cleanup, and the ``maybe_auto_prune``
-hook fired opportunistically from ``worktree list``.
-``worktree_mgmt`` re-exports this surface so callers and tests keep importing
-from ``worktree_mgmt``.
-
-Cross-cutting seams monkeypatched on the ``worktree_mgmt`` module
-(``detect_worktree_status``, ``dirty_info``, ``merged_into_source``,
-``_worktree_list_paths_with_warning``, ``prune_worktrees``, ``remove_worktree``,
-``_error_payload``) are read back through the ``worktree_mgmt`` facade (the
-``wm`` alias) at call time so those patches still take effect.
-"""
+Shared inspection and safety helpers come from worktree_mgmt. Destructive
+removal goes through worktree_remove; maintenance helpers belong here."""
 
 from __future__ import annotations
 

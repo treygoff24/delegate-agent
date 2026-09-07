@@ -1,18 +1,7 @@
-"""Persistent worktree management facade.
+"""Persistent worktree inspection, shared safety predicates and error envelopes.
 
-This module owns the worktree status/inspection layer (status detection, dirty
-and merged checks, ahead/behind, record decoration, ``list``/``show``) and the
-shared error envelope, and re-exports the record model (``worktree_records``),
-the removal pipeline (``worktree_remove``), and the prune/gc/reap pipelines
-(``worktree_gc``) so callers — ``worktree_commands``, ``cli``, and the test
-suite — keep importing the full surface from ``worktree_mgmt`` unchanged.
-
-The seam functions tests monkeypatch via ``worktree_mgmt.<name>`` (e.g.
-``_run_git``, ``porcelain_status``, ``merged_into_source``,
-``detect_worktree_status``, ``_remove_branch``, ``prune_worktrees``) are either
-defined here or re-exported here; the moved pipeline functions read them back
-through this module so those patches keep taking effect.
-"""
+Removal and maintenance pipelines live in worktree_remove and worktree_gc.
+Callers and tests import each operation from its owning module."""
 
 from __future__ import annotations
 

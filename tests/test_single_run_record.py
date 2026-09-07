@@ -203,5 +203,30 @@ class SingleRunRecordTests(unittest.TestCase):
             self.assertFalse(wal_path.exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_wal_and_state_share_canonical_size_limit(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(run_registry, "PRIVATE_RECORD_READ_MAX_BYTES", 65536)
+    import json
+
+    limit = 65536 - run_registry.FINALIZE_WAL_ENVELOPE_RESERVE_BYTES
+    run_id = "del_20260907T000000Z_abcdef"
+    record = {
+        "schema": run_registry.STATE_SCHEMA,
+        "runId": run_id,
+        "status": "succeeded",
+        "assistantText": "",
+    }
+    overhead = len((json.dumps(record, indent=2, sort_keys=True) + "\n").encode())
+    run_path = run_registry.run_directory(tmp_path, run_id)
+    run_path.mkdir(parents=True)
+    for size in (limit - 1, limit):
+        record["assistantText"] = "x" * (size - overhead)
+        run_registry.write_run_state(run_path, record)
+        run_registry.write_finalize_wal(tmp_path, run_id, status="succeeded", record=record)
+        assert (run_path / run_registry.STATE_FILE).stat().st_size == size
+    record["assistantText"] += "x"
+    with pytest.raises(run_registry.RegistryJsonError, match="canonical record limit"):
+        run_registry.write_run_state(run_path, record)
+    with pytest.raises(run_registry.RegistryJsonError, match="canonical record limit"):
+        run_registry.write_finalize_wal(tmp_path, run_id, status="succeeded", record=record)

@@ -876,6 +876,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "use `delegate followup`.",
         ),
         see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
+        unsupported_global_options=("--isolation",),
     ),
     "followup": CommandSpec(
         name="followup",
@@ -916,9 +917,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
             "The source run must have been launched with --resumable to capture its native session ID.",
             "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",
-            "Followup options must appear before the handle; tokens after the handle are prompt instructions.",
+            "Followup options may appear on either side of the handle before prompt text. Use -- to introduce literal flag-like prompt text.",
         ),
         see_also=("resume", "runs", "snapshot", "run-output", "worktree show"),
+        unsupported_global_options=("--isolation",),
     ),
     "snapshot": CommandSpec(
         name="snapshot",
@@ -2208,28 +2210,6 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--group",
     "--notify",
 )
-for _command_name in ("models", "capabilities", "describe", "agent-help", "personas", "help"):
-    _spec = COMMAND_SPECS[_command_name]
-    COMMAND_SPECS[_command_name] = replace(
-        _spec,
-        unsupported_global_options=tuple(
-            dict.fromkeys((*_spec.unsupported_global_options, *_INSPECTION_GLOBAL_RESTRICTIONS))
-        ),
-    )
-_spec = COMMAND_SPECS["workflow"]
-COMMAND_SPECS["workflow"] = replace(
-    _spec,
-    unsupported_global_options=tuple(
-        dict.fromkeys(
-            (
-                *_spec.unsupported_global_options,
-                "--group",
-                "--completion-report",
-                "--no-completion-report",
-            )
-        )
-    ),
-)
 for _engine in (*KNOWN_ENGINES, "dry-run"):
     _spec = COMMAND_SPECS[_engine]
     COMMAND_SPECS[_engine] = replace(
@@ -2320,6 +2300,31 @@ for _name, _spec in tuple(COMMAND_SPECS.items()):
                     )
                 ),
             )
+
+
+# Non-launch globals never substitute for command-local options of the same
+# name. For example, `wait --completion-report` is a local boolean, whereas a
+# launch's global `--completion-report markdown` selects an output format.
+for _name, _spec in tuple(COMMAND_SPECS.items()):
+    if _name.split()[0] in {*KNOWN_ENGINES, "dry-run", "run", "resume", "followup"}:
+        continue
+    _restrictions = tuple(
+        flag
+        for flag in _INSPECTION_GLOBAL_RESTRICTIONS
+        if flag != "--notify" or _name not in {"workflow run", "workflow resume"}
+    )
+    COMMAND_SPECS[_name] = replace(
+        _spec,
+        unsupported_global_options=tuple(
+            dict.fromkeys(
+                (
+                    *_spec.unsupported_global_options,
+                    *_restrictions,
+                    *(("--cwd",) if _name == "help" else ()),
+                )
+            )
+        ),
+    )
 
 
 # Help-token detection.

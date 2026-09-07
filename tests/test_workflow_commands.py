@@ -236,7 +236,11 @@ class WorkflowCommandTests(unittest.TestCase):
         path.chmod(0o755)
 
     def run_delegate(
-        self, args: list[str], *, env_extra: dict[str, str] | None = None
+        self,
+        args: list[str],
+        *,
+        env_extra: dict[str, str] | None = None,
+        workspace_option: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["DELEGATE_CONFIG"] = str(self.config_path)
@@ -244,7 +248,12 @@ class WorkflowCommandTests(unittest.TestCase):
         env["HOME"] = str(self.home)
         env.update(env_extra or {})
         return subprocess.run(
-            [sys.executable, str(CLI), "--cwd", str(self.workspace), *args],
+            [
+                sys.executable,
+                str(CLI),
+                *(["--cwd", str(self.workspace)] if workspace_option else []),
+                *args,
+            ],
             text=True,
             capture_output=True,
             check=False,
@@ -4073,7 +4082,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertTrue(
             payload["workflows"]["dsl"]["agent"]["signature"].endswith("allow_repo_persona=False)")
         )
-        help_result = self.run_delegate(["--json", "help", "workflow"])
+        help_result = self.run_delegate(["--json", "help", "workflow"], workspace_option=False)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertEqual(json.loads(help_result.stdout)["command"], "workflow")
 
