@@ -559,6 +559,9 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     run_metadata.add_selection_payload_fields(payload, ctx)
+    cleanup = _worktree_cleanup_commands(ctx)
+    if cleanup is not None:
+        payload["worktreeCleanupCommands"] = cleanup
     if ctx.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if ctx.auth_profile is not None:
@@ -2072,8 +2075,7 @@ def _record_tracked_launch_failure(
     prior_capture: TrackedCaptureResult | None = None,
 ) -> None:
     # A launch failure never ran the child, so there is no result to classify.
-    # resultQuality is set to None explicitly so build_state omits the key,
-    # keeping state consistent with the snapshot below (which also omits it).
+    # The canonical record omits resultQuality when no child result exists.
     extra: JsonObject = {
         "error": error.error,
         "message": error.message,

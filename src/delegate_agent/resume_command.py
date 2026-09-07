@@ -571,8 +571,8 @@ def build_resume_plan(
     *,
     stderr: TextIO,
 ) -> ResumePlan:
-    opts = parsed.resume
-    if opts is None:
+    opts = parsed.payload
+    if not isinstance(opts, ResumeOptions):
         raise DelegateError("invalid_command", "resume options are required.")
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -871,7 +871,7 @@ def build_resume_plan(
             group=group,
             notify=global_options.notify,
         ),
-        launch=launch,
+        payload=launch,
     )
 
     for note in notes:

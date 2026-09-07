@@ -441,19 +441,12 @@ def _persist_completion_worktree_fields(ctx: RetirementContext, fields: JsonObje
     run_id = ctx.run_id
     if run_id is None:
         return
-    run_path = run_registry.run_directory(registry_root, run_id)
     with run_registry.registry_lock(registry_root):
-        readers = (
-            (run_registry.STATE_FILE, run_registry.load_run_state),
-            (run_registry.SNAPSHOT_FILE, run_registry.load_run_snapshot),
-        )
-        for filename, reader in readers:
-            path = run_path / filename
-            payload = reader(registry_root, run_id)
-            if payload is None:
-                continue
+        run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
+        payload = run_registry.load_run_state(registry_root, run_id)
+        if payload is not None:
             payload.update(fields)
-            run_registry.write_json_atomic(path, payload)
+            run_registry.publish_terminal_record_locked(registry_root, run_id, payload)
 
 
 def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: JsonObject) -> None:
