@@ -69,8 +69,9 @@ def reap_recorded_group_matching(pgid: int, marker: str) -> None:
     live-group assertion surfaces a leak loudly instead of a silent wrong kill.
     """
     _record_pgid(pgid)
+    # -ww keeps ownership markers visible when CI exports a narrow COLUMNS.
     result = subprocess.run(
-        ["ps", "-axo", "pgid=,args="],
+        ["ps", "-ww", "-axo", "pgid=,args="],
         capture_output=True,
         text=True,
         check=False,

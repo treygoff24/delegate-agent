@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from delegate_agent import run_registry, run_status
-from delegate_agent.workflows import registry
+from delegate_agent.workflows import registry, runtime
 from tests import proc_harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,9 +222,12 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         supervisor_pid = int(status["supervisorPid"])
         supervisor_pgid = int(status["supervisorPgid"])
 
-        def three_running_children() -> dict[str, dict[str, object]] | None:
+        # Four-core CI runners deliberately admit only two concurrent agents.
+        expected_children = min(3, runtime._global_agent_cap())
+
+        def running_children() -> dict[str, dict[str, object]] | None:
             states = self._workflow_child_states(wf_id)
-            if len(states) != 3:
+            if len(states) != expected_children:
                 return None
             if any(
                 run_status.raw_status(state) != run_status.STATUS_RUNNING
@@ -235,7 +238,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                 return None
             return states
 
-        running = self._wait_for(three_running_children, timeout=12)
+        running = self._wait_for(running_children, timeout=12)
         self.assertIsInstance(running, dict)
         owned_pgids = {run_id: int(state["pgid"]) for run_id, state in running.items()}
         self.assertNotIn(supervisor_pgid, owned_pgids.values())

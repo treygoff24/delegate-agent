@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import process_guard
 
@@ -27,7 +28,8 @@ class ProcessGuardTests(unittest.TestCase):
             self.addCleanup(self._cleanup_process, owned_process)
             self.addCleanup(self._cleanup_process, foreign_process)
 
-            reaped = process_guard.reap_delegate_processes(Path(owned))
+            with mock.patch.dict("os.environ", {"COLUMNS": "80"}):
+                reaped = process_guard.reap_delegate_processes(Path(owned))
 
             self.assertIn(owned_process.pid, reaped)
             self.assertIsNotNone(owned_process.poll())
