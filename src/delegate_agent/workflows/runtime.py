@@ -41,7 +41,7 @@ from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
     ARGV_PROMPT_TRANSPORT_ENGINES,
 )
-from delegate_agent.workflows import registry
+from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry
 from delegate_agent.workflows import schema as workflow_schema
 from delegate_agent.workflows import script as workflow_script
 
@@ -620,6 +620,14 @@ class CompletedChild:
     resumable: bool
 
 
+@dataclass(frozen=True)
+class _WorkflowInvocation:
+    script_path: Path
+    args: JsonValue
+    namespace: str
+    depth: int
+
+
 _AGENT_AUTHORITY_EVENTS = frozenset({"budget", "agent_started", "agent_child", "agent_finished"})
 
 
@@ -640,7 +648,6 @@ class WorkflowState:
     budget: Budget
     dry_run: bool = False
     replay_journal: bool = True
-    workflow_key_version: int = 1
     # Read once at supervisor start and re-emitted on every status write.
     # status.json is REBUILT from scratch by _write_status_locked rather than
     # merged, so a key written only at create time is erased by the supervisor's
@@ -652,10 +659,11 @@ class WorkflowState:
     replay_keys: set[str] = field(default_factory=set)
     failed_replay_keys: set[str] = field(default_factory=set)
     tombstoned_keys: set[str] = field(default_factory=set)
-    # Starts recorded after a tombstone are fresh work.  Preserve the
-    # tombstone for v2 attempt-key derivation, but allow a later supervisor to
+    # Starts recorded after a tombstone are fresh work. Preserve the
+    # tombstone for attempt-key derivation, but allow a later supervisor to
     # adopt that fresh child rather than launching a third copy of it.
     started_after_tombstone: set[str] = field(default_factory=set)
+    known_agent_keys: set[str] = field(default_factory=set)
     label_keys: dict[str, str] = field(default_factory=dict)
     started_scopes: dict[str, str] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
@@ -760,11 +768,12 @@ class WorkflowState:
             if event.get("type") == "agent_started" and isinstance(scope, str):
                 self.started_scopes[key] = scope
             if isinstance(etype, str) and etype in _AGENT_AUTHORITY_EVENTS:
-                # A legacy unmarked rejection following only simulated rows
+                # An unmarked rejection following only simulated rows
                 # must not resurrect a tombstone; any real agent/budget row
                 # makes the key genuinely live and keeps explicit rejection
                 # semantics intact.
                 live_authority_keys.add(key)
+                self.known_agent_keys.add(key)
             if not include_simulated and key in simulated_keys and key not in live_authority_keys:
                 continue
             if event.get("type") == "agent_rejected":
@@ -773,7 +782,7 @@ class WorkflowState:
                 # A tombstone only invalidates a result that exists before it.
                 # Repeated tombstones and no-result tombstones are durable
                 # no-ops, preserving any unfinished adoption state.  The
-                # tombstone marker itself remains so v2 can select a retry key.
+                # tombstone marker itself remains so retry-key selection is stable.
                 self.tombstoned_keys.add(key)
                 self.started_after_tombstone.discard(key)
                 if key not in self.replay_keys and key not in self.replay:
@@ -803,10 +812,8 @@ class WorkflowState:
                 # the next pass through the journal.
                 self.tombstoned_keys.discard(key)
                 self.started_after_tombstone.discard(key)
-                # Historical v1 journals replay every completed result,
-                # including an exhausted ``None``.  CP2's explicit reject()
-                # tombstone adds invalidation without reinterpreting these
-                # existing rows.
+                # Completed results, including exhausted ``None``, replay until
+                # an explicit reject() tombstone invalidates them.
                 self.failed_replay_keys.discard(key)
                 self.replay_keys.add(key)
                 self.replay[key] = result
@@ -909,6 +916,7 @@ class WorkflowState:
                 event["simulated"] = True
             event_key = event.get("key")
             event_label = event.get("label")
+            registry.append_jsonl(self.journal_path, event)
             if (
                 event_type in {"agent_started", "agent_finished"}
                 and isinstance(event_key, str)
@@ -923,7 +931,35 @@ class WorkflowState:
                 and isinstance(event_scope, str)
             ):
                 self.started_scopes[event_key] = event_scope
-            registry.append_jsonl(self.journal_path, event)
+            if (
+                isinstance(event_key, str)
+                and event_type in _AGENT_AUTHORITY_EVENTS
+                and (self.dry_run or not _is_simulated_event(event))
+            ):
+                self.known_agent_keys.add(event_key)
+            if isinstance(event_key, str) and not _is_simulated_event(event):
+                if event_type == "agent_started":
+                    self.started_without_result.add(event_key)
+                    if event_key in self.tombstoned_keys:
+                        self.started_after_tombstone.add(event_key)
+                elif event_type == "agent_finished":
+                    self.replay_keys.add(event_key)
+                    self.replay[event_key] = event.get("result")
+                    self.started_without_result.discard(event_key)
+                    self.tombstoned_keys.discard(event_key)
+                    self.started_after_tombstone.discard(event_key)
+                    if event.get("exhausted") is True:
+                        self.exhausted_keys.add(event_key)
+                    else:
+                        self.exhausted_keys.discard(event_key)
+                elif event_type == "agent_rejected":
+                    self.tombstoned_keys.add(event_key)
+                    self.started_after_tombstone.discard(event_key)
+                    if event_key in self.replay_keys and event_key in self.replay:
+                        self.replay_keys.discard(event_key)
+                        self.replay.pop(event_key, None)
+                        self.started_without_result.discard(event_key)
+                        self.exhausted_keys.discard(event_key)
             # A gate writes status="paused" with its gateKey and then raises GateExit; the
             # script's own unwind logging must not clobber that back to "running", or
             # `workflow approve` sees nothing gated and the parked supervisor reads as dead.
@@ -969,6 +1005,9 @@ class WorkflowState:
         """Return the latest live gate, optionally limited to pending approval."""
         with self.journal_lock:
             latest: JsonObject | None = None
+            approval = (
+                registry.read_json(self.root / registry.APPROVAL_FILE) if unapproved_only else None
+            )
             for event in registry.iter_journal(self.journal_path):
                 gate_key = event.get("key")
                 result_hash = event.get("gateResultHash")
@@ -982,6 +1021,7 @@ class WorkflowState:
                             self.root,
                             gate_key,
                             result_hash if isinstance(result_hash, str) else None,
+                            approval=approval or {},
                         )
                     )
                 ):
@@ -1012,10 +1052,6 @@ class WorkflowState:
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
             if isinstance(last_seq, int):
                 self.sequence = max(self.sequence, last_seq)
-            for prior in registry.iter_journal(self.journal_path):
-                seq = prior.get("seq")
-                if isinstance(seq, int):
-                    self.sequence = max(self.sequence, seq)
             event = self._latest_gate_event_locked(gate_key, result_hash)
             if event is None:
                 self.sequence += 1
@@ -1052,10 +1088,6 @@ class WorkflowState:
             result=result,
             result_hash=result_hash,
         )
-
-    def persist_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
-        """Backward-compatible alias for the journal-authoritative gate park."""
-        return self.park_gate(gate_key, child=child, result=result)
 
     def ensure_gate_durable(self, exc: GateExit) -> None:
         if exc.gate_key is None:
@@ -1105,10 +1137,14 @@ class WorkflowState:
                 )
         return GateExit("workflow gate is closed to new agent calls")
 
-    def _known_agent_keys(self) -> set[str]:
-        """Return structural agent keys known to this live/replayed workflow."""
+    def resolve_agent_key(self, key_or_label: object) -> tuple[str, str | None]:
+        """Resolve an exact structural key or the most recent exact label."""
+        if not isinstance(key_or_label, str) or not key_or_label.strip():
+            raise ValueError("reject() expects a non-empty agent key or label")
+        raw = key_or_label
         with self.journal_lock:
             known = {
+                *self.known_agent_keys,
                 *self.replay,
                 *self.replay_keys,
                 *self.failed_replay_keys,
@@ -1119,76 +1155,24 @@ class WorkflowState:
                 *self.started_scopes,
                 *self.label_keys.values(),
             }
-            for event in registry.iter_journal(self.journal_path):
-                event_type = event.get("type")
-                if not isinstance(event_type, str) or event_type not in _AGENT_AUTHORITY_EVENTS:
-                    continue
-                if not self.dry_run and _is_simulated_event(event):
-                    continue
-                key = event.get("key")
-                if event_type == "agent_child" and not isinstance(key, str):
-                    key = event.get("workflowAgentKey")
-                if isinstance(key, str):
-                    known.add(key)
-            return known
-
-    def resolve_agent_key(self, key_or_label: object) -> tuple[str, str | None]:
-        """Resolve an exact structural key or the most recent exact label."""
-        if not isinstance(key_or_label, str) or not key_or_label.strip():
-            raise ValueError("reject() expects a non-empty agent key or label")
-        raw = key_or_label
-        known = self._known_agent_keys()
-        if raw in known:
-            return raw, None
-        key = self.label_keys.get(raw)
-        if isinstance(key, str) and key in known:
-            return key, raw
+            if raw in known:
+                return raw, None
+            key = self.label_keys.get(raw)
+            if isinstance(key, str) and key in known:
+                return key, raw
         raise ValueError(f"reject() could not resolve agent key or label: {raw!r}")
-
-    def _has_cached_result(self, key: str) -> bool:
-        """Check the latest cached-result state, including newly appended rows."""
-        cached = False
-        saw_settlement = False
-        with self.journal_lock:
-            for event in registry.iter_journal(self.journal_path):
-                if event.get("key") != key:
-                    continue
-                if not self.dry_run and _is_simulated_event(event):
-                    continue
-                if event.get("type") == "agent_rejected":
-                    cached = False
-                    saw_settlement = True
-                elif event.get("type") == "agent_finished":
-                    cached = True
-                    saw_settlement = True
-        if saw_settlement:
-            return cached
-        return key in self.replay_keys or key in self.replay
 
     def reject_agent(self, key_or_label: object, reason: object) -> str:
         """Durably tombstone an agent key so a later call executes fresh."""
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reject() expects a non-empty reason string")
         key, label = self.resolve_agent_key(key_or_label)
-        has_cached_result = self._has_cached_result(key)
         event: JsonObject = {"key": key, "reason": reason}
         if label is not None:
             event["label"] = label
-        # The durable row is written before mutating in-memory replay state.
+        # append_event writes the tombstone and updates the in-memory fold under
+        # the same lock used by lifecycle cache decisions.
         self.append_event("agent_rejected", **event)
-        # agent() snapshots every cache-decision input under journal_lock, so
-        # invalidate this matching set atomically with respect to that reader.
-        with self.journal_lock:
-            self.tombstoned_keys.add(key)
-            self.started_after_tombstone.discard(key)
-            # Tombstones with no cached result do not clear an unfinished adoption
-            # state; the marker remains for v2's fresh attempt-key derivation.
-            if not has_cached_result:
-                return key
-            self.replay_keys.discard(key)
-            self.replay.pop(key, None)
-            self.started_without_result.discard(key)
-            self.exhausted_keys.discard(key)
         return key
 
     def cancel_stale_scope_children(self, scope: str, current_key: str) -> None:
@@ -1234,8 +1218,7 @@ class WorkflowState:
             "replayAttempt": self.replay_attempt,
             "updatedAt": run_registry.utc_now_iso(),
         }
-        if self.workflow_key_version == 2:
-            payload["workflowKeyVersion"] = 2
+        payload["workflowKeyVersion"] = WORKFLOW_KEY_VERSION
         if self.attempt_config is not None:
             payload["attemptConfig"] = self.attempt_config
         if not self.replay_journal:
@@ -1356,6 +1339,25 @@ class WorkflowState:
     def current_scope(self) -> str:
         return getattr(self.thread_local, "scope", self.namespace)
 
+    def current_invocation(self) -> _WorkflowInvocation:
+        current = getattr(self.thread_local, "invocation", None)
+        if isinstance(current, _WorkflowInvocation):
+            return current
+        return _WorkflowInvocation(self.script_path, self.args, self.namespace, self.depth)
+
+    @contextlib.contextmanager
+    def invocation(self, frame: _WorkflowInvocation) -> Iterator[None]:
+        previous = getattr(self.thread_local, "invocation", _MISSING)
+        self.thread_local.invocation = frame
+        try:
+            with self.scope(frame.namespace):
+                yield
+        finally:
+            if previous is _MISSING:
+                del self.thread_local.invocation
+            else:
+                self.thread_local.invocation = previous
+
     def next_child_scope(self, kind: str) -> str:
         with self.scope_lock:
             counters = getattr(self.thread_local, "counters", None)
@@ -1370,15 +1372,21 @@ class WorkflowState:
 
     @contextlib.contextmanager
     def scope(self, value: str) -> Iterator[None]:
-        previous = self.current_scope()
-        previous_counters = getattr(self.thread_local, "counters", None)
+        previous = getattr(self.thread_local, "scope", _MISSING)
+        previous_counters = getattr(self.thread_local, "counters", _MISSING)
         self.thread_local.scope = value
         self.thread_local.counters = {}
         try:
             yield
         finally:
-            self.thread_local.scope = previous
-            self.thread_local.counters = previous_counters or {}
+            if previous is _MISSING:
+                del self.thread_local.scope
+            else:
+                self.thread_local.scope = previous
+            if previous_counters is _MISSING:
+                del self.thread_local.counters
+            else:
+                self.thread_local.counters = previous_counters
 
     def next_agent_path(self) -> str:
         with self.scope_lock:
@@ -1577,37 +1585,39 @@ def _structured_retries(config: JsonObject) -> int:
     return DEFAULT_STRUCTURED_RETRIES
 
 
-def execute_workflow(state: WorkflowState) -> object:
-    source = state.script_path.read_text(encoding="utf-8")
-    code = workflow_script.compile_workflow(source, filename=str(state.script_path))
-    meta = workflow_script.parse_meta(source, filename=str(state.script_path))
-    dsl = WorkflowDsl(state, meta)
-    globals_dict: dict[str, object] = {
-        "agent": dsl.agent,
-        "followup": dsl.followup,
-        "pipeline": dsl.pipeline,
-        "soft_park": dsl.soft_park,
-        "park_item": dsl.park_item,
-        "soft_park_item": dsl.park_item,
-        "item_park": dsl.park_item,
-        "park": dsl.park_item,
-        "soft_park_request": dsl.soft_park_request,
-        "parked": dsl.is_soft_parked,
-        "SoftPark": SoftPark,
-        "parallel": dsl.parallel,
-        "phase": dsl.phase,
-        "log": dsl.log,
-        "workflow": dsl.workflow,
-        "reject": dsl.reject,
-        "structured_attempt": dsl.structured_attempt,
-        "judges": dsl.judges,
-        "args": state.args,
-        "budget": state.budget,
-        "dry_run": state.dry_run,
-        "is_dry_run": state.dry_run,
-    }
-    exec(code, globals_dict)
-    return globals_dict["__delegate_workflow__"]()
+def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = None) -> object:
+    frame = frame or state.current_invocation()
+    with state.invocation(frame):
+        source = frame.script_path.read_text(encoding="utf-8")
+        code = workflow_script.compile_workflow(source, filename=str(frame.script_path))
+        meta = workflow_script.parse_meta(source, filename=str(frame.script_path))
+        dsl = WorkflowDsl(state, meta)
+        globals_dict: dict[str, object] = {
+            "agent": dsl.agent,
+            "followup": dsl.followup,
+            "pipeline": dsl.pipeline,
+            "soft_park": dsl.soft_park,
+            "park_item": dsl.park_item,
+            "soft_park_item": dsl.park_item,
+            "item_park": dsl.park_item,
+            "park": dsl.park_item,
+            "soft_park_request": dsl.soft_park_request,
+            "parked": dsl.is_soft_parked,
+            "SoftPark": SoftPark,
+            "parallel": dsl.parallel,
+            "phase": dsl.phase,
+            "log": dsl.log,
+            "workflow": dsl.workflow,
+            "reject": dsl.reject,
+            "structured_attempt": dsl.structured_attempt,
+            "judges": dsl.judges,
+            "args": frame.args,
+            "budget": state.budget,
+            "dry_run": state.dry_run,
+            "is_dry_run": state.dry_run,
+        }
+        exec(code, globals_dict)
+        return globals_dict["__delegate_workflow__"]()
 
 
 class WorkflowDsl:
@@ -2156,9 +2166,10 @@ class WorkflowDsl:
     def workflow(
         self, name_or_path: str, args: JsonValue = None, gate: bool | str = False
     ) -> object:
-        if self.state.depth >= 3:
+        invocation = self.state.current_invocation()
+        if invocation.depth >= 3:
             raise RuntimeError("workflow nesting depth exceeded 3")
-        child_path = resolve_workflow_reference(name_or_path, self.state.script_path.parent)
+        child_path = resolve_workflow_reference(name_or_path, invocation.script_path.parent)
         child_source = workflow_script.read_script(child_path)
         workflow_script.check_source(child_source, filename=str(child_path))
         name = Path(name_or_path).stem
@@ -2177,57 +2188,10 @@ class WorkflowDsl:
                 "workflow_stubbed", scope=scope, child=name, gate=gate, dryRun=True
             )
             return None
-        child_state = WorkflowState(
-            wf_id=self.state.wf_id,
-            workspace=self.state.workspace,
-            root=self.state.root,
-            script_path=child_path,
-            config=self.state.config,
-            cli_argv=self.state.cli_argv,
-            args=args,
-            budget=self.state.budget,
-            dry_run=self.state.dry_run,
-            # Inherited, not defaulted. status.json is rebuilt rather than
-            # merged, so any field a child state forgets is not merely absent
-            # from the child -- it is ERASED from the file for everyone. A gated
-            # sub-workflow was writing `paused` with notify null, silently losing
-            # the target the parent was launched with, and replay_journal was
-            # taking the same path back to its default and quietly re-enabling
-            # journal replay after a dry run.
-            replay_journal=self.state.replay_journal,
-            notify_target=self.state.notify_target,
-            depth=self.state.depth + 1,
-            namespace=scope,
-            replay=self.state.replay,
-            replay_keys=self.state.replay_keys,
-            started_without_result=self.state.started_without_result,
-            claimed_keys=self.state.claimed_keys,
-            failed_replay_keys=self.state.failed_replay_keys,
-            tombstoned_keys=self.state.tombstoned_keys,
-            started_after_tombstone=self.state.started_after_tombstone,
-            label_keys=self.state.label_keys,
-            started_scopes=self.state.started_scopes,
-            lifetime_counter=self.state.lifetime_counter,
-            gate_state=self.state.gate_state,
-            replay_attempt=self.state.replay_attempt,
-            attempt_config=self.state.attempt_config,
-            attempt_environment=self.state.attempt_environment,
-            workflow_key_version=self.state.workflow_key_version,
-            cancel_event=self.state.cancel_event,
-            retry_worktree_runs=self.state.retry_worktree_runs,
-            pending_gate=self.state.pending_gate,
-            soft_parked_items=self.state.soft_parked_items,
-            soft_park_scopes=self.state.soft_park_scopes,
+        result = execute_workflow(
+            self.state,
+            _WorkflowInvocation(child_path, args, scope, invocation.depth + 1),
         )
-        child_state.journal_lock = self.state.journal_lock
-        child_state.scope_lock = self.state.scope_lock
-        child_state.lifetime_lock = self.state.lifetime_lock
-        child_state.gate_condition = self.state.gate_condition
-        child_state.agent_semaphore = self.state.agent_semaphore
-        child_state.engine_semaphores = self.state.engine_semaphores
-        child_state.item_semaphore = self.state.item_semaphore
-        child_state.thread_local.item_depth = getattr(self.state.thread_local, "item_depth", 0)
-        result = execute_workflow(child_state)
         should_gate = gate is True or (gate == "on-failure" and _gate_failed(result))
         if should_gate:
             gate_key = _stable_hash(f"gate:{scope}:{_canonical_json(args)}")
@@ -2242,6 +2206,194 @@ class WorkflowDsl:
                 time.sleep(0.01)
                 raise self.state.park_gate(gate_key, child=name, result=result)
         return result
+
+    def _finish_child(
+        self,
+        *,
+        key: str,
+        scope: str,
+        result: JsonValue | _StructuredNullType,
+        engine: str | None,
+        label: str | None,
+        resumable: bool = False,
+        adopted: bool = False,
+        exhausted: bool = False,
+    ) -> JsonValue:
+        value = _unwrap_structured_null(result)
+        event: JsonObject = {"key": key, "scope": scope, "result": value}
+        if engine is not None:
+            event["engine"] = engine
+        if adopted:
+            event["adopted"] = True
+        if exhausted:
+            event["exhausted"] = True
+        self.state.append_event("agent_finished", **event)
+        run_id = getattr(self.state.thread_local, "last_run_id", None)
+        if not adopted and label is not None and isinstance(run_id, str):
+            self.state.record_completed_child(label, run_id, engine or "codex", resumable)
+        return value
+
+    def _run_child_lifecycle(
+        self,
+        *,
+        key: str,
+        scope: str,
+        label: str | None,
+        phase: str | None,
+        schema: JsonObject | None,
+        timeout: int | float | None,
+        start_event: JsonObject,
+        dry_run_entry: JsonObject,
+        dry_run_engine: str,
+        resumable: bool,
+        launch: Callable[[], tuple[JsonValue | _StructuredNullType, str | None]],
+    ) -> JsonValue:
+        with self.state.journal_lock:
+            if label is not None:
+                self.state.label_keys[label] = key
+            cached = (
+                key in self.state.replay_keys
+                and key not in self.state.tombstoned_keys
+                and key in self.state.replay
+            )
+            cached_result = self.state.replay.get(key)
+            exhausted = key in self.state.exhausted_keys
+            adoptable_started = key in self.state.started_without_result and (
+                key not in self.state.tombstoned_keys or key in self.state.started_after_tombstone
+            )
+        self.state.thread_local.last_structured_attempt_key = key
+        self.state.cancel_stale_scope_children(scope, key)
+        if cached:
+            if exhausted:
+                with self.state.journal_lock:
+                    self.state.exhausted_keys.discard(key)
+                adopted_result = self._adopt_existing_agent_run(
+                    key,
+                    scope=scope,
+                    label=label,
+                    phase=phase,
+                    schema=schema,
+                    prefer_assistant=schema is not None,
+                    timeout=timeout,
+                )
+                if adopted_result is not _MISSING and adopted_result is not None:
+                    return self._finish_child(
+                        key=key,
+                        scope=scope,
+                        result=adopted_result,
+                        engine=None,
+                        label=label,
+                        resumable=resumable,
+                        adopted=True,
+                    )
+            self.state.append_event(
+                "agent_cache_hit",
+                key=key,
+                scope=scope,
+                label=label,
+                phase=phase,
+                result=cached_result,
+            )
+            return cached_result
+        if adoptable_started:
+            adopted_result = self._adopt_existing_agent_run(
+                key,
+                scope=scope,
+                label=label,
+                phase=phase,
+                schema=schema,
+                prefer_assistant=schema is not None,
+                timeout=timeout,
+            )
+            if adopted_result is not _MISSING:
+                return self._finish_child(
+                    key=key,
+                    scope=scope,
+                    result=adopted_result,
+                    engine=None,
+                    label=label,
+                    resumable=resumable,
+                    adopted=True,
+                )
+        already_claimed = key in self.state.claimed_keys
+        if not already_claimed:
+            self.state.claim_agent_lifetime()
+        if self.state.dry_run:
+            if already_claimed:
+                spent = self.state.dry_run_budget_spent
+            else:
+                spent = self.state.dry_run_budget_tick()
+                self.state.claimed_keys.add(key)
+            remaining = (
+                None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
+            )
+            self.state.append_event(
+                "budget",
+                key=key,
+                spent=spent,
+                total=self.state.budget.total,
+                remaining=remaining,
+                simulated=True,
+            )
+            placeholder = workflow_schema.placeholder(schema) if schema else ""
+            self.state.dry_runs.append(dry_run_entry)
+            dry_start = {
+                name: start_event[name]
+                for name in ("personaDigest", "personaSource")
+                if name in start_event
+            }
+            self.state.append_event(
+                "agent_started",
+                key=key,
+                scope=scope,
+                dryRun=True,
+                simulated=True,
+                **dry_start,
+            )
+            self.state.append_event(
+                "agent_finished", key=key, scope=scope, result=placeholder, simulated=True
+            )
+            if label is not None:
+                self.state.record_completed_child(
+                    label,
+                    f"dry_run_{key}",
+                    dry_run_engine,
+                    resumable,
+                )
+            return placeholder
+        if already_claimed:
+            spent = self.state.budget.spent()
+        else:
+            spent = self.state.budget.claim()
+            self.state.claimed_keys.add(key)
+        self.state.append_event(
+            "budget",
+            key=key,
+            spent=spent,
+            total=self.state.budget.total,
+            remaining=_budget_remaining_json(self.state.budget),
+        )
+        with self.state.active_agent():
+            self.state.thread_local.last_run_id = None
+            self.state.append_event("agent_started", key=key, scope=scope, **start_event)
+            result, engine = launch()
+            if result is not None:
+                return self._finish_child(
+                    key=key,
+                    scope=scope,
+                    result=result,
+                    engine=engine,
+                    label=label,
+                    resumable=resumable,
+                )
+            return self._finish_child(
+                key=key,
+                scope=scope,
+                result=None,
+                engine=None,
+                label=None,
+                exhausted=True,
+            )
 
     def agent(
         self,
@@ -2336,200 +2488,46 @@ class WorkflowDsl:
         if timeout is not None:
             opts["timeout"] = timeout
         path = self.state.next_agent_path()
-        key_version = 2 if self.state.workflow_key_version == 2 else 1
         key_opts = dict(opts)
-        if key_version == 1:
-            # v1 cache keys intentionally omit timeout.  The timeout is
-            # execution metadata, not structural identity; changing it must
-            # not fork a paused production workflow.
-            key_opts.pop("timeout", None)
-        base_key = _agent_key(path, prompt, key_opts, version=key_version)
+        base_key = _agent_key(path, prompt, key_opts)
         key = base_key
-        if key_version == 2 and base_key in self.state.tombstoned_keys:
+        if base_key in self.state.tombstoned_keys:
             retry_opts = dict(key_opts)
             retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
-            key = _agent_key(path, prompt, retry_opts, version=key_version)
-        if label is not None:
-            self.state.label_keys[label] = key
-        self.state.thread_local.last_structured_attempt_key = key
-        if key_version == 2:
-            # A v2 timeout change intentionally creates a fresh key.  Cancel
-            # any unfinished child from the same structural scope before the
-            # replacement launches, so its temporary worktree cannot leak.
-            self.state.cancel_stale_scope_children(path, key)
-        # reject() mutates the replay maps under journal_lock.  Take one
-        # coherent decision so a concurrent cache hit cannot observe a key in
-        # replay_keys after reject has popped its value.
-        with self.state.journal_lock:
-            cached = (
-                key in self.state.replay_keys
-                and key not in self.state.tombstoned_keys
-                and key in self.state.replay
+            key = _agent_key(path, prompt, retry_opts)
+        persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
+        prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes
+        dry_run_entry: JsonObject = {
+            "scope": path,
+            "engine": engines,
+            "mode": resolved_mode,
+            "model": resolved_model,
+            "effort": resolved_effort,
+            "fast": resolved_fast,
+            "isolation": resolved_isolation,
+            "promptBytes": prompt_bytes,
+            "phase": resolved_phase,
+            "label": label,
+            "schema": bool(schema),
+        }
+        if resumable:
+            dry_run_entry["resumable"] = True
+        if persona_resolution is not None:
+            dry_run_entry.update(
+                persona=persona_resolution.name,
+                personaSource=persona_resolution.source,
+                personaDigest=persona_resolution.digest,
+                personaBytes=persona_resolution.size_bytes,
             )
-            cached_result = self.state.replay.get(key)
-            adoptable_started = key in self.state.started_without_result and (
-                key not in self.state.tombstoned_keys or key in self.state.started_after_tombstone
-            )
-        if cached:
-            result = cached_result
-            if key in self.state.exhausted_keys:
-                self.state.exhausted_keys.discard(key)
-                adopted = self._adopt_existing_agent_run(
-                    key,
-                    scope=path,
-                    label=label,
-                    phase=resolved_phase,
-                    schema=schema,
-                    prefer_assistant=schema is not None,
-                    timeout=timeout,
-                )
-                if adopted is not _MISSING and adopted is not None:
-                    adopted_result = _unwrap_structured_null(adopted)
-                    self.state.replay[key] = adopted_result
-                    self.state.append_event(
-                        "agent_finished",
-                        key=key,
-                        scope=path,
-                        result=adopted_result,
-                        adopted=True,
-                    )
-                    return adopted_result
-            self.state.append_event(
-                "agent_cache_hit",
-                key=key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                result=result,
-            )
-            return result
-        if adoptable_started:
-            adopted = self._adopt_existing_agent_run(
-                key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                schema=schema,
-                prefer_assistant=schema is not None,
-                timeout=timeout,
-            )
-            if adopted is not _MISSING:
-                adopted_result = _unwrap_structured_null(adopted)
-                self.state.replay_keys.add(key)
-                self.state.replay[key] = adopted_result
-                self.state.started_without_result.discard(key)
-                self.state.append_event(
-                    "agent_finished",
-                    key=key,
-                    scope=path,
-                    result=adopted_result,
-                    adopted=True,
-                )
-                return adopted_result
-            # Failed/cancelled/unparseable/schema-invalid: keep the key in
-            # started_without_result and fall through to a live respawn.
-        already_claimed = key in self.state.claimed_keys
-        if not already_claimed:
-            self.state.claim_agent_lifetime()
-        if self.state.dry_run:
-            if already_claimed:
-                spent = self.state.dry_run_budget_spent
-            else:
-                spent = self.state.dry_run_budget_tick()
-                self.state.claimed_keys.add(key)
-            remaining = (
-                None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
-            )
-            self.state.append_event(
-                "budget",
-                key=key,
-                spent=spent,
-                total=self.state.budget.total,
-                remaining=remaining,
-                simulated=True,
-            )
-            placeholder = workflow_schema.placeholder(schema) if schema else ""
-            persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
-            prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes
-            dry_run_entry = {
-                "scope": path,
-                "engine": engines,
-                "mode": resolved_mode,
-                "model": resolved_model,
-                "effort": resolved_effort,
-                "fast": resolved_fast,
-                "isolation": resolved_isolation,
-                "promptBytes": prompt_bytes,
-                "phase": resolved_phase,
-                "label": label,
-                "schema": bool(schema),
-            }
-            if resumable:
-                dry_run_entry["resumable"] = True
-            if persona_resolution is not None:
-                dry_run_entry.update(
-                    persona=persona_resolution.name,
-                    personaSource=persona_resolution.source,
-                    personaDigest=persona_resolution.digest,
-                    personaBytes=persona_resolution.size_bytes,
-                )
-            constrained = [item for item in engines if item in ENGINE_ARGV_TRANSPORT]
-            if constrained and prompt_bytes > PROMPT_ARGV_GUARD_BYTES:
-                dry_run_entry["warnings"] = [
-                    f"prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
-                    f"{PROMPT_ARGV_GUARD_BYTES}-byte argv transport limit for "
-                    f"{'/'.join(constrained)}; route this stage to "
-                    "codex/claude/droid/opencode"
-                ]
-            self.state.dry_runs.append(dry_run_entry)
-            self.state.append_event(
-                "agent_started",
-                key=key,
-                scope=path,
-                dryRun=True,
-                simulated=True,
-                personaDigest=persona_resolution.digest if persona_resolution is not None else None,
-                personaSource=persona_resolution.source if persona_resolution is not None else None,
-            )
-            self.state.append_event(
-                "agent_finished", key=key, scope=path, result=placeholder, simulated=True
-            )
-            self.state.tombstoned_keys.discard(key)
-            if label is not None:
-                self.state.record_completed_child(
-                    label=label,
-                    run_id=f"dry_run_{key}",
-                    engine=engines[0] if engines else "codex",
-                    resumable=resumable,
-                )
-            return placeholder
-        if already_claimed:
-            spent = self.state.budget.spent()
-        else:
-            spent = self.state.budget.claim()
-            self.state.claimed_keys.add(key)
-        self.state.append_event(
-            "budget",
-            key=key,
-            spent=spent,
-            total=self.state.budget.total,
-            remaining=_budget_remaining_json(self.state.budget),
-        )
-        with self.state.active_agent():
-            if key in self.state.tombstoned_keys:
-                self.state.started_after_tombstone.add(key)
-            self.state.append_event(
-                "agent_started",
-                key=key,
-                workflowAgentKey=key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                engine=engines,
-                mode=resolved_mode,
-                personaDigest=persona_resolution.digest if persona_resolution is not None else None,
-                personaSource=persona_resolution.source if persona_resolution is not None else None,
-            )
+        constrained = [item for item in engines if item in ENGINE_ARGV_TRANSPORT]
+        if constrained and prompt_bytes > PROMPT_ARGV_GUARD_BYTES:
+            dry_run_entry["warnings"] = [
+                f"prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
+                f"{PROMPT_ARGV_GUARD_BYTES}-byte argv transport limit for "
+                f"{'/'.join(constrained)}; route this stage to codex/claude/droid/opencode"
+            ]
+
+        def launch() -> tuple[JsonValue | _StructuredNullType, str | None]:
             for candidate in engines:
                 try:
                     result = self._run_agent_attempts(
@@ -2564,27 +2562,34 @@ class WorkflowDsl:
                     )
                     result = None
                 if result is not None:
-                    result = _unwrap_structured_null(result)
-                    self.state.tombstoned_keys.discard(key)
-                    self.state.replay_keys.add(key)
-                    self.state.replay[key] = result
-                    self.state.append_event(
-                        "agent_finished",
-                        key=key,
-                        scope=path,
-                        engine=candidate,
-                        result=result,
-                    )
-                    run_id = getattr(self.state.thread_local, "last_run_id", None)
-                    if label is not None and isinstance(run_id, str):
-                        self.state.record_completed_child(label, run_id, candidate, resumable)
-                    return result
-            self.state.replay_keys.add(key)
-            self.state.replay[key] = None
-            self.state.append_event(
-                "agent_finished", key=key, scope=path, result=None, exhausted=True
-            )
-            return None
+                    return result, candidate
+            return None, None
+
+        return self._run_child_lifecycle(
+            key=key,
+            scope=path,
+            label=label,
+            phase=resolved_phase,
+            schema=schema,
+            timeout=timeout,
+            start_event={
+                "workflowAgentKey": key,
+                "label": label,
+                "phase": resolved_phase,
+                "engine": engines,
+                "mode": resolved_mode,
+                "personaDigest": (
+                    persona_resolution.digest if persona_resolution is not None else None
+                ),
+                "personaSource": (
+                    persona_resolution.source if persona_resolution is not None else None
+                ),
+            },
+            dry_run_entry=dry_run_entry,
+            dry_run_engine=engines[0],
+            resumable=resumable,
+            launch=launch,
+        )
 
     def _adopt_existing_agent_run(
         self,
@@ -3403,125 +3408,14 @@ class WorkflowDsl:
         if retries is not None:
             opts["retries"] = retries
         path = self.state.next_agent_path()
-        key_version = 2 if self.state.workflow_key_version == 2 else 1
-        base_key = _followup_key(path, prior_label, prompt, opts, version=key_version)
+        base_key = _followup_key(path, prior_label, prompt, opts)
         key = base_key
-        if key_version == 2 and base_key in self.state.tombstoned_keys:
+        if base_key in self.state.tombstoned_keys:
             retry_opts = dict(opts)
             retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
-            key = _followup_key(path, prior_label, prompt, retry_opts, version=key_version)
-        if label is not None:
-            self.state.label_keys[label] = key
-        if key in self.state.replay_keys and key not in self.state.tombstoned_keys:
-            result = self.state.replay[key]
-            self.state.append_event(
-                "agent_cache_hit",
-                key=key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                result=result,
-            )
-            return result
-        if key in self.state.started_without_result and key not in self.state.tombstoned_keys:
-            adopted = self._adopt_existing_agent_run(
-                key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                schema=schema,
-                prefer_assistant=schema is not None,
-                timeout=timeout,
-            )
-            if adopted is not _MISSING:
-                adopted_result = _unwrap_structured_null(adopted)
-                self.state.replay_keys.add(key)
-                self.state.replay[key] = adopted_result
-                self.state.started_without_result.discard(key)
-                self.state.append_event(
-                    "agent_finished",
-                    key=key,
-                    scope=path,
-                    result=adopted_result,
-                    adopted=True,
-                )
-                return adopted_result
-        already_claimed = key in self.state.claimed_keys
-        if not already_claimed:
-            self.state.claim_agent_lifetime()
-        if self.state.dry_run:
-            if already_claimed:
-                spent = self.state.dry_run_budget_spent
-            else:
-                spent = self.state.dry_run_budget_tick()
-                self.state.claimed_keys.add(key)
-            remaining = (
-                None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
-            )
-            self.state.append_event(
-                "budget",
-                key=key,
-                spent=spent,
-                total=self.state.budget.total,
-                remaining=remaining,
-                simulated=True,
-            )
-            placeholder = workflow_schema.placeholder(schema) if schema else ""
-            prompt_bytes = len(prompt.encode("utf-8"))
-            dry_run_entry = {
-                "primitive": "followup",
-                "scope": path,
-                "priorLabel": prior_label,
-                "engine": prior_child.engine,
-                "mode": "work",
-                "promptBytes": prompt_bytes,
-                "phase": resolved_phase,
-                "label": label,
-                "schema": bool(schema),
-            }
-            self.state.dry_runs.append(dry_run_entry)
-            self.state.append_event(
-                "agent_started",
-                key=key,
-                scope=path,
-                dryRun=True,
-                simulated=True,
-            )
-            self.state.append_event(
-                "agent_finished", key=key, scope=path, result=placeholder, simulated=True
-            )
-            if label is not None:
-                self.state.record_completed_child(
-                    label=label,
-                    run_id=f"dry_run_{key}",
-                    engine=prior_child.engine,
-                    resumable=True,
-                )
-            return placeholder
-        if already_claimed:
-            spent = self.state.budget.spent()
-        else:
-            spent = self.state.budget.claim()
-            self.state.claimed_keys.add(key)
-        self.state.append_event(
-            "budget",
-            key=key,
-            spent=spent,
-            total=self.state.budget.total,
-            remaining=_budget_remaining_json(self.state.budget),
-        )
-        with self.state.active_agent():
-            self.state.append_event(
-                "agent_started",
-                key=key,
-                workflowAgentKey=key,
-                scope=path,
-                label=label,
-                phase=resolved_phase,
-                engine=prior_child.engine,
-                mode="work",
-                priorLabel=prior_label,
-            )
+            key = _followup_key(path, prior_label, prompt, retry_opts)
+
+        def launch() -> tuple[JsonValue | _StructuredNullType, str | None]:
             try:
                 result = self._run_followup_attempts(
                     prior_child,
@@ -3543,26 +3437,38 @@ class WorkflowDsl:
                     error=str(exc),
                 )
                 result = None
-        if result is not None:
-            result = _unwrap_structured_null(result)
-            self.state.tombstoned_keys.discard(key)
-            self.state.replay_keys.add(key)
-            self.state.replay[key] = result
-            self.state.append_event(
-                "agent_finished",
-                key=key,
-                scope=path,
-                engine=prior_child.engine,
-                result=result,
-            )
-            run_id = getattr(self.state.thread_local, "last_run_id", None)
-            if label is not None and isinstance(run_id, str):
-                self.state.record_completed_child(label, run_id, prior_child.engine, resumable=True)
-            return result
-        self.state.replay_keys.add(key)
-        self.state.replay[key] = None
-        self.state.append_event("agent_finished", key=key, scope=path, result=None, exhausted=True)
-        return None
+            return result, prior_child.engine
+
+        return self._run_child_lifecycle(
+            key=key,
+            scope=path,
+            label=label,
+            phase=resolved_phase,
+            schema=schema,
+            timeout=timeout,
+            start_event={
+                "workflowAgentKey": key,
+                "label": label,
+                "phase": resolved_phase,
+                "engine": prior_child.engine,
+                "mode": "work",
+                "priorLabel": prior_label,
+            },
+            dry_run_entry={
+                "primitive": "followup",
+                "scope": path,
+                "priorLabel": prior_label,
+                "engine": prior_child.engine,
+                "mode": "work",
+                "promptBytes": len(prompt.encode("utf-8")),
+                "phase": resolved_phase,
+                "label": label,
+                "schema": bool(schema),
+            },
+            dry_run_engine=prior_child.engine,
+            resumable=True,
+            launch=launch,
+        )
 
     def _run_followup_attempts(
         self,
@@ -3955,16 +3861,16 @@ def _engine_chain(value: object) -> list[str]:
     return [DEFAULT_ENGINE]
 
 
-def _agent_key(scope_path: str, prompt: str, opts: JsonObject, *, version: int = 1) -> str:
+def _agent_key(scope_path: str, prompt: str, opts: JsonObject) -> str:
     canonical_opts = _canonical_json(opts)
-    return _stable_hash(f"v{version}:{scope_path}{prompt}{canonical_opts}")
+    return _stable_hash(f"v{WORKFLOW_KEY_VERSION}:{scope_path}{prompt}{canonical_opts}")
 
 
-def _followup_key(
-    scope_path: str, prior_label: str, prompt: str, opts: JsonObject, *, version: int = 1
-) -> str:
+def _followup_key(scope_path: str, prior_label: str, prompt: str, opts: JsonObject) -> str:
     canonical_opts = _canonical_json(opts)
-    return _stable_hash(f"followup-v{version}:{scope_path}{prior_label}{prompt}{canonical_opts}")
+    return _stable_hash(
+        f"followup-v{WORKFLOW_KEY_VERSION}:{scope_path}{prior_label}{prompt}{canonical_opts}"
+    )
 
 
 def _stable_hash(value: str) -> str:
@@ -4452,8 +4358,10 @@ def run_supervisor(
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
         total_budget = total if isinstance(total, int) else None
         replay_journal = status.get("replayJournal") is not False
-        key_version = status.get("workflowKeyVersion")
-        workflow_key_version = key_version if key_version in {1, 2} else 1
+        if status.get("workflowKeyVersion") != WORKFLOW_KEY_VERSION:
+            raise RuntimeError(
+                "unsupported workflow version; start a new workflow with this Delegate runtime"
+            )
         prior_attempt = status.get("replayAttempt")
         replay_attempt = (
             prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
@@ -4469,7 +4377,6 @@ def run_supervisor(
             args=args,
             budget=Budget(total_budget, spent_budget),
             replay_journal=replay_journal,
-            workflow_key_version=workflow_key_version,
             replay_attempt=replay_attempt,
             attempt_config=attempt_config,
             attempt_environment=attempt_environment,

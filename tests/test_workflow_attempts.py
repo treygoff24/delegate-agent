@@ -219,14 +219,19 @@ class WorkflowAttemptTests(unittest.TestCase):
                 with self.subTest(prior=prior, seam=seam):
                     registry.write_json(
                         root / registry.STATUS_FILE,
-                        {"status": "paused", "gateKey": "gate", "gateResultHash": "result"},
+                        {
+                            "status": "paused",
+                            "workflowKeyVersion": 2,
+                            "gateKey": "gate",
+                            "gateResultHash": "result",
+                        },
                     )
                     if prior is None:
                         approval_path.unlink(missing_ok=True)
                     else:
                         approval_path.write_bytes(prior)
-                    target = commands if seam == "journal" else runtime
-                    name = "_append_command_event" if seam == "journal" else "detach_supervisor"
+                    target = registry if seam == "journal" else runtime
+                    name = "append_jsonl" if seam == "journal" else "detach_supervisor"
                     with (
                         mock.patch.object(
                             target, name, side_effect=OSError("injected launch failure")
@@ -286,6 +291,11 @@ class WorkflowAttemptTests(unittest.TestCase):
         self.assertEqual(first.config_path.stat().st_mode & 0o777, 0o400)
 
     def test_supported_supervisor_cannot_silently_fall_back_to_base(self):
+        root = registry.ensure_workflow_dir(self.workspace, self.pin.workflow_id)
+        registry.write_json(
+            root / registry.STATUS_FILE,
+            {"status": "created", "workflowKeyVersion": 2},
+        )
         with self.assertRaises(commands.DelegateError) as raised:
             commands.emit(
                 commands.WorkflowCommand("_supervise", wf_id=self.pin.workflow_id),
@@ -331,7 +341,10 @@ class WorkflowAttemptTests(unittest.TestCase):
     def test_invalid_ops_are_rejected_before_approval_or_status_mutation(self):
         root = registry.ensure_workflow_dir(self.workspace, self.pin.workflow_id)
         (root / registry.SCRIPT_FILE).write_text("return True\n")
-        registry.write_json(root / registry.STATUS_FILE, {"status": "paused", "gateKey": "gate"})
+        registry.write_json(
+            root / registry.STATUS_FILE,
+            {"status": "paused", "workflowKeyVersion": 2, "gateKey": "gate"},
+        )
         before = (root / registry.STATUS_FILE).read_bytes()
         live = copy.deepcopy(self.base)
         live["workflows"]["itemThreads"] = -1
@@ -374,7 +387,6 @@ class WorkflowAttemptTests(unittest.TestCase):
                 initial = workflow_attempts.create(
                     pin, workflow_attempts.prepare(pin, {}, "defaults")
                 )
-                self.assertEqual(pin.attempt_config_version, 1)
                 self.assertEqual(initial.config["cursor"], pin.config["cursor"])
                 changed_defaults = config.embedded_default_config()
                 changed_defaults["cursor"]["defaultModel"] = "later-default"
@@ -397,7 +409,7 @@ class WorkflowAttemptTests(unittest.TestCase):
                 self.assertEqual(pin.config_path.read_bytes(), before)
                 self.assertEqual(verified, pin)
 
-    def test_legacy_partial_pin_is_loaded_without_refilling_or_recreating_it(self):
+    def test_legacy_partial_pin_is_rejected_without_rewriting_it(self):
         pin = self.pin
         payload = json.loads(pin.path.read_text())
         payload["runtime"].pop("attemptConfigVersion")
@@ -414,12 +426,9 @@ class WorkflowAttemptTests(unittest.TestCase):
             pin.config_path.read_bytes(),
             pin.path.parent.stat().st_mode,
         )
-        loaded = workflow_pinning.load_pin(pin.workflow_id)
-        self.assertEqual(loaded.config, {})
-        self.assertEqual(loaded.attempt_config_version, 0)
         with self.assertRaises(workflow_pinning.WorkflowPinError) as raised:
-            workflow_pinning.create_pin(pin.workflow_id, workspace=self.workspace, config={})
-        self.assertEqual(raised.exception.error, "pin_collision")
+            workflow_pinning.load_pin(pin.workflow_id)
+        self.assertEqual(raised.exception.error, "invalid_pin")
         self.assertEqual(
             (pin.path.read_bytes(), pin.config_path.read_bytes(), pin.path.parent.stat().st_mode),
             before,

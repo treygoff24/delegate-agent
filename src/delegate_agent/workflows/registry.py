@@ -13,7 +13,7 @@ from pathlib import Path
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject
-from delegate_agent.workflows import WORKFLOW_SCHEMA
+from delegate_agent.workflows import WORKFLOW_KEY_VERSION, WORKFLOW_SCHEMA
 
 WORKFLOW_ID_PREFIX = "wf_"
 SCRIPT_FILE = "script.py"
@@ -88,22 +88,23 @@ def write_json(path: Path, payload: JsonObject) -> None:
     run_registry.write_json_atomic(path, payload)
 
 
-def record_approval(root: Path, gate_key: str, result_hash: str | None = None) -> JsonObject:
+def record_approval(
+    root: Path,
+    gate_key: str,
+    result_hash: str,
+    *,
+    previous: JsonObject | None = None,
+) -> JsonObject:
     """Approve ``gate_key`` without forgetting earlier approvals.
 
     A resume replays the whole script, so every gate the run already passed
     fires again with the same deterministic key; if the file only held the
     latest key or result, approving gate N would re-pause the run at gate N-1.
     """
+    if not isinstance(result_hash, str) or not result_hash:
+        raise ValueError("workflow approvals require a result hash")
     path = root / APPROVAL_FILE
-    previous = read_json(path) or {}
-    keys = [key for key in previous.get("approvedKeys", []) if isinstance(key, str)]
-    earlier = previous.get("gateKey")
-    if isinstance(earlier, str) and earlier not in keys:
-        keys.append(earlier)
-    if gate_key not in keys:
-        keys.append(gate_key)
-    payload: JsonObject = {"approved": True, "gateKey": gate_key, "approvedKeys": keys}
+    previous = previous if previous is not None else read_json(path) or {}
     approved_results: list[JsonObject] = []
     previous_results = previous.get("approvedResults")
     if isinstance(previous_results, list):
@@ -114,20 +115,29 @@ def record_approval(root: Path, gate_key: str, result_hash: str | None = None) -
                 and isinstance(record.get("resultHash"), str)
             ):
                 approved_results.append(dict(record))
-    if result_hash is not None and not any(
+    if not any(
         record.get("key") == gate_key and record.get("resultHash") == result_hash
         for record in approved_results
     ):
         approved_results.append({"key": gate_key, "resultHash": result_hash})
-    if approved_results:
-        payload["approvedResults"] = approved_results
+    payload: JsonObject = {"approved": True, "approvedResults": approved_results}
     write_json(path, payload)
     return payload
 
 
-def approval_allows(root: Path, gate_key: str, result_hash: str | None = None) -> bool:
-    payload = read_json(root / APPROVAL_FILE)
-    if not isinstance(payload, dict) or payload.get("approved") is not True:
+def approval_allows(
+    root: Path,
+    gate_key: str,
+    result_hash: str | None = None,
+    *,
+    approval: JsonObject | None = None,
+) -> bool:
+    payload = approval if approval is not None else read_json(root / APPROVAL_FILE)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("approved") is not True
+        or not isinstance(result_hash, str)
+    ):
         return False
     approved_results = payload.get("approvedResults")
     matching_records = (
@@ -141,14 +151,7 @@ def approval_allows(root: Path, gate_key: str, result_hash: str | None = None) -
         if isinstance(approved_results, list)
         else []
     )
-    if matching_records:
-        return result_hash is not None and any(
-            record.get("resultHash") == result_hash for record in matching_records
-        )
-    if payload.get("gateKey") == gate_key:
-        return True
-    keys = payload.get("approvedKeys")
-    return isinstance(keys, list) and gate_key in keys
+    return any(record.get("resultHash") == result_hash for record in matching_records)
 
 
 def read_json(path: Path) -> JsonObject | None:
@@ -201,6 +204,7 @@ def register_workflow(workspace: Path, root: Path, payload: JsonObject) -> None:
         merged: JsonObject = {
             "schema": WORKFLOW_SCHEMA,
             **payload,
+            "workflowKeyVersion": WORKFLOW_KEY_VERSION,
             "createdAt": created_at,
             "createdOrdinal": latest_ordinal + 1,
         }
@@ -266,12 +270,11 @@ def latest_workflow_dir(
     if not root.exists():
         return None
     ordered: list[tuple[int, Path]] = []
-    legacy: list[tuple[str, str, str, Path]] = []
     for child in root.iterdir():
         if not child.is_dir() or not WORKFLOW_ID_RE.fullmatch(child.name):
             continue
         status = read_json(child / STATUS_FILE)
-        if status is None:
+        if status is None or status.get("workflowKeyVersion") != WORKFLOW_KEY_VERSION:
             continue
         if require_result and not (child / RESULT_FILE).is_file():
             continue
@@ -280,20 +283,7 @@ def latest_workflow_dir(
         ordinal = status.get("createdOrdinal")
         if isinstance(ordinal, int) and not isinstance(ordinal, bool):
             ordered.append((ordinal, child))
-            continue
-        created_at = status.get("createdAt")
-        updated_at = status.get("updatedAt")
-        legacy.append(
-            (
-                created_at if isinstance(created_at, str) else "",
-                updated_at if isinstance(updated_at, str) else "",
-                child.name,
-                child,
-            )
-        )
-    if ordered:
-        return max(ordered, key=lambda item: item[0])[1]
-    return max(legacy)[3] if legacy else None
+    return max(ordered, key=lambda item: item[0])[1] if ordered else None
 
 
 def append_jsonl(path: Path, event: JsonObject) -> None:

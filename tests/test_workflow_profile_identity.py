@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import config, profiles, workflow_attempts, workflow_pinning
-from delegate_agent.workflows import commands, registry, runtime
+from delegate_agent.workflows import commands, registry
 
 
 class WorkflowProfileIdentityTests(unittest.TestCase):
@@ -100,7 +100,12 @@ except config.ConfigError as exc:
         (root / registry.SCRIPT_FILE).write_text("return True\n")
         registry.write_json(
             root / registry.STATUS_FILE,
-            {"status": "paused", "gateKey": "gate", "gateResultHash": "evidence"},
+            {
+                "status": "paused",
+                "workflowKeyVersion": 2,
+                "gateKey": "gate",
+                "gateResultHash": "evidence",
+            },
         )
         before = (root / registry.STATUS_FILE).read_bytes()
         with (
@@ -133,11 +138,14 @@ except config.ConfigError as exc:
         changed = self.child(pin, attempt, TEAM_PROFILE="B")
         self.assertEqual(changed.returncode, 2, changed.stdout + changed.stderr)
 
-    def test_changed_home_cannot_turn_an_identity_bound_run_into_legacy_unpinned(self):
+    def test_changed_home_cannot_hide_a_missing_current_pin(self):
         pin, attempt = self.make("A")
         root = registry.ensure_workflow_dir(self.workspace, pin.workflow_id)
         (root / registry.SCRIPT_FILE).write_text("return True\n")
-        registry.write_json(root / registry.STATUS_FILE, {"status": "paused"})
+        registry.write_json(
+            root / registry.STATUS_FILE,
+            {"status": "paused", "workflowKeyVersion": 2},
+        )
         registry.append_jsonl(
             root / registry.JOURNAL_FILE, {"seq": 1, "type": "attempt_config", **attempt.metadata}
         )
@@ -191,7 +199,7 @@ except config.ConfigError as exc:
         redirected = self.child(pin, attempt, DELEGATE_PROFILE="A")
         self.assertEqual(redirected.returncode, 2, redirected.stdout + redirected.stderr)
 
-    def test_legacy_pin_reports_identity_unavailable_without_blocking_execution(self):
+    def test_pin_without_profile_identity_is_rejected(self):
         pin, _attempt = self.make("A")
         payload = json.loads(pin.path.read_text())
         payload.pop("profileIdentity")
@@ -199,27 +207,9 @@ except config.ConfigError as exc:
         pin.path.chmod(0o600)
         pin.path.write_text(json.dumps(payload))
         pin.path.chmod(0o400)
-        legacy = workflow_pinning.load_pin(pin.workflow_id)
-        self.assertIsNone(legacy.profile_identity)
-        root = registry.ensure_workflow_dir(self.workspace, pin.workflow_id)
-        (root / registry.SCRIPT_FILE).write_text("return True\n")
-        registry.write_json(root / registry.STATUS_FILE, {"status": "paused"})
-        out = io.StringIO()
-        with (
-            mock.patch.object(runtime, "detach_supervisor"),
-            mock.patch.dict(os.environ, {"DELEGATE_PROFILE": "B"}),
-        ):
-            commands.emit_run(
-                commands.WorkflowCommand("run", resume=pin.workflow_id, json_mode=True),
-                workspace=self.workspace,
-                config=self.base,
-                stdout=out,
-                stderr=io.StringIO(),
-            )
-        result = json.loads(out.getvalue())
-        self.assertFalse(result["profileIdentityPinned"])
-        self.assertTrue(any("not pinned" in value for value in result["warnings"]))
-        self.assertNotIn("baseProfileIdentityDigest", result["attemptConfig"])
+        with self.assertRaises(workflow_pinning.WorkflowPinError) as raised:
+            workflow_pinning.load_pin(pin.workflow_id)
+        self.assertEqual(raised.exception.error, "invalid_pin")
 
     def test_custom_selector_and_namespace_expansion_remain_bound(self):
         with mock.patch.dict(os.environ, {"TEAM_PROFILE": "A"}):
