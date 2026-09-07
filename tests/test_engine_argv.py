@@ -83,14 +83,13 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "-p",
                 "--trust",
-                "--mode",
-                "ask",
                 "--model",
                 "composer-2.5",
                 "--output-format",
                 "stream-json",
             ],
         )
+        self.assertNotIn("--mode", argv)
         prompt = request.stdin_text
         self.assertTrue(prompt.startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
         self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], prompt)
@@ -2414,7 +2413,7 @@ class EngineArgvTests(CommandTestBase):
                 with self.subTest(engine=engine, mode=mode):
                     self.assertTrue(all(isinstance(item, str) for item in mapping[mode]))
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
-        self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", cursor_safe)
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--approve-mcps", cursor_safe)
         self.assertIn("<isolated-workspace>", cursor_safe)

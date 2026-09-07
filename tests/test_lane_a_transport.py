@@ -178,15 +178,18 @@ if __name__ == "__main__":
 
 
 class CursorReadOnlyModeTests(CommandTestBase):
-    """A2: the cursor read-only boundary moves from prompt text into the harness.
+    """A2, as amended: the harness read-only mode is worth its cost only in call.
 
     Cursor documents `--mode ask` as "Q&A style for explanations and questions
-    (read-only)" and `-p/--print` as having "access to all tools, including write
-    and shell", so safe mode without a mode flag rested on the prompt prefix plus
-    workspace isolation alone.
+    (read-only)" and `-p/--print` as having "access to all tools, including
+    write and shell". Live testing found that both read-only modes, `ask` and
+    `plan`, block the shell outright, so a `cursor safe` reviewer cannot run
+    `git diff` or the test suite. Safe mode keeps the isolated workspace copy as
+    its boundary and no longer emits the flag; read-only call, which has no
+    isolated copy, keeps it.
     """
 
-    def test_cursor_safe_argv_carries_mode_ask(self):
+    def test_cursor_safe_argv_keeps_the_isolated_copy_as_its_boundary(self):
         request = self.build_git_request(
             "cursor",
             "safe",
@@ -196,7 +199,7 @@ class CursorReadOnlyModeTests(CommandTestBase):
             delegate_config.embedded_default_config(),
             dry_run=True,
         )
-        self.assertEqual(request.argv[request.argv.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", request.argv)
         self.assertNotIn("--force", request.argv)
         self.assertNotIn("--approve-mcps", request.argv)
 
@@ -218,22 +221,39 @@ class CursorReadOnlyModeTests(CommandTestBase):
         self.assertNotIn("--mode", work)
         self.assertIn("--force", work)
 
-    def test_cursor_resume_and_text_output_paths_keep_mode_ask(self):
-        # Both argv branches (stream-json and pass-through text) and the resume
-        # branch must carry the flag; a mode flag on only one is not a boundary.
+    def test_cursor_read_only_call_carries_mode_ask_on_every_argv_branch(self):
+        # Both output branches and the resume branch must carry the flag; a mode
+        # flag on only one is not a boundary.
+        for kwargs in ({}, {"stream_capture": False}, {"resume_session_id": "s1"}):
+            with self.subTest(kwargs=sorted(kwargs)):
+                argv = argv_api.build_cursor_argv(
+                    ["cursor-agent"], "call", "/ws", "model", call_read_only=True, **kwargs
+                )
+                self.assertEqual(argv[argv.index("--mode") + 1], "ask")
+
+    def test_cursor_safe_emits_no_mode_flag_on_any_argv_branch(self):
         for kwargs in ({}, {"stream_capture": False}, {"resume_session_id": "s1"}):
             with self.subTest(kwargs=sorted(kwargs)):
                 argv = argv_api.build_cursor_argv(
                     ["cursor-agent"], "safe", "/ws", "model", **kwargs
                 )
-                self.assertEqual(argv[argv.index("--mode") + 1], "ask")
+                self.assertNotIn("--mode", argv)
+                self.assertNotIn("--force", argv)
+                self.assertNotIn("--approve-mcps", argv)
 
-    def test_describe_mode_mapping_shows_mode_ask_for_cursor_safe(self):
+    def test_cursor_safe_still_emits_print_once(self):
+        # The `-p`/`--print` dedupe from the same change stays: cursor took both
+        # spellings of the same flag before it.
+        argv = argv_api.build_cursor_argv(["cursor-agent"], "safe", "/ws", "model")
+        self.assertEqual(argv.count("-p"), 1)
+        self.assertNotIn("--print", argv)
+
+    def test_describe_mode_mapping_shows_no_mode_flag_for_cursor_safe(self):
         payload = describe_api.describe_payload(
             delegate_config.embedded_default_config(), "embedded default"
         )
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
-        self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", cursor_safe)
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--mode", payload["modeMapping"]["cursor"]["work"])
 
