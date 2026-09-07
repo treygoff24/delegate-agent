@@ -1156,6 +1156,69 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual([event.kind for event in acc.events], ["text"])
         self.assertEqual(acc.malformed_lines, 0)
 
+    def test_unhandled_event_types_are_counted(self):
+        """shared L9: an event that matches no branch shipped in silence."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "stream_error", "message": "gone"}))
+        acc.ingest_line(json.dumps({"type": "stream_error", "message": "gone again"}))
+        acc.ingest_line(json.dumps({"type": "rate_limit_event"}))
+
+        self.assertEqual(acc.unhandled_event_types, {"stream_error": 2, "rate_limit_event": 1})
+        self.assertFalse(acc.unhandled_event_types_truncated)
+
+    def test_handled_and_deliberately_dropped_types_are_not_counted(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        for payload in (
+            {"type": "system", "subtype": "init", "session_id": "s1"},
+            {"type": "reasoning", "text": "hidden"},
+            {"type": "thought", "data": "hidden"},
+            {"type": "tool_result"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            {"type": "result", "subtype": "success", "result": "done"},
+        ):
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.unhandled_event_types, {})
+
+    def test_unhandled_event_types_are_bounded_to_32_distinct(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        for index in range(40):
+            acc.ingest_line(json.dumps({"type": f"vendor_event_{index}"}))
+        self.assertEqual(len(acc.unhandled_event_types), self.events.UNHANDLED_EVENT_TYPE_LIMIT)
+        self.assertTrue(acc.unhandled_event_types_truncated)
+
+    def test_an_unhandled_event_type_name_is_bounded_and_control_safe(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(json.dumps({"type": "V" * 200}))
+        acc.ingest_line(json.dumps({"type": "bad\u0000type"}))
+        self.assertEqual(
+            list(acc.unhandled_event_types), ["V" * self.events.UNHANDLED_EVENT_TYPE_CHARS]
+        )
+
+    def test_unhandled_event_types_are_counted_for_pi_and_opencode(self):
+        pi = self.events.StreamAccumulator(harness="pi")
+        pi.ingest_line(json.dumps({"type": "queue_update", "size": 2}))
+        pi.ingest_line(json.dumps({"type": "notice", "level": "info", "message": "ok"}))
+        self.assertEqual(pi.unhandled_event_types, {"queue_update": 1})
+
+        opencode = self.events.StreamAccumulator(harness="opencode")
+        opencode.ingest_line(json.dumps({"type": "session.idle"}))
+        opencode.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
+        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text": 1})
+
+    def test_the_real_captures_leave_a_readable_unhandled_tally(self):
+        claude = self.events.StreamAccumulator(harness="claude")
+        fixture = ROOT / "tests" / "fixtures" / "claude" / "structured_output.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            claude.ingest_line(line)
+        self.assertEqual(claude.unhandled_event_types, {"rate_limit_event": 1})
+        self.assertEqual(claude.completion_text, '{"ok":true}')
+
+        grok = self.events.StreamAccumulator(harness="grok")
+        fixture = ROOT / "tests" / "fixtures" / "grok" / "tool_read_multi_response.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            grok.ingest_line(line)
+        self.assertEqual(grok.unhandled_event_types, {"available_commands": 4})
+
     def test_deeply_nested_json_line_falls_back_to_text_event(self):
         acc = self.events.StreamAccumulator()
         # Python 3.14's json scanner tolerates ~100k nesting levels before
