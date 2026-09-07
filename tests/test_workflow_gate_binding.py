@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from delegate_agent.workflows import commands, registry, runtime
@@ -28,9 +29,36 @@ class GateApprovalBindingTests(unittest.TestCase):
             {
                 "wfId": self.wf_id,
                 "status": "created",
+                "workflowKeyVersion": 2,
                 "budget": {"total": None, "spent": 0, "remaining": None},
             },
         )
+
+    def _resume(self, *, approve_gate: bool = False, detach_error: Exception | None = None) -> int:
+        pin = SimpleNamespace(
+            cli_argv=["delegate"], environment={}, profile_identity={"current": True}
+        )
+        attempt = SimpleNamespace(
+            config={}, metadata={}, environment={}, config_path=self.root / "attempt.json"
+        )
+        with (
+            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=pin),
+            mock.patch.object(commands.workflow_attempts, "prepare", return_value={}),
+            mock.patch.object(commands.workflow_attempts, "create", return_value=attempt),
+            mock.patch.object(commands.workflow_pinning, "register_active_supervisor"),
+            mock.patch.object(
+                commands.workflow_pinning, "temporarily_apply_environment", return_value={}
+            ),
+            mock.patch.object(runtime, "detach_supervisor", side_effect=detach_error),
+        ):
+            return commands.emit_run(
+                commands.WorkflowCommand("run", resume=self.wf_id),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                approve_gate=approve_gate,
+            )
 
     def _state(self) -> runtime.WorkflowState:
         return runtime.WorkflowState(
@@ -59,38 +87,24 @@ class GateApprovalBindingTests(unittest.TestCase):
         return raised.exception
 
     def _resume_auto_approve(self) -> None:
-        with (
-            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
-            mock.patch.object(runtime, "detach_supervisor"),
-        ):
-            result = commands.emit_run(
-                commands.WorkflowCommand("run", resume=self.wf_id),
-                workspace=self.workspace,
-                config={},
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(result, 0)
+        self.assertEqual(self._resume(), 0)
 
     def test_approve_during_gate_drain_does_not_change_projection(self) -> None:
         self._park({"ok": False, "reason": "draining"})
         registry.write_json(
             self.root / registry.STATUS_FILE,
-            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+            {
+                "wfId": self.wf_id,
+                "status": "running",
+                "workflowKeyVersion": 2,
+                "budget": {"total": None, "spent": 0},
+            },
         )
         before = (self.root / registry.STATUS_FILE).read_bytes()
         fd = registry.acquire_workflow_lock(self.root)
         try:
-            with (
-                mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
-                self.assertRaises(commands.DelegateError) as raised,
-            ):
-                commands.emit_approve(
-                    commands.WorkflowCommand("approve", wf_id=self.wf_id),
-                    workspace=self.workspace,
-                    config={},
-                    stdout=io.StringIO(),
-                )
+            with self.assertRaises(commands.DelegateError) as raised:
+                self._resume(approve_gate=True)
             self.assertEqual(raised.exception.error, "workflow_locked")
             self.assertEqual((self.root / registry.STATUS_FILE).read_bytes(), before)
             self.assertFalse((self.root / registry.APPROVAL_FILE).exists())
@@ -103,19 +117,15 @@ class GateApprovalBindingTests(unittest.TestCase):
         # supervisor drains a gate. The journal is authoritative.
         registry.write_json(
             self.root / registry.STATUS_FILE,
-            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
+            {
+                "wfId": self.wf_id,
+                "status": "running",
+                "workflowKeyVersion": 2,
+                "budget": {"total": None, "spent": 0},
+            },
         )
-        with (
-            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
-            mock.patch.object(runtime, "detach_supervisor", side_effect=OSError("injected")),
-            self.assertRaises(OSError),
-        ):
-            commands.emit_approve(
-                commands.WorkflowCommand("approve", wf_id=self.wf_id),
-                workspace=self.workspace,
-                config={},
-                stdout=io.StringIO(),
-            )
+        with self.assertRaises(OSError):
+            self._resume(approve_gate=True, detach_error=OSError("injected"))
         # The repair is durable: a resume that fails afterwards rolls back to
         # the recovered projection, not to the clobbered one.
         status = registry.read_json(self.root / registry.STATUS_FILE) or {}
@@ -125,40 +135,41 @@ class GateApprovalBindingTests(unittest.TestCase):
         self.assertEqual(status.get("gateResultHash"), parked.result_hash)
         self.assertIsInstance(status.get("updatedAt"), str)
 
-    def test_recovered_legacy_gate_never_writes_a_null_result_hash(self) -> None:
-        # A gate event from an older journal carries no gateResultHash. The key
-        # has to stay absent from the projection rather than become null.
+    def test_gate_without_result_identity_is_not_approvable(self) -> None:
         registry.append_jsonl(
             self.root / registry.JOURNAL_FILE,
             {
                 "seq": 1,
                 "type": "gate",
                 "at": "2026-01-01T00:00:00Z",
-                "key": "legacy-gate",
+                "key": "unbound-gate",
                 "child": "child.py",
                 "result": {"ok": False},
             },
         )
-        registry.write_json(
-            self.root / registry.STATUS_FILE,
-            {"wfId": self.wf_id, "status": "running", "budget": {"total": None, "spent": 0}},
-        )
+        self.assertIsNone(commands._latest_unapproved_gate_event(self.root))
+        self.assertFalse(registry.approval_allows(self.root, "unbound-gate", None))
+        with self.assertRaisesRegex(ValueError, "result hash"):
+            registry.record_approval(self.root, "unbound-gate", None)
+
+    def test_approve_reads_journal_and_approval_once(self) -> None:
+        self._park({"ok": False, "reason": "single-fold"})
         with (
-            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=None),
-            mock.patch.object(runtime, "detach_supervisor"),
+            mock.patch.object(registry, "iter_journal", wraps=registry.iter_journal) as journal,
+            mock.patch.object(
+                commands.private_io,
+                "read_private_text_bounded",
+                wraps=commands.private_io.read_private_text_bounded,
+            ) as approval,
         ):
-            result = commands.emit_run(
-                commands.WorkflowCommand("run", resume=self.wf_id),
-                workspace=self.workspace,
-                config={},
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-                approve_gate=True,
-            )
-        self.assertEqual(result, 0)
-        status = registry.read_json(self.root / registry.STATUS_FILE) or {}
-        self.assertEqual(status.get("gateKey"), "legacy-gate")
-        self.assertNotIn("gateResultHash", status)
+            self.assertEqual(self._resume(approve_gate=True), 0)
+        self.assertEqual(journal.call_count, 1)
+        approval_reads = [
+            call
+            for call in approval.call_args_list
+            if call.args and call.args[0] == self.root / registry.APPROVAL_FILE
+        ]
+        self.assertEqual(len(approval_reads), 1)
 
     def test_checkpoint_key_stable_but_changed_evidence_needs_new_approval(self) -> None:
         first = self._park({"ok": False, "reason": "first"})
@@ -205,12 +216,12 @@ class GateApprovalBindingTests(unittest.TestCase):
         self.assertEqual(status.get("gateResultHash"), second.result_hash)
         self.assertEqual(commands._latest_unapproved_gate_event(self.root), events[-1])
 
-    def test_legacy_approved_key_remains_result_agnostic_and_unchanged(self) -> None:
+    def test_legacy_key_only_approval_does_not_authorize_a_result(self) -> None:
         approval_path = self.root / registry.APPROVAL_FILE
         original = b'{\n  "approved": true,\n  "approvedKeys": ["legacy"]\n}\n'
         approval_path.write_bytes(original)
 
-        self.assertTrue(registry.approval_allows(self.root, "legacy", "any-result-hash"))
+        self.assertFalse(registry.approval_allows(self.root, "legacy", "any-result-hash"))
         self.assertEqual(approval_path.read_bytes(), original)
 
     def test_record_approval_merges_approved_results(self) -> None:

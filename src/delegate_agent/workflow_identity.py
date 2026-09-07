@@ -107,9 +107,7 @@ def validate_stamp(identity: JsonObject, config: JsonObject) -> None:
         raise WorkflowPinError("invalid_pin", "workflow fallback namespace is invalid")
 
 
-def validate(identity: JsonObject | None, config: JsonObject) -> None:
-    if identity is None:
-        return  # Older pins retain their explicitly reported legacy semantics.
+def validate(identity: JsonObject, config: JsonObject) -> None:
     validate_stamp(identity, config)
     current = capture(config)
     # Different detector provenance is harmless when it selects the same

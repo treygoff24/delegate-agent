@@ -264,25 +264,31 @@ class ApprovalAccumulates(unittest.TestCase):
     def test_second_approval_keeps_the_first_gate_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workflow_registry.record_approval(root, "gate-one")
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
-            workflow_registry.record_approval(root, "gate-two")
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
-            self.assertTrue(workflow_registry.approval_allows(root, "gate-two"))
-            self.assertFalse(workflow_registry.approval_allows(root, "gate-three"))
+            workflow_registry.record_approval(root, "gate-one", "hash-one")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one", "hash-one"))
+            workflow_registry.record_approval(root, "gate-two", "hash-two")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one", "hash-one"))
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-two", "hash-two"))
+            self.assertFalse(workflow_registry.approval_allows(root, "gate-three", "hash-three"))
             payload = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE)
-            self.assertEqual(payload["approvedKeys"], ["gate-one", "gate-two"])
+            self.assertEqual(
+                payload["approvedResults"],
+                [
+                    {"key": "gate-one", "resultHash": "hash-one"},
+                    {"key": "gate-two", "resultHash": "hash-two"},
+                ],
+            )
 
-    def test_legacy_single_key_file_is_honoured_and_upgraded(self) -> None:
+    def test_legacy_single_key_file_is_ignored_when_recording_current_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workflow_registry.write_json(
                 root / workflow_registry.APPROVAL_FILE, {"approved": True, "gateKey": "legacy"}
             )
-            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
-            workflow_registry.record_approval(root, "next")
-            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
-            self.assertTrue(workflow_registry.approval_allows(root, "next"))
+            self.assertFalse(workflow_registry.approval_allows(root, "legacy", "old-hash"))
+            workflow_registry.record_approval(root, "next", "next-hash")
+            self.assertFalse(workflow_registry.approval_allows(root, "legacy", "old-hash"))
+            self.assertTrue(workflow_registry.approval_allows(root, "next", "next-hash"))
 
 
 if __name__ == "__main__":
