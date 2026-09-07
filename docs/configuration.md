@@ -93,21 +93,32 @@ layers. This is read-only observability; inspecting it does not modify
 
 ## Mail
 
-Mail commands work with mail disabled. The opt-in prompt mailbox seam is
-controlled by a strict object with one key:
+Workspace mail is enabled by default, including when the section or key is
+omitted. A strict object with one key controls launch-time mail setup:
 
 ```json
 {
   "mail": {
-    "enabled": false
+    "enabled": true
   }
 }
 ```
 
-`mail.enabled` must be a boolean; unknown keys are rejected. Enabling it adds
-the pull-mail instruction suffix to wrapped work launches. `--mail-push` and
-input JSON `mailPush: true` also require `mail.enabled: true`, and are limited
-to wrapped work-mode launches. Push is opt-in: enabling mail does not install
+`mail.enabled` must be a boolean; unknown keys are rejected. Wrapped work
+launches receive a pull-mail instruction suffix, and isolated work launches
+receive the harness-specific mailbox grant where supported. Set `enabled` to
+`false`, or pass global `--no-mail`, to disable that setup for a launch. The flag
+does not change saved configuration or suppress explicit `--notify`.
+
+Mail storage is local to `.delegate/mail`; it needs no daemon, network, or
+`post` installation. If mail storage cannot be prepared, the launch continues
+with mail setup disabled, one stderr warning, and a recorded `warnings` entry.
+The run registry itself must still be writable. An isolated sandbox that
+cannot reach mail records a deduplicated manifest warning without stderr noise.
+Explicit mail commands remain available even when launch-time mail is disabled.
+
+`--mail-push` and input JSON `mailPush: true` require mail to be enabled and a
+wrapped work-mode launch. Push remains opt-in; default mail never installs
 hooks. Claude receives launch-scoped settings and both adapters keep cursors
 and markers under `.delegate/mail`; Codex private homes are created under
 `.delegate/runs/<runId>/` and cleaned at terminal finalization or terminal

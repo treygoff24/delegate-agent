@@ -200,7 +200,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "structuredOutputRetries": 2,
     },
     "mail": {
-        "enabled": False,
+        "enabled": True,
     },
 }
 
@@ -1686,8 +1686,8 @@ def skill_review_preamble_enabled(config: JsonObject) -> bool:
 
 
 def mail_enabled(config: JsonObject) -> bool:
-    section = config.get("mail")
-    return isinstance(section, dict) and section.get("enabled") is True
+    section = config.get("mail", {})
+    return isinstance(section, dict) and section.get("enabled", True) is True
 
 
 def completion_report_default_mode(config: JsonObject) -> str:
