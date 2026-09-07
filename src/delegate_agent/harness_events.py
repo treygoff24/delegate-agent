@@ -796,9 +796,15 @@ class StreamAccumulator:
         terminal_recorded = provider_terminal is not None
         if provider_terminal is not None:
             self.provider_terminal_state, self.provider_terminal_reason = provider_terminal
+            # A cancellation is its own terminal status, not a failure. The
+            # harness handlers that also see this line recorded `cancelled`
+            # after this call and so overwrote it; recording it correctly here
+            # is what lets those handlers stand down.
             self._record_terminal_event(
                 event=event_type,
-                status="failed",
+                status=(
+                    "cancelled" if self.provider_terminal_state == PROVIDER_CANCELLED else "failed"
+                ),
                 reason=self.provider_terminal_reason,
             )
         self._capture_session_id(payload, event_type)
@@ -816,7 +822,7 @@ class StreamAccumulator:
             self._ingest_grok_text(payload)
             return
         if event_type == "end" and self.harness == "grok":
-            self._ingest_grok_end(payload)
+            self._ingest_grok_end(payload, terminal_recorded=terminal_recorded)
             return
         if event_type == "error" and self.harness == "grok":
             self._ingest_grok_error(payload)
@@ -902,7 +908,11 @@ class StreamAccumulator:
             )
             return
         if event_type in ("turn.cancelled", "turn.canceled"):
-            self._record_terminal_event(event=event_type, status="cancelled")
+            # The provider-terminal table classifies this event type as
+            # `provider_cancelled` and has already published a run.completed for
+            # it, exactly as it does for `error` and `result`.
+            if not terminal_recorded:
+                self._record_terminal_event(event=event_type, status="cancelled")
             return
         if event_type in ("item.started", "item.completed"):
             self._ingest_codex_item(payload, completed=event_type == "item.completed")
@@ -1382,7 +1392,7 @@ class StreamAccumulator:
         self._invalidate_assistant_text_cache()
         return text
 
-    def _ingest_grok_end(self, payload: JsonObject) -> None:
+    def _ingest_grok_end(self, payload: JsonObject, *, terminal_recorded: bool = False) -> None:
         text = self._take_grok_text()
         usage = _normalize_reported_usage(payload.get("usage"))
         if usage is not None:
@@ -1406,7 +1416,11 @@ class StreamAccumulator:
             else:
                 self._record_terminal_event(event="grok.end", status="succeeded")
             return
-        if terminal_status in {"cancelled", "failed"}:
+        if terminal_status in {"cancelled", "failed"} and not terminal_recorded:
+            # A cancelled or refused stop reason is already in the
+            # provider-terminal table, which published a run.completed for this
+            # same line before the handler ran. Recording a second one left the
+            # event stream claiming the run both failed and was cancelled.
             self._record_terminal_event(event="grok.end", status=terminal_status, reason=reason)
         if text:
             self._record_recoverable_assistant_text(text)
