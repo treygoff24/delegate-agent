@@ -722,6 +722,37 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(declaration, cache["harnesses"]["grok"]["models"]["grok-4.6"])
         self.assertNotIn("grok", TRANSPORT_BY_HARNESS)
 
+    def test_cache_validation_accepts_a_cursor_row_beside_codex_and_grok(self):
+        """cursor is a routing-table harness; accepting grok must not have dropped it."""
+        cache = {
+            "harnesses": {
+                "cursor": {"models": {"composer-2.5": {"supported": ["high"]}}},
+                "codex": {"models": {"gpt-5.5": {"supported": ["high"]}}},
+                "droid": {"models": {"droid-1": {"supported": ["high"]}}},
+                "grok": {"models": {"grok-4.6": {"supported": ["high"]}}},
+            }
+        }
+
+        validate_cache_payload(cache)
+
+    def test_a_cursor_row_does_not_discard_the_whole_cache_file(self):
+        """`_load_cache` swallows the validation error, so a reject loses codex too."""
+        cache = {
+            "harnesses": {
+                "cursor": {"models": {"composer-2.5": {"supported": ["high"]}}},
+                "codex": {"models": {"gpt-5.5": {"supported": ["high"]}}},
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = reasoning_module.reasoning_capability_cache_path(tmp)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cache), encoding="utf-8")
+
+            loaded = load_reasoning_capability_cache(tmp)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(sorted(loaded["harnesses"]), ["codex", "cursor"])
+
     def test_cache_validation_still_rejects_unrelated_harness_rows(self):
         with self.assertRaises(ReasoningCapabilityError):
             validate_cache_payload(
