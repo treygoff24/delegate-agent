@@ -2192,6 +2192,106 @@ class HarnessEventsTests(unittest.TestCase):
         completed = [event for event in acc.events if event.kind == "tool.completed"]
         self.assertEqual([event.status for event in completed], ["failed"])
 
+    def test_cursor_tool_events_are_named_and_targeted_from_the_real_shape(self):
+        """cursor B2: the type is dotless and the tool is named by its key."""
+        acc = self.events.StreamAccumulator(harness="cursor")
+        fixture = ROOT / "tests" / "fixtures" / "cursor" / "tool_read.jsonl"
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        tool_events = [event for event in acc.events if event.kind.startswith("tool.")]
+        self.assertEqual(
+            [(event.kind, event.tool, event.target, event.status) for event in tool_events],
+            [
+                ("tool.started", "read", "/var/tmp/lane-E-cap/marker.txt", None),
+                ("tool.completed", "read", "/var/tmp/lane-E-cap/marker.txt", "success"),
+            ],
+        )
+        self.assertEqual(acc.completion_text, "ZQ-1147")
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 9854,
+                "outputTokens": 114,
+                "cacheReadTokens": 25047,
+                "cacheWriteTokens": 0,
+            },
+        )
+
+    def test_cursor_tool_completion_does_not_invent_a_success(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "started",
+                    "call_id": "c1",
+                    "tool_call": {
+                        "shellToolCall": {"args": {"command": "pytest"}},
+                        "toolCallId": "c1",
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": {
+                        "shellToolCall": {
+                            "args": {"command": "pytest"},
+                            "result": {"error": {"message": "exit 1"}},
+                        },
+                        "toolCallId": "c1",
+                    },
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(
+            [(e.tool, e.target, e.status) for e in completed], [("shell", "pytest", "error")]
+        )
+
+    def test_cursor_tool_completion_with_an_unreadable_result_has_no_status(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {"args": {"path": "a.txt"}}, "toolCallId": "c1"},
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual([e.status for e in completed], [None])
+
+    def test_cursor_tool_call_without_a_subtype_is_a_start(self):
+        acc = self.events.StreamAccumulator(harness="cursor")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {"args": {"path": "a.txt"}}},
+                }
+            )
+        )
+        self.assertEqual([event.kind for event in acc.events], ["tool.started"])
+
+    def test_non_cursor_tool_call_keeps_the_flat_shape(self):
+        """The generic flat `tool_call` used by grok and droid is untouched."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(
+            json.dumps({"type": "tool_call", "tool": "Bash", "args": {"command": "git status"}})
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual([(e.tool, e.target) for e in started], [("Bash", "git status")])
+
     def test_top_level_grok_shapes_are_ignored_for_non_grok_harnesses(self):
         acc = self.events.StreamAccumulator(harness="cursor")
         acc.ingest_line(json.dumps({"type": "text", "data": "x"}))

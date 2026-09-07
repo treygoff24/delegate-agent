@@ -276,6 +276,24 @@ def _classify_kimi_role_envelope(payload: JsonObject) -> LineSignals | None:
     return None
 
 
+def _classify_cursor(payload: JsonObject, event_type: str) -> LineSignals | None:
+    """Cursor's tool events are `(type, subtype)` with the id in `call_id`.
+
+    The shared typed dispatch reads a dotted `tool_call.started`/`.completed`
+    type that Cursor does not emit, so every tool event -- start and finish
+    alike -- was pushed onto the pending list under the fallback key "tool" and
+    never removed. Two unresolved tools disable the watchdog for the rest of
+    the run.
+    """
+    if event_type == "tool_call":
+        tool_call = payload.get("tool_call")
+        key = _string_field(payload, "call_id") or _string_field(tool_call, "toolCallId") or "tool"
+        if payload.get("subtype") == "completed":
+            return LineSignals(tools_finished=(key,), label="tool_call.completed")
+        return LineSignals(tools_started=(key,), label="tool_call.started")
+    return _classify_typed(payload, event_type)
+
+
 def _classify_codex_item(payload: JsonObject, *, completed: bool) -> LineSignals:
     item = payload.get("item")
     if not isinstance(item, dict):
@@ -437,6 +455,8 @@ def _classify_payload(
         return _classify_opencode(payload, event_type) if isinstance(event_type, str) else None
     if harness == "grok":
         return _classify_grok(payload, event_type) if isinstance(event_type, str) else None
+    if harness == "cursor":
+        return _classify_cursor(payload, event_type) if isinstance(event_type, str) else None
     if not isinstance(event_type, str):
         return _classify_kimi_role_envelope(payload)
     return _classify_typed(payload, event_type)
