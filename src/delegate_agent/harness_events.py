@@ -1443,7 +1443,7 @@ class StreamAccumulator:
             return
         part = payload.get("part")
         if not isinstance(part, dict):
-            self._record_unhandled_event_type(event_type)
+            self._record_unhandled_event_type(_opencode_unhandled_key(event_type, payload))
             return
         part_type = part.get("type")
         if event_type == "step_start" and part_type == "step-start":
@@ -1458,7 +1458,7 @@ class StreamAccumulator:
         if event_type == "step_finish" and part_type == "step-finish":
             self._ingest_opencode_step_finish(part)
             return
-        self._record_unhandled_event_type(event_type)
+        self._record_unhandled_event_type(_opencode_unhandled_key(event_type, payload))
 
     def _ingest_opencode_text(self, part: JsonObject) -> None:
         text = part.get("text")
@@ -1921,6 +1921,30 @@ def _grok_stop_reason_succeeded(value: JsonValue) -> bool:
         return False
     normalized = re.sub(r"[^a-z]", "", value.lower())
     return normalized in {"endturn", "stop", "complete", "done"}
+
+
+# opencode dispatches on the (`type`, `part.type`) pair, so a known `type` can
+# still go unhandled because the part shape changed. These are the `type` halves
+# that have a handler.
+_OPENCODE_PAIRED_EVENT_TYPES = frozenset({"step_start", "text", "tool_use", "step_finish"})
+
+
+def _opencode_unhandled_key(event_type: str, payload: JsonObject) -> str:
+    """Name the half of the pair that did not match.
+
+    Filing a known `type` under its own name reports a handled type as
+    unhandled and hides which half of the pair changed, so a known type is
+    keyed with the part type it actually arrived with.
+    """
+    if event_type not in _OPENCODE_PAIRED_EVENT_TYPES:
+        return event_type
+    part = payload.get("part")
+    if not isinstance(part, dict):
+        return f"{event_type}/<no part>"
+    part_type = part.get("type")
+    if not isinstance(part_type, str) or not part_type.strip():
+        return f"{event_type}/<no part.type>"
+    return f"{event_type}/{part_type.strip()}"
 
 
 def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
