@@ -1627,7 +1627,7 @@ def _build_normalized_launch(
             auth_profile_override=global_options.auth_profile,
             output_schema=spec.output_schema,
             output_schema_text=launch.output_schema_text,
-            warnings=(*output_schema_warnings, *isolation_warnings),
+            warnings=(*launch.warnings, *output_schema_warnings, *isolation_warnings),
             cleanup_workspace=cleanup_workspace,
             call_read_only=launch.read_only,
             pure=launch.pure,
