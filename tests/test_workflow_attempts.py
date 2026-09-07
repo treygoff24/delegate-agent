@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,52 @@ class WorkflowAttemptTests(unittest.TestCase):
         return workflow_attempts.create(
             self.pin, workflow_attempts.prepare(self.pin, live or self.base, "test-command-config")
         )
+
+    def test_attempt_publication_keeps_source_writable_until_rename(self):
+        publish = private_io.rename_directory_noreplace
+        source_modes = []
+
+        def checked_publish(source, target):
+            source_modes.append(stat.S_IMODE(source.stat().st_mode))
+            self.assertTrue(source.stat().st_mode & stat.S_IWUSR)
+            publish(source, target)
+
+        with mock.patch.object(
+            private_io, "rename_directory_noreplace", side_effect=checked_publish
+        ):
+            attempt = self.attempt()
+
+        self.assertEqual(len(source_modes), 1)
+        self.assertEqual(stat.S_IMODE(attempt.path.parent.stat().st_mode), 0o500)
+        self.assertEqual(stat.S_IMODE(attempt.path.stat().st_mode), 0o400)
+        self.assertEqual(stat.S_IMODE(attempt.config_path.stat().st_mode), 0o400)
+
+    def test_reused_attempt_is_sealed_after_interrupted_publication(self):
+        attempt = self.attempt()
+        attempt.path.parent.chmod(0o700)
+
+        reused = self.attempt()
+
+        self.assertEqual(stat.S_IMODE(reused.path.parent.stat().st_mode), 0o500)
+
+    def test_colliding_attempt_is_sealed_after_interrupted_publication(self):
+        attempt = self.attempt()
+        root = attempt.path.parent
+        root.chmod(0o700)
+        interrupted = root.with_name(f"{root.name}.interrupted")
+        root.rename(interrupted)
+        publish = private_io.rename_directory_noreplace
+
+        def publish_collision(source, target):
+            interrupted.rename(target)
+            publish(source, target)
+
+        with mock.patch.object(
+            private_io, "rename_directory_noreplace", side_effect=publish_collision
+        ):
+            reused = self.attempt()
+
+        self.assertEqual(stat.S_IMODE(reused.path.parent.stat().st_mode), 0o500)
 
     def test_only_ops_change_and_exact_config_load_ignores_global_overlay(self):
         live = copy.deepcopy(self.base)
@@ -198,7 +245,7 @@ class WorkflowAttemptTests(unittest.TestCase):
 
         def race_publish(source, target):
             target.mkdir()
-            foreign.append((target, target.stat().st_ino))
+            foreign.append((target, target.stat().st_ino, target.stat().st_mode))
             publish(source, target)
 
         with (
@@ -207,9 +254,10 @@ class WorkflowAttemptTests(unittest.TestCase):
         ):
             self.attempt()
         self.assertEqual(len(foreign), 1)
-        path, inode = foreign[0]
+        path, inode, mode = foreign[0]
         self.assertEqual(path.stat().st_ino, inode)
         self.assertEqual(list(path.iterdir()), [])
+        self.assertEqual(path.stat().st_mode, mode)
 
     def test_failed_resume_restores_exact_prior_approval(self):
         root = registry.ensure_workflow_dir(self.workspace, self.pin.workflow_id)
