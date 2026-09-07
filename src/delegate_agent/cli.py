@@ -869,18 +869,23 @@ def _execute_attached_worktree(
             run_path,
             delegate_runner.build_manifest(ctx_runner, execution_request.display_argv),
         )
-        delegate_runner.write_state(
+        from delegate_agent import harness_events
+
+        delegate_runner._persist_final_progress(
             run_path,
-            delegate_runner.build_state(
-                ctx_runner,
-                status=_run_registry.STATUS_FAILED,
-                exit_code=1,
-                extra={
-                    "error": "worktree_missing",
-                    "message": exc.message,
-                    "failureReason": "worktree_missing",
-                },
-            ),
+            ctx_runner,
+            harness_events.StreamAccumulator(harness=ctx_runner.harness),
+            status=_run_registry.STATUS_FAILED,
+            exit_code=1,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            completion_report_written=False,
+            extra={
+                "error": "worktree_missing",
+                "message": exc.message,
+                "failureReason": "worktree_missing",
+                "resultQuality": None,
+            },
         )
         raise DelegateError("worktree_missing", exc.message) from exc
     except Exception:

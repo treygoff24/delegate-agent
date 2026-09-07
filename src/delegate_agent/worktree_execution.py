@@ -408,7 +408,7 @@ def _register_persistent_worktree_run(
 
     delegate_runner.write_state(
         run_path,
-        delegate_runner.build_state(
+        delegate_runner.build_run_record(
             pre_ctx,
             status="creating_isolation",
             extra={"plannedBranch": branch, "plannedExecutionCwd": worktree_path},
@@ -444,35 +444,19 @@ def _record_persistent_worktree_failure(
     else:
         extra["plannedBranch"] = registration.branch
         extra["plannedExecutionCwd"] = registration.worktree_path
-    failed_state = delegate_runner.build_state(
-        registration.pre_ctx,
-        status="failed",
-        extra=extra,
-    )
-    delegate_runner.write_state(registration.run_path, failed_state)
-
-    failed_snapshot = delegate_runner.build_snapshot(
+    status, _ = delegate_runner._persist_final_progress(
+        registration.run_path,
         registration.pre_ctx,
         accumulator=harness_events.StreamAccumulator(harness=registration.pre_ctx.harness),
+        status=run_registry.STATUS_FAILED,
+        exit_code=1,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        completion_report_written=False,
+        extra={**extra, "resultQuality": None},
     )
-    failed_snapshot["ok"] = False
-    failed_snapshot["error"] = error
-    failed_snapshot["message"] = message
-    failed_snapshot["status"] = "failed"
-    if not worktree_realized:
-        # Pre-creation failure: nothing was realized on disk, so strip the
-        # realized worktree fields build_snapshot derived from the registration
-        # context and record only the planned branch/path. When the worktree
-        # was realized, executionCwd, branch, worktreeStatus, and
-        # worktreeCleanupCommands stay so the operator can inspect and clean up
-        # the preserved worktree.
-        failed_snapshot["plannedBranch"] = registration.branch
-        failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
-        for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
-            failed_snapshot.pop(key, None)
-    delegate_runner.write_snapshot(registration.run_path, failed_snapshot)
     delegate_runner._send_completion_notification(
-        registration.run_path, registration.pre_ctx, "failed"
+        registration.run_path, registration.pre_ctx, status
     )
 
 
@@ -856,20 +840,23 @@ def _cleanup_partial_worktree(
             if remove_branch:
                 commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
             manual = " && ".join(commands)
-        snapshot_path = run_path / run_registry.SNAPSHOT_FILE
+        state_path = run_path / run_registry.STATE_FILE
         metadata_warning: str | None = None
         try:
-            existing = run_registry.load_run_snapshot(run_path.parent.parent, run_path.name)
-            if existing is not None:
-                existing["cleanupFailed"] = True
-                existing["manualCleanup"] = manual
-                if guarded:
-                    existing["cleanupRefused"] = "source_root_guard"
-                run_registry.write_snapshot(run_path, existing)
+            root, run_id = run_path.parent.parent, run_path.name
+            with run_registry.registry_lock(root):
+                run_registry.reconcile_finalize_wal_locked(root, run_id)
+                existing = run_registry.load_run_state(root, run_id)
+                if existing is not None:
+                    existing["cleanupFailed"] = True
+                    existing["manualCleanup"] = manual
+                    if guarded:
+                        existing["cleanupRefused"] = "source_root_guard"
+                    run_registry.publish_terminal_record_locked(root, run_id, existing)
         except (OSError, ValueError) as exc:
             metadata_warning = (
                 "warning: partial worktree cleanup failed, and Delegate could not "
-                f"record cleanup metadata in {snapshot_path}: {exc}"
+                f"record cleanup metadata in {state_path}: {exc}"
             )
         if metadata_warning is not None:
             print(metadata_warning, file=stderr)
