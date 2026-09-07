@@ -44,6 +44,7 @@ from delegate_agent.private_io import (
 from delegate_agent.request_models import (
     CONTINUITY_MODES,
     DEFAULT_CONTINUITY_MODE,
+    FollowupOptions,
     GlobalOptions,
     LaunchOptions,
     ParsedCommand,
@@ -205,8 +206,8 @@ def build_followup_plan(
     *,
     stderr: TextIO,
 ) -> FollowupPlan:
-    opts = parsed.followup
-    if opts is None:
+    opts = parsed.payload
+    if not isinstance(opts, FollowupOptions):
         raise DelegateError("invalid_command", "followup options are required.")
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -394,7 +395,7 @@ def build_followup_plan(
             group=group,
             notify=global_options.notify,
         ),
-        launch=launch,
+        payload=launch,
     )
 
     for note in notes:
