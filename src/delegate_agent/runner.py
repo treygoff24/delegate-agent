@@ -4518,20 +4518,6 @@ def _claude_usage(event: JsonObject) -> JsonObject:
     return {"inputTokens": input_tokens, "outputTokens": output_tokens, "basis": "exact"}
 
 
-def _claude_result_text(payload: JsonObject) -> str | None:
-    extractor = getattr(harness_events, "claude_result_text", None)
-    if callable(extractor):
-        return extractor(payload)
-    # TODO(Lane E): delete this fallback once harness_events.claude_result_text is merged.
-    if "structured_output" in payload:
-        try:
-            return json.dumps(payload["structured_output"], allow_nan=False)
-        except (TypeError, ValueError):
-            pass
-    result = payload.get("result")
-    return result if isinstance(result, str) else None
-
-
 def _parse_claude_call_json(
     stdout_text: str, *, pure: bool
 ) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None]:
@@ -4553,7 +4539,7 @@ def _parse_claude_call_json(
     )
     if not isinstance(result, dict):
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
-    result_text = _claude_result_text(result)
+    result_text = harness_events.claude_result_text(result)
     if result_text is None:
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
     denials = result.get("permission_denials")

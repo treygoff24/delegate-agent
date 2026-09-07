@@ -1220,7 +1220,7 @@ class HarnessEventsTests(unittest.TestCase):
         for line in fixture.read_text(encoding="utf-8").splitlines():
             claude.ingest_line(line)
         self.assertEqual(claude.unhandled_event_types, {"rate_limit_event": 1})
-        self.assertEqual(claude.completion_text, '{"ok":true}')
+        self.assertEqual(claude.completion_text, '{"ok": true}')
 
         grok = self.events.StreamAccumulator(harness="grok")
         fixture = ROOT / "tests" / "fixtures" / "grok" / "tool_read_multi_response.jsonl"
@@ -1347,19 +1347,22 @@ class HarnessEventsTests(unittest.TestCase):
             self.events.claude_result_text(
                 {"result": "stale echo", "structured_output": {"ok": True, "n": 2}}
             ),
-            '{"ok":true,"n":2}',
+            '{"ok": true, "n": 2}',
         )
         self.assertEqual(self.events.claude_result_text({"result": "plain answer"}), "plain answer")
-        self.assertEqual(self.events.claude_result_text({"structured_output": [1, 2]}), "[1,2]")
+        self.assertEqual(self.events.claude_result_text({"structured_output": [1, 2]}), "[1, 2]")
         self.assertIsNone(self.events.claude_result_text({"result": "   "}))
-        self.assertIsNone(self.events.claude_result_text({"structured_output": None}))
+        # A PRESENT structured_output wins even when null: on a --json-schema
+        # run the field is the answer, and null is a representable one.
+        self.assertEqual(self.events.claude_result_text({"structured_output": None}), "null")
+        self.assertEqual(self.events.claude_result_text({"structured_output": float("nan")}), None)
         self.assertIsNone(self.events.claude_result_text({"is_error": True, "num_turns": 3}))
 
     def test_claude_result_text_does_not_judge_is_error(self):
         """Extraction and failure detection are separate questions."""
         self.assertEqual(
             self.events.claude_result_text({"is_error": True, "structured_output": {"ok": False}}),
-            '{"ok":false}',
+            '{"ok": false}',
         )
 
     def test_claude_result_event_reads_structured_output_when_result_is_absent(self):
@@ -1367,7 +1370,7 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(
             json.dumps({"type": "result", "subtype": "success", "structured_output": {"ok": True}})
         )
-        self.assertEqual(acc.completion_text, '{"ok":true}')
+        self.assertEqual(acc.completion_text, '{"ok": true}')
         self.assertEqual(acc.terminal_status, "succeeded")
 
     def test_claude_real_capture_delivers_the_structured_answer(self):
@@ -1376,7 +1379,11 @@ class HarnessEventsTests(unittest.TestCase):
         for line in fixture.read_text(encoding="utf-8").splitlines():
             acc.ingest_line(line)
 
-        self.assertEqual(acc.completion_text, '{"ok":true}')
+        # The vendor echoes `{"ok":true}` into `result`; delegate delivers the
+        # documented `structured_output` field, so the spacing differs and the
+        # parsed value does not.
+        self.assertEqual(acc.completion_text, '{"ok": true}')
+        self.assertEqual(json.loads(acc.completion_text), {"ok": True})
         self.assertEqual(acc.terminal_status, "succeeded")
         self.assertEqual(acc.session_id, "226e1bf3-7bd8-43c7-8958-89966432300c")
         self.assertEqual(acc.harness_session_id, "226e1bf3-7bd8-43c7-8958-89966432300c")

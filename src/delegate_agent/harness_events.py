@@ -569,17 +569,20 @@ def claude_result_text(payload: JsonObject) -> str | None:
     `structured_output` is the only surface the vendor documents for a
     structured run; the same JSON is also echoed into the `result` string,
     which delegate has been relying on without a commitment that it stays
-    there. Prefer the documented field, serialized the way the CLI serializes
-    it, and fall back to the string.
+    there. Prefer the documented field and fall back to the string.
+
+    A PRESENT `structured_output` wins even when it is null, because on a
+    `--json-schema` run the field is the model's answer and `null` is a
+    representable one. `allow_nan=False` sends a non-serializable value to the
+    fallback rather than emitting invalid JSON.
 
     Extraction only. `is_error` and the pure-mode permission-denial check are
     separate questions and stay with their callers: a run can carry a perfectly
     readable result and still have failed.
     """
-    structured = payload.get("structured_output")
-    if structured is not None:
+    if "structured_output" in payload:
         try:
-            return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(payload["structured_output"], allow_nan=False)
         except (TypeError, ValueError):
             pass
     result = payload.get("result")
