@@ -254,8 +254,11 @@ def build_kimi_argv(
         validate_mode(mode)
     if model:
         argv.extend(["--model", model])
-    if stream_capture:
-        argv.extend(["--output-format", "stream-json"])
+    # Kimi resolves the output format from --output-format, then
+    # KIMI_MODEL_OUTPUT_FORMAT, then "text", and it honours that environment
+    # variable in prompt mode — which is every Delegate launch. Pin the format
+    # explicitly on both branches so an ambient export cannot flip a run.
+    argv.extend(["--output-format", "stream-json" if stream_capture else "text"])
     argv.extend(["--prompt", prompt])
     return argv
 
