@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,11 +10,14 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from delegate_agent import reasoning as reasoning_module  # noqa: E402
 from delegate_agent.reasoning import (  # noqa: E402
     CLAUDE_NATIVE_EFFORTS,
     DEVIN_UNSUPPORTED_REASONING_WARNING,
+    GROK_NATIVE_EFFORTS,
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
+    PI_NATIVE_EFFORTS,
     REASONING_PROFILES,
     TRANSPORT_BY_HARNESS,
     TRANSPORT_CLAUDE_EFFORT_FLAG,
@@ -23,15 +28,18 @@ from delegate_agent.reasoning import (  # noqa: E402
     TRANSPORT_PI_THINKING_FLAG,
     ReasoningCapabilityError,
     _alias_key_for_default_model,
+    _lookup_declaration,
     build_alias_reasoning_summaries,
     build_reasoning_capabilities_payload,
     format_explicit_reasoning_effort_error,
+    load_reasoning_capability_cache,
     normalize_effort,
     resolve_discovered_model_capability,
     resolve_grok_reasoning_capability,
     resolve_native_effort,
     resolve_pi_native_effort,
     resolve_reasoning_capability,
+    validate_cache_payload,
 )
 
 
@@ -57,40 +65,29 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.transport, "codex-config")
         self.assertEqual(capability.source, "bundled")
 
-    def test_codex_spark_model_accepts_bundled_effort(self):
-        capability = resolve_reasoning_capability(
-            harness="codex",
-            model="gpt-5.3-codex-spark",
-            requested_effort="high",
-            config={},
-        )
-        self.assertIsNotNone(capability)
-        assert capability is not None
-        self.assertEqual(capability.transport, "codex-config")
-        self.assertEqual(capability.source, "bundled")
-
-    def test_codex_sol_accepts_bundled_max_effort(self):
+    def test_codex_sol_accepts_bundled_ultra_effort(self):
         capability = resolve_reasoning_capability(
             harness="codex",
             model="gpt-5.6-sol",
-            requested_effort="max",
+            requested_effort="ultra",
             config={},
         )
         self.assertIsNotNone(capability)
         assert capability is not None
-        self.assertEqual(capability.effort, "max")
+        self.assertEqual(capability.effort, "ultra")
+        self.assertEqual(capability.default_effort, "low")
         self.assertEqual(capability.source, "bundled")
 
-    def test_codex_terra_rejects_max_effort(self):
+    def test_codex_luna_rejects_ultra_effort(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
             resolve_reasoning_capability(
                 harness="codex",
-                model="gpt-5.6-terra",
-                requested_effort="max",
+                model="gpt-5.6-luna",
+                requested_effort="ultra",
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("gpt-5.6-terra", ctx.exception.message)
+        self.assertIn("gpt-5.6-luna", ctx.exception.message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, ctx.exception.message)
 
     def test_codex_declared_model_rejects_max_effort(self):
@@ -113,6 +110,17 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_droid_gemini_flash_rejects_minimal_effort(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="droid",
+                model="gemini-3.6-flash",
+                requested_effort="minimal",
+                config={},
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("Supported values: low, medium, high", ctx.exception.message)
 
     def test_config_can_extend_codex_max_effort_support(self):
         config = {
@@ -281,14 +289,17 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_grok_native_effort_accepts_static_cli_levels(self):
-        for effort in ("low", "medium", "high", "xhigh", "max"):
+        for effort in ("low", "medium", "high", "xhigh"):
             with self.subTest(effort=effort):
                 self.assertEqual(resolve_native_effort("grok", effort), effort)
+        self.assertEqual(GROK_NATIVE_EFFORTS, ("low", "medium", "high", "xhigh"))
 
     def test_grok_native_effort_rejects_invalid_levels(self):
-        with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_native_effort("grok", "off")
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        for effort in ("off", "max"):
+            with self.subTest(effort=effort):
+                with self.assertRaises(ReasoningCapabilityError) as ctx:
+                    resolve_native_effort("grok", effort)
+                self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_grok_native_effort_rejects_malformed_values(self):
         for bad in ("", 'hi"gh', "hi\\gh", "hi gh"):
@@ -297,32 +308,39 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     resolve_native_effort("grok", bad)
                 self.assertEqual(ctx.exception.error, "invalid_reasoning_effort")
 
-    def test_pi_native_effort_accepts_delegate_levels_only(self):
-        for effort in ("low", "medium", "high", "xhigh", "max"):
+    def test_pi_and_omp_native_efforts_match_their_cli_vocabularies(self):
+        for effort in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
             with self.subTest(effort=effort):
                 self.assertEqual(resolve_pi_native_effort(effort), effort)
-        for unsupported in ("off", "minimal"):
-            with self.subTest(effort=unsupported), self.assertRaises(ReasoningCapabilityError):
-                resolve_pi_native_effort(unsupported)
+        self.assertEqual(resolve_pi_native_effort("auto", engine="omp"), "auto")
+        with self.assertRaises(ReasoningCapabilityError):
+            resolve_pi_native_effort("auto", engine="pi")
+        self.assertNotIn("auto", PI_NATIVE_EFFORTS)
+        self.assertIn("auto", getattr(reasoning_module, "OMP_NATIVE_EFFORTS", ()))
 
     def test_capabilities_payload_includes_static_pi_thinking_levels(self):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         pi = payload["harnesses"]["pi"]
         self.assertEqual(pi["transport"], "pi-thinking-flag")
         self.assertEqual(pi["source"], "static")
-        self.assertEqual(pi["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(
+            pi["supported"], ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        )
 
         omp = payload["harnesses"]["omp"]
         self.assertEqual(omp["transport"], "pi-thinking-flag")
         self.assertEqual(omp["source"], "static")
-        self.assertEqual(omp["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(
+            omp["supported"],
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"],
+        )
 
     def test_capabilities_payload_includes_static_grok_efforts(self):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         grok = payload["harnesses"]["grok"]
         self.assertEqual(grok["transport"], "grok-effort-flag")
         self.assertEqual(grok["source"], "harness-compatibility")
-        self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh"])
         # No bundled grok rows: nothing may narrow the harness enum without evidence.
         self.assertEqual(grok["models"], {})
 
@@ -676,6 +694,40 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(TRANSPORT_BY_HARNESS["droid"], TRANSPORT_DROID_FLAG)
         self.assertEqual(TRANSPORT_BY_HARNESS["cursor"], TRANSPORT_CURSOR_MODEL_SELECTION)
 
+    def test_mixed_cache_with_grok_loads_and_uses_exact_grok_row(self):
+        cache = {
+            "harnesses": {
+                "codex": {"models": {"gpt-5.5": {"supported": ["low"], "default": "low"}}},
+                "droid": {"models": {"glm-5.1": {"supported": ["off", "high"], "default": "high"}}},
+                "grok": {
+                    "models": {"grok-4.6": {"supported": ["high", "xhigh"], "default": "high"}}
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / ".delegate" / "capabilities" / "reasoning.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(cache), encoding="utf-8")
+            loaded = load_reasoning_capability_cache(temp_dir)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        declaration, source = _lookup_declaration(
+            harness="grok",
+            model="grok-4.6",
+            config={},
+            cache=loaded,
+        )
+        self.assertEqual(source, "cache")
+        self.assertEqual(declaration, cache["harnesses"]["grok"]["models"]["grok-4.6"])
+        self.assertNotIn("grok", TRANSPORT_BY_HARNESS)
+
+    def test_cache_validation_still_rejects_unrelated_harness_rows(self):
+        with self.assertRaises(ReasoningCapabilityError):
+            validate_cache_payload(
+                {"harnesses": {"claude": {"models": {"model": {"supported": ["high"]}}}}}
+            )
+
     def test_projection_precedence_is_config_discovery_cache_bundled(self):
         config = {"reasoning": {"capabilities": {"codex": {"gpt-5.5": {"supported": ["config"]}}}}}
         cache = {"harnesses": {"codex": {"models": {"gpt-5.5": {"supported": ["cache"]}}}}}
@@ -821,23 +873,21 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.source, "config")
         self.assertEqual(capability.evidence, "exact")
 
-    def test_grok_full_native_enum_available_without_discovery(self):
+    def test_grok_xhigh_native_enum_available_without_discovery(self):
         # Regression: a bundled grok row once narrowed the harness enum to
-        # low/medium/high, so a configured defaultModel broke `xhigh`/`max`
-        # while an unset one worked.
-        for effort in ("xhigh", "max"):
-            with self.subTest(effort=effort):
-                capability, warnings = resolve_grok_reasoning_capability(
-                    model="grok-4.5",
-                    requested_effort=effort,
-                    config={},
-                    discovery=None,
-                )
-                assert capability is not None
-                self.assertEqual(capability.effort, effort)
-                self.assertEqual(capability.source, "harness-compatibility")
-                self.assertEqual(capability.evidence, "harness")
-                self.assertTrue(warnings)
+        # low/medium/high, so a configured defaultModel broke `xhigh` while an
+        # unset one worked.
+        capability, warnings = resolve_grok_reasoning_capability(
+            model="grok-4.5",
+            requested_effort="xhigh",
+            config={},
+            discovery=None,
+        )
+        assert capability is not None
+        self.assertEqual(capability.effort, "xhigh")
+        self.assertEqual(capability.source, "harness-compatibility")
+        self.assertEqual(capability.evidence, "harness")
+        self.assertTrue(warnings)
 
     def test_grok_manual_exact_declaration_precedes_compatibility(self):
         config = {
