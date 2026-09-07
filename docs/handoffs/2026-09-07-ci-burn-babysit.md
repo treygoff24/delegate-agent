@@ -51,6 +51,11 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - Major: runner._tracked_stream_max_bytes reloads config at execute time; carry from launch config. Followup on codex-77 (runs/o7i-fix.json).
 - Items 2,3,4,5,7 clean. Opus review still running (runs/review-opus.json).
 
+## Review round 1b (Opus high, safe): verdict SHIP, 9 minor/nit
+- #1 multi-text-block dedupe gap, #3 explicit accepts other-harness basename, #6 configuration.md row, #9 watchdog comment → Luna cleanup lane (briefs/opus-minors.md, runs/opus-minors.json).
+- #2 raw PermissionError from rmtree path → fold into pinning after Astra fix lands. #4 same as Astra major 2. #5 manifest field resume-table row, #7 AssertionError→RunnerLaunchError → after Sol fix lands (runner.py owned by codex-77).
+- #8 publication window 0o700 between rename and seal: accepted (same-uid, forced by macOS rename semantics).
+
 ## Gate
 - Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Re-gate after the two review fixes merge.
 
