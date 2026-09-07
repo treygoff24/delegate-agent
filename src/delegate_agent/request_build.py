@@ -3266,6 +3266,32 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _omp_catalog_absence_warning(
+    model: str | None, discovery: JsonObject | None
+) -> tuple[str, ...]:
+    """Warn when a resolved omp selector is not in the discovered catalog.
+
+    omp resolves --model by exact provider/modelId, then exact bare id, then a
+    provider-scoped fuzzy and substring pass, so a stale exact-form selector does
+    not fail — it can land on a different concrete model, and omp runs under
+    fungible continuity so the substitution is not recorded as a violation. The
+    operator's alias is never rewritten and the launch is never refused: an empty
+    or missing catalog is absence of evidence, not evidence of absence.
+    """
+    if not model:
+        return ()
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("omp") if isinstance(harnesses, dict) else None
+    catalog = record.get("models") if isinstance(record, dict) else None
+    if not isinstance(catalog, dict) or not catalog or model in catalog:
+        return ()
+    return (
+        f"omp model {model!r} is absent from the discovered catalog; omp resolves an "
+        "unknown selector by fuzzy match, so the run may be served by a different "
+        "model. Check `delegate models omp --live`.",
+    )
+
+
 def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     omp = build.config["omp"]
@@ -3333,7 +3359,11 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
         display_argv=list(argv),
-        warnings=(*capability_warnings, *fallback_warnings),
+        warnings=(
+            *capability_warnings,
+            *fallback_warnings,
+            *_omp_catalog_absence_warning(model, build.discovery),
+        ),
         **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, thinking_source),
     )
