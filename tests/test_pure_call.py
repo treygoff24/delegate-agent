@@ -232,7 +232,6 @@ class PureCallTests(CommandTestBase):
                 "call",
                 "/tmp/call",
                 "requested-model",
-                "answer",
                 pure=True,
             )
         self.assertEqual(ctx.exception.error, "unsupported_pure_call")

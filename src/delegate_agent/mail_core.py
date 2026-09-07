@@ -392,7 +392,7 @@ def wire_work_mail_launch(
         if flags and not all(flag in updated for flag in flags):
             if engine == "kimi" and "--prompt" in updated:
                 updated[updated.index("--prompt") : updated.index("--prompt")] = flags
-            elif engine in {"codex", "omp"} and prompt_transport == "argv" and updated:
+            elif engine == "codex" and prompt_transport == "argv" and updated:
                 updated[-1:-1] = flags
             else:
                 updated.extend(flags)
