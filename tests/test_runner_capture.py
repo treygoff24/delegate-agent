@@ -189,6 +189,42 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(result.text_chars, 0)
         self.assertTrue(any("no assistant text" in warning for warning in result.warnings))
 
+    def test_execute_call_returns_plain_text_stdout_from_a_malformed_line_harness(self):
+        """An unauthenticated pi prints prose to stdout; the message is the whole answer."""
+        message = "Error: no credentials found for provider anthropic"
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "plain_pi.py"
+            script.write_text(
+                f"print({json.dumps(message)})\n",
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="pi",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(message, result.text)
+        self.assertEqual(result.warnings, ())
+
+    def test_execute_call_still_suppresses_raw_stdout_once_one_real_event_parsed(self):
+        """A malformed line alongside a genuine event must not reopen the raw fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "mixed_pi.py"
+            script.write_text(
+                "print('pi: warning: retrying')\n"
+                'print(\'{"type":"tool_call","toolName":"read"}\')\n',
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="pi",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.text, "")
+        self.assertTrue(any("no assistant text" in warning for warning in result.warnings))
+
     def test_execute_call_captures_redacted_stderr_tail_on_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "fail.py"

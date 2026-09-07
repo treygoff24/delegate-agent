@@ -997,7 +997,7 @@ def _classify_result_quality(
         return RESULT_QUALITY_OK
     if (
         exit_code == 0
-        and accumulator.structured_events_seen > 0
+        and (accumulator.structured_events_seen > 0 or accumulator.malformed_lines > 0)
         and not accumulator.assistant_text.strip()
         and not accumulator.completion_text
     ):

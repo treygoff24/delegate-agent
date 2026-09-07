@@ -739,15 +739,14 @@ class StreamAccumulator:
         """Keep a bounded, redacted trace of a stdout line that is not an event.
 
         The line is never surfaced as assistant text, so the protection against
-        promoting a raw tool envelope to an answer is unchanged. What changes is
-        that the run stops looking clean: `structured_events_seen` is what the
-        runner reads to decide whether the parser owned this child's stdout, so
-        counting a malformed line there is what routes an otherwise textless run
-        onto the no-assistant-text quality verdict instead of the raw-stdout
-        fallback that must not fire for these engines.
+        promoting a raw tool envelope to an answer is unchanged. The line is not
+        counted in `structured_events_seen`, which stays a count of parsed event
+        objects: a child whose whole stdout is plain text parsed no events, and
+        the runner must still be able to fall back to that raw stdout rather
+        than return an empty answer. Readers that want "the stream produced
+        something" read `malformed_lines` alongside it.
         """
         self.malformed_lines += 1
-        self.structured_events_seen += 1
         if len(self.malformed_samples) >= MALFORMED_SAMPLE_LIMIT:
             return
         sample = redact_string(text)[:MALFORMED_SAMPLE_CHARS]
