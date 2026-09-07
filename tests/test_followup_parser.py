@@ -115,6 +115,11 @@ class FollowupParserTests(unittest.TestCase):
         warnings = tuple(parsed.payload.warnings)
         self.assertTrue(any("--model" in warning for warning in warnings), warnings)
 
+    def test_resume_and_followup_with_no_trailing_text_carry_no_warnings(self):
+        """The bare form never reaches the tail branch, so the field must be preset."""
+        self.assertEqual(parse_cli(["resume", "codex-1"]).payload.warnings, ())
+        self.assertEqual(parse_cli(["followup", "codex-1"]).payload.warnings, ())
+
     def test_resume_does_not_warn_about_tokens_after_a_separator(self):
         parsed = parse_cli(["resume", "codex-1", "keep going", "--", "--model", "opus"])
         self.assertEqual(parsed.payload.extra_parts, ["keep going", "--model", "opus"])

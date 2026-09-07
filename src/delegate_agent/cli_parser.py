@@ -1588,6 +1588,7 @@ def parse_resume(
     continuity_mode: str | None = None
     handle: str | None = None
     extra_parts: list[str] = []
+    tail_warnings: tuple[str, ...] = ()
     i = 0
     while i < len(rest):
         token = rest[i]
