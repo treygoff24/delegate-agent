@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removal target, and limited run listings avoid probing logs for excluded rows.
 
 ### Changed
+- Workspace mail setup is on by default; global `--no-mail` or
+  `mail.enabled: false` opts out without suppressing `--notify`. Push remains
+  opt-in.
+- Mail storage failures warn and disable launch-time mail instead of refusing
+  the run; unreachable isolated mailboxes record manifest-only warnings.
+- The wrapped work prompt gains 303 UTF-8 bytes, which count toward the argv
+  size guard; `--no-mail` avoids that overhead near the boundary.
 - Droid uses the same `--model <alias-or-model>` grammar as other engines. The
   positional model-alias form is retired.
 - Workflow resume requires current-format pins, attempt configuration and

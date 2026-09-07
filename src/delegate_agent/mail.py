@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import mail_core as _core
 from delegate_agent import mail_push as _push
 from delegate_agent import profiles
@@ -21,6 +22,7 @@ from delegate_agent.mail_core import (
     MailCommand,
     _next_message_id,
     _recipient_for_alias,
+    prepare_mail_storage,
     wire_work_mail_launch,
 )
 from delegate_agent.mail_push import *  # noqa: F403
@@ -34,6 +36,7 @@ from delegate_agent.mail_push import (
 from delegate_agent.mail_push import (
     provision_mail_push as _provision_mail_push,
 )
+from delegate_agent.request_models import Request
 
 
 def __getattr__(name: str) -> object:
@@ -42,14 +45,50 @@ def __getattr__(name: str) -> object:
     return getattr(_core, name)
 
 
+def launch_enabled(mode: str, config: JsonObject) -> bool:
+    return mode == "work" and delegate_config.mail_enabled(config)
+
+
+def prepare_launch_storage(
+    request: Request, config: JsonObject, registry_root: Path, stderr: TextIO
+) -> None:
+    """Fail open for this launch, keeping explicit mail commands independent."""
+    if not launch_enabled(request.mode, config):
+        return
+    try:
+        prepare_mail_storage(registry_root)
+    except _core.MailError as exc:
+        warning = f"mail disabled for this launch: {exc.error}: {exc.message}"
+        if warning not in request.warnings:
+            request.warnings = (*request.warnings, warning)
+            print(f"delegate mail: WARNING: {warning}", file=stderr)
+        config["mail"] = {"enabled": False}
+        request.mail_push = False
+        # Only remove Delegate's final suffix, never matching text inside user data.
+        if request.prompt_instruction_mode == "wrapped" and request.prompt != request.source_prompt:
+            prompt = request.prompt.removesuffix("\n\n" + _core.MAIL_PROMPT_SUFFIX)
+            request.argv = [prompt if arg == request.prompt else arg for arg in request.argv]
+            if request.display_argv is not None:
+                request.display_argv = [
+                    prompt if arg == request.prompt else arg for arg in request.display_argv
+                ]
+            if request.stdin_text is not None:
+                request.stdin_text = request.stdin_text.removesuffix(
+                    "\n\n" + _core.MAIL_PROMPT_SUFFIX
+                )
+            if request.prompt_file_text is not None:
+                request.prompt_file_text = request.prompt_file_text.removesuffix(
+                    "\n\n" + _core.MAIL_PROMPT_SUFFIX
+                )
+            request.prompt = prompt
+
+
 @dataclass(frozen=True)
 class MailLaunchPreparation:
     argv: list[str]
     display_argv: list[str] | None
     provision: MailPushProvision | None
     request_warnings: tuple[str, ...]
-    registry_root: Path
-    run_id: str
 
     def context_updates(
         self,
@@ -61,16 +100,10 @@ class MailLaunchPreparation:
             return {}
         provision = self.provision
         return {
-            "env_overrides": (
-                dict(provision.env)
-                if provision.warning is not None and provision.env is not None
-                else env_overrides
-            ),
+            "env_overrides": env_overrides,
             "fallback_env_overrides": mail_push_fallback_env_overrides(
                 provision,
                 fallback_env_overrides or {},
-                self.registry_root,
-                self.run_id,
             ),
             "warnings": tuple(
                 dict.fromkeys((*warnings, *((provision.warning,) if provision.warning else ())))
@@ -96,7 +129,8 @@ def prepare_work_mail_launch(
     warnings: tuple[str, ...],
 ) -> MailLaunchPreparation:
     if not enabled:
-        return MailLaunchPreparation(argv, display_argv, None, warnings, registry_root, run_id)
+        return MailLaunchPreparation(argv, display_argv, None, warnings)
+    launch_warnings = list(warnings)
     argv, display_argv = wire_work_mail_launch(
         engine,
         argv,
@@ -104,9 +138,10 @@ def prepare_work_mail_launch(
         registry_root,
         prompt=prompt,
         prompt_transport=prompt_transport,
-        stderr=stderr,
+        warnings=launch_warnings,
         isolated_workspace=isolated_workspace,
     )
+    warnings = tuple(launch_warnings)
     provision = None
     if mail_push:
         provision = provision_mail_push(
@@ -122,7 +157,7 @@ def prepare_work_mail_launch(
             warnings = (*warnings, provision.warning)
             print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
         argv, display_argv = provision.argv, provision.display_argv
-    return MailLaunchPreparation(argv, display_argv, provision, warnings, registry_root, run_id)
+    return MailLaunchPreparation(argv, display_argv, provision, warnings)
 
 
 def send(

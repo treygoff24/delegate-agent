@@ -54,6 +54,7 @@ FLAG_GLOBAL_OPTIONS = frozenset(
         "--json",
         "--pass-through",
         "--no-completion-report",
+        "--no-mail",
     }
 )
 
@@ -516,6 +517,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     global_argv, command_argv = _normalize_global_options(argv)
     completion_report_flag = False
     no_completion_report_flag = False
+    no_mail = False
 
     json_mode = False
     cwd: str | None = None
@@ -540,6 +542,10 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             continue
         if token == "--pass-through":
             pass_through = True
+            i += 1
+            continue
+        if token == "--no-mail":
+            no_mail = True
             i += 1
             continue
         if token == "--no-completion-report":
@@ -710,6 +716,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile,
             group,
             notify,
+            no_mail,
         )
     if subcommand in MODELESS_ENGINES:
         return parse_modeless_engine(
@@ -724,6 +731,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -737,6 +745,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "dry-run":
         return parse_dry_run(
@@ -749,6 +758,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile,
             group,
             notify,
+            no_mail,
         )
     if subcommand == "resume":
         return parse_resume(
@@ -760,6 +770,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "followup":
         return parse_followup(
@@ -771,6 +782,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -1118,6 +1130,7 @@ def parse_run(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     # Help wins before required-arg validation: `run --help` needs no --input-json.
     if any(command_help.is_help_token(token) for token in rest):
@@ -1135,6 +1148,7 @@ def parse_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
         payload=RunJsonOptions(rest[1]),
     )
@@ -1152,6 +1166,7 @@ def parse_modeless_engine(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1254,6 +1269,7 @@ def parse_modeless_engine(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
         payload=LaunchOptions(
             engine=engine,
@@ -1294,6 +1310,7 @@ def parse_droid(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1395,6 +1412,7 @@ def parse_droid(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
         payload=LaunchOptions(
             engine="droid",
@@ -1456,6 +1474,7 @@ def parse_dry_run(
     auth_profile: str | None,
     group: str | None = None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     # Help wins before the engine is consumed: `dry-run --help`.
     if rest and command_help.is_help_token(rest[0]):
@@ -1479,6 +1498,7 @@ def parse_dry_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
             help_topic="dry-run",
         )
     if engine == "droid":
@@ -1493,6 +1513,7 @@ def parse_dry_run(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
             help_topic="dry-run",
         )
     raise DelegateError(
@@ -1511,6 +1532,7 @@ def parse_resume(
     auth_profile: str | None,
     group: str | None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     """Parse ``resume [resume-options] <alias|runId> ["extra instructions"...]``.
 
@@ -1699,6 +1721,7 @@ def parse_resume(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
         payload=ResumeOptions(
             handle=handle,
@@ -1732,6 +1755,7 @@ def parse_followup(
     auth_profile: str | None,
     group: str | None,
     notify: str | None = None,
+    no_mail: bool = False,
 ) -> ParsedCommand:
     """Parse options on either side of the handle, before free-form prompt text."""
     prompt_file: str | None = None
@@ -1795,6 +1819,7 @@ def parse_followup(
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+            no_mail=no_mail,
         ),
         payload=FollowupOptions(
             handle=handle,
