@@ -47,3 +47,6 @@ Also in scope (Trey, mid-turn): put the auto-injected skill-review preamble
 ## Re-arm
 ScheduleWakeup fallback 1500s with prompt "babysit tick: overnight harness-compat run". Subagent
 completions re-invoke the session automatically.
+
+## Closeout (14:30Z, Trey awake)
+Trey approved: merged to main (ff, `a4c0b1d`), Forgejo pushed, one GitHub push of the filtered history (`8043bec`, no release), runtime promoted with mail on / preamble off (bead `dlg-1ps`, closed), skills synced (`skill-library` `3ce1b8f`). Run complete; nothing pending in this handoff.

@@ -1,24 +1,33 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-07 (simplification installed for local dogfood)
+Updated: 2026-09-07 (harness-compat audit shipped, promoted, published)
 
-- Source work is on `feat/negative-diff-simplification`, tracked by `dlg-w7i`.
-  The full audit is implemented: shared command policy, single mutable run record,
-  targeted recovery, bounded maintenance, shared workflow lifecycle and worktree
-  safety policy. Production source is net 301 lines smaller than baseline.
-- Validation: 3,046 passed / 15 skipped / 2,241 subtests in the pinned parallel
-  suite; compileall and both Ruff gates passed. A repo-local live child passed.
-  Plan and code reviews, fixes, measurements and limits:
-  [simplification results](docs/reviews/2026-09-07-simplification-results.md).
-- Breaking changes: old workflow replay formats are refused; Droid models use
-  `--model`; default discovery is compact and `--full` expands it. New runs do
-  not write snapshot.json. Do not mix old and new writers in one run registry.
-- Installed source `a270465` in a new versioned payload; doctor verifies parity.
-  Live resumable launch, native followup and pinned workflow passed. Previous
-  payload, outer shim and config are retained. Installation task: `dlg-4hu`.
-  Installation and rollback: [live runtime](docs/live-runtime.md).
-- Retained worktrees are preserved; Beads export changes remain unstaged.
-  Unrelated Claude duplicate-final-text bug: `dlg-y5c`.
-- Raw audit/debug artifacts were deleted and ignored under `dlg-ohh`; concise
-  reports remain. Public history is being cleaned before the authorized GitHub
-  push, without a release or force-push. Publication task: `dlg-4hu`.
+- `main` = `4c62010` (code at `a4c0b1d`), pushed to Forgejo. The 2026-09-07
+  harness-compatibility audit is merged: every confirmed defect across the ten
+  harnesses at current releases, structured-output eligibility unified, Cursor
+  and omp prompts on stdin, workspace mail on by default with global
+  `--no-mail`, skill-review preamble behind `tracking.skillReviewPreamble`
+  (default off). Story and decisions:
+  [REPORT](docs/audits/2026-09-07-harness-compat/REPORT.md); run log and
+  rulings: [handoff](docs/handoffs/2026-09-07-overnight-harness-compat.md).
+- Validation: 3,278 passed / 15 skipped at `a4c0b1d` via `scripts/gate.sh`;
+  three cross-model reviews triaged in `docs/audits/2026-09-07-harness-compat/REVIEW-*.md`;
+  live smoke rows in `SMOKE.md` there. CHANGELOG carries `0.31.0 - Unreleased`;
+  no version bump, tag, or release.
+- Installed runtime: `~/.delegate/releases/a4c0b1d23e95953f-573c837cc75f4d49`,
+  `promotionMatchesRuntime: true`, previous payload retained. Installed config
+  sets `mail.enabled: true` and `tracking.skillReviewPreamble.enabled: false`.
+  Discovery cache re-probed for codex/claude/cursor/grok/omp; pi's `estate-pi`
+  wrapper fails the version fingerprint (launches still work): `dlg-3em`.
+  Ritual: [live runtime](docs/live-runtime.md), now with step 7.
+- GitHub `main` (`8043bec`) is the *filtered* history — raw audit artifacts
+  removed from every commit after `8e2b0d2` — mirrored as Forgejo
+  `publish/main`. Forgejo `main` keeps them, so a direct GitHub push is
+  non-fast-forward by design; procedure in
+  [publishing checklist](docs/publishing-checklist.md). GitHub lags Forgejo by
+  the publish-doc and ledger commits only.
+- Open for Trey: Devin behavioral probe before widening the 3000.4.x gate;
+  cursor safe stays without a harness mode (both read-only modes block the
+  shell); eight dirty `delegate/*` worktrees under
+  `~/Code/delegate-worktrees/e06d04efc0d7/` and nine merged `lane/*` branches
+  await a deletion ruling. Open beads: `dlg-3em`, `dlg-cjz.4`, `dlg-o7i`, `dlg-y5c`.
