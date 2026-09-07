@@ -800,7 +800,7 @@ def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> 
         model=model,
     )
     if engine == "omp":
-        return build_omp_argv(section, mode, model, thinking, "<prompt>")
+        return build_omp_argv(section, mode, model, thinking)
     return build_pi_argv(section, mode, model, thinking)
 
 
@@ -911,7 +911,7 @@ def describe_payload(
         "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "promptSources": ["direct", "prompt-file", "stdin"],
         "promptTransports": {
-            "cursor": PROMPT_TRANSPORT_ARGV,
+            "cursor": PROMPT_TRANSPORT_STDIN,
             "droid": PROMPT_TRANSPORT_FILE,
             "codex": PROMPT_TRANSPORT_STDIN,
             "kimi": PROMPT_TRANSPORT_ARGV,
@@ -920,7 +920,7 @@ def describe_payload(
             "devin": PROMPT_TRANSPORT_FILE,
             "opencode": PROMPT_TRANSPORT_STDIN,
             "pi": PROMPT_TRANSPORT_STDIN,
-            "omp": PROMPT_TRANSPORT_ARGV,
+            "omp": PROMPT_TRANSPORT_STDIN,
         },
         "personaTransports": {
             "safe": {engine: "prepend" for engine in KNOWN_ENGINES},
@@ -1061,7 +1061,7 @@ def describe_payload(
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
+                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to another engine.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",

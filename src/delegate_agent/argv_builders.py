@@ -16,9 +16,9 @@ from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_m
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
-    CURSOR_PROMPT_REDACTION,
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    KIMI_PROMPT_REDACTION,
     PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
@@ -87,7 +87,12 @@ PI_FAMILY_SAFE_LOCKDOWN = {
 }
 
 
-def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDACTION) -> list[str]:
+def redacted_prompt_argv(argv: list[str], replacement: str = KIMI_PROMPT_REDACTION) -> list[str]:
+    """Replace a trailing argv prompt with a placeholder for parent-facing output.
+
+    Kimi is the only engine left on argv transport; cursor and omp moved to
+    stdin, where there is no argv prompt to hide.
+    """
     if not argv:
         return []
     redacted = list(argv)
@@ -149,7 +154,6 @@ def build_cursor_argv(
     mode: str,
     workspace: str,
     model: str,
-    prompt: str,
     *,
     stream_capture: bool = True,
     call_read_only: bool = False,
@@ -169,10 +173,13 @@ def build_cursor_argv(
         validate_mode(mode)
     if resume_session_id is not None:
         argv.extend(["--resume", resume_session_id])
+    # The prompt rides stdin (verified live on 2026.09.02-c22c1a3: a piped prompt
+    # with no argv positional is echoed back as the user message), so it never
+    # reaches /proc/<pid>/cmdline.
     if stream_capture:
-        argv.extend(["--model", model, "--print", "--output-format", "stream-json", prompt])
+        argv.extend(["--model", model, "--output-format", "stream-json"])
     else:
-        argv.extend(["--model", model, "--output-format", "text", prompt])
+        argv.extend(["--model", model, "--output-format", "text"])
     return argv
 
 
@@ -498,7 +505,6 @@ def _build_pi_family_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
-    prompt: str | None = None,
     *,
     call_read_only: bool = False,
     pure: bool = False,
@@ -520,21 +526,10 @@ def _build_pi_family_argv(
         argv.extend(["--model", model])
     if thinking:
         argv.extend(["--thinking", thinking])
-    if prompt is not None:
-        # The prompt is a bare trailing positional and omp does not honor `--` as
-        # an end-of-options separator, so a prompt whose first char is `-` would be
-        # parsed as a flag (e.g. a lone `--auto-approve` re-enabling writes) and `@`
-        # is omp's file-include sigil. safe/call--read-only never reach here flag-
-        # shaped because the safe prefix / read-only preamble is prepended upstream;
-        # this makes that boundary explicit instead of incidental and also fails
-        # plain call/work closed with a clear error instead of omp's opaque one.
-        if prompt[:1] in ("-", "@"):
-            raise DelegateError(
-                "pi_family_prompt_flag_like",
-                f"{engine} prompt may not start with '-' or '@' (argv transport has no "
-                "end-of-options separator); rephrase, or lead with a space or period.",
-            )
-        argv.append(prompt)
+    # Both forks read the prompt from non-TTY stdin (omp 18.1.13 `src/main.ts`
+    # reads piped input for every non-protocol mode, and `--mode json` is not a
+    # protocol mode), so neither carries a positional prompt: no ARG_MAX ceiling,
+    # no flag-shaped-prompt hazard, and nothing prompt-shaped in the child argv.
     return argv
 
 
@@ -563,7 +558,6 @@ def build_omp_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
-    prompt: str,
     *,
     call_read_only: bool = False,
     pure: bool = False,
@@ -576,7 +570,6 @@ def build_omp_argv(
         mode,
         model,
         thinking,
-        prompt,
         call_read_only=call_read_only,
         pure=pure,
         persist_session=persist_session,

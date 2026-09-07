@@ -77,7 +77,7 @@ class EngineArgvTests(CommandTestBase):
         argv = request.argv
         self.assertEqual(argv[0], "agent")
         self.assertEqual(
-            argv[1:10],
+            argv[1:],
             [
                 "--workspace",
                 "/repo",
@@ -85,16 +85,14 @@ class EngineArgvTests(CommandTestBase):
                 "--trust",
                 "--model",
                 "composer-2.5",
-                "--print",
                 "--output-format",
                 "stream-json",
             ],
         )
-        self.assertTrue(argv[10].startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
-        self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], argv[10])
-        self.assertIn("hello", argv[10])
-        self.assertNotIn("--mode=plan", argv)
-        self.assertNotIn("--mode=ask", argv)
+        prompt = request.stdin_text
+        self.assertTrue(prompt.startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
+        self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], prompt)
+        self.assertIn("hello", prompt)
         self.assertNotIn("--force", argv)
         self.assertNotIn("--approve-mcps", argv)
 
@@ -878,9 +876,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertNotIn("implement the change", lowered)
 
     def test_cursor_work_argv_cursor_agent_prefix(self):
-        argv = argv_api.build_cursor_argv(
-            ["cursor", "agent"], "work", "/repo", "composer-2.5", "hello"
-        )
+        argv = argv_api.build_cursor_argv(["cursor", "agent"], "work", "/repo", "composer-2.5")
         self.assertEqual(
             argv,
             [
@@ -894,12 +890,11 @@ class EngineArgvTests(CommandTestBase):
                 "--force",
                 "--model",
                 "composer-2.5",
-                "--print",
                 "--output-format",
                 "stream-json",
-                "hello",
             ],
         )
+        self.assertNotIn("hello", argv)
         self.assertNotIn("--mode=agent", argv)
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
@@ -910,7 +905,6 @@ class EngineArgvTests(CommandTestBase):
             "safe",
             "/repo",
             "composer-2.5",
-            "fix output",
             resume_session_id="cursor-session",
         )
         self.assertEqual(cursor[cursor.index("--resume") + 1], "cursor-session")
@@ -933,7 +927,6 @@ class EngineArgvTests(CommandTestBase):
             "safe",
             None,
             None,
-            "fix output",
             persist_session=True,
             resume_session_id="omp-session",
         )
@@ -1015,7 +1008,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_pass_through_restores_text_argv(self):
         cursor = argv_api.build_cursor_argv(
-            ["agent"], "work", "/repo", "composer-2.5", "hello", stream_capture=False
+            ["agent"], "work", "/repo", "composer-2.5", stream_capture=False
         )
         self.assertIn("--output-format", cursor)
         self.assertIn("text", cursor)
@@ -1610,7 +1603,10 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("review the diff", prompt)
 
-    def test_cursor_dry_run_redacts_prompt_argv_tail(self):
+    def test_cursor_dry_run_keeps_the_prompt_out_of_argv_entirely(self):
+        # Redaction only ever hid the prompt from Delegate's own output; the child
+        # argv still carried it. On stdin transport there is nothing to hide, and
+        # the dry-run payload must show the real argv.
         secret_prompt = "TOP-SECRET-CURSOR-PROMPT"
         request = self.build_git_request(
             "cursor",
@@ -1621,14 +1617,16 @@ class EngineArgvTests(CommandTestBase):
             delegate_config.embedded_default_config(),
             True,
         )
-        self.assertEqual(request.prompt_transport, "argv")
-        self.assertIn(secret_prompt, request.argv[-1])
+        self.assertEqual(request.prompt_transport, "stdin")
+        self.assertNotIn(secret_prompt, json.dumps(request.argv))
+        self.assertIn(secret_prompt, request.stdin_text)
 
         payload = cli.dry_run_payload(request)
 
-        self.assertEqual(payload["promptTransport"], "argv")
-        self.assertEqual(payload["argv"][-1], transport_api.CURSOR_PROMPT_REDACTION)
+        self.assertEqual(payload["promptTransport"], "stdin")
+        self.assertEqual(payload["argv"], request.argv)
         self.assertNotIn(secret_prompt, json.dumps(payload["argv"]))
+        self.assertNotIn("redacted", json.dumps(payload["argv"]))
 
     def test_build_request_uses_cache_declared_custom_model_capability(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
@@ -2479,7 +2477,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--tools", pi_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["pi"])
         self.assertEqual(payload["engineDefaults"]["omp"]["binary"], "omp")
-        self.assertEqual(payload["promptTransports"]["omp"], "argv")
+        self.assertEqual(payload["promptTransports"]["omp"], "stdin")
+        self.assertEqual(payload["promptTransports"]["cursor"], "stdin")
         omp_safe = payload["modeMapping"]["omp"]["safe"]
         omp_work = payload["modeMapping"]["omp"]["work"]
         self.assertEqual(omp_safe[omp_safe.index("--tools") + 1], "read")
@@ -2921,9 +2920,9 @@ class EngineArgvTests(CommandTestBase):
             delegate_config.embedded_default_config(),
             dry_run=True,
         )
-        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_ARGV)
-        self.assertIsNone(request.stdin_text)
-        self.assertEqual(request.display_argv[-1], "<prompt redacted: omp argv transport>")
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
+        self.assertIn("review task", request.stdin_text)
+        self.assertEqual(request.display_argv, request.argv)
         self.assertEqual(
             request.argv,
             [
@@ -2940,7 +2939,6 @@ class EngineArgvTests(CommandTestBase):
                 "--no-lsp",
                 "--approval-mode",
                 "always-ask",
-                "review task",
             ],
         )
         # --approval-mode always-ask is the load-bearing read-only enforcer: omp
@@ -2966,27 +2964,6 @@ class EngineArgvTests(CommandTestBase):
             "--auto-approve",
         ):
             self.assertNotIn(forbidden, request.argv)
-
-    def test_omp_rejects_flag_like_prompt_on_argv_transport(self):
-        # omp is the only pi-family engine using argv prompt transport (pi uses stdin).
-        # omp does not honor `--` as an end-of-options separator, so a bare prompt
-        # starting with `-` (e.g. a lone `--auto-approve` that would re-enable writes)
-        # or `@` (omp's file-include sigil) must be rejected before it reaches argv.
-        # safe/call--read-only never hit this because the safe prefix / read-only
-        # preamble is prepended upstream; this guards plain work/call.
-        for bad in ("--auto-approve", "@/etc/hostname", "-x"):
-            with self.subTest(prompt=bad):
-                with self.assertRaises(error_types.DelegateError) as ctx:
-                    argv_api.build_omp_argv(
-                        delegate_config.embedded_default_config()["omp"], "work", None, None, bad
-                    )
-                self.assertEqual(ctx.exception.error, "pi_family_prompt_flag_like")
-        # A normal prompt still builds, and safe-mode omp (prefix prepended upstream)
-        # is never flag-shaped, so the guard does not false-positive on real prompts.
-        ok = argv_api.build_omp_argv(
-            delegate_config.embedded_default_config()["omp"], "work", None, None, "do the task"
-        )
-        self.assertEqual(ok[-1], "do the task")
 
     def test_omp_never_emits_fork_role_flags(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
@@ -3057,9 +3034,9 @@ class EngineArgvTests(CommandTestBase):
                 "openai-codex/gpt-5.6-sol",
                 "--thinking",
                 "xhigh",
-                "implement",
             ],
         )
+        self.assertEqual(request.stdin_text, "implement")
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
         self.assertEqual(request.reasoning_capability_source, "harness-compatibility")

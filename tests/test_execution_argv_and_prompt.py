@@ -494,12 +494,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("--strict-mcp-config", ro_argv)
 
     def test_cursor_and_droid_call_write_flags_only_when_not_read_only(self):
-        cursor_default = argv_builders.build_cursor_argv(
-            ["cursor-agent"], "call", "/ws", "model", "prompt"
-        )
+        cursor_default = argv_builders.build_cursor_argv(["cursor-agent"], "call", "/ws", "model")
         self.assertIn("--force", cursor_default)
         cursor_ro = argv_builders.build_cursor_argv(
-            ["cursor-agent"], "call", "/ws", "model", "prompt", call_read_only=True
+            ["cursor-agent"], "call", "/ws", "model", call_read_only=True
         )
         self.assertNotIn("--force", cursor_ro)
         droid_default = argv_builders.build_droid_argv("droid", "call", "/ws", "m", "p")
