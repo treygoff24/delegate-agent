@@ -104,6 +104,34 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
 - [ ] GitHub Security Advisories are enabled for private vulnerability reports.
 - [ ] CI passes without real child-agent binaries.
 
+### Published history is filtered, not mirrored
+
+GitHub `main` and the Forgejo branch `publish/main` carry the same commits with
+489 raw audit artifacts (`docs/receipts/**` and the stale evidence files removed
+in 0362a90 and 32d01e6) filtered out of every commit after
+8e2b0d27aa3acc96b70e0b9e58c5737cf8671f2d. Forgejo `main` still holds those
+files in its history, so its commits are not ancestors of GitHub `main`: a
+plain `git push github main` is rejected as non-fast-forward, and that
+rejection is correct. Never force it.
+
+To publish a newer `main`:
+
+```bash
+git clone -q --no-local --branch main --single-branch <repo> /var/tmp/publish-clone
+cd /var/tmp/publish-clone
+uvx git-filter-repo --invert-paths --paths-from-file <paths.txt> \
+  --refs 8e2b0d27aa3acc96b70e0b9e58c5737cf8671f2d..main
+git fetch <repo> '+refs/remotes/github/*:refs/remotes/github/*'
+git merge-base --is-ancestor github/main main   # must succeed
+git log main --name-only --format= | grep -c -F -f <paths.txt>   # must be 0
+git rev-parse main^{tree}                        # must equal the source tree
+```
+
+`<paths.txt>` is `git show --name-status --format= 0362a90 32d01e6 | awk '$1=="D"{print $2}' | sort -u`
+(489 lines). Push the filtered `main` to GitHub `main` and to Forgejo
+`publish/main`, then discard the clone. The filter is deterministic for the
+same range and path list, so successive pushes stay fast-forward.
+
 ## Release decision
 
 - [ ] Decide whether this release is source-only, GitHub release, PyPI, or another distribution path.
