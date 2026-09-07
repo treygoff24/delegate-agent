@@ -753,6 +753,10 @@ class StreamAccumulator:
             self._ingest_message(payload)
             return
         if event_type == "tool_call":
+            if self.harness == "cursor":
+                # Cursor's type is dotless; the phase rides on `subtype`.
+                self._ingest_cursor_tool(payload, _string_field(payload, "subtype") or "started")
+                return
             self._ingest_tool_call(payload)
             return
         if event_type == "completion":
@@ -768,7 +772,7 @@ class StreamAccumulator:
             self._ingest_user_event(payload)
             return
         if event_type in ("tool_call.started", "tool_call.completed"):
-            self._ingest_cursor_tool(payload, event_type)
+            self._ingest_cursor_tool(payload, event_type.rsplit(".", 1)[1])
             return
         if event_type == "result":
             self._ingest_result_event(payload, terminal_recorded=terminal_recorded)
@@ -1566,16 +1570,41 @@ class StreamAccumulator:
         )
         self.current = _tool_current(tool, target)
 
-    def _ingest_cursor_tool(self, payload: JsonObject, event_type: str) -> None:
+    def _ingest_cursor_tool(self, payload: JsonObject, subtype: str) -> None:
         tool_call = payload.get("tool_call")
         if not isinstance(tool_call, dict):
             return
-        tool = _string_field(tool_call, "name", "tool") or "tool"
-        target = _tool_target(tool_call)
-        kind = "tool.completed" if event_type.endswith("completed") else "tool.started"
-        status = "success" if kind == "tool.completed" else None
+        named = _cursor_tool_body(tool_call)
+        if named is None:
+            tool = _string_field(tool_call, "name", "tool") or "tool"
+            body = tool_call
+        else:
+            tool, body = named
+        target = _tool_target(body) or _tool_target(tool_call)
+        call_id = _string_field(payload, "call_id") or _string_field(tool_call, "toolCallId")
+        completed = subtype == "completed"
+        if not completed:
+            if call_id:
+                self._pending_tool_uses[call_id] = (tool, target)
+            self.events.append(
+                NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target)
+            )
+            self.current = _tool_current(tool, target)
+            return
+        pending_tool, pending_target = (
+            self._pending_tool_uses.pop(call_id, (None, None)) if call_id else (None, None)
+        )
+        if named is None and pending_tool:
+            tool = pending_tool
+        target = target or pending_target
         self.events.append(
-            NormalizedEvent(kind=kind, tool=tool, target=target, path=target, status=status),
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=_cursor_tool_status(body),
+            )
         )
         self.current = _tool_current(tool, target)
 
@@ -1713,6 +1742,40 @@ def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if status == "completed":
         return "success"
     return status
+
+
+# Cursor names the tool by the KEY of the single `*ToolCall` member of
+# `tool_call` -- `readToolCall`, `writeToolCall` -- with its arguments nested
+# one level inside under `args`. There is no `name` field to read.
+_CURSOR_TOOL_KEY_SUFFIX = "ToolCall"
+
+
+def _cursor_tool_body(tool_call: JsonObject) -> tuple[str, JsonObject] | None:
+    for key, value in tool_call.items():
+        if (
+            key.endswith(_CURSOR_TOOL_KEY_SUFFIX)
+            and len(key) > len(_CURSOR_TOOL_KEY_SUFFIX)
+            and isinstance(value, dict)
+        ):
+            return key[: -len(_CURSOR_TOOL_KEY_SUFFIX)], value
+    return None
+
+
+def _cursor_tool_status(body: JsonObject) -> str | None:
+    """Read the outcome Cursor reports, rather than assuming a success.
+
+    A completed call carries `result: {"success": {...}}` or an error member.
+    An unrecognized result shape leaves the status unknown; an unknown outcome
+    is not a good one.
+    """
+    result = body.get("result")
+    if not isinstance(result, dict):
+        return None
+    if "success" in result:
+        return "success"
+    if result.keys() & {"error", "failure", "failed"}:
+        return "error"
+    return None
 
 
 def _completed_tool_status(status: JsonValue) -> str | None:
