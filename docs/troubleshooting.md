@@ -111,7 +111,7 @@ $EDITOR ~/.delegate/config.json
 Use aliases like `reviewer` or `implementer` in commands:
 
 ```bash
-delegate droid reviewer safe "Investigate only. Do not edit."
+delegate droid safe --model reviewer "Investigate only. Do not edit."
 ```
 
 If editing `~/.delegate/config.json` does not change behavior, check the active
@@ -293,7 +293,7 @@ to `true` in config and use `--no-progress` to override for one launch:
 
 ```bash
 delegate --json claude safe --progress "Review only. Do not edit."
-delegate --json droid reviewer work --progress "Implement the scoped change."
+delegate --json droid work --model reviewer --progress "Implement the scoped change."
 ```
 
 Progress messages go to stderr. They are intentionally bounded, credential-scrubbed
@@ -313,7 +313,7 @@ require a later `snapshot`/`run-output` lookup:
 
 ```bash
 delegate --json codex call "Summarize this context."
-delegate --json droid reviewer call --prompt-file prompt.md
+delegate --json droid call --model reviewer --prompt-file prompt.md
 ```
 
 Call mode returns captured assistant text in JSON `text` when available. Use
@@ -486,7 +486,9 @@ jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjso
 
 Prefer `delegate snapshot` / `run-output` for parent-facing summaries. Use the
 raw event log only for diagnostics, and treat it as sensitive: retained event
-text is not redacted.
+text is not redacted. The private `state.json` record also holds bounded
+`recentEvents` diagnostics that can contain raw child text. Public snapshot
+output is redacted by default; raw record files are not safe to share.
 
 ## Structured / JSON-only final output
 

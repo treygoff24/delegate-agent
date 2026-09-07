@@ -16,7 +16,7 @@ Workflow registries use this file set as needed:
   (the launch-time source path, provenance only, never the resume execution
   input) and `scriptSha256`.
 - `result.json`: final workflow result, present only after success.
-- `approval.json`: gate approval state, present after `workflow approve`. `approvedKeys` accumulates every gate approved so far (a resume replays the whole script and re-fires each passed gate with the same key); `gateKey` is the latest.
+- `approval.json`: approvals bound to both a gate key and its result hash. A changed result requires a fresh approval; a key-only legacy approval does not authorize it.
 - `workflow.lock`: process lock held while a supervisor is active.
 
 ## Terminology
@@ -93,6 +93,12 @@ never write the persona body. Child input JSON carries `persona` and
 non-sensitive persona metadata only.
 
 ## Gates and resume
+
+Only current-format workflows can resume: version-2 structural keys, a runtime
+pin, and version-1 attempt configuration are required. Older or pinless workflow
+records are rejected before child launch. Start a new workflow instead of
+reusing old state. New workflows still replay completed children, adopt running
+children, and preserve result-bound approvals across resume.
 
 A supervisor is detached, so it pauses, fails, or finishes with nobody watching.
 Pass `--notify room:<name>` or `--notify channel:<name>` to `workflow run` and it

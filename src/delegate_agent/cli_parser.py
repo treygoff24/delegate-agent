@@ -1314,7 +1314,7 @@ def parse_droid(
     mode = rest[0]
     tail = rest[1:]
     command_prefix = ["droid", mode]
-    # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
+    # Help wins after the mode, before prompt capture: `droid safe --help`.
     if tail and command_help.is_help_token(tail[0]):
         return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
     if _help_follows_options(tail):

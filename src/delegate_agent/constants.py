@@ -157,7 +157,7 @@ def validate_mode(mode: str) -> None:
             "invalid_mode",
             "Mode must be safe, work, or call. Valid forms: "
             "delegate <harness> safe|work <prompt>; "
-            "delegate droid <model-alias> safe|work <prompt>.",
+            "delegate droid safe|work --model <model-alias> <prompt>.",
         )
 
 

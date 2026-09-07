@@ -136,7 +136,7 @@ and the [security model](security-model.md#zero-copy-safe-isolation-linux-isolat
    delegate --json dry-run pi safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run omp safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
-   delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
+   delegate --json dry-run droid safe --model reviewer "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
