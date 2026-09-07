@@ -1605,6 +1605,72 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(seqs, sorted(seqs))
         self.assertEqual(len(seqs), len(set(seqs)))
 
+    def test_parallel_nested_resume_keeps_child_replay_keys_byte_identical(self) -> None:
+        child = self.write_saved_workflow(
+            "parallel-replay-child",
+            """
+            meta = {"name": "child", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent(args["prompt"])
+            """,
+        )
+        parent = self.write_workflow(
+            f"""
+            meta = {{"name": "parent"}}
+            return parallel([
+                lambda: workflow({child!r}, args={{"prompt": "left"}}),
+                lambda: workflow({child!r}, args={{"prompt": "right"}}),
+            ])
+            """
+        )
+        prompt_log = self.home / "parallel-prompts.log"
+        env = {"FAKE_PROMPT_LOG": str(prompt_log)}
+        launch = self.run_delegate(["--json", "workflow", "run", str(parent)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        first_events = workflow_registry.iter_journal(journal)
+        first_starts = [
+            event
+            for event in first_events
+            if event.get("type") == "agent_started" and event.get("simulated") is not True
+        ]
+        first_keys = {event["key"] for event in first_starts}
+        self.assertEqual(len(first_keys), 2)
+        self.assertEqual(
+            {event["scope"] for event in first_starts},
+            {
+                "root/parallel@0/thunk#0/wf:parallel-replay-child@0/seq#0",
+                "root/parallel@0/thunk#1/wf:parallel-replay-child@0/seq#0",
+            },
+        )
+        (root / workflow_registry.RESULT_FILE).unlink()
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+            ).returncode,
+            0,
+        )
+        final_events = workflow_registry.iter_journal(journal)
+        replay_keys = {
+            event["key"] for event in final_events if event.get("type") == "agent_cache_hit"
+        }
+        self.assertEqual(replay_keys, first_keys)
+        self.assertEqual(
+            len([event for event in final_events if event.get("type") == "agent_child"]),
+            2,
+        )
+        self.assertEqual(prompt_log.read_text(encoding="utf-8").count("\n---\n"), 2)
+
     def test_nested_pipeline_does_not_deadlock_with_item_thread_cap_one(self) -> None:
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         config["workflows"]["itemThreads"] = 1
@@ -1750,7 +1816,7 @@ class WorkflowCommandTests(unittest.TestCase):
         result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
         self.assertEqual(result["result"], [["fake completion"]])
 
-    def test_pipeline_scope_strings_remain_v1_compatible(self) -> None:
+    def test_pipeline_scope_strings_remain_stable_for_current_replay(self) -> None:
         script = self.write_workflow(
             """
             meta = {"name": "pipeline-scope", "defaults": {"engine": "codex", "mode": "safe"}}
@@ -1843,6 +1909,7 @@ class WorkflowCommandTests(unittest.TestCase):
             {
                 "wfId": wf_id,
                 "status": "created",
+                "workflowKeyVersion": 2,
                 "budget": {"total": None, "spent": 0, "remaining": None},
             },
         )
@@ -1902,6 +1969,7 @@ class WorkflowCommandTests(unittest.TestCase):
             {
                 "wfId": wf_id,
                 "status": "created",
+                "workflowKeyVersion": 2,
                 "budget": {"total": None, "spent": 0, "remaining": None},
             },
         )
@@ -1961,10 +2029,12 @@ class WorkflowCommandTests(unittest.TestCase):
         final = self.run_delegate(["--json", "workflow", "status", wf_id])
         self.assertEqual(json.loads(final.stdout).get("status"), "succeeded")
         approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
-        self.assertIn(gate_key, approval.get("approvedKeys", []))
+        self.assertIn(
+            {"key": gate_key, "resultHash": gate_events[-1]["gateResultHash"]},
+            approval.get("approvedResults", []),
+        )
 
-    def test_approve_recovers_wf_b43032f7fee5_fixture(self) -> None:
-        """Recover the named production-shaped fixture from journal authority."""
+    def test_approve_refuses_legacy_wf_b43032f7fee5_before_launch(self) -> None:
         wf_id = "wf_b43032f7fee5"
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
         script_path = root / workflow_registry.SCRIPT_FILE
@@ -1983,37 +2053,10 @@ class WorkflowCommandTests(unittest.TestCase):
                 "budget": {"total": None, "spent": 4, "remaining": None},
             },
         )
-        events = [
-            {"seq": 1, "type": "budget", "key": "agent-1"},
-            {"seq": 2, "type": "agent_finished", "key": "agent-1", "result": {"ok": True}},
-            {"seq": 3, "type": "agent_finished", "key": "agent-2", "result": {"ok": True}},
-            *[
-                {
-                    "seq": seq,
-                    "type": "gate",
-                    "key": f"gate-{seq - 4}",
-                    "child": f"child-{seq - 4}",
-                    "result": {"ok": False},
-                }
-                for seq in range(4, 9)
-            ],
-        ]
-        for event in events:
-            workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
-        workflow_registry.write_json(
-            root / workflow_registry.APPROVAL_FILE,
-            {
-                "approved": True,
-                "gateKey": "gate-3",
-                "approvedKeys": ["gate-0", "gate-1", "gate-2", "gate-3"],
-            },
-        )
         approved = self.run_delegate(["--json", "workflow", "approve", wf_id])
-        self.assertEqual(approved.returncode, 0, approved.stderr)
-        status = self.run_delegate(["--json", "workflow", "status", wf_id])
-        self.assertEqual(json.loads(status.stdout).get("status"), "succeeded")
-        approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
-        self.assertIn("gate-4", approval.get("approvedKeys", []))
+        self.assertEqual(approved.returncode, 2, approved.stderr)
+        self.assertEqual(json.loads(approved.stdout)["error"], "unsupported_workflow_version")
+        self.assertFalse((root / workflow_registry.APPROVAL_FILE).exists())
 
     def test_reject_is_durable_idempotent_and_sequence_ordered(self) -> None:
         wf_id = "wf_333333333333"
@@ -2025,6 +2068,7 @@ class WorkflowCommandTests(unittest.TestCase):
             {
                 "wfId": wf_id,
                 "status": "created",
+                "workflowKeyVersion": 2,
                 "budget": {"total": None, "spent": 0, "remaining": None},
             },
         )
@@ -2216,7 +2260,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertEqual(replayed.resolve_agent_key("draft"), ("settled-key", "draft"))
 
-    def test_v1_start_after_reject_remains_adoptable(self) -> None:
+    def test_start_after_reject_remains_adoptable(self) -> None:
         wf_id = "wf_888888888888"
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
         script_path = root / workflow_registry.SCRIPT_FILE
@@ -2226,9 +2270,9 @@ class WorkflowCommandTests(unittest.TestCase):
             {"wfId": wf_id, "status": "created", "budget": {"total": None, "spent": 0}},
         )
         for event in (
-            {"seq": 1, "type": "agent_started", "key": "v1-key"},
-            {"seq": 2, "type": "agent_rejected", "key": "v1-key", "reason": "stale"},
-            {"seq": 3, "type": "agent_started", "key": "v1-key"},
+            {"seq": 1, "type": "agent_started", "key": "retry-key"},
+            {"seq": 2, "type": "agent_rejected", "key": "retry-key", "reason": "stale"},
+            {"seq": 3, "type": "agent_started", "key": "retry-key"},
         ):
             workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
         state = workflow_runtime.WorkflowState(
@@ -2241,8 +2285,8 @@ class WorkflowCommandTests(unittest.TestCase):
             args=None,
             budget=workflow_runtime.Budget(None),
         )
-        self.assertIn("v1-key", state.tombstoned_keys)
-        self.assertIn("v1-key", state.started_after_tombstone)
+        self.assertIn("retry-key", state.tombstoned_keys)
+        self.assertIn("retry-key", state.started_after_tombstone)
 
     def test_cli_reject_parked_workflow_tombstones_and_resume_respawns(self) -> None:
         child = self.write_saved_workflow(
@@ -2332,63 +2376,20 @@ class WorkflowCommandTests(unittest.TestCase):
         waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
         self.assertEqual(waited.returncode, 0, waited.stderr)
 
-    def test_v1_agent_key_parity_omits_timeout(self) -> None:
-        wf_id = "wf_444444444444"
-        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
-        script_path = root / workflow_registry.SCRIPT_FILE
-        script_path.write_text("return True\n", encoding="utf-8")
-        workflow_registry.write_json(
-            root / workflow_registry.STATUS_FILE,
-            {
-                "wfId": wf_id,
-                "status": "created",
-                "budget": {"total": None, "spent": 0, "remaining": None},
-            },
-        )
-        state = workflow_runtime.WorkflowState(
-            wf_id=wf_id,
-            workspace=self.workspace,
-            root=root,
-            script_path=script_path,
-            config={},
-            cli_argv=[str(CLI)],
-            args=None,
-            budget=workflow_runtime.Budget(None),
-            workflow_key_version=1,
-            dry_run=True,
-        )
-        workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex"}}).agent(
-            "parity prompt", timeout=3601
-        )
-        event = next(
-            event
-            for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
-            if event.get("type") == "agent_started"
-        )
-        # Frozen main-branch v1 vector: sha256 of
-        # `v1:{scope}{prompt}{canonical opts}`.  Do not derive the expected
-        # value with _agent_key(), which would reproduce a changed bug.
-        expected = "3f6a782a9ecd411cb4640bc0224c81b3bd40ee7cbcfa045b107010d1826f8cab"
-        self.assertEqual(event["key"], expected)
-        self.assertNotEqual(
-            event["key"],
-            workflow_runtime._agent_key(
-                "root/seq#0",
-                "parity prompt",
-                {
-                    "engine": "codex",
-                    "mode": "safe",
-                    "model": None,
-                    "effort": None,
-                    "fast": None,
-                    "schema": None,
-                    "isolation": None,
-                    "personaDigest": None,
-                    "timeout": 3601,
-                },
-            ),
-            "v1 key fixture must remain timeout-independent",
-        )
+    def test_current_agent_key_includes_timeout(self) -> None:
+        opts = {
+            "engine": "codex",
+            "mode": "safe",
+            "model": None,
+            "effort": None,
+            "fast": None,
+            "schema": None,
+            "isolation": None,
+            "personaDigest": None,
+        }
+        short = workflow_runtime._agent_key("root/seq#0", "parity prompt", {**opts, "timeout": 1})
+        long = workflow_runtime._agent_key("root/seq#0", "parity prompt", {**opts, "timeout": 3601})
+        self.assertNotEqual(short, long)
 
     def test_new_workflow_launch_stamps_v2_key_version(self) -> None:
         script = self.write_workflow(
@@ -2404,7 +2405,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(json.loads(status.stdout).get("workflowKeyVersion"), 2)
 
-    def test_v2_tombstone_retry_uses_attempt_key(self) -> None:
+    def test_current_tombstone_retry_uses_attempt_key(self) -> None:
         wf_id = "wf_555555555555"
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
         script_path = root / workflow_registry.SCRIPT_FILE
@@ -2428,7 +2429,7 @@ class WorkflowCommandTests(unittest.TestCase):
             "personaDigest": None,
             "timeout": 1,
         }
-        base_key = workflow_runtime._agent_key("root/seq#0", "retry prompt", base_opts, version=2)
+        base_key = workflow_runtime._agent_key("root/seq#0", "retry prompt", base_opts)
         workflow_registry.append_jsonl(
             root / workflow_registry.JOURNAL_FILE,
             {"seq": 1, "type": "agent_rejected", "key": base_key, "reason": "retry"},
@@ -2442,7 +2443,6 @@ class WorkflowCommandTests(unittest.TestCase):
             cli_argv=[str(CLI)],
             args=None,
             budget=workflow_runtime.Budget(None),
-            workflow_key_version=2,
             replay_attempt=2,
             dry_run=True,
         )
@@ -2460,7 +2460,7 @@ class WorkflowCommandTests(unittest.TestCase):
         retry_opts["retryAttempt"] = 2
         self.assertEqual(
             started[0]["key"],
-            workflow_runtime._agent_key("root/seq#0", "retry prompt", retry_opts, version=2),
+            workflow_runtime._agent_key("root/seq#0", "retry prompt", retry_opts),
         )
 
     def test_resume_releases_paused_gate(self) -> None:
@@ -2949,6 +2949,8 @@ class WorkflowCommandTests(unittest.TestCase):
         workflow_registry.write_status(root, status)
         prior_status = workflow_registry.read_json(status_path)
         prior_result = result_path.read_bytes()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            workflow_pinning.create_pin(wf_id, workspace=self.workspace, config={}, home=self.home)
 
         def fail_detach(*_args, **_kwargs) -> None:
             self.assertEqual(workflow_registry.read_json(status_path)["status"], "starting")
@@ -2957,6 +2959,7 @@ class WorkflowCommandTests(unittest.TestCase):
             raise RuntimeError("launch failed")
 
         with (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
             mock.patch.object(
                 workflow_runtime,
                 "detach_supervisor",
@@ -2976,8 +2979,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(result_path.read_bytes(), prior_result)
         self.assertEqual(result_path.stat().st_mode & 0o777, 0o600)
 
-    def test_pre_pinning_workflow_resume_remains_pinless(self) -> None:
-        """A legacy workflow with no pin still uses the current trampoline."""
+    def test_unsupported_workflow_versions_refuse_before_launch(self) -> None:
         wf_id = "wf_123456789abc"
         root = self._seed_completed_workflow(
             wf_id,
@@ -2985,24 +2987,27 @@ class WorkflowCommandTests(unittest.TestCase):
             result={"value": "old"},
         )
         (root / workflow_registry.SCRIPT_FILE).write_text("return 'legacy'\n", encoding="utf-8")
-        observed: list[list[str]] = []
-
-        def capture(argv, **_kwargs):
-            observed.append(list(argv))
-
-        with mock.patch.object(workflow_runtime, "detach_supervisor", side_effect=capture):
-            stdout = io.StringIO()
-            result = workflow_commands.emit_run(
-                workflow_commands.WorkflowCommand("run", resume=wf_id, json_mode=True),
-                workspace=self.workspace,
-                config={},
-                stdout=stdout,
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(result, 0)
-        self.assertNotIn("warnings", json.loads(stdout.getvalue()))
-        self.assertEqual(len(observed), 1)
-        self.assertEqual(observed[0][:2], workflow_commands._delegate_cli_argv())
+        for version in (None, 1, 3):
+            with self.subTest(version=version):
+                status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+                if version is None:
+                    status.pop("workflowKeyVersion", None)
+                else:
+                    status["workflowKeyVersion"] = version
+                workflow_registry.write_json(root / workflow_registry.STATUS_FILE, status)
+                with (
+                    mock.patch.object(workflow_runtime, "detach_supervisor") as detach,
+                    self.assertRaises(workflow_commands.DelegateError) as raised,
+                ):
+                    workflow_commands.emit_run(
+                        workflow_commands.WorkflowCommand("run", resume=wf_id, json_mode=True),
+                        workspace=self.workspace,
+                        config={},
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+                self.assertEqual(raised.exception.error, "unsupported_workflow_version")
+                detach.assert_not_called()
         self.assertFalse(workflow_pinning.pin_path(wf_id, home=self.home).exists())
 
     def test_resume_snapshot_failure_releases_workflow_lock(self) -> None:
@@ -3013,8 +3018,11 @@ class WorkflowCommandTests(unittest.TestCase):
             result={"value": "old"},
         )
         prior_result = (root / workflow_registry.RESULT_FILE).read_bytes()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            workflow_pinning.create_pin(wf_id, workspace=self.workspace, config={}, home=self.home)
 
         with (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
             mock.patch.object(Path, "read_bytes", side_effect=RuntimeError("snapshot failed")),
             self.assertRaisesRegex(RuntimeError, "snapshot failed"),
         ):
@@ -5924,7 +5932,8 @@ class WorkflowCommandTests(unittest.TestCase):
         with_result: bool = True,
     ) -> Path:
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
-        workflow_registry.write_status(
+        workflow_registry.register_workflow(
+            self.workspace,
             root,
             {
                 "ok": True,
@@ -5980,16 +5989,14 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(latest.returncode, 0, latest.stderr)
         self.assertEqual(json.loads(latest.stdout)["wfId"], second_id)
 
-        legacy = self._seed_completed_workflow("wf_111111111111", created_at="2025-01-01T00:00:00Z")
-        legacy_status = workflow_registry.read_json(legacy / workflow_registry.STATUS_FILE) or {}
-        legacy_status.update({"status": "running", "createdOrdinal": 100})
-        workflow_registry.write_status(legacy, legacy_status)
+        unregistered = workflow_registry.ensure_workflow_dir(self.workspace, "wf_111111111111")
+        workflow_registry.write_status(unregistered, {"status": "running", "createdOrdinal": 100})
         self.assertNotIn(
             "createdOrdinal",
-            workflow_registry.read_json(legacy / workflow_registry.STATUS_FILE),
+            workflow_registry.read_json(unregistered / workflow_registry.STATUS_FILE),
         )
 
-    def test_creation_ordinal_survives_resume_and_legacy_resume_stays_legacy(self) -> None:
+    def test_creation_ordinal_survives_resume(self) -> None:
         script = self.write_workflow('meta = {"name": "ordinal-resume"}\nreturn None')
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
@@ -6011,16 +6018,6 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         status = workflow_registry.read_json(status_path)
         self.assertEqual(status["createdOrdinal"], ordinal)
-
-        status.pop("createdOrdinal")
-        workflow_registry.write_json(status_path, status)
-        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
-        self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
-            0,
-        )
-        self.assertNotIn("createdOrdinal", workflow_registry.read_json(status_path))
 
     def test_latest_wait_excludes_dry_runs_only(self) -> None:
         old_id = "wf_111111111111"
@@ -6091,27 +6088,21 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(payload["workflow"]["status"], "stalled")
         self.assertEqual(payload["workflow"]["statusOnDisk"], "created")
 
-    def test_latest_legacy_workflow_has_deterministic_timestamp_and_name_fallback(self) -> None:
-        statuses = (
-            ("wf_aaaaaaaaaaaa", "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z"),
-            ("wf_bbbbbbbbbbbb", "2026-01-02T00:00:00Z", "2026-01-02T00:00:01Z"),
-            ("wf_cccccccccccc", "2026-01-02T00:00:00Z", "2026-01-02T00:00:02Z"),
-            ("wf_dddddddddddd", "2026-01-02T00:00:00Z", "2026-01-02T00:00:02Z"),
+    def test_latest_workflow_ignores_legacy_unversioned_status(self) -> None:
+        legacy = workflow_registry.ensure_workflow_dir(self.workspace, "wf_aaaaaaaaaaaa")
+        workflow_registry.write_status(
+            legacy,
+            {"wfId": legacy.name, "status": "succeeded", "createdAt": "2099-01-01"},
         )
-        for wf_id, created_at, updated_at in statuses:
-            root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
-            workflow_registry.write_status(
-                root,
-                {
-                    "wfId": wf_id,
-                    "status": "succeeded",
-                    "createdAt": created_at,
-                    "updatedAt": updated_at,
-                },
-            )
+        current = workflow_registry.ensure_workflow_dir(self.workspace, "wf_bbbbbbbbbbbb")
+        workflow_registry.register_workflow(
+            self.workspace,
+            current,
+            {"wfId": current.name, "status": "succeeded", "createdAt": "2026-01-01"},
+        )
         latest = workflow_registry.latest_workflow_dir(self.workspace)
         self.assertIsNotNone(latest)
-        self.assertEqual(latest.name, "wf_dddddddddddd")
+        self.assertEqual(latest.name, current.name)
 
     def test_latest_result_uses_immutable_created_at_and_requires_result_file(self) -> None:
         old_id = "wf_444444444444"
@@ -6280,7 +6271,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("traceback", status)
         self.assertIn("KeyError", status["traceback"])
 
-    def test_agent_replay_key_compatibility(self) -> None:
+    def test_current_agent_replay_key_identity(self) -> None:
         opts_without_resumable = {
             "engine": "codex",
             "mode": "work",
@@ -6292,9 +6283,9 @@ class WorkflowCommandTests(unittest.TestCase):
             "personaDigest": None,
         }
         key_plain = workflow_runtime._agent_key("root/seq#0", "do it", opts_without_resumable)
-        # Hard requirement: must remain byte-identical to original hash
+        # Current-format replay keys must remain byte-identical.
         self.assertEqual(
-            key_plain, "633463618573aeac26c13c7afb217f1f7c98d377797f1d379ed09882e42654a2"
+            key_plain, "5ffe349954477cad66dacd8d7dd3d3980149fef64755786db058a6e18eaad4a8"
         )
 
         opts_with_resumable = dict(opts_without_resumable)

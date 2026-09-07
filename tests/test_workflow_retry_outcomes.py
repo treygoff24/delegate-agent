@@ -186,6 +186,7 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
                     {
                         "wfId": wf_id,
                         "status": "created",
+                        "workflowKeyVersion": 2,
                         "workspace": str(self.workspace),
                         "budget": {"total": None, "spent": 0, "remaining": None},
                     },

@@ -86,9 +86,8 @@ def operational_values(
 def _effective_config(pin: workflow_pinning.WorkflowPin, values: JsonObject) -> JsonObject:
     if set(values) != {f"{section}.{key}" for section, key in OPS_KEYS}:
         raise _error("operational key set does not match the supported allowlist")
-    # Do not merge current defaults into the identity surface of an older pin.
-    # Defaults may change between CLI versions; only the allowlisted values
-    # below are permitted to cross that boundary.
+    # Defaults may change between CLI versions; only these allowlisted values
+    # may cross the immutable pin boundary.
     base = copy.deepcopy(pin.config)
     for section, key in OPS_KEYS:
         # Optional sections may explicitly be null (meaning defaults). Only
@@ -142,9 +141,8 @@ def prepare(
         "opsEnvironment": sorted(name for name in ENV_KEYS if name in environment),
         "opsChangedKeys": sorted(key for key in values if values[key] != base_values[key]),
         "opsValues": values,
+        "baseProfileIdentityDigest": workflow_pinning._json_digest(pin.profile_identity),
     }
-    if pin.profile_identity is not None:
-        metadata["baseProfileIdentityDigest"] = workflow_pinning._json_digest(pin.profile_identity)
     return metadata
 
 
@@ -199,22 +197,17 @@ def load(path: Path, *, pin: workflow_pinning.WorkflowPin | None = None) -> Work
             "opsEnvironment",
             "opsChangedKeys",
             "opsValues",
+            "baseProfileIdentityDigest",
         }
-        if "baseProfileIdentityDigest" in metadata:
-            allowed_fields.add("baseProfileIdentityDigest")
         if set(metadata) != allowed_fields:
             raise _error("unsupported attempt metadata fields")
         wf_id = metadata.get("wfId")
         if not isinstance(wf_id, str):
             raise _error("attempt workflow id is missing")
         pin = pin or workflow_pinning.load_pin(wf_id)
-        if pin is None or pin.attempt_config_version != 1 or pin.workflow_id != wf_id:
+        if pin is None or pin.workflow_id != wf_id:
             raise _error("attempt does not bind a supported workflow pin")
-        expected_identity = (
-            workflow_pinning._json_digest(pin.profile_identity)
-            if pin.profile_identity is not None
-            else None
-        )
+        expected_identity = workflow_pinning._json_digest(pin.profile_identity)
         if metadata.get("baseProfileIdentityDigest") != expected_identity:
             raise _error("attempt profile identity digest differs")
         workflow_identity.validate(pin.profile_identity, pin.config)

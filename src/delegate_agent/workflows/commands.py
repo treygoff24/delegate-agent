@@ -17,7 +17,7 @@ from delegate_agent import private_io, rendering, run_registry, workflow_attempt
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
-from delegate_agent.workflows import registry, runtime
+from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry, runtime
 from delegate_agent.workflows import script as workflow_script
 
 workflow_pinning.require_pinned_persona_resolver()
@@ -34,6 +34,14 @@ DRY_RUN_WRITE_WARNING = (
 
 def _delegate_cli_argv() -> list[str]:
     return [sys.executable, str(Path(sys.argv[0]).resolve())]
+
+
+def _require_current_workflow(status: JsonObject) -> None:
+    if status.get("workflowKeyVersion") != WORKFLOW_KEY_VERSION:
+        raise DelegateError(
+            "unsupported_workflow_version",
+            "This workflow uses an unsupported saved format; start a new workflow.",
+        )
 
 
 @dataclass(frozen=True)
@@ -82,32 +90,29 @@ def emit(
         if command.wf_id is None:
             raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
         try:
+            root = registry.workflow_dir(workspace, command.wf_id)
+            _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
             pin = workflow_pinning.load_pin(command.wf_id)
+            if pin is None:
+                raise workflow_pinning.WorkflowPinError(
+                    "invalid_pin", "workflow pin is missing; start a new workflow"
+                )
             attempt = workflow_attempts.from_environment(pin=pin)
-            if pin is not None and pin.attempt_config_version == 1 and attempt is None:
+            if attempt is None:
                 raise workflow_pinning.WorkflowPinError(
                     "invalid_workflow_attempt",
                     "this pinned supervisor requires an attempt snapshot",
                 )
-            if pin is not None:
-                previous_environment = workflow_pinning.temporarily_apply_environment(
-                    pin, attempt=attempt
-                )
-                cli_argv = pin.cli_argv
-                launch_config = attempt.config if attempt is not None else pin.config
-            else:
-                previous_environment = {}
-                cli_argv = _delegate_cli_argv()
-                launch_config = config
+            previous_environment = workflow_pinning.temporarily_apply_environment(
+                pin, attempt=attempt
+            )
             return runtime.run_supervisor(
                 workspace=workspace,
                 wf_id=command.wf_id,
-                cli_argv=cli_argv,
-                config=launch_config,
-                attempt_config=attempt.metadata if attempt is not None else None,
-                attempt_environment={**pin.environment, **attempt.environment}
-                if pin is not None and attempt is not None
-                else None,
+                cli_argv=pin.cli_argv,
+                config=attempt.config,
+                attempt_config=attempt.metadata,
+                attempt_environment={**pin.environment, **attempt.environment},
             )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -183,6 +188,57 @@ def emit_run(
     previous_result_exists = False
     previous_approval: str | None = None
     approval_changed = False
+    approval_loaded = False
+    approval_payload: JsonObject = {}
+    journal_events: list[JsonObject] | None = None
+    journal_sequence = 0
+
+    def load_journal() -> list[JsonObject]:
+        nonlocal journal_events, journal_sequence
+        if journal_events is None:
+            journal_events = registry.iter_journal(root / registry.JOURNAL_FILE)
+            journal_sequence = max(
+                (event["seq"] for event in journal_events if isinstance(event.get("seq"), int)),
+                default=0,
+            )
+        return journal_events
+
+    def append_run_event(event_type: str, **payload: JsonValue) -> None:
+        nonlocal journal_sequence
+        load_journal()
+        journal_sequence += 1
+        registry.append_jsonl(
+            root / registry.JOURNAL_FILE,
+            {
+                "seq": journal_sequence,
+                "type": event_type,
+                "at": run_registry.utc_now_iso(),
+                **payload,
+            },
+        )
+
+    def load_approval() -> JsonObject:
+        nonlocal approval_loaded, approval_payload, previous_approval
+        if approval_loaded:
+            return approval_payload
+        approval_loaded = True
+        try:
+            previous_approval = private_io.read_private_text_bounded(
+                root / registry.APPROVAL_FILE,
+                max_bytes=private_io.PRIVATE_RECORD_READ_MAX_BYTES,
+            )
+        except private_io.BoundedReadError as exc:
+            if exc.reason == "not_found":
+                return approval_payload
+            raise DelegateError("invalid_workflow_approval", str(exc)) from exc
+        try:
+            value = json.loads(previous_approval)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise DelegateError("invalid_workflow_approval", "approval file is invalid") from exc
+        if not isinstance(value, dict):
+            raise DelegateError("invalid_workflow_approval", "approval file is invalid")
+        approval_payload = value
+        return approval_payload
 
     def restore_approval() -> None:
         if not approval_changed:
@@ -204,40 +260,19 @@ def emit_run(
         root = registry.workflow_dir(workspace, wf_id)
         if not root.exists():
             raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
+        _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
         try:
             pin = workflow_pinning.load_pin(wf_id)
             if pin is None:
-                prior = registry.read_json(root / registry.STATUS_FILE) or {}
-                recorded = prior.get("attemptConfig")
-                identity_bound = isinstance(recorded, dict) and isinstance(
-                    recorded.get("baseProfileIdentityDigest"), str
+                raise workflow_pinning.WorkflowPinError(
+                    "invalid_pin", "workflow pin is missing; start a new workflow"
                 )
-                if not identity_bound:
-                    identity_bound = any(
-                        event.get("type") == "attempt_config"
-                        and isinstance(event.get("baseProfileIdentityDigest"), str)
-                        for event in registry.iter_journal(root / registry.JOURNAL_FILE)
-                    )
-                if identity_bound:
-                    raise workflow_pinning.WorkflowPinError(
-                        "invalid_pin",
-                        "identity-bound workflow pin is missing; restore its original HOME and pin before resuming",
-                    )
-            if pin is not None and pin.attempt_config_version == 1:
-                if not command.dry_run:
-                    attempt = workflow_attempts.create(
-                        pin,
-                        workflow_attempts.prepare(
-                            pin, config, config_source, environment=operational_environment
-                        ),
-                    )
-            elif pin is not None:
-                warnings.append(
-                    "operational updates unavailable: this legacy pinned runtime uses frozen creation config"
-                )
-            if pin is not None and pin.profile_identity is None:
-                warnings.append(
-                    "credential profile selection is not pinned by this legacy pin; selector identity enforcement is unavailable"
+            if not command.dry_run:
+                attempt = workflow_attempts.create(
+                    pin,
+                    workflow_attempts.prepare(
+                        pin, config, config_source, environment=operational_environment
+                    ),
                 )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -246,12 +281,17 @@ def emit_run(
         lock_fd = _acquire_workflow_lock(root, wf_id)
         try:
             status = registry.read_json(root / registry.STATUS_FILE) or {}
+            _require_current_workflow(status)
             previous_status = dict(status)
             if approve_gate:
                 # Recover gate evidence only after acquiring the supervisor
                 # lock; an approval racing a draining supervisor must not
                 # publish a paused projection before its resume is admitted.
-                recovered = _latest_unapproved_gate_event(root)
+                recovered = _latest_unapproved_gate_event(
+                    root,
+                    load_approval(),
+                    events=load_journal(),
+                )
                 gate_key = recovered.get("key") if recovered else status.get("gateKey")
                 if not isinstance(gate_key, str):
                     raise DelegateError(
@@ -264,16 +304,10 @@ def emit_run(
                         {
                             "ok": True,
                             "gateResult": recovered.get("result"),
+                            "gateResultHash": recovered["gateResultHash"],
                             "updatedAt": run_registry.utc_now_iso(),
                         }
                     )
-                    result_hash = recovered.get("gateResultHash")
-                    if isinstance(result_hash, str):
-                        status["gateResultHash"] = result_hash
-                    else:
-                        # Absent, never null: a gate event from an older
-                        # journal carries no hash, and a null would claim one.
-                        status.pop("gateResultHash", None)
                     # status.json is a projection the journal outranks, so the
                     # repair is published to disk rather than kept in memory
                     # for this call. Re-reading it makes the recovered
@@ -293,19 +327,17 @@ def emit_run(
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 gate_result_hash = status.get("gateResultHash")
-                try:
-                    previous_approval = private_io.read_private_text_bounded(
-                        root / registry.APPROVAL_FILE,
-                        max_bytes=private_io.PRIVATE_RECORD_READ_MAX_BYTES,
+                if not isinstance(gate_result_hash, str):
+                    raise DelegateError(
+                        "invalid_workflow_gate",
+                        "Workflow gate is missing its result identity; start a new workflow.",
                     )
-                except private_io.BoundedReadError as exc:
-                    if exc.reason != "not_found":
-                        raise DelegateError("invalid_workflow_approval", str(exc)) from exc
                 approval_changed = True
-                registry.record_approval(
+                approval_payload = registry.record_approval(
                     root,
                     gate_key,
-                    gate_result_hash if isinstance(gate_result_hash, str) else None,
+                    gate_result_hash,
+                    previous=load_approval(),
                 )
             script_path = root / registry.SCRIPT_FILE
             recorded_source_script = status.get("sourceScript")
@@ -381,9 +413,6 @@ def emit_run(
                 "scriptSha256": script_hash,
                 "args": args_value,
                 "budget": {"total": budget_total, "spent": 0, "remaining": budget_total},
-                # New workflow launches use v2 keys.  A resumed workflow keeps
-                # its existing version (missing means legacy v1).
-                "workflowKeyVersion": 2,
                 # Persisted rather than passed on argv: the supervisor is
                 # detached and re-execs itself, so status.json is the only thing
                 # that survives to tell it where to report.
@@ -432,7 +461,7 @@ def emit_run(
     if lock_fd is None:
         lock_fd = _acquire_workflow_lock(root, wf_id)
     supervisor_argv = [
-        *(pin.cli_argv if pin is not None else _delegate_cli_argv()),
+        *pin.cli_argv,
         "--cwd",
         str(workspace),
         "workflow",
@@ -440,19 +469,13 @@ def emit_run(
         wf_id,
     ]
     try:
-        if pin is not None and pin.profile_identity is None:
-            _append_command_event(root, "profile_identity_unavailable", reason="legacy_pin")
         if attempt is not None:
-            _append_command_event(root, "attempt_config", **attempt.metadata)
+            append_run_event("attempt_config", **attempt.metadata)
             current_status = registry.read_json(root / registry.STATUS_FILE) or {}
             current_status["attemptConfig"] = attempt.metadata
             registry.write_status(root, current_status)
             if command.resume:
                 status["attemptConfig"] = attempt.metadata
-        elif pin is not None:
-            _append_command_event(
-                root, "attempt_config_unavailable", reason="legacy_pinned_runtime"
-            )
         if command.resume:
             prior_attempt = status.get("replayAttempt")
             replay_attempt = (
@@ -488,18 +511,13 @@ def emit_run(
             registry.write_status(root, status)
             with contextlib.suppress(FileNotFoundError):
                 result_path.unlink()
-        if pin is not None:
-            workflow_pinning.register_active_supervisor(
-                wf_id,
-                workflow_root=root,
-                workspace=workspace,
-                pin=pin,
-            )
-        previous_environment = (
-            workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
-            if pin is not None
-            else {}
+        workflow_pinning.register_active_supervisor(
+            wf_id,
+            workflow_root=root,
+            workspace=workspace,
+            pin=pin,
         )
+        previous_environment = workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
         try:
             runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
         finally:
@@ -528,10 +546,8 @@ def emit_run(
     if attempt is not None:
         payload["attemptConfig"] = attempt.metadata
         payload["effectiveConfigPath"] = str(attempt.config_path)
-    if pin is not None:
-        payload["profileIdentityPinned"] = pin.profile_identity is not None
-        if pin.profile_identity is not None:
-            payload["profileIdentity"] = pin.profile_identity
+    payload["profileIdentityPinned"] = True
+    payload["profileIdentity"] = pin.profile_identity
     if source_script is not None:
         payload["sourceScript"] = source_script
     if script_hash is not None:
@@ -580,7 +596,6 @@ def emit_dry_run(
         args=args_value,
         budget=runtime.Budget(budget_total),
         dry_run=True,
-        workflow_key_version=2,
         # A dry run writes status too, and status.json is rebuilt rather than
         # merged, so omitting the target here erases it from a workflow that was
         # created with one and then dry-run before launching.
@@ -896,6 +911,7 @@ def emit_reject(
         ) from exc
     try:
         status = registry.read_json(root / registry.STATUS_FILE) or {}
+        _require_current_workflow(status)
         budget_payload = status.get("budget")
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
@@ -912,11 +928,6 @@ def emit_reject(
                 spent if isinstance(spent, int) and spent >= 0 else 0,
             ),
             replay_journal=status.get("replayJournal") is not False,
-            workflow_key_version=(
-                status.get("workflowKeyVersion")
-                if status.get("workflowKeyVersion") in {1, 2}
-                else 1
-            ),
         )
         try:
             key, label = state.resolve_agent_key(key_or_label)
@@ -925,7 +936,7 @@ def emit_reject(
         event: JsonObject = {"key": key, "reason": reason}
         if label is not None:
             event["label"] = label
-        _append_command_event(root, "agent_rejected", **event)
+        state.append_journal_only("agent_rejected", **event)
     finally:
         with contextlib.suppress(OSError):
             os.close(lock_fd)
@@ -945,9 +956,19 @@ def emit_reject(
     return EXIT_OK
 
 
-def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
+def _latest_unapproved_gate_event(
+    root: Path,
+    approval: JsonObject | None = None,
+    *,
+    events: list[JsonObject] | None = None,
+) -> JsonObject | None:
+    approval = (
+        approval if approval is not None else registry.read_json(root / registry.APPROVAL_FILE)
+    )
     latest: JsonObject | None = None
-    for event in registry.iter_journal(root / registry.JOURNAL_FILE):
+    for event in (
+        events if events is not None else registry.iter_journal(root / registry.JOURNAL_FILE)
+    ):
         if (
             event.get("type") != "gate"
             or event.get("simulated") is True
@@ -956,10 +977,15 @@ def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
             continue
         key = event.get("key")
         result_hash = event.get("gateResultHash")
-        if isinstance(key, str) and not registry.approval_allows(
-            root,
-            key,
-            result_hash if isinstance(result_hash, str) else None,
+        if (
+            isinstance(key, str)
+            and isinstance(result_hash, str)
+            and not registry.approval_allows(
+                root,
+                key,
+                result_hash,
+                approval=approval or {},
+            )
         ):
             latest = event
     return latest

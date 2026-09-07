@@ -88,8 +88,7 @@ class WorkflowPin:
     python_executable: str
     personas: JsonObject
     created_at: str
-    attempt_config_version: int = 0
-    profile_identity: JsonObject | None = None
+    profile_identity: JsonObject
 
     @property
     def cli_argv(self) -> list[str]:
@@ -109,13 +108,10 @@ class WorkflowPin:
             "DELEGATE_WORKFLOW_PIN": str(self.path),
             "PYTHONPATH": pythonpath,
         }
-        if self.profile_identity is not None:
-            namespaces = self.profile_identity["namespaces"]
-            # HOME remains the pin/registry owner's home. A profile-specific
-            # HOME is already frozen in its definition for external engines.
-            environment.update(
-                {name: namespaces[name] for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR")}
-            )
+        namespaces = self.profile_identity["namespaces"]
+        # HOME remains the pin/registry owner's home. A profile-specific
+        # HOME is already frozen in its definition for external engines.
+        environment.update({name: namespaces[name] for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR")})
         return environment
 
 
@@ -539,12 +535,9 @@ def create_pin(
         )
     existing_pin = load_pin(workflow_id, home=home)
     if existing_pin is not None:
-        if existing_pin.attempt_config_version == 0:
-            raise WorkflowPinError("pin_collision", "legacy pins cannot be upgraded implicitly")
         requested = _complete_pin_config(existing_pin.config, config)
-        if existing_pin.profile_identity is not None:
-            workflow_identity.validate(existing_pin.profile_identity, existing_pin.config)
-            workflow_identity.freeze(requested)
+        workflow_identity.validate(existing_pin.profile_identity, existing_pin.config)
+        workflow_identity.freeze(requested)
         if (
             requested != existing_pin.config
             or live_runtime_digest() != existing_pin.runtime_digest
@@ -612,7 +605,7 @@ def create_pin(
 
 
 def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | None:
-    """Load and validate a pin; ``None`` is the explicit pre-pinning path."""
+    """Load and validate a current pin, returning ``None`` when none exists."""
     _validate_workflow_id(workflow_id)
     path = pin_path(workflow_id, home=home)
     if not path.exists():
@@ -621,13 +614,17 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise WorkflowPinError("invalid_pin", f"could not read workflow pin: {path}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != PIN_SCHEMA:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != PIN_SCHEMA
+        or payload.get("version") != PIN_VERSION
+    ):
         raise WorkflowPinError("invalid_pin", f"unsupported workflow pin: {path}")
     if payload.get("workflowId") != workflow_id:
         raise WorkflowPinError("invalid_pin", "workflow pin id does not match its path")
     runtime = payload.get("runtime")
     config = payload.get("config")
-    personas_payload = payload.get("personas", {})
+    personas_payload = payload.get("personas")
     if (
         not isinstance(runtime, dict)
         or not isinstance(config, dict)
@@ -636,6 +633,8 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         raise WorkflowPinError(
             "invalid_pin", "workflow pin is missing runtime, config, or personas"
         )
+    if runtime.get("attemptConfigVersion") != 1:
+        raise WorkflowPinError("invalid_pin", "workflow pin uses an unsupported attempt format")
     config_path_value = payload.get("configPath")
     if not isinstance(config_path_value, str):
         raise WorkflowPinError("invalid_pin", "workflow pin config path is invalid")
@@ -680,18 +679,19 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
     if disk_config != config or payload.get("configDigest") != _json_digest(config):
         raise WorkflowPinError("invalid_pin", "workflow pin config does not match its digest")
     profile_identity = payload.get("profileIdentity")
-    if profile_identity is not None:
-        from delegate_agent import workflow_identity
+    from delegate_agent import workflow_identity
 
-        if not (import_root / "delegate_agent" / "workflow_identity.py").is_file():
-            raise WorkflowPinError(
-                "invalid_pin", "pinned runtime does not support profile identity validation"
-            )
-        if not isinstance(profile_identity, dict) or payload.get(
-            "profileIdentityDigest"
-        ) != _json_digest(profile_identity):
-            raise WorkflowPinError("invalid_pin", "workflow profile identity digest differs")
-        workflow_identity.validate_stamp(profile_identity, config)
+    if not (import_root / "delegate_agent" / "workflow_identity.py").is_file():
+        raise WorkflowPinError(
+            "invalid_pin", "pinned runtime does not support profile identity validation"
+        )
+    if not isinstance(profile_identity, dict) or payload.get(
+        "profileIdentityDigest"
+    ) != _json_digest(profile_identity):
+        raise WorkflowPinError("invalid_pin", "workflow profile identity digest differs")
+    if not (import_root / "delegate_agent" / "workflow_attempts.py").is_file():
+        raise WorkflowPinError("invalid_pin", "pinned runtime does not support attempts")
+    workflow_identity.validate_stamp(profile_identity, config)
     return WorkflowPin(
         workflow_id=workflow_id,
         path=path,
@@ -705,12 +705,6 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         personas=personas_payload,
         created_at=created_at,
         profile_identity=profile_identity,
-        attempt_config_version=(
-            1
-            if runtime.get("attemptConfigVersion") == 1
-            and (import_root / "delegate_agent" / "workflow_attempts.py").is_file()
-            else 0
-        ),
     )
 
 
