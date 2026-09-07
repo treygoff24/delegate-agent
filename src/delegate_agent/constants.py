@@ -171,3 +171,21 @@ WORKFLOW_DRY_RUN_HINT = (
 # Shared execution/help defaults; keep discovery imports free of registry I/O.
 DEFAULT_RUN_PRUNE_DAYS = 30
 RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
+
+
+# Claude reports a fully-dated served model id, never the alias the caller passed
+# (https://code.claude.com/docs/en/model-config). Under `--continuity-mode pinned`
+# the served id is compared against the requested one, so an alias is only usable
+# there if it names a family segment the served id can be matched against. The
+# `[1m]`-style suffix is documented on both aliases and full names and is stripped
+# before the comparison.
+CLAUDE_FAMILY_ALIASES = ("opus", "sonnet", "haiku", "fable")
+# Documented aliases that name no family: whichever model they resolve to is a
+# provider decision, so a pinned run can never verify it was served.
+CLAUDE_UNPINNABLE_ALIASES = ("best", "opusplan", "default")
+
+
+def claude_alias_base(model: str) -> str:
+    """Strip a documented `[...]` context-window suffix from a Claude selector."""
+    head, separator, _ = model.partition("[")
+    return head if separator else model
