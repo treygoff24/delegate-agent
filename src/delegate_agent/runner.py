@@ -2206,7 +2206,9 @@ def _capture_tracked_process(
 ) -> TrackedCaptureResult:
     tracked_stream_max_bytes = ctx.tracked_stream_max_bytes
     if tracked_stream_max_bytes is None:
-        raise AssertionError("tracked stream limit must be resolved before child launch")
+        raise RunnerLaunchError(
+            "internal_error", "tracked stream limit must be resolved before child launch"
+        )
     accumulator = harness_events.StreamAccumulator(
         harness=ctx.harness,
         requested_model=ctx.model_resolved or ctx.model or _requested_model(ctx),
