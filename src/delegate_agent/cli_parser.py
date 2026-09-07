@@ -514,6 +514,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return ParsedCommand("version")
 
     global_argv, command_argv = _normalize_global_options(argv)
+    completion_report_flag = False
+    no_completion_report_flag = False
 
     json_mode = False
     cwd: str | None = None
@@ -541,10 +543,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 1
             continue
         if token == "--no-completion-report":
+            no_completion_report_flag = True
             completion_report = delegate_config.COMPLETION_REPORT_MODE_NONE
             i += 1
             continue
         if token == "--completion-report":
+            completion_report_flag = True
             if i + 1 >= len(global_argv):
                 raise DelegateError(
                     "missing_completion_report", "--completion-report requires markdown or none."
@@ -618,9 +622,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         {
             "--cwd": cwd,
             "--pass-through": pass_through,
-            "--completion-report": completion_report,
-            "--no-completion-report": completion_report
-            == delegate_config.COMPLETION_REPORT_MODE_NONE,
+            "--completion-report": completion_report_flag,
+            "--no-completion-report": no_completion_report_flag,
             "--isolation": isolation,
             "--auth-profile": auth_profile,
             "--group": group,
@@ -748,12 +751,6 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             notify,
         )
     if subcommand == "resume":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate resume; "
-                "isolation is inherited from the source run.",
-            )
         return parse_resume(
             rest,
             json_mode,
@@ -765,12 +762,6 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             notify=notify,
         )
     if subcommand == "followup":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate followup; "
-                "isolation is inherited from the source run.",
-            )
         return parse_followup(
             rest,
             json_mode,
@@ -790,39 +781,14 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
     if subcommand == "wait":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate wait.",
-            )
         return parse_wait(rest, json_mode, cwd)
     if subcommand == "cancel":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate cancel.",
-            )
         return parse_cancel(rest, json_mode, cwd)
     if subcommand == "worktree":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate worktree commands.",
-            )
         return parse_worktree(rest, json_mode, cwd)
     if subcommand == "workflow":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate workflow commands.",
-            )
         return parse_workflow(rest, json_mode, cwd, notify)
     if subcommand == "profiles":
-        if isolation is not None:
-            raise DelegateError(
-                "invalid_option_combination",
-                "--isolation is not supported with delegate profiles.",
-            )
         return parse_profiles(rest, json_mode, cwd, auth_profile)
 
     raise DelegateError("unknown_subcommand", unknown_subcommand_message(subcommand))
@@ -1345,7 +1311,6 @@ def parse_droid(
             "invalid_droid_model_syntax",
             "Droid model selection uses --model <alias-or-model>; positional model syntax is no longer supported.",
         )
-    model_alias = None
     mode = rest[0]
     tail = rest[1:]
     command_prefix = ["droid", mode]
@@ -1404,7 +1369,7 @@ def parse_droid(
         isolation = "worktree"
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
-        droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
+        droid_tokens = ["droid", mode]
         corrected = corrected_command_suffix(
             [
                 "--isolation",
@@ -1434,7 +1399,6 @@ def parse_droid(
         payload=LaunchOptions(
             engine="droid",
             mode=mode,
-            model_alias=model_alias,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             output_schema=output_schema,

@@ -45,9 +45,9 @@ def test_cli_help_and_version_do_not_import_execution_runtime():
 def test_top_help_is_compact_and_complete():
     _code, output, _error = run_cli("--help")
     assert len(output.encode()) <= 4096
-    assert all(
-        name in output for name, spec in command_help.COMMAND_SPECS.items() if not spec.internal
-    )
+    command_lines = output.split("Commands:\n", 1)[1].split("\n\n", 1)[0]
+    names = {name.strip() for line in command_lines.splitlines() for name in line.split(" | ")}
+    assert names == {name for name, spec in command_help.COMMAND_SPECS.items() if not spec.internal}
 
 
 def test_overview_discovers_a_new_command_from_the_registry(monkeypatch):
@@ -142,3 +142,106 @@ def test_droid_uses_unified_model_option_and_keeps_alias_provenance():
     )
     assert request.model_alias == "reviewer"
     assert request.model == "model-id"
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        name
+        for name in command_help.COMMAND_SPECS
+        if name.split()[0]
+        not in {*cli_parser.KNOWN_ENGINES, "dry-run", "run", "resume", "followup"}
+    ],
+)
+def test_nonlaunch_global_advertisement_and_refusals(name, position):
+    spec = command_help.COMMAND_SPECS[name]
+    allowed = {"--cwd", "--json"}
+    if name in {"models", "capabilities", "profiles", "setup"}:
+        allowed.add("--auth-profile")
+    if name in {"workflow run", "workflow resume"}:
+        allowed.add("--notify")
+    if name.split()[0] in {"config", "doctor", "promote", "setup", "help"}:
+        allowed.remove("--cwd")
+    flags = {
+        "--pass-through": [],
+        "--isolation": ["worktree"],
+        "--completion-report": ["markdown"],
+        "--no-completion-report": [],
+        "--group": ["wave4"],
+        "--notify": ["room:example"],
+        "--auth-profile": ["example"],
+        "--cwd": ["/tmp"],
+    }
+    advertised = {
+        option["flag"] for option in command_help.command_help_payload(spec)["globalOptions"]
+    }
+    assert advertised == allowed
+    local = {option.flag for option in spec.options}
+    for flag, values in flags.items():
+        if flag in allowed or (position == "after" and flag in local):
+            continue
+        path = name.split()
+        argv = [flag, *values, *path] if position == "before" else [*path, flag, *values]
+        with pytest.raises(errors.DelegateError) as caught:
+            cli_parser.parse_cli(argv)
+        assert caught.value.error == "invalid_option_combination", (argv, caught.value)
+        assert flag in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "command", ["runs", "ps", "wait", "worktree list", "worktree remove", "worktree prune"]
+)
+def test_local_group_option_remains_effective(command):
+    parsed = cli_parser.parse_cli([*command.split(), "--group", "wave4"])
+    assert parsed.payload.group == "wave4"
+
+
+@pytest.mark.parametrize("command", ["wait", "run-output"])
+def test_local_completion_report_remains_effective(command):
+    parsed = cli_parser.parse_cli([command, "codex-1", "--completion-report"])
+    assert parsed.payload.completion_report is True
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["snapshot", "codex-1"],
+        ["runs"],
+        ["ps"],
+        ["wait", "codex-1"],
+        ["run-output", "codex-1"],
+        ["cancel", "codex-1"],
+        ["worktree", "list"],
+        ["mail", "inbox"],
+        ["models"],
+        ["capabilities"],
+        ["describe"],
+        ["profiles"],
+        ["personas"],
+        ["workflow", "check", "workflow.py"],
+    ],
+)
+def test_supported_global_cwd_and_json_reach_parsed_options(args):
+    for prefix in (True, False):
+        flags = ["--cwd", "/tmp/example", "--json"]
+        parsed = cli_parser.parse_cli(flags + args if prefix else args + flags)
+        assert parsed.global_options.cwd == "/tmp/example"
+        assert parsed.global_options.json_mode is True
+
+
+@pytest.mark.parametrize("command", ["models", "capabilities", "profiles", "setup"])
+def test_supported_auth_profile_reaches_parsed_options(command):
+    parsed = cli_parser.parse_cli(["--auth-profile", "example", command])
+    assert parsed.global_options.auth_profile == "example"
+
+
+@pytest.mark.parametrize("command", ["run", "resume"])
+def test_workflow_notify_reaches_command(command):
+    parsed = cli_parser.parse_cli(["--notify", "room:example", "workflow", command, "example"])
+    assert parsed.payload.notify == "room:example"
+
+
+def test_completion_report_word_as_cwd_is_not_a_passed_flag():
+    parsed = cli_parser.parse_cli(["--cwd", "--completion-report", "snapshot", "codex-1"])
+    assert parsed.global_options.cwd == "--completion-report"

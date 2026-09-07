@@ -252,17 +252,14 @@ class OverviewTests(unittest.TestCase):
         # still be a registry top-level command.
         self.assertEqual(registry_top_level, set(TOP_LEVEL_COMMANDS) | {"help"})
 
-    def test_overview_advertises_codex_output_schema(self):
-        self.assertIn("codex", self.overview)
-        self.assertIn("codex call", self.overview)
-        self.assertIn("describe --full", self.overview)
-
-    def test_overview_advertises_output_schema_on_every_claude_line(self):
-        self.assertIn("claude", self.overview)
-        self.assertIn("help <command>", self.overview)
-
-    def test_overview_advertises_codex_fast_on_every_codex_line(self):
-        self.assertIn("codex", self.overview)
+    def test_focused_help_advertises_engine_capabilities(self):
+        for engine in ("codex", "claude"):
+            for name in (engine, f"{engine} call"):
+                with self.subTest(command=name):
+                    text = command_help.render_command_help_text(command_help.COMMAND_SPECS[name])
+                    self.assertIn("--output-schema", text)
+                    if engine == "codex":
+                        self.assertIn("--fast", text)
 
     def test_overview_call_lines_omit_workspace_options(self):
         """Stateless call usage must not advertise workspace-only options."""
@@ -287,12 +284,9 @@ class OverviewTests(unittest.TestCase):
                 with self.subTest(line=line, option=option):
                     self.assertNotIn(option, line)
 
-    def test_overview_devin_usage_omits_unsupported_reasoning_effort(self):
-        self.assertIn("devin", self.overview)
-
-    def test_overview_advertises_ps_structural(self):
-        self.assertIn("ps", self.overview)
-        self.assertIn("run-output", self.overview)
+    def test_focused_devin_usage_omits_unsupported_reasoning_effort(self):
+        for usage in command_help.COMMAND_SPECS["devin"].usage:
+            self.assertNotIn("--reasoning-effort", usage)
 
 
 class PsHelpContractTests(unittest.TestCase):
