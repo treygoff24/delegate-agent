@@ -1256,7 +1256,32 @@ class HarnessEventsTests(unittest.TestCase):
         opencode = self.events.StreamAccumulator(harness="opencode")
         opencode.ingest_line(json.dumps({"type": "session.idle"}))
         opencode.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
-        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text": 1})
+        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text/reasoning": 1})
+
+    def test_an_opencode_part_shape_mismatch_names_both_halves_of_the_pair(self):
+        """Filing it under `text` reports a handled type as unhandled."""
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
+        acc.ingest_line(json.dumps({"type": "tool_use", "part": {"type": "tool-result"}}))
+        acc.ingest_line(json.dumps({"type": "text"}))
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": 7}}))
+        acc.ingest_line(json.dumps({"type": "session.idle", "part": {"type": "anything"}}))
+
+        self.assertEqual(
+            acc.unhandled_event_types,
+            {
+                "text/reasoning": 1,
+                "tool_use/tool-result": 1,
+                "text/<no part>": 1,
+                "text/<no part.type>": 1,
+                "session.idle": 1,
+            },
+        )
+
+    def test_a_matching_opencode_pair_is_not_counted_as_unhandled(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "text", "text": "hello"}}))
+        self.assertEqual(acc.unhandled_event_types, {})
 
     def test_the_real_captures_leave_a_readable_unhandled_tally(self):
         claude = self.events.StreamAccumulator(harness="claude")
