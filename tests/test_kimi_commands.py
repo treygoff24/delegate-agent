@@ -10,13 +10,15 @@ from tests.delegate_commands_test_base import CommandTestBase
 
 class KimiCommandTests(CommandTestBase):
     def test_kimi_safe_argv(self):
+        config = config_api.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
         request = self.build_git_request(
             "kimi",
             "safe",
             None,
             "/repo",
             "hello",
-            config_api.embedded_default_config(),
+            config,
             dry_run=True,
             frame_prompt=True,
         )

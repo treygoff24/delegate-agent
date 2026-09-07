@@ -289,7 +289,8 @@ Controls local run recording.
     "completionReport": {"defaultMode": "markdown"},
     "retention": {"enabled": true, "rawLogDays": 7},
     "registryLockTimeoutSec": 120,
-    "processGroupTerminationGraceSec": 3
+    "processGroupTerminationGraceSec": 3,
+    "skillReviewPreamble": {"enabled": false}
   }
 }
 ```
@@ -308,6 +309,12 @@ Controls local run recording.
   it before its own mutation. Until replay, readers see the prior canonical
   state. Malformed WAL records are quarantined, and a cancellation marker wins
   over a WAL success.
+- `skillReviewPreamble.enabled`: whether Delegate prepends the skill-review
+  requirement (`SKILL_REVIEW_PREFIX`) to a wrapped child prompt. The default is
+  `false`. When `true`, every wrapped safe- and work-mode prompt is prefixed
+  with it before any persona, safe-mode, or worktree framing is added.
+  `--pass-through` launches and `call`-mode prompts never receive the
+  preamble, regardless of this setting.
 
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,

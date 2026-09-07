@@ -62,13 +62,15 @@ class EngineArgvTests(CommandTestBase):
         }
 
     def test_cursor_safe_argv_agent_prefix(self):
+        config = delegate_config.embedded_default_config()
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
         request = self.build_git_request(
             "cursor",
             "safe",
             None,
             "/repo",
             "hello",
-            delegate_config.embedded_default_config(),
+            config,
             dry_run=True,
             frame_prompt=True,
         )
@@ -1583,6 +1585,7 @@ class EngineArgvTests(CommandTestBase):
         self.addCleanup(repo.cleanup)
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
+        config["tracking"]["skillReviewPreamble"] = {"enabled": True}
         parsed = request_types.ParsedCommand(
             "droid",
             global_options=request_types.GlobalOptions(cwd=repo.name),

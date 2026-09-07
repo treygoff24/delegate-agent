@@ -3509,7 +3509,9 @@ def _build_request_for_workspace(
             mode=mode,
             completion_report_mode=completion_report_mode,
             instruction_mode=prompt_instruction_mode,
-            skip_skill_preamble=skip_skill_preamble,
+            skip_skill_preamble=(
+                skip_skill_preamble or not delegate_config.skill_review_preamble_enabled(config)
+            ),
             persona_text=(
                 persona_resolution.text
                 if persona_resolution is not None and persona_transport == "prepend"

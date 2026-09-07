@@ -61,6 +61,10 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         self.addCleanup(self.repo.cleanup)
         self.config = config_api.embedded_default_config()
         self.config["droid"]["models"] = {"reviewer": "model-id"}
+        # This class exercises the enabled skill-review-preamble path (wrapped,
+        # non-pass-through prompts assert the prefix is present); slash and
+        # pass-through prompts always skip it regardless of this switch.
+        self.config["tracking"]["skillReviewPreamble"] = {"enabled": True}
 
     def build(self, argv):
         parsed = parser_api.parse_cli(["--cwd", self.repo.name, *argv])
