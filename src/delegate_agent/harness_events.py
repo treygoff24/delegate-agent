@@ -695,6 +695,12 @@ class StreamAccumulator:
         """
         self.terminal_status = status
         self.terminal_exit_armed = arm_exit
+        if status == "succeeded":
+            # The run got past whatever it reported. `_last_error_message` is the
+            # fallback reason for a terminal that carries none of its own, so
+            # leaving it set lets a later bodiless failure inherit an error the
+            # run already recovered from.
+            self._last_error_message = None
         payload: JsonObject = {"event": event, "status": status}
         # The reason is child-supplied text and both sinks below are persisted to
         # the run record: `terminalEvent` directly and the `run.completed` event
@@ -1663,8 +1669,6 @@ class StreamAccumulator:
                     _string_field(message, "errorMessage") or f"Provider stopped: {stop_reason}"
                 )
                 self._ingest_error_event({"message": reason})
-            else:
-                self._last_error_message = None
             self._pi_recovery_error = reason
             self._record_terminal_event(
                 event=f"{self.harness}.turn_end", status=status, reason=reason
