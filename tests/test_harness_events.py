@@ -167,6 +167,44 @@ class HarnessEventsTests(unittest.TestCase):
             {"event": "error", "status": "failed", "reason": "429 rate_limit_exceeded"},
         )
 
+    def test_a_max_turns_result_with_text_and_no_is_error_stays_failed(self):
+        """`error_max_turns` carries partial text and often omits `is_error`."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "error_max_turns", "result": "partial"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "partial")
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["failed"])
+
+    def test_a_refusal_result_with_text_is_not_promoted_either(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "safety_refusal", "result": "I cannot"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "I cannot")
+
+    def test_an_ordinary_success_result_is_still_promoted(self):
+        """The planted negative: the guard must not demote a real answer."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "result", "subtype": "success", "is_error": False, "result": "the answer"}
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.completion_text, "the answer")
+
     def test_typed_provider_error_records_exactly_one_terminal(self):
         """A provider-typed error must not publish a second run.completed."""
         acc = self.events.StreamAccumulator(harness="codex")
