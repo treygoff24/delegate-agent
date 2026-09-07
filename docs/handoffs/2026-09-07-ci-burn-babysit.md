@@ -40,6 +40,8 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 
 - codex-73/80 = dlg-278.2 (confirmed): merged, test-helper-only (ps -ww, COLUMNS=80 pins, watchdog cap). Closed.
 
+- codex-77/81 = dlg-o7i (confirmed): merged. All seven lanes landed; endgame = quiet full gate + Opus cross-family review + Astra final gate + Forgejo push.
+
 ## Failure modes seen
 - 2026-09-07 ~21:10Z herdr update killed the Claude session and with it the parent processes of codex-73 (dlg-278.2) and codex-77 (dlg-o7i) mid-gate; both marked stale with uncommitted diffs intact. Resumed via `delegate followup codex-73|77 --prompt-file briefs/resume-after-kill.md` (envelopes runs/278-2-fu.json, runs/o7i-fu.json).
 - Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
