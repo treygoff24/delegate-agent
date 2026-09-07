@@ -1099,8 +1099,6 @@ def describe_payload(
                     "<isolated-workspace>",
                     "-p",
                     "--trust",
-                    "--mode",
-                    "ask",
                     "--model",
                     config["cursor"]["defaultModel"],
                     "--output-format",
@@ -1108,7 +1106,7 @@ def describe_payload(
                 ],
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
-                    "--mode ask is Cursor's documented read-only mode; no --force or --approve-mcps.",
+                    "No --mode, --force, or --approve-mcps; the isolated workspace copy is the boundary.",
                     "Writes .cursor/cli.json in the isolated workspace (Read(**), read-only shell helpers; no git/find shell).",
                     "The prompt is delivered on stdin, not argv.",
                 ],

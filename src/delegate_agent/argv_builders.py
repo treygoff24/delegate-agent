@@ -54,7 +54,9 @@ SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
 
 # Cursor documents --mode ask as "Q&A style for explanations and questions
 # (read-only)"; --mode plan is the other read-only mode. ask is what the audit
-# proved live.
+# proved live. Both of them also block the shell outright, so this is emitted
+# only where there is no other boundary to fall back on: read-only call, which
+# runs in the caller's cwd with no isolated copy.
 CURSOR_READ_ONLY_MODE = ("--mode", "ask")
 
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
@@ -191,14 +193,12 @@ def build_cursor_argv(
             argv.extend(CURSOR_READ_ONLY_MODE)
         else:
             argv.extend(["--approve-mcps", "--force"])
-    elif mode == MODE_SAFE:
-        # `-p` alone "has access to all tools, including write and shell" per
-        # Cursor's parameter reference, so without a mode flag the read-only
-        # claim rested on the prompt prefix and the isolated workspace copy.
-        # `--mode ask` is documented read-only and is the mode the live stdin
-        # proof used.
-        argv.extend(CURSOR_READ_ONLY_MODE)
     else:
+        # Safe mode deliberately emits no mode flag. Both of Cursor's read-only
+        # modes block the shell entirely, so a `cursor safe` reviewer under one
+        # cannot run `git diff` or a test suite -- it can only read files, which
+        # is not a review. The isolated workspace copy remains the boundary
+        # here, as it was before the flag was added.
         validate_mode(mode)
     if resume_session_id is not None:
         argv.extend(["--resume", resume_session_id])
