@@ -259,6 +259,67 @@ class WrapEngineArgvTests(unittest.TestCase):
             self.assertNotIn(str(fake_home / ".local"), argv)
             self.assertNotIn(str(fake_home / ".codex"), argv)
 
+    def test_kimi_default_home_is_writable_and_legacy_home_is_hidden(self):
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_home = Path(home_tmp)
+            kimi_home = fake_home / ".kimi-code"
+            legacy_home = fake_home / ".kimi"
+            kimi_home.mkdir()
+            legacy_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["kimi"],
+                cwd="/ws",
+                env={"HOME": str(fake_home)},
+                engine="kimi",
+            )
+
+            self.assertEqual(argv.count(str(kimi_home)), 2)
+            self.assertEqual(argv[argv.index(str(kimi_home)) - 1], "--bind")
+            self.assertNotIn(str(legacy_home), argv)
+
+    def test_kimi_home_override_replaces_default_home(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as override_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            default_home = fake_home / ".kimi-code"
+            default_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["kimi"],
+                cwd="/ws",
+                env={"HOME": str(fake_home), "KIMI_CODE_HOME": override_tmp},
+                engine="kimi",
+            )
+
+            self.assertEqual(argv.count(override_tmp), 2)
+            self.assertEqual(argv[argv.index(override_tmp) - 1], "--bind")
+            self.assertNotIn(str(default_home), argv)
+
+    def test_kimi_homes_are_hidden_from_other_engines(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as override_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            default_home = fake_home / ".kimi-code"
+            legacy_home = fake_home / ".kimi"
+            default_home.mkdir()
+            legacy_home.mkdir()
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["codex"],
+                cwd="/ws",
+                env={"HOME": str(fake_home), "KIMI_CODE_HOME": override_tmp},
+                engine="codex",
+            )
+
+            self.assertNotIn(str(default_home), argv)
+            self.assertNotIn(str(legacy_home), argv)
+            self.assertNotIn(override_tmp, argv)
+
 
 class ProbeTests(unittest.TestCase):
     def test_probe_is_the_production_boundary_with_the_exact_binary(self):
@@ -904,6 +965,25 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
                     env={"CODEX_HOME": str(Path(ws) / "src")},
                     engine="codex",
                 )
+
+    def test_kimi_home_may_not_intersect_the_workspace(self):
+        with tempfile.TemporaryDirectory() as ws:
+            workspace = Path(ws)
+            default_home = workspace / ".kimi-code"
+            override_home = workspace / "kimi-override"
+            default_home.mkdir()
+            override_home.mkdir()
+
+            for env in (
+                {"HOME": ws},
+                {"HOME": "/home/elsewhere", "KIMI_CODE_HOME": str(override_home)},
+            ):
+                with self.subTest(env=env):
+                    with self.assertRaises(DelegateError) as caught:
+                        sandbox_bwrap.wrap_engine_argv(
+                            engine_argv=["kimi"], cwd=ws, env=env, engine="kimi"
+                        )
+                    self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
 
     def test_preflight_runs_the_final_plan(self):
         true_path = shutil.which("true")
