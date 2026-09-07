@@ -78,7 +78,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
         self.assertTrue(payload["isolatedWorkspace"])
         self.assertIn("isolation", payload)
-        self.assertNotIn("--mode=plan", payload["argv"])
+        self.assertEqual(payload["argv"][payload["argv"].index("--mode") + 1], "ask")
         self.assertNotIn("--approve-mcps", payload["argv"])
 
     def test_cleanup_refuses_target_containing_source_root(self):
@@ -786,7 +786,8 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertIn(f"{isolated.workspace}/src/module.py", isolated.prompt)
 
     def test_safe_isolation_reroots_argv_prompt_paths(self):
-        self._assert_safe_prompt_paths_are_rerooted("cursor", "argv")
+        # Kimi is the last engine on argv prompt transport.
+        self._assert_safe_prompt_paths_are_rerooted("kimi", "argv")
 
     def test_safe_isolation_reroots_stdin_prompt_paths(self):
         self._assert_safe_prompt_paths_are_rerooted("codex", "stdin_text")
@@ -818,8 +819,9 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             prompt_instruction_mode=PROMPT_INSTRUCTION_MODE_SLASH,
         )
         if transport_field == "argv":
-            # Cursor safe rejects slash prompts before this isolation layer, so
-            # provide the already-resolved verbatim payload directly here.
+            # Prompt-enforced safe engines reject slash prompts before this
+            # isolation layer, so provide the already-resolved verbatim payload
+            # directly here.
             request.argv[-1] = prompt
 
         with safe_api.safe_isolated_request(request) as isolated:
@@ -831,13 +833,15 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertEqual(isolated.prompt, prompt)
             self.assertEqual(transported, prompt)
             self.assertNotIn("Safe-isolation note", transported)
-            self.assertEqual(
-                isolated.argv[isolated.argv.index(workspace_flag) + 1],
-                isolated.workspace,
-            )
+            if workspace_flag is not None:
+                self.assertEqual(
+                    isolated.argv[isolated.argv.index(workspace_flag) + 1],
+                    isolated.workspace,
+                )
 
     def test_safe_isolation_preserves_slash_argv_prompt(self):
-        self._assert_safe_slash_prompt_is_verbatim("cursor", "argv", "--workspace")
+        # Kimi has no CLI workspace flag; Delegate sets the child cwd instead.
+        self._assert_safe_slash_prompt_is_verbatim("kimi", "argv", None)
 
     def test_safe_isolation_preserves_slash_stdin_prompt(self):
         self._assert_safe_slash_prompt_is_verbatim("codex", "stdin_text", "--cd")

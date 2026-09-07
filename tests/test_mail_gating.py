@@ -515,8 +515,10 @@ class MailGatingTests(CommandTestBase):
                     self.assertEqual(bool(manifests), tracked)
                     if manifests:
                         manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
-                        self.assertEqual(manifest["argv"][1:-1], observed_argv[:-1])
-                        self.assertIn("<prompt redacted:", manifest["argv"][-1])
+                        # Cursor takes the prompt on stdin, so the manifest argv is
+                        # the real argv with nothing to redact and no prompt in it.
+                        self.assertEqual(manifest["argv"][1:], observed_argv)
+                        self.assertNotIn("prompt", observed_argv)
 
 
 if __name__ == "__main__":

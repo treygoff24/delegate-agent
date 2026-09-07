@@ -787,7 +787,9 @@ def _opencode_describe_argv(
     return prompt_file_display_argv(argv)
 
 
-def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:
+def _pi_family_describe_argv(
+    section: JsonObject, engine: str, *, mode: str, workspace: str
+) -> list[str]:
     model = _resolve_default_model(section)
     default_effort = section.get("defaultReasoningEffort")
     # describe rejects --auth-profile, so profile-scoped discovery is out of
@@ -800,7 +802,7 @@ def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> 
         model=model,
     )
     if engine == "omp":
-        return build_omp_argv(section, mode, model, thinking, "<prompt>")
+        return build_omp_argv(section, mode, model, thinking, workspace)
     return build_pi_argv(section, mode, model, thinking)
 
 
@@ -876,10 +878,14 @@ def describe_payload(
         mode=MODE_WORK,
         workspace="<workspace>",
     )
-    pi_safe_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_SAFE)
-    pi_work_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_WORK)
-    omp_safe_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_SAFE)
-    omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK)
+    pi_safe_argv = _pi_family_describe_argv(
+        pi, "pi", mode=MODE_SAFE, workspace="<isolated-workspace>"
+    )
+    pi_work_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_WORK, workspace="<workspace>")
+    omp_safe_argv = _pi_family_describe_argv(
+        omp, "omp", mode=MODE_SAFE, workspace="<isolated-workspace>"
+    )
+    omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK, workspace="<workspace>")
     return {
         "ok": True,
         "summary": False,
@@ -911,7 +917,7 @@ def describe_payload(
         "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "promptSources": ["direct", "prompt-file", "stdin"],
         "promptTransports": {
-            "cursor": PROMPT_TRANSPORT_ARGV,
+            "cursor": PROMPT_TRANSPORT_STDIN,
             "droid": PROMPT_TRANSPORT_FILE,
             "codex": PROMPT_TRANSPORT_STDIN,
             "kimi": PROMPT_TRANSPORT_ARGV,
@@ -920,7 +926,7 @@ def describe_payload(
             "devin": PROMPT_TRANSPORT_FILE,
             "opencode": PROMPT_TRANSPORT_STDIN,
             "pi": PROMPT_TRANSPORT_STDIN,
-            "omp": PROMPT_TRANSPORT_ARGV,
+            "omp": PROMPT_TRANSPORT_STDIN,
         },
         "personaTransports": {
             "safe": {engine: "prepend" for engine in KNOWN_ENGINES},
@@ -1061,7 +1067,7 @@ def describe_payload(
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
+                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to another engine.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",
@@ -1093,17 +1099,18 @@ def describe_payload(
                     "<isolated-workspace>",
                     "-p",
                     "--trust",
+                    "--mode",
+                    "ask",
                     "--model",
                     config["cursor"]["defaultModel"],
-                    "--print",
                     "--output-format",
                     "stream-json",
-                    "<read-only-review-prefixed-skill-review-prompt>",
                 ],
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
-                    "No --mode=plan, --mode=ask, --force, or --approve-mcps.",
+                    "--mode ask is Cursor's documented read-only mode; no --force or --approve-mcps.",
                     "Writes .cursor/cli.json in the isolated workspace (Read(**), read-only shell helpers; no git/find shell).",
+                    "The prompt is delivered on stdin, not argv.",
                 ],
                 "work": [
                     *config["cursor"]["argvPrefix"],
@@ -1115,10 +1122,8 @@ def describe_payload(
                     "--force",
                     "--model",
                     config["cursor"]["defaultModel"],
-                    "--print",
                     "--output-format",
                     "stream-json",
-                    "<skill-review-prompt>",
                 ],
             },
             "droid": {
@@ -1158,12 +1163,12 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Always uses --sandbox read-only; safe sandbox is not configurable in v1.",
-                    "Non-interactive: --ask-for-approval never.",
+                    'Non-interactive: -c approval_policy="never" inside the exec scope.',
                 ],
                 "work": codex_work_argv,
                 "workNotes": [
                     "networkAccess enables -c sandbox_workspace_write.network_access=true when workSandbox is workspace-write.",
-                    "webSearch enables global --search before exec.",
+                    'webSearch enables -c web_search="live" inside the exec scope.',
                     "profile is config-only (codex.profile); not accepted in run input JSON.",
                 ],
             },
@@ -1172,6 +1177,7 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
+                    "Adds --permission-prompts none when discovery proves the installed Claude lists the flag; anything that would prompt is then denied outright.",
                     "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
                     "Delegate does not prove Claude hooks, plugins, or user settings are disabled; keep safe-mode work review-only.",
                 ],
@@ -1194,6 +1200,7 @@ def describe_payload(
                 "workNotes": [
                     "Kimi prompt mode auto-approves tool actions; Delegate does not pass --yolo because Kimi rejects combining it with --prompt.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
+                    "--output-format is always explicit (stream-json tracked, text pass-through) so KIMI_MODEL_OUTPUT_FORMAT cannot change it.",
                 ],
             },
             "grok": {
@@ -1208,7 +1215,7 @@ def describe_payload(
                 "work": grok_work_argv,
                 "workNotes": [
                     "Uses grok.workPermissionMode unless policy.harness.grok.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
-                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh).",
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },
@@ -1265,7 +1272,7 @@ def describe_payload(
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
                     "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
-                    "Oh My Pi 17.0.4 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
+                    "Oh My Pi 18.1.13 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
                 ],
                 "work": omp_work_argv,
                 "workNotes": [

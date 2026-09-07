@@ -31,7 +31,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 3. Install and authenticate the child runtimes you plan to use:
 
    ```bash
-   command -v agent || echo "Cursor Agent CLI missing"
+   cursor-agent --version || echo "Cursor Agent CLI missing"
    command -v droid || echo "Factory Droid CLI missing"
    command -v codex || echo "Codex CLI missing"
    command -v claude || echo "Claude Code CLI missing"

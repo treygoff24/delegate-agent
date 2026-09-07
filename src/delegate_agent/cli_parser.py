@@ -1211,6 +1211,7 @@ def parse_modeless_engine(
     allow_repo_persona = tail.allow_repo_persona
     resumable = tail.resumable
     continuity_mode = tail.continuity_mode
+    tail_warnings = tail.warnings
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
@@ -1296,6 +1297,7 @@ def parse_modeless_engine(
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
 
@@ -1359,6 +1361,7 @@ def parse_droid(
     allow_repo_persona = tail_result.allow_repo_persona
     resumable = tail_result.resumable
     continuity_mode = tail_result.continuity_mode
+    tail_warnings = tail_result.warnings
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
@@ -1439,6 +1442,7 @@ def parse_droid(
             allow_repo_persona=allow_repo_persona,
             resumable=resumable,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
 
@@ -2176,6 +2180,17 @@ def parse_prompt_tail(
         raise DelegateError(
             "invalid_output_schema", "--output-schema must appear before direct prompt text."
         )
+    # An unrecognized option after the prompt already fails loudly above. A
+    # recognized one is the silent case: the trailing prompt is variadic, so the
+    # flag and its value become prompt text and the run proceeds with the default.
+    # Match whole tokens only, so prose that mentions a flag stays quiet, and skip
+    # everything after a literal `--`, which is an explicit "this is prompt text".
+    absorbed_options = [token for token in checked_prompt_parts if token in known_options]
+    tail_warnings = tuple(
+        f"option after the prompt is treated as prompt text: {option}. "
+        "Move it before the prompt to apply it."
+        for option in dict.fromkeys(absorbed_options)
+    )
     return PromptTail(
         prompt_file,
         output_schema,
@@ -2198,6 +2213,7 @@ def parse_prompt_tail(
         allow_repo_persona,
         resumable,
         continuity_mode,
+        tail_warnings,
     )
 
 
