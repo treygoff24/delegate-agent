@@ -179,6 +179,14 @@ EVENT_TEXT_LIMIT = 500
 MALFORMED_SAMPLE_LIMIT = 3
 MALFORMED_SAMPLE_CHARS = 200
 
+# Every parser here is an allowlist enforced by omission: an event type that
+# matches no branch is dropped with no trace, so a vendor adding an error event
+# or renaming a field ships silently and the run reports empty output rather
+# than a problem. Counting the types that reach no handler makes the next
+# rename visible. Bounded because the type string comes from the child.
+UNHANDLED_EVENT_TYPE_LIMIT = 32
+UNHANDLED_EVENT_TYPE_CHARS = 64
+
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
     """Bound retained event text for raw and normalized event surfaces.
@@ -633,6 +641,8 @@ class StreamAccumulator:
     structured_events_seen: int = 0
     malformed_lines: int = 0
     malformed_samples: list[str] = field(default_factory=list)
+    unhandled_event_types: dict[str, int] = field(default_factory=dict)
+    unhandled_event_types_truncated: bool = False
 
     def _record_terminal_event(
         self,
@@ -856,10 +866,24 @@ class StreamAccumulator:
         if event_type == "turn.started":
             self._codex_completion_candidate = None
             return
-        # Anything else with a "type" is intentionally dropped here. That
-        # includes kimi 0.26.0 meta lines such as
-        # {"role":"meta","type":"session.resume_hint",...}, which carry no
-        # assistant text, tool activity, or terminal signal worth normalizing.
+        # Anything else with a "type" reached no handler. That includes benign
+        # lines such as kimi 0.26.0's {"role":"meta","type":"session.resume_hint"},
+        # and it also includes whatever a vendor adds next, so it is counted
+        # rather than dropped in silence.
+        self._record_unhandled_event_type(event_type)
+
+    def _record_unhandled_event_type(self, event_type: str) -> None:
+        name = event_type.strip()
+        if not name or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            return
+        name = name[:UNHANDLED_EVENT_TYPE_CHARS]
+        if name in self.unhandled_event_types:
+            self.unhandled_event_types[name] += 1
+            return
+        if len(self.unhandled_event_types) >= UNHANDLED_EVENT_TYPE_LIMIT:
+            self.unhandled_event_types_truncated = True
+            return
+        self.unhandled_event_types[name] = 1
 
     def _observe_model(self, payload: JsonObject, event_type: str) -> None:
         model = _served_model(payload)
@@ -1370,6 +1394,7 @@ class StreamAccumulator:
             return
         part = payload.get("part")
         if not isinstance(part, dict):
+            self._record_unhandled_event_type(event_type)
             return
         part_type = part.get("type")
         if event_type == "step_start" and part_type == "step-start":
@@ -1383,6 +1408,8 @@ class StreamAccumulator:
             return
         if event_type == "step_finish" and part_type == "step-finish":
             self._ingest_opencode_step_finish(part)
+            return
+        self._record_unhandled_event_type(event_type)
 
     def _ingest_opencode_text(self, part: JsonObject) -> None:
         text = part.get("text")
@@ -1579,11 +1606,14 @@ class StreamAccumulator:
             self._ingest_error_event(payload)
             self._record_terminal_event(event=f"{self.harness}.error", status="failed")
             return
-        if event_type == "notice" and _string_field(payload, "level") == "error":
-            # A session-layer error notice is not a terminal on its own, but its
-            # text is what the failover classifier and the synthesized
-            # completion report read out of the accumulator.
-            self._ingest_error_event(payload)
+        if event_type == "notice":
+            if _string_field(payload, "level") == "error":
+                # A session-layer error notice is not a terminal on its own, but
+                # its text is what the failover classifier and the synthesized
+                # completion report read out of the accumulator.
+                self._ingest_error_event(payload)
+            return
+        self._record_unhandled_event_type(event_type)
 
     def _clear_pi_terminal(self) -> None:
         # A new turn/compaction suspends terminal shutdown, not the obligation
