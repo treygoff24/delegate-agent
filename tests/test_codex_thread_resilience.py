@@ -226,21 +226,25 @@ raise SystemExit(1)
         run_path = root / "runs" / run_id
         self.assertNotIn(secret, (run_path / "completion-report.md").read_text(encoding="utf-8"))
         state = run_registry.load_run_state(root, run_id)
-        # The single record now also holds the raw diagnostic mirror that used
-        # to live in snapshot.json. Every other persisted field remains scrubbed.
-        self.assertNotIn(
-            secret,
-            json.dumps({key: value for key, value in state.items() if key != "recentEvents"}),
-        )
+        # Every field of the run record is scrubbed, `recentEvents` included: it
+        # is derived from the parsed error message, and the message is redacted
+        # at the point it is read out of the event.
+        self.assertNotIn(secret, json.dumps(state))
         snapshot = run_registry.load_run_snapshot(root, run_id)
         self.assertNotIn(secret, snapshot["message"])
         self.assertNotIn(secret, snapshot["current"])
-        # Retained event surfaces are a raw diagnostic mirror: secret-shaped
-        # text stays verbatim (no event-text redaction).
-        events_text = (run_path / "events.jsonl").read_text(encoding="utf-8")
-        self.assertIn(secret, events_text)
-        recent_blob = json.dumps(snapshot.get("recentEvents") or [])
-        self.assertIn(secret, recent_blob)
+        self.assertNotIn(secret, json.dumps(snapshot.get("recentEvents") or []))
+        # The verbatim child stdout capture is the one surface that keeps the
+        # raw bytes: `stream.line` in events.jsonl is that capture, not a
+        # normalized event, and redacting it would defeat its purpose.
+        events = [
+            json.loads(line)
+            for line in (run_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        raw_lines = [event for event in events if event.get("kind") == "stream.line"]
+        self.assertTrue(any(secret in event.get("text", "") for event in raw_lines))
+        normalized = [event for event in events if event.get("kind") != "stream.line"]
+        self.assertNotIn(secret, json.dumps(normalized))
         report = (run_path / "completion-report.md").read_text(encoding="utf-8")
         self.assertIn("usage_limit", report)
         self.assertIn("2026-07-22 01:00 UTC", report)

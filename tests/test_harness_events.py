@@ -117,6 +117,69 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(acc.terminal_event))
         self.assertIn("Usage limit for", acc.terminal_event["reason"])
 
+    def test_no_sink_of_an_error_message_keeps_the_bearer_token(self):
+        """The error text reaches terminalEvent, recentEvents and `current`; all redact."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": f"401 from api: {secret}"}))
+
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        recent = acc.bounded_recent_events()[0]
+        self.assertNotIn(secret, json.dumps(recent))
+        kinds = {event["kind"] for event in recent}
+        self.assertIn("error", kinds)
+        self.assertIn("run.completed", kinds)
+        self.assertNotIn(secret, json.dumps(acc.current))
+        self.assertNotIn(secret, json.dumps(acc._last_error_message))
+        self.assertIn("401 from api:", acc.terminal_event["reason"])
+
+    def test_a_terminal_reason_from_outside_the_error_path_is_redacted_in_both_sinks(self):
+        """opencode builds its reason from the payload without touching _ingest_error_event."""
+        secret = "Bearer sk-ant-api03-SECRETVALUE123"
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": {"name": "AuthError", "data": {"message": f"sent {secret}"}},
+                }
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn(secret, json.dumps(acc.terminal_event))
+        self.assertIn("AuthError", acc.terminal_event["reason"])
+        self.assertNotIn(secret, json.dumps(acc.bounded_recent_events()[0]))
+
+    def test_a_recovered_error_does_not_supply_a_later_failures_reason(self):
+        """A bodiless turn.failed must not inherit the 429 the run already recovered from."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: recovered"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.terminal_status, "succeeded")
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertNotIn("reason", acc.terminal_event)
+
+    def test_an_unrecovered_error_still_supplies_a_later_failures_reason(self):
+        """The planted negative: only a success terminal clears the message."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate_limit_exceeded"}))
+
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+
+        self.assertEqual(acc.terminal_event["reason"], "429 rate_limit_exceeded")
+
     def test_error_event_reads_nested_error_message(self):
         """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
         acc = self.events.StreamAccumulator(harness="claude")
@@ -132,6 +195,44 @@ class HarnessEventsTests(unittest.TestCase):
             acc.terminal_event,
             {"event": "error", "status": "failed", "reason": "429 rate_limit_exceeded"},
         )
+
+    def test_a_max_turns_result_with_text_and_no_is_error_stays_failed(self):
+        """`error_max_turns` carries partial text and often omits `is_error`."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "error_max_turns", "result": "partial"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "partial")
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["failed"])
+
+    def test_a_refusal_result_with_text_is_not_promoted_either(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "safety_refusal", "result": "I cannot"})
+        )
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "I cannot")
+
+    def test_an_ordinary_success_result_is_still_promoted(self):
+        """The planted negative: the guard must not demote a real answer."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "result", "subtype": "success", "is_error": False, "result": "the answer"}
+            )
+        )
+
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.completion_text, "the answer")
 
     def test_typed_provider_error_records_exactly_one_terminal(self):
         """A provider-typed error must not publish a second run.completed."""
@@ -1157,11 +1258,21 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertLessEqual(len(sample), self.events.MALFORMED_SAMPLE_CHARS)
         self.assertNotIn("sk-ant-api03-AAAA", sample)
 
-    def test_malformed_lines_alone_do_not_reach_the_raw_stdout_fallback(self):
-        """The runner reads structured_events_seen to decide the parser owned stdout."""
+    def test_a_malformed_line_is_counted_apart_from_parsed_events(self):
+        """structured_events_seen decides whether the parser owned stdout; a plain
+        line did not come from the parser, so it must not inflate that count."""
         acc = self.events.StreamAccumulator(harness="kimi")
         acc.ingest_line("kimi: fatal: no credentials configured")
-        self.assertGreater(acc.structured_events_seen, 0)
+        self.assertEqual(acc.structured_events_seen, 0)
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "")
+
+    def test_a_parsed_event_beside_a_malformed_line_still_counts_as_structured(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: warning: retrying")
+        acc.ingest_line(json.dumps({"type": "tool_call", "toolName": "read"}))
+        self.assertEqual(acc.structured_events_seen, 1)
+        self.assertEqual(acc.malformed_lines, 1)
         self.assertEqual(acc.assistant_text, "")
 
     def test_a_later_valid_assistant_message_clears_the_textless_state(self):
@@ -1228,7 +1339,32 @@ class HarnessEventsTests(unittest.TestCase):
         opencode = self.events.StreamAccumulator(harness="opencode")
         opencode.ingest_line(json.dumps({"type": "session.idle"}))
         opencode.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
-        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text": 1})
+        self.assertEqual(opencode.unhandled_event_types, {"session.idle": 1, "text/reasoning": 1})
+
+    def test_an_opencode_part_shape_mismatch_names_both_halves_of_the_pair(self):
+        """Filing it under `text` reports a handled type as unhandled."""
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "reasoning"}}))
+        acc.ingest_line(json.dumps({"type": "tool_use", "part": {"type": "tool-result"}}))
+        acc.ingest_line(json.dumps({"type": "text"}))
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": 7}}))
+        acc.ingest_line(json.dumps({"type": "session.idle", "part": {"type": "anything"}}))
+
+        self.assertEqual(
+            acc.unhandled_event_types,
+            {
+                "text/reasoning": 1,
+                "tool_use/tool-result": 1,
+                "text/<no part>": 1,
+                "text/<no part.type>": 1,
+                "session.idle": 1,
+            },
+        )
+
+    def test_a_matching_opencode_pair_is_not_counted_as_unhandled(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+        acc.ingest_line(json.dumps({"type": "text", "part": {"type": "text", "text": "hello"}}))
+        self.assertEqual(acc.unhandled_event_types, {})
 
     def test_the_real_captures_leave_a_readable_unhandled_tally(self):
         claude = self.events.StreamAccumulator(harness="claude")
@@ -1450,9 +1586,14 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "Cancelled"}))
         self.assertEqual(acc.terminal_status, "cancelled")
+        # The provider-terminal table owns this terminal, as it does for every
+        # other classified stop reason, so the terminal is named for the raw
+        # event type and carries the trusted reason.
         self.assertEqual(
-            acc.terminal_event, {"event": "grok.end", "status": "cancelled", "reason": "Cancelled"}
+            acc.terminal_event,
+            {"event": "end", "status": "cancelled", "reason": "end Cancelled"},
         )
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial report")
 
@@ -1473,6 +1614,57 @@ class HarnessEventsTests(unittest.TestCase):
         acc = self.events.StreamAccumulator(harness="grok")
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "max_turn_requests"}))
         self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+
+    def test_grok_max_tokens_is_typed_like_the_other_truncations(self):
+        """Without a provider state the run record carries no failureReason."""
+        for stop_reason in ("max_tokens", "MaxTokens"):
+            with self.subTest(stop_reason=stop_reason):
+                acc = self.events.StreamAccumulator(harness="grok")
+                acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+                acc.ingest_line(json.dumps({"type": "end", "stopReason": stop_reason}))
+                self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_grok_end_turn_is_not_typed_as_a_truncation(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_a_cancelled_grok_end_records_exactly_one_terminal(self):
+        """The provider table already recorded it; the end handler must not repeat it."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
+        self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_a_cancelled_codex_turn_records_exactly_one_terminal(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "turn.cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
+
+    def test_an_uncancelled_grok_end_still_records_its_own_terminal(self):
+        """The planted negative: the guard must not swallow the ordinary path."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["succeeded"])
+        self.assertEqual(acc.completion_text, "the answer")
 
     def test_grok_max_turns_reached_event_is_a_terminal(self):
         """grok L4: the second, independent truncation signal was discarded."""

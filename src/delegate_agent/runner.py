@@ -1012,7 +1012,7 @@ def _classify_result_quality(
         return RESULT_QUALITY_OK
     if (
         exit_code == 0
-        and accumulator.structured_events_seen > 0
+        and (accumulator.structured_events_seen > 0 or accumulator.malformed_lines > 0)
         and not accumulator.assistant_text.strip()
         and not accumulator.completion_text
     ):
@@ -2283,7 +2283,7 @@ def _capture_tracked_process(
                 prior_session_id = accumulator.session_id
                 accumulator.ingest_line(line)
                 watchdog.observe_line(line, now=time.monotonic())
-                if accumulator.terminal_status is not None:
+                if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
                 elif accumulator.harness in {"pi", "omp"}:
                     # A harness-owned retry/new turn supersedes its preceding
@@ -4582,7 +4582,16 @@ def _parse_claude_call_json(
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
     result_text = harness_events.claude_result_text(result)
     if result_text is None:
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        # `claude_result_text` requires a non-blank string because a blank one is
+        # not an answer worth publishing as assistant text. For the call surface
+        # it still is a valid result: claude's deferred-tool-use branch emits
+        # `stop_reason: "tool_deferred"` with `is_error: false` and `result: ""`.
+        # Only a `result` event with no string `result` at all is a broken
+        # transport, and `is_error` remains what decides the exit code.
+        raw_result = result.get("result")
+        if not isinstance(raw_result, str):
+            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        result_text = raw_result
     denials = result.get("permission_denials")
     if pure:
         if not isinstance(denials, list):

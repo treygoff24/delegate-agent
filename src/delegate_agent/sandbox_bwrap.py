@@ -82,7 +82,14 @@ def _engine_home_path(engine: str, env: Mapping[str, str], home: str) -> str | N
         if override.strip():
             return os.path.expanduser(override)
     default_dir = _ENGINE_HOME_DEFAULT_DIR.get(engine)
-    return os.path.join(home, default_dir) if default_dir else None
+    if not default_dir:
+        return None
+    # bwrap refuses a bind whose source does not exist, so a machine that has an
+    # engine installed but has never run it must not have the default home bound.
+    # The explicit override above stays unguarded: a bad KIMI_CODE_HOME is an
+    # operator error and should fail loudly rather than be silently dropped.
+    candidate = os.path.join(home, default_dir)
+    return candidate if os.path.isdir(candidate) else None
 
 
 class Mask(NamedTuple):

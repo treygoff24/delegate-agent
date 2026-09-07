@@ -171,6 +171,29 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         self.assertEqual(session_idx, len(followup_argv) - 2)
         self.assertEqual(followup_argv[-1], "-")
 
+    def test_followup_tail_warning_reaches_the_run_payload(self):
+        """The parser advisory is only useful if it survives the synthetic launch."""
+        env_extra = {"FAKE_CODEX_ARGV_LOG": str(self.argv_log)}
+        exit_code, stdout, stderr = self.run_delegate(
+            ["--json", "codex", "work", "--resumable", "initial task"],
+            env_extra=env_extra,
+        )
+        self.assertEqual(exit_code, 0, msg=f"stdout={stdout!r}, stderr={stderr!r}")
+        alias = json.loads(stdout)["alias"]
+
+        exit_code, stdout, stderr = self.run_delegate(
+            ["--json", "followup", alias, "second task", "--model", "opus"],
+            env_extra=env_extra,
+        )
+
+        self.assertEqual(exit_code, 0, msg=f"stdout={stdout!r}, stderr={stderr!r}")
+        payload = json.loads(stdout)
+        warnings = payload.get("warnings") or []
+        self.assertTrue(any("option after the prompt" in warning for warning in warnings), warnings)
+        self.assertTrue(any("--model" in warning for warning in warnings), warnings)
+        # The flag really was absorbed: the model is the source run's, not opus.
+        self.assertNotEqual(payload.get("model"), "opus")
+
     def test_claude_resumable_capture_and_followup_e2e(self):
         claude_argv_log = self.home / "claude_argv.jsonl"
         env_extra = {"FAKE_CLAUDE_ARGV_LOG": str(claude_argv_log)}

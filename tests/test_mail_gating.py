@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -42,6 +43,81 @@ class MailGatingTests(CommandTestBase):
                 with self.assertRaises(delegate_config.ConfigError) as caught:
                     delegate_config.validate_config(config)
                 self.assertEqual(caught.exception.error, "invalid_mail_config")
+
+    def test_dry_run_without_a_config_does_not_wire_mail(self):
+        """`config=None` means the machine's mail setting is unknown, not enabled."""
+        request = self.build_git_request(
+            "codex",
+            "work",
+            None,
+            "/repo",
+            "prompt",
+            self._config(True),
+            True,
+            frame_prompt=True,
+        )
+
+        with_config = self.delegate.dry_run_payload(request, config=self._config(True))
+        without_config = self.delegate.dry_run_payload(request)
+
+        off_config = self.delegate.dry_run_payload(request, config=self._config(False))
+
+        self.assertIn("mailPromptSuffix", with_config)
+        self.assertNotIn("mailPromptSuffix", without_config)
+        self.assertNotEqual(with_config, off_config)
+        self.assertEqual(without_config, off_config)
+
+    def test_degraded_launch_strips_the_mail_suffix_from_the_middle_of_the_prompt(self):
+        """The strip must survive a reordering that puts another segment after it."""
+        config = self._config(True)
+        request = self.build_git_request(
+            "codex",
+            "work",
+            None,
+            "/repo",
+            "prompt",
+            config,
+            False,
+            frame_prompt=True,
+        )
+        marker = "\n\n" + mail.MAIL_PROMPT_SUFFIX
+        self.assertIn(marker, request.prompt)
+        # Simulate a later reordering: a segment appended after the mail suffix.
+        trailing = "\n\nWorktree note: the tree was dirty at launch."
+        request.prompt += trailing
+        request.stdin_text = request.prompt
+        request.argv = [*request.argv[:-1], request.prompt]
+
+        def fail(_registry_root):
+            raise mail.MailError("mail_storage_unavailable", "read-only registry")
+
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-degrade-") as tmp:
+            registry_root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            with mock.patch.object(mail, "prepare_mail_storage", fail):
+                mail.prepare_launch_storage(request, config, registry_root, io.StringIO())
+
+        self.assertNotIn(mail.MAIL_PROMPT_SUFFIX, request.prompt)
+        self.assertNotIn(mail.MAIL_PROMPT_SUFFIX, request.stdin_text)
+        self.assertNotIn(mail.MAIL_PROMPT_SUFFIX, request.argv[-1])
+        self.assertTrue(request.prompt.endswith(trailing.strip()))
+        self.assertIn("the tree was dirty at launch", request.stdin_text)
+        self.assertFalse(delegate_config.mail_enabled(config))
+        self.assertTrue(
+            any("mail disabled for this launch" in warning for warning in request.warnings),
+            request.warnings,
+        )
+
+    def test_dry_run_reports_the_mail_suffix_from_the_middle_of_the_prompt(self):
+        """The dry-run disclosure has the same position dependence as the strip."""
+        config = self._config(True)
+        request = self.build_git_request(
+            "codex", "work", None, "/repo", "prompt", config, True, frame_prompt=True
+        )
+        self.assertIn("mailPromptSuffix", self.delegate.dry_run_payload(request, config=config))
+
+        request.prompt += "\n\nWorktree note: the tree was dirty at launch."
+
+        self.assertIn("mailPromptSuffix", self.delegate.dry_run_payload(request, config=config))
 
     def test_mail_commands_work_when_injection_flag_is_disabled(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-command-") as tmp:
@@ -198,6 +274,43 @@ class MailGatingTests(CommandTestBase):
                     for flag in expected:
                         self.assertIn(flag, argv)
                     self.assertFalse((root / "mail").exists())
+
+    def test_codex_stdin_transport_splices_the_grant_before_the_trailing_dash(self):
+        """The `-` is codex's read-prompt-from-stdin positional, not a flag slot."""
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-stdin-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            argv = mail.wire_work_mail_launch(
+                "codex",
+                ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-"],
+                None,
+                root,
+                prompt_transport="stdin",
+                isolated_workspace=True,
+            )[0]
+
+        self.assertEqual(
+            argv[-3:],
+            ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]', "-"],
+        )
+
+    def test_codex_argv_transport_still_splices_before_the_prompt(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-argv-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            argv = mail.wire_work_mail_launch(
+                "codex",
+                ["codex", "exec", "--sandbox", "workspace-write", "the prompt"],
+                None,
+                root,
+                prompt_transport="argv",
+                isolated_workspace=True,
+            )[0]
+
+        self.assertEqual(
+            argv[-3:],
+            ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]', "the prompt"],
+        )
 
     def test_cursor_default_work_argv_is_not_changed_to_enable_a_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:

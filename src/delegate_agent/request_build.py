@@ -590,11 +590,12 @@ def _preflight_claude_output_schema(
     if engine != "claude" or (output_schema is None and schema_text is None):
         return
     try:
-        schema = json.loads(
+        serialized = (
             schema_text
             if schema_text is not None
             else Path(str(output_schema)).read_text(encoding="utf-8")
         )
+        schema = json.loads(serialized)
     except json.JSONDecodeError as exc:
         raise DelegateError(
             "invalid_output_schema",
@@ -604,7 +605,9 @@ def _preflight_claude_output_schema(
         raise DelegateError(
             "invalid_output_schema", f"Output schema is not readable: {output_schema}"
         ) from exc
-    reason = structured_output.native_schema_eligible("claude", schema)
+    # `serialized` is the exact text this path inlines as the `--json-schema`
+    # argv token, so it is what the argv ceiling has to be measured against.
+    reason = structured_output.native_schema_eligible("claude", schema, serialized=serialized)
     if reason is None:
         return
     raise DelegateError(

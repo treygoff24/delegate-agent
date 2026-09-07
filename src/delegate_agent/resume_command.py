@@ -862,6 +862,7 @@ def build_resume_plan(
         persona_record_path=persona_record_path,
         mail_push=opts.mail_push,
         continuity_mode=continuity_mode,
+        warnings=opts.warnings,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",

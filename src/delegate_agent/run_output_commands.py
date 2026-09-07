@@ -109,7 +109,7 @@ def _structured_stdout_tail(
     )
     for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
-    if not accumulator.structured_events_seen:
+    if not accumulator.structured_events_seen and not accumulator.malformed_lines:
         return None
     lines = [_render_event_line(event) for event in accumulator.events]
     # Assistant prose is recorded as chunks, not events, so it would vanish from

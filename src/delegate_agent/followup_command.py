@@ -382,6 +382,7 @@ def build_followup_plan(
         resumable=True,
         resume_session_id=session_id,
         continuity_mode=continuity_mode,
+        warnings=opts.warnings,
     )
     synthetic = ParsedCommand(
         source_engine,

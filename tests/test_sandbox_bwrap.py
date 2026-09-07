@@ -298,6 +298,50 @@ class WrapEngineArgvTests(unittest.TestCase):
             self.assertEqual(argv[argv.index(override_tmp) - 1], "--bind")
             self.assertNotIn(str(default_home), argv)
 
+    def test_kimi_run_launches_when_the_default_home_has_never_been_created(self):
+        """bwrap refuses a missing bind source, so an absent ~/.kimi-code must not be bound."""
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            self.assertFalse((fake_home / ".kimi-code").exists())
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={"HOME": str(fake_home), "PATH": os.environ["PATH"]},
+                engine="kimi",
+            )
+
+            self.assertNotIn(str(fake_home / ".kimi-code"), argv)
+            if shutil.which(sandbox_bwrap.BWRAP_BINARY) is None:
+                self.skipTest("bwrap is not installed")
+            sandbox_bwrap.preflight_plan(argv)
+
+    def test_an_explicit_kimi_home_override_that_is_absent_still_fails_loudly(self):
+        """A bad KIMI_CODE_HOME is an operator error, not a first-run condition."""
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            missing = str(fake_home / "nowhere")
+
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={
+                    "HOME": str(fake_home),
+                    "KIMI_CODE_HOME": missing,
+                    "PATH": os.environ["PATH"],
+                },
+                engine="kimi",
+            )
+
+            self.assertIn(missing, argv)
+            self.assertEqual(argv[argv.index(missing) - 1], "--bind")
+
     def test_kimi_homes_are_hidden_from_other_engines(self):
         with (
             tempfile.TemporaryDirectory() as home_tmp,

@@ -413,11 +413,15 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["plannedExecutionCwd"] = None
         payload["plannedBranch"] = None
 
-    if _mail.launch_enabled(request.mode, config or {}):
+    # A missing config is not an empty config: `mail_enabled({})` is True, so
+    # `config or {}` claimed mail was on for a caller that never said so. The
+    # dry run reports what this machine would do, and without a config it cannot
+    # know, so it reports the conservative answer.
+    if config is not None and _mail.launch_enabled(request.mode, config):
         if (
             request.prompt_instruction_mode == "wrapped"
             and request.prompt != request.source_prompt
-            and request.prompt.endswith("\n\n" + _mail.MAIL_PROMPT_SUFFIX)
+            and ("\n\n" + _mail.MAIL_PROMPT_SUFFIX) in request.prompt
         ):
             # Expose the injected instructions without publishing the user's prompt.
             payload["mailPromptSuffix"] = _mail.MAIL_PROMPT_SUFFIX

@@ -89,6 +89,42 @@ class FollowupParserTests(unittest.TestCase):
         self.assertTrue(parsed.payload.dry_run)
         self.assertEqual(parsed.payload.prompt_parts, ["do more"])
 
+    def test_followup_warns_about_an_option_after_the_prompt(self):
+        """Nothing after the handle is an option, so the absorption is silent."""
+        parsed = parse_cli(["followup", "codex-1", "do more", "--model", "opus"])
+
+        self.assertEqual(parsed.payload.prompt_parts, ["do more", "--model", "opus"])
+        warnings = tuple(parsed.payload.warnings)
+        self.assertTrue(any("--model" in warning for warning in warnings), warnings)
+        self.assertTrue(any("prompt text" in warning for warning in warnings), warnings)
+
+    def test_followup_does_not_warn_about_prompt_prose_or_literals(self):
+        after_separator = parse_cli(["followup", "codex-1", "do more", "--", "--model", "opus"])
+        self.assertEqual(after_separator.payload.warnings, ())
+
+        prose = parse_cli(["followup", "codex-1", "explain what --model does"])
+        self.assertEqual(prose.payload.warnings, ())
+
+        negative_number = parse_cli(["followup", "codex-1", "cool it by", "-5 degrees"])
+        self.assertEqual(negative_number.payload.warnings, ())
+
+    def test_resume_warns_about_an_option_after_the_prompt(self):
+        parsed = parse_cli(["resume", "codex-1", "keep going", "--model", "opus"])
+
+        self.assertEqual(parsed.payload.extra_parts, ["keep going", "--model", "opus"])
+        warnings = tuple(parsed.payload.warnings)
+        self.assertTrue(any("--model" in warning for warning in warnings), warnings)
+
+    def test_resume_and_followup_with_no_trailing_text_carry_no_warnings(self):
+        """The bare form never reaches the tail branch, so the field must be preset."""
+        self.assertEqual(parse_cli(["resume", "codex-1"]).payload.warnings, ())
+        self.assertEqual(parse_cli(["followup", "codex-1"]).payload.warnings, ())
+
+    def test_resume_does_not_warn_about_tokens_after_a_separator(self):
+        parsed = parse_cli(["resume", "codex-1", "keep going", "--", "--model", "opus"])
+        self.assertEqual(parsed.payload.extra_parts, ["keep going", "--model", "opus"])
+        self.assertEqual(parsed.payload.warnings, ())
+
 
 if __name__ == "__main__":
     unittest.main()

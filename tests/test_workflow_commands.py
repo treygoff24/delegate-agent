@@ -826,6 +826,56 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("effort", payload["message"])
         self.assertIn("low", payload["message"])
 
+    def test_check_accepts_auto_effort_only_for_omp(self) -> None:
+        """`auto` is omp's alone; pi and claude fail in the child, not at parse."""
+        accepted = self.write_workflow(
+            """
+            meta = {"name": "omp-auto"}
+            return agent("do it", engine="omp", effort="auto")
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "check", str(accepted)])
+        self.assertEqual(result.returncode, 0, msg=result.stdout)
+
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine):
+                rejected = self.write_workflow(
+                    f"""
+                    meta = {{"name": "{engine}-auto"}}
+                    return agent("do it", engine="{engine}", effort="auto")
+                    """
+                )
+                result = self.run_delegate(["--json", "workflow", "check", str(rejected)])
+                self.assertNotEqual(result.returncode, 0, msg=result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["error"], "invalid_workflow_script")
+                self.assertIn("effort", payload["message"])
+
+    def test_check_keeps_each_engines_own_effort_vocabulary(self) -> None:
+        """The planted negative: an effort each engine really accepts must parse."""
+        for engine, effort in (("pi", "off"), ("claude", "max"), ("omp", "minimal")):
+            with self.subTest(engine=engine, effort=effort):
+                script = self.write_workflow(
+                    f"""
+                    meta = {{"name": "{engine}-{effort}"}}
+                    return agent("do it", engine="{engine}", effort="{effort}")
+                    """
+                )
+                result = self.run_delegate(["--json", "workflow", "check", str(script)])
+                self.assertEqual(result.returncode, 0, msg=result.stdout)
+
+        # grok has no `off`; claude has no `minimal`.
+        for engine, effort in (("grok", "off"), ("claude", "minimal")):
+            with self.subTest(engine=engine, effort=effort):
+                script = self.write_workflow(
+                    f"""
+                    meta = {{"name": "{engine}-{effort}"}}
+                    return agent("do it", engine="{engine}", effort="{effort}")
+                    """
+                )
+                result = self.run_delegate(["--json", "workflow", "check", str(script)])
+                self.assertNotEqual(result.returncode, 0, msg=result.stdout)
+
     def test_script_size_limit_admits_planc_scale_scripts(self) -> None:
         # planc-compiled workflows embed their engine and measure ~530 KiB at
         # near-limit plan scale; the cap must admit them and still refuse

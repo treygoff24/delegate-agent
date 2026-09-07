@@ -49,6 +49,19 @@ def launch_enabled(mode: str, config: JsonObject) -> bool:
     return mode == "work" and delegate_config.mail_enabled(config)
 
 
+def _strip_mail_suffix(text: str) -> str:
+    """Remove Delegate's injected mail segment wherever it sits in the prompt.
+
+    The last occurrence is the injected one: the suffix is appended during
+    framing, so anything a user's own text contributed comes before it.
+    """
+    marker = "\n\n" + _core.MAIL_PROMPT_SUFFIX
+    index = text.rfind(marker)
+    if index < 0:
+        return text
+    return text[:index] + text[index + len(marker) :]
+
+
 def prepare_launch_storage(
     request: Request, config: JsonObject, registry_root: Path, stderr: TextIO
 ) -> None:
@@ -64,22 +77,23 @@ def prepare_launch_storage(
             print(f"delegate mail: WARNING: {warning}", file=stderr)
         config["mail"] = {"enabled": False}
         request.mail_push = False
-        # Only remove Delegate's final suffix, never matching text inside user data.
+        # Only remove Delegate's own injected suffix, never matching text inside
+        # user data. The framed prompt is a list of segments joined by a blank
+        # line and the mail suffix is one of them, so it is found by search
+        # rather than by position: it happens to be last today, and a strip
+        # anchored to the end would silently no-op the whole degrade path the
+        # day another segment is appended after it.
         if request.prompt_instruction_mode == "wrapped" and request.prompt != request.source_prompt:
-            prompt = request.prompt.removesuffix("\n\n" + _core.MAIL_PROMPT_SUFFIX)
+            prompt = _strip_mail_suffix(request.prompt)
             request.argv = [prompt if arg == request.prompt else arg for arg in request.argv]
             if request.display_argv is not None:
                 request.display_argv = [
                     prompt if arg == request.prompt else arg for arg in request.display_argv
                 ]
             if request.stdin_text is not None:
-                request.stdin_text = request.stdin_text.removesuffix(
-                    "\n\n" + _core.MAIL_PROMPT_SUFFIX
-                )
+                request.stdin_text = _strip_mail_suffix(request.stdin_text)
             if request.prompt_file_text is not None:
-                request.prompt_file_text = request.prompt_file_text.removesuffix(
-                    "\n\n" + _core.MAIL_PROMPT_SUFFIX
-                )
+                request.prompt_file_text = _strip_mail_suffix(request.prompt_file_text)
             request.prompt = prompt
 
 
