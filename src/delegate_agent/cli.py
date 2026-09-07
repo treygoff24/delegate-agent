@@ -1596,6 +1596,32 @@ def emit_error(
     return error.exit_code
 
 
+def _doctor_config_warnings(
+    global_options: _request_models.GlobalOptions,
+) -> tuple[str, ...]:
+    """Config-derived findings for `delegate doctor`, resolved best effort.
+
+    Doctor is what an operator runs when something is wrong, including a config
+    that will not load, so it reports runtime identity first and treats every
+    config-derived check as optional. An unreadable or invalid config yields no
+    warning here rather than turning the diagnostic into an error.
+    """
+    from delegate_agent import request_build
+
+    try:
+        workspace = request_build.resolve_workspace(global_options.cwd)
+        config, _source = request_build.load_config(workspace=Path(workspace.path))
+        resolution = profiles.resolve_active_profile(
+            config,
+            profiles.child_environment(),
+            cli_override=global_options.auth_profile,
+        )
+    except (DelegateError, delegate_config.ConfigError, OSError, ValueError):
+        return ()
+    warning = profiles.codex_profile_overlay_warning(config, resolution)
+    return (warning,) if warning is not None else ()
+
+
 def main(
     argv: list[str] | None = None,
     stdin: TextIO | None = None,
@@ -1641,7 +1667,11 @@ def main(
                 stderr=stderr,
             )
         if parsed.subcommand == "doctor":
-            return _workflow_pinning.emit_doctor(stdout=stdout, json_mode=global_options.json_mode)
+            return _workflow_pinning.emit_doctor(
+                stdout=stdout,
+                json_mode=global_options.json_mode,
+                extra_warnings=_doctor_config_warnings(global_options),
+            )
         if parsed.subcommand == "promote":
             return emit_promote_command(parsed, stdout)
 

@@ -157,14 +157,30 @@ class HarnessEventsTests(unittest.TestCase):
                 self.assertEqual(len(completed), 1)
                 self.assertEqual(acc.terminal_event["event"], f"{harness}.error")
 
-    def test_cursor_effort_labels_match_harness_discovery(self):
-        """The duplicated label table must not drift from its source."""
-        import delegate_agent.harness_discovery as harness_discovery
+    def test_cursor_effort_labels_cover_every_selector_effort(self):
+        """The shared label table must render every effort the selector accepts.
 
-        self.assertEqual(
-            self.events._CURSOR_EFFORT_LABELS,
-            harness_discovery._CURSOR_EFFORT_LABELS,
+        Discovery and the pinned-run comparison now read one table in
+        ``constants``, so the drift that remains is between that table and the
+        selector grammar beside it: an effort the pattern parses but the table
+        cannot render raises ``KeyError`` mid-run instead of failing the pin.
+        """
+        pattern_efforts = set(
+            self.events._CURSOR_SELECTOR_PATTERN.pattern.split("(?P<effort>")[1]
+            .split(")")[0]
+            .split("|")
         )
+
+        self.assertEqual(pattern_efforts, set(self.events.CURSOR_EFFORT_LABELS))
+        for effort in pattern_efforts:
+            with self.subTest(effort=effort):
+                self.assertTrue(
+                    self.events._cursor_pin_matches(
+                        f"composer-{effort}",
+                        f"Composer {self.events.CURSOR_EFFORT_LABELS[effort]}",
+                        None,
+                    )
+                )
 
     def test_pinned_cursor_accepts_the_served_display_name(self):
         """cursor B1: cursor reports a display name, never the requested id."""

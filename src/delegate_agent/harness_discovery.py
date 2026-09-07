@@ -24,7 +24,7 @@ from typing import BinaryIO, TextIO, TypeAlias
 
 from delegate_agent import config as delegate_config
 from delegate_agent import private_io, profiles, redaction, run_registry
-from delegate_agent.constants import KNOWN_ENGINES
+from delegate_agent.constants import CURSOR_EFFORT_LABELS, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 
 # A refresh-progress callback: called with each harness name before its probe
@@ -116,14 +116,6 @@ _AMBIGUOUS_VERSION_BASENAMES = frozenset({"agent"})
 _DIAGNOSTIC_LIMIT = 8_000
 METADATA_PROBE_TIMEOUT_SEC = 15
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_CURSOR_EFFORT_LABELS = {
-    "none": "None",
-    "low": "Low",
-    "medium": "Medium",
-    "high": "High",
-    "xhigh": "Extra High",
-    "max": "Max",
-}
 _SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses", "contexts"})
 _HARNESS_FIELDS = frozenset(
     {
@@ -1088,7 +1080,7 @@ def _cursor_route_candidate(selector: str, label: str) -> tuple[str, bool, str, 
     if match is None:
         return None
     effort = match.group("effort")
-    expected_label = _CURSOR_EFFORT_LABELS[effort]
+    expected_label = CURSOR_EFFORT_LABELS[effort]
     direct = re.search(rf"\b{re.escape(expected_label)}\b", label, re.IGNORECASE) is not None
     return match.group("family"), match.group("fast") is not None, effort, direct
 
@@ -1108,7 +1100,7 @@ def _cursor_high_corroborated(efforts: dict[str, tuple[str, bool, str]], *, fast
 
 
 def _cursor_direct_label_base(label: str, effort: str, *, fast: bool) -> str | None:
-    suffix = f" {_CURSOR_EFFORT_LABELS[effort]}{' Fast' if fast else ''}"
+    suffix = f" {CURSOR_EFFORT_LABELS[effort]}{' Fast' if fast else ''}"
     return label[: -len(suffix)] if label.casefold().endswith(suffix.casefold()) else None
 
 
