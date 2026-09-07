@@ -2212,6 +2212,7 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--pass-through",
     "--completion-report",
     "--no-completion-report",
+    "--no-mail",
     "--group",
     "--notify",
 )

@@ -630,6 +630,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "--pass-through": pass_through,
             "--completion-report": completion_report_flag,
             "--no-completion-report": no_completion_report_flag,
+            "--no-mail": no_mail,
             "--isolation": isolation,
             "--auth-profile": auth_profile,
             "--group": group,
