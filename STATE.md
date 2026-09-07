@@ -1,6 +1,6 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-07 (source simplification verified; not installed or promoted)
+Updated: 2026-09-07 (simplification installed for local dogfood)
 
 - Source work is on `feat/negative-diff-simplification`, tracked by `dlg-w7i`.
   The full audit is implemented: shared command policy, single mutable run record,
@@ -13,10 +13,11 @@ Updated: 2026-09-07 (source simplification verified; not installed or promoted)
 - Breaking changes: old workflow replay formats are refused; Droid models use
   `--model`; default discovery is compact and `--full` expands it. New runs do
   not write snapshot.json. Do not mix old and new writers in one run registry.
-- No installation or promotion was performed. The last installed verification
-  remains the 2026-09-05 receipt in `dlg-133`; it was not refreshed here.
+- Installed source `a270465` in a new versioned payload; doctor verifies parity.
+  Live resumable launch, native followup and pinned workflow passed. Previous
+  payload, outer shim and config are retained. Installation task: `dlg-4hu`.
   Installation and rollback: [live runtime](docs/live-runtime.md).
-- Retained worktrees and pre-existing Beads export changes remain untouched.
+- Retained worktrees are preserved; Beads export changes remain unstaged.
   Unrelated Claude duplicate-final-text bug: `dlg-y5c`.
-- Forgejo is the source-sync remote. GitHub publication remains separately gated
-  (`dlg-swn`). Open work and maintainer decisions: `bd ready`.
+- GitHub push is authorized without a release, but held for the public-history
+  decision recorded in `dlg-4hu`. Forgejo remains current. See `bd ready`.

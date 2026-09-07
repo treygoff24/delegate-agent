@@ -88,3 +88,25 @@ Old workflow replay formats and positional Droid model syntax are intentional
 breaking changes. Do not point old installed mutators at new-format run records.
 No installed runtime, release channel, or GitHub remote was changed. Existing
 worktrees were retained, and pre-existing Beads export changes were not staged.
+
+
+## Authorized local dogfood installation
+
+On 2026-09-07, the operator authorized local installation and GitHub publication
+without a release. The reviewed source `a270465` was copied into a new versioned
+payload, with all 81 payload files checked against Git. No ordinary Delegate
+run or workflow supervisor was active at the final cutover preflight. The two
+runtime links were replaced atomically; the previous payload, profile shim and
+all four configuration files were preserved.
+
+The installed PATH command reports `executionMode: installed` and
+`promotionMatchesRuntime: true`, with runtime digest
+`1521f3024c718df644dac9bb6f967d6b64f99913979da31612e1694b2b5ec060`.
+A live resumable launch, its native followup, and a pinned workflow all completed
+successfully. Both ordinary runs persisted canonical state without snapshot
+files. The after-handle followup dry-run remained a dry-run.
+
+The canonical Delegate and workflow skills now describe compact discovery,
+command-local option placement, current workflow formats, result-bound approvals
+and single-record storage. These installed probes do not verify every provider,
+isolation backend, or cross-process race. No package release was created.
