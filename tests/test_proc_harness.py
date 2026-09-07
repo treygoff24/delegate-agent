@@ -77,9 +77,10 @@ class ProcessHarnessTests(unittest.TestCase):
         )
         try:
             pgid = os.getpgid(process.pid)
-            proc_harness.reap_recorded_group_matching(pgid, "no-such-marker-anywhere")
-            self.assertIsNone(process.poll(), "reap fired without a marker match")
-            proc_harness.reap_recorded_group_matching(pgid, sentinel)
+            with mock.patch.dict(os.environ, {"COLUMNS": "80"}):
+                proc_harness.reap_recorded_group_matching(pgid, "no-such-marker-anywhere")
+                self.assertIsNone(process.poll(), "reap fired without a marker match")
+                proc_harness.reap_recorded_group_matching(pgid, sentinel)
             self._assert_process_gone(process.pid)
         finally:
             with contextlib.suppress(ProcessLookupError):
