@@ -1502,6 +1502,26 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "max_turn_requests"}))
         self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
 
+    def test_grok_max_tokens_is_typed_like_the_other_truncations(self):
+        """Without a provider state the run record carries no failureReason."""
+        for stop_reason in ("max_tokens", "MaxTokens"):
+            with self.subTest(stop_reason=stop_reason):
+                acc = self.events.StreamAccumulator(harness="grok")
+                acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+                acc.ingest_line(json.dumps({"type": "end", "stopReason": stop_reason}))
+                self.assertEqual(acc.provider_terminal_state, "provider_max_turns")
+                self.assertEqual(acc.terminal_status, "failed")
+                self.assertIsNone(acc.completion_text)
+                self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_grok_end_turn_is_not_typed_as_a_truncation(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+        self.assertIsNone(acc.provider_terminal_state)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "the answer")
+
     def test_grok_max_turns_reached_event_is_a_terminal(self):
         """grok L4: the second, independent truncation signal was discarded."""
         acc = self.events.StreamAccumulator(harness="grok")

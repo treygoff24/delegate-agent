@@ -332,8 +332,13 @@ _PROVIDER_MAX_TURNS_CODES = frozenset(
         "turn_limit",
         # grok 1.0.13's documented `end.stopReason` vocabulary, in both the
         # snake_case the binary emits and the CamelCase the 0.2.73 fixtures use.
+        # `max_tokens` truncates the answer mid-turn rather than at a turn
+        # boundary, but the state either way is "the provider truncated the
+        # turn", and typing it is what puts a `failureReason` on the run record.
         "max_turn_requests",
         "maxturnrequests",
+        "max_tokens",
+        "maxtokens",
     }
 )
 # grok emits this as a standalone event type rather than a stop reason. The
@@ -1391,16 +1396,10 @@ class StreamAccumulator:
         # CamelCase spellings normalize onto the same tokens.
         stop_reason = payload.get("stopReason")
         reason = stop_reason if isinstance(stop_reason, str) else None
+        # Every truncation reason grok emits is in `_PROVIDER_MAX_TURNS_CODES`,
+        # so the provider-terminal table has already recorded the terminal by
+        # the time this runs. What is left here is the ordinary vocabulary.
         terminal_status = _normalize_terminal_status(stop_reason)
-        if (
-            terminal_status is None
-            and _grok_stop_reason_incomplete(stop_reason)
-            and self.provider_terminal_state is None
-        ):
-            # max_tokens truncates the answer. Without a terminal the run rides
-            # on the exit code, which is 0, and a truncated answer is published
-            # as a clean success.
-            terminal_status = "failed"
         if _grok_stop_reason_succeeded(stop_reason):
             if text:
                 self._record_successful_completion_text(text)
@@ -1922,14 +1921,6 @@ def _grok_stop_reason_succeeded(value: JsonValue) -> bool:
         return False
     normalized = re.sub(r"[^a-z]", "", value.lower())
     return normalized in {"endturn", "stop", "complete", "done"}
-
-
-def _grok_stop_reason_incomplete(value: JsonValue) -> bool:
-    """Truncation reasons that neither `_normalize_terminal_status` nor the
-    provider-terminal table classifies, leaving the run to ride on exit 0."""
-    if not isinstance(value, str):
-        return False
-    return re.sub(r"[^a-z]", "", value.lower()) in {"maxtokens", "maxturnrequests"}
 
 
 def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
