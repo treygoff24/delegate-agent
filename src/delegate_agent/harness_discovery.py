@@ -136,6 +136,7 @@ _HARNESS_FIELDS = frozenset(
         "models",
         "harnessReasoning",
         "personaTransports",
+        "capabilities",
         "warnings",
         # Attempt-only provenance fields. Failed records are never selected for
         # persistence, but keeping these fields in the validated shape lets a
@@ -316,6 +317,19 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
         if not isinstance(persona_transports.get("native-file"), bool):
             raise ValueError(
                 f"discovery harness {harness}.personaTransports.native-file must be boolean"
+            )
+    capabilities = record.get("capabilities")
+    if capabilities is not None:
+        if not isinstance(capabilities, dict):
+            raise ValueError(f"discovery harness {harness}.capabilities must be an object")
+        _reject_extra_fields(
+            capabilities,
+            frozenset({"permissionPrompts"}),
+            f"discovery harness {harness}.capabilities",
+        )
+        if not isinstance(capabilities.get("permissionPrompts"), bool):
+            raise ValueError(
+                f"discovery harness {harness}.capabilities.permissionPrompts must be boolean"
             )
     if not _string_list(record.get("warnings")):
         raise ValueError(f"discovery harness {harness}.warnings must be a string array")
@@ -861,7 +875,7 @@ def _opencode_object_end(raw: str, start: int) -> int | None:
 
 
 def _next_opencode_selector(raw: str, start: int) -> re.Match[str] | None:
-    return re.compile(r"(?m)^([^\s/]+/[^\s/]+)\r?\n(?=\s*\{)").search(raw, start)
+    return re.compile(r"(?m)^([^\s/]+/\S+)\r?\n(?=\s*\{)").search(raw, start)
 
 
 def parse_opencode_catalog(raw: str) -> JsonObject:
@@ -933,6 +947,13 @@ def parse_kimi_catalog(raw: str) -> JsonObject:
     entries = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         raise ValueError("Kimi catalog must contain a top-level models object")
+    if not entries:
+        return _fragment(
+            model_scope="configured",
+            models={},
+            probe_status="partial",
+            warnings=["Kimi catalog contained no configured models"],
+        )
     models: JsonObject = {}
     warnings: list[str] = []
     for selector, entry in entries.items():
@@ -1176,18 +1197,14 @@ def parse_droid_settings_models(custom_models: object) -> JsonObject:
     models: JsonObject = {}
     if not isinstance(custom_models, list):
         return models
-    for item in custom_models:
+    for index, item in enumerate(custom_models):
         if not isinstance(item, dict):
             continue
-        selector = item.get("id")
         display = item.get("displayName")
-        if not _nonempty_string(selector):
-            if not _nonempty_string(display):
-                continue
-            selector = "custom:" + "-".join(display.split())
-        model: JsonObject = {}
-        if _nonempty_string(display):
-            model["displayName"] = display
+        if not _nonempty_string(display):
+            continue
+        selector = f"custom:{'-'.join(display.split())}-{index}"
+        model: JsonObject = {"displayName": display}
         models[selector] = model
     return models
 
@@ -1258,11 +1275,9 @@ def parse_grok_catalog(raw: str) -> JsonObject:
             continue
         if models and (not stripped or (line and not line[0].isspace())):
             break
-        match = re.match(r"^\*?\s*(\S+?)(?:\s+\(default\))?$", stripped)
+        match = re.match(r"^[*-]\s+(\S+?)(?:\s+\(default\))?$", stripped)
         if match:
             selector = match.group(1)
-            if selector.startswith("-"):
-                break
             models[selector] = {}
     if not models:
         raise ValueError("Grok catalog had no Available models entries")
@@ -1371,8 +1386,9 @@ def _probe_omp(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None
 def _probe_opencode(
     selector: tuple[str, ...], env: Mapping[str, str], _: Path | None
 ) -> JsonObject:
+    probe_env = {**env, "OPENCODE_DISABLE_AUTOUPDATE": "1"}
     return parse_opencode_catalog(
-        _probe_output(selector, ("--pure", "models", "--verbose"), env).stdout
+        _probe_output(selector, ("--pure", "models", "--verbose"), probe_env).stdout
     )
 
 
@@ -1426,6 +1442,7 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
             "--append-system-prompt-file" in combined or "--append-system-prompt[-file]" in combined
         ),
     }
+    fragment["capabilities"] = {"permissionPrompts": "--permission-prompts" in combined}
     return fragment
 
 
