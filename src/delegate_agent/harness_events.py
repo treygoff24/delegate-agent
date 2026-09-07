@@ -300,8 +300,20 @@ _PROVIDER_CANCELLED_CODES = frozenset(
     {"cancelled", "canceled", "provider_cancelled", "provider_canceled", "stop_cancelled"}
 )
 _PROVIDER_MAX_TURNS_CODES = frozenset(
-    {"max_turns", "maximum_turns", "error_max_turns", "turn_limit"}
+    {
+        "max_turns",
+        "maximum_turns",
+        "error_max_turns",
+        "turn_limit",
+        # grok 1.0.13's documented `end.stopReason` vocabulary, in both the
+        # snake_case the binary emits and the CamelCase the 0.2.73 fixtures use.
+        "max_turn_requests",
+        "maxturnrequests",
+    }
 )
+# grok emits this as a standalone event type rather than a stop reason. The
+# vendor guide names it alongside `max_turn_requests` as the same truncation.
+_MAX_TURNS_EVENT_TYPES = frozenset({"max_turns_reached"})
 
 
 def _event_timestamp(payload: JsonObject) -> str:
@@ -371,7 +383,7 @@ def _structured_terminal_codes(payload: JsonObject) -> set[str]:
 def _provider_terminal_state(payload: JsonObject, event_type: str) -> tuple[str, str] | None:
     codes = _structured_terminal_codes(payload)
     reason = _trusted_terminal_reason(payload, event_type)
-    if codes & _PROVIDER_MAX_TURNS_CODES:
+    if event_type in _MAX_TURNS_EVENT_TYPES or codes & _PROVIDER_MAX_TURNS_CODES:
         return PROVIDER_MAX_TURNS, reason
     if codes & _PROVIDER_REFUSAL_CODES:
         return PROVIDER_REFUSAL, reason
@@ -514,14 +526,35 @@ def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
     if not isinstance(value, dict):
         return None
     usage: JsonObject = {"basis": "reported"}
-    for camel_case, snake_case in (
-        ("inputTokens", "input_tokens"),
-        ("outputTokens", "output_tokens"),
-        ("cacheReadTokens", "cache_read_tokens"),
-        ("cacheWriteTokens", "cache_write_tokens"),
+    # Cursor uses the camelCase spellings; grok and codex spell the cache
+    # counters out in full and disagree with each other on the prefix.
+    for canonical, keys in (
+        ("inputTokens", ("inputTokens", "input_tokens")),
+        ("outputTokens", ("outputTokens", "output_tokens")),
+        (
+            "cacheReadTokens",
+            (
+                "cacheReadTokens",
+                "cache_read_tokens",
+                "cacheReadInputTokens",
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+            ),
+        ),
+        (
+            "cacheWriteTokens",
+            (
+                "cacheWriteTokens",
+                "cache_write_tokens",
+                "cacheCreationInputTokens",
+                "cache_creation_input_tokens",
+                "cache_write_input_tokens",
+            ),
+        ),
     ):
-        token_count = value.get(camel_case, value.get(snake_case))
-        usage[camel_case] = token_count if is_non_negative_int(token_count) else None
+        usage[canonical] = next(
+            (value[key] for key in keys if is_non_negative_int(value.get(key))), None
+        )
     return usage
 
 
@@ -544,6 +577,7 @@ class StreamAccumulator:
     _last_substantive_assistant_text: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
+    _grok_sealed_response: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
     _last_error_message: str | None = field(default=None, repr=False)
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
@@ -672,6 +706,19 @@ class StreamAccumulator:
             return
         if event_type == "error" and self.harness == "grok":
             self._ingest_grok_error(payload)
+            return
+        if self.harness == "grok" and event_type == "usage":
+            # grok emits exactly one terminal `end` per run; `usage` is the
+            # documented per-response boundary. Sealing here is what keeps a
+            # tool preamble out of the delivered answer.
+            self._seal_grok_response()
+            return
+        if self.harness == "grok" and event_type == "tool_call_update":
+            self._ingest_grok_tool_update(payload)
+            return
+        if self.harness == "grok" and event_type in _MAX_TURNS_EVENT_TYPES:
+            # Already recorded as a provider max-turns terminal above; this
+            # branch only keeps it out of the unhandled-type tally.
             return
         if event_type == "error":
             # Codex --json emits {"type":"error","message":...} on stdout for
@@ -831,6 +878,8 @@ class StreamAccumulator:
                 candidate = payload.get("chat_id", payload.get("chatId"))
         elif self.harness == "omp" and event_type == "session":
             candidate = payload.get("id")
+        elif self.harness == "grok" and event_type == "end":
+            candidate = payload.get("sessionId")
         if (
             isinstance(candidate, str)
             and candidate
@@ -1142,50 +1191,67 @@ class StreamAccumulator:
         self.current = _bounded_current_line(self._grok_current_line.strip())
         self._invalidate_assistant_text_cache()
 
-    def _ingest_grok_end(self, payload: JsonObject) -> None:
+    def _grok_live_text(self) -> str:
+        """The current response: the open buffer, else the last sealed one."""
+        return self._grok_text_buffer.strip() or self._grok_sealed_response
+
+    def _seal_grok_response(self) -> None:
         text = self._grok_text_buffer.strip()
+        if text:
+            self._grok_sealed_response = text
         self._grok_text_buffer = ""
         self._grok_current_line = ""
         self._invalidate_assistant_text_cache()
-        if text:
-            # The thought/text/end stream shape and the "EndTurn" success spelling
-            # are validated against grok 0.2.73; non-success stopReason spellings
-            # (MaxTokens/Refusal/etc.) are best-effort, so classification is
-            # conservative — anything not recognized as success stays recoverable.
-            stop_reason = payload.get("stopReason")
-            terminal_status = _normalize_terminal_status(stop_reason)
-            if _grok_stop_reason_succeeded(stop_reason):
+
+    def _take_grok_text(self) -> str:
+        text = self._grok_live_text()
+        self._grok_text_buffer = ""
+        self._grok_sealed_response = ""
+        self._grok_current_line = ""
+        self._invalidate_assistant_text_cache()
+        return text
+
+    def _ingest_grok_end(self, payload: JsonObject) -> None:
+        text = self._take_grok_text()
+        usage = _normalize_reported_usage(payload.get("usage"))
+        if usage is not None:
+            cost = payload.get("total_cost_usd")
+            if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+                usage["costUsd"] = float(cost)
+            self.usage = usage
+        # The event shape, the single terminal `end`, and the snake_case
+        # stopReason vocabulary (end_turn, max_tokens, max_turn_requests,
+        # refusal, cancelled) are validated against grok 1.0.13. The 0.2.73
+        # CamelCase spellings normalize onto the same tokens.
+        stop_reason = payload.get("stopReason")
+        reason = stop_reason if isinstance(stop_reason, str) else None
+        terminal_status = _normalize_terminal_status(stop_reason)
+        if (
+            terminal_status is None
+            and _grok_stop_reason_incomplete(stop_reason)
+            and self.provider_terminal_state is None
+        ):
+            # max_tokens truncates the answer. Without a terminal the run rides
+            # on the exit code, which is 0, and a truncated answer is published
+            # as a clean success.
+            terminal_status = "failed"
+        if _grok_stop_reason_succeeded(stop_reason):
+            if text:
                 self._record_successful_completion_text(text)
-            elif terminal_status in {"cancelled", "failed"}:
-                self._record_terminal_event(
-                    event="grok.end",
-                    status=terminal_status,
-                    reason=stop_reason if isinstance(stop_reason, str) else None,
-                )
-                self._record_recoverable_assistant_text(text)
             else:
-                self._record_recoverable_assistant_text(text)
-        elif _grok_stop_reason_succeeded(payload.get("stopReason")):
-            self._record_terminal_event(event="grok.end", status="succeeded")
-        else:
-            terminal_status = _normalize_terminal_status(payload.get("stopReason"))
-            if terminal_status in {"cancelled", "failed"}:
-                reason = payload.get("stopReason")
-                self._record_terminal_event(
-                    event="grok.end",
-                    status=terminal_status,
-                    reason=reason if isinstance(reason, str) else None,
-                )
+                self._record_terminal_event(event="grok.end", status="succeeded")
+            return
+        if terminal_status in {"cancelled", "failed"}:
+            self._record_terminal_event(event="grok.end", status=terminal_status, reason=reason)
+        if text:
+            self._record_recoverable_assistant_text(text)
 
     def _ingest_grok_error(self, payload: JsonObject) -> None:
         # Grok streaming-json emits {"type":"error","message":...} on failure and
         # then exits nonzero, so the runner already marks the run failed via exit
         # code. Surface the message (plus any partial buffered text) as recoverable
         # assistant text so it lands in the snapshot instead of being dropped.
-        partial = self._grok_text_buffer.strip()
-        self._grok_text_buffer = ""
-        self._grok_current_line = ""
-        self._invalidate_assistant_text_cache()
+        partial = self._take_grok_text()
         if partial:
             self._record_recoverable_assistant_text(partial)
         message = payload.get("message")
@@ -1249,7 +1315,7 @@ class StreamAccumulator:
         # continues as ordinary text with exit 0. Do not infer denial here.
         tool = _string_field(part, "tool") or "tool"
         state = part.get("state")
-        status = _opencode_tool_status(state.get("status") if isinstance(state, dict) else None)
+        status = _completed_tool_status(state.get("status") if isinstance(state, dict) else None)
         target = _opencode_tool_target(part)
         self.events.append(
             NormalizedEvent(
@@ -1466,9 +1532,37 @@ class StreamAccumulator:
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
-        kind = "tool.started"
+        tool_id = _string_field(payload, "toolCallId", "call_id", "id")
+        if tool_id:
+            # grok resolves the call later on a `tool_call_update` that carries
+            # only the id, so the name and target have to be remembered here.
+            self._pending_tool_uses[tool_id] = (tool, target)
         self.events.append(
-            NormalizedEvent(kind=kind, tool=tool, target=target, path=target),
+            NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target),
+        )
+        self.current = _tool_current(tool, target)
+
+    def _ingest_grok_tool_update(self, payload: JsonObject) -> None:
+        status = _string_field(payload, "status")
+        if status is None:
+            # grok emits a first update with `status: null` carrying only
+            # `locations`. The tool has not resolved, so nothing completes.
+            return
+        tool_id = _string_field(payload, "toolCallId")
+        tool, target = (
+            self._pending_tool_uses.pop(tool_id, (None, None)) if tool_id else (None, None)
+        )
+        tool = tool or "tool"
+        if target is None:
+            target = _grok_update_target(payload)
+        self.events.append(
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=_completed_tool_status(status),
+            )
         )
         self.current = _tool_current(tool, target)
 
@@ -1500,7 +1594,7 @@ class StreamAccumulator:
     def assistant_text(self) -> str:
         if self._assistant_text_cache is None:
             base = "\n\n".join(chunk for chunk in self.assistant_chunks if chunk).strip()
-            grok = self._grok_text_buffer.strip()
+            grok = self._grok_live_text()
             if grok:
                 base = f"{base}\n\n{grok}" if base else grok
             self._assistant_text_cache = base
@@ -1538,7 +1632,7 @@ class StreamAccumulator:
         return self._last_recoverable_assistant_text
 
     def _refresh_grok_recovery_text(self) -> None:
-        text = self._grok_text_buffer.strip()
+        text = self._grok_live_text()
         if not text:
             return
         self._last_recoverable_assistant_text = text
@@ -1605,6 +1699,14 @@ def _grok_stop_reason_succeeded(value: JsonValue) -> bool:
     return normalized in {"endturn", "stop", "complete", "done"}
 
 
+def _grok_stop_reason_incomplete(value: JsonValue) -> bool:
+    """Truncation reasons that neither `_normalize_terminal_status` nor the
+    provider-terminal table classifies, leaving the run to ride on exit 0."""
+    if not isinstance(value, str):
+        return False
+    return re.sub(r"[^a-z]", "", value.lower()) in {"maxtokens", "maxturnrequests"}
+
+
 def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if not completed:
         return status
@@ -1613,13 +1715,28 @@ def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     return status
 
 
-def _opencode_tool_status(status: JsonValue) -> str | None:
+def _completed_tool_status(status: JsonValue) -> str | None:
+    """Normalize a harness's completed-tool status onto delegate's vocabulary.
+
+    An unrecognized status is passed through rather than invented into a
+    success: an unknown outcome is not a good one.
+    """
     if not isinstance(status, str) or not status.strip():
         return None
     stripped = status.strip()
     if stripped == "completed":
         return "success"
     return stripped
+
+
+def _grok_update_target(payload: JsonObject) -> str | None:
+    locations = payload.get("locations")
+    if not isinstance(locations, list):
+        return None
+    for location in locations:
+        if isinstance(location, dict) and (path := _string_field(location, "path")):
+            return path
+    return None
 
 
 def _opencode_tool_target(part: JsonObject) -> str | None:
@@ -1665,15 +1782,23 @@ def _kimi_tool_target(arguments: JsonValue) -> str | None:
     return _tool_use_target({"input": arguments})
 
 
+# grok puts tool arguments under `rawInput` and names a file `target_file`
+# (ACP leaf naming); cursor and the generic shape use `args` with `path`.
+_TOOL_TARGET_KEYS = ("path", "file", "command", "target", "target_file", "uri")
+_TOOL_ARGUMENT_CONTAINERS = ("args", "rawInput")
+
+
 def _tool_target(payload: JsonObject) -> str | None:
-    for key in ("path", "file", "command", "target", "uri"):
+    for key in _TOOL_TARGET_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    args = payload.get("args")
-    if isinstance(args, dict):
-        for key in ("path", "file", "command", "target"):
-            value = args.get(key)
+    for container in _TOOL_ARGUMENT_CONTAINERS:
+        arguments = payload.get(container)
+        if not isinstance(arguments, dict):
+            continue
+        for key in _TOOL_TARGET_KEYS:
+            value = arguments.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None
