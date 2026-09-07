@@ -149,6 +149,11 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         None,
         "Disable completion-report prompt injection.",
     ),
+    OptionSpec(
+        "--no-mail",
+        None,
+        "Disable mail prompt injection and sandbox grants for this launch; --notify is unchanged.",
+    ),
 )
 
 
@@ -2207,6 +2212,7 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--pass-through",
     "--completion-report",
     "--no-completion-report",
+    "--no-mail",
     "--group",
     "--notify",
 )

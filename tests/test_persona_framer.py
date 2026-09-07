@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from delegate_agent import argv_builders, prompt_instructions, resume_command, worktree_execution
+from delegate_agent import (
+    argv_builders,
+    mail,
+    prompt_instructions,
+    resume_command,
+    worktree_execution,
+)
 from delegate_agent import config as config_api
 from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
@@ -184,6 +190,7 @@ class PersonaFramerTests(CommandTestBase):
                             safe,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
                         if segment is not None
                     )
@@ -221,6 +228,7 @@ class PersonaFramerTests(CommandTestBase):
                             safe,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
                         if segment is not None
                     )
@@ -415,6 +423,7 @@ class PersonaFramerTests(CommandTestBase):
                             PERSISTENT_WORKTREE_CONTEXT_NOTE,
                             user,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                            mail.MAIL_PROMPT_SUFFIX,
                         )
                     )
                     prompt = self._final_prompt(request, str(repo / "exec"))

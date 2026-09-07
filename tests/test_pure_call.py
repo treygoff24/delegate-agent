@@ -254,8 +254,8 @@ class PureCallTests(CommandTestBase):
         event = [
             {
                 "type": "result",
-                "result": '{"answer":"yes"}',
-                "structured_output": {"answer": "yes"},
+                "result": '{"answer":"fallback"}',
+                "structured_output": {"answer": "documented"},
                 "is_error": False,
                 "usage": {"input_tokens": 11, "output_tokens": 7},
                 "modelUsage": {
@@ -271,7 +271,7 @@ class PureCallTests(CommandTestBase):
             result = runner_api.execute_call(
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
-        self.assertEqual(result.text, '{"answer":"yes"}')
+        self.assertEqual(result.text, '{"answer": "documented"}')
         self.assertEqual(result.model_resolved, "substantive-model")
         self.assertEqual(result.usage, {"inputTokens": 11, "outputTokens": 7, "basis": "exact"})
         self.assertEqual(result.exit_code, 1)
@@ -294,6 +294,24 @@ class PureCallTests(CommandTestBase):
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
         self.assertEqual(result.usage, {"basis": "unavailable"})
+        self.assertEqual(result.exit_code, 0)
+        self.assertIsNone(result.error)
+
+    def test_claude_call_accepts_object_payload_and_present_null_output(self):
+        event = {
+            "type": "result",
+            "result": '{"answer":"fallback"}',
+            "structured_output": None,
+            "is_error": False,
+            "permission_denials": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "claude_object_result.py"
+            script.write_text(f"print({json.dumps(json.dumps(event))})\n", encoding="utf-8")
+            result = runner_api.execute_call(
+                [sys.executable, str(script)], tmp, harness="claude", pure=True
+            )
+        self.assertEqual(result.text, "null")
         self.assertEqual(result.exit_code, 0)
         self.assertIsNone(result.error)
 

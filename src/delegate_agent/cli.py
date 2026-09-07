@@ -71,6 +71,7 @@ from delegate_agent import sandbox_bwrap as _sandbox_bwrap
 from delegate_agent import (
     setup_commands as _setup_commands,
 )
+from delegate_agent import stall_watchdog as _stall_watchdog
 from delegate_agent import (
     wait_cancel_commands as _wait_cancel_commands,
 )
@@ -412,7 +413,44 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["plannedExecutionCwd"] = None
         payload["plannedBranch"] = None
 
+    if _mail.launch_enabled(request.mode, config or {}):
+        if (
+            request.prompt_instruction_mode == "wrapped"
+            and request.prompt != request.source_prompt
+            and request.prompt.endswith("\n\n" + _mail.MAIL_PROMPT_SUFFIX)
+        ):
+            # Expose the injected instructions without publishing the user's prompt.
+            payload["mailPromptSuffix"] = _mail.MAIL_PROMPT_SUFFIX
+        mail_warnings = list(payload.get("warnings", []))
+        payload["argv"], _ = _mail.wire_work_mail_launch(
+            request.engine,
+            payload["argv"],
+            None,
+            Path(request.workspace) / ".delegate",
+            prompt_transport=request.prompt_transport,
+            isolated_workspace=bool(payload["isolatedWorkspace"]),
+            warnings=mail_warnings,
+        )
+        if mail_warnings:
+            payload["warnings"] = mail_warnings
     return payload
+
+
+def _stall_minutes_explicitly_configured(config: JsonObject) -> bool:
+    workflows = config.get("workflows")
+    return "stallMinutes" in config or (isinstance(workflows, dict) and "stallMinutes" in workflows)
+
+
+def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Request:
+    stall_seconds = _stall_watchdog.effective_stall_seconds(
+        request.stall_seconds,
+        harness=request.engine,
+        timeout_seconds=request.timeout,
+        explicitly_configured=_stall_minutes_explicitly_configured(config),
+    )
+    if stall_seconds == request.stall_seconds:
+        return request
+    return dc_replace(request, stall_seconds=stall_seconds)
 
 
 def _binary_config_key(engine: str | None) -> str | None:
@@ -767,8 +805,8 @@ def _execute_attached_worktree(
 
     registry_root, registry_timeout = _launch_registry(source_workspace, config)
     maybe_run_retention_pass(registry_root, config)
-    if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-        _mail.prepare_mail_storage(registry_root)
+    _mail.prepare_launch_storage(request, config, registry_root, stderr)
+    execution_request = worktree_execution._request_for_execution_workspace(request, worktree_path)
     _mail.sanitize_inherited_mail_identity(request.env_overrides)
     metadata = {
         "mode": request.mode,
@@ -797,7 +835,7 @@ def _execute_attached_worktree(
         _mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
     mail_launch = _mail.prepare_work_mail_launch(
-        enabled=request.mode == MODE_WORK and delegate_config.mail_enabled(config),
+        enabled=_mail.launch_enabled(request.mode, config),
         mail_push=request.mail_push,
         engine=request.engine,
         argv=execution_request.argv,
@@ -919,8 +957,6 @@ def _execute_attached_worktree(
                     request.profile_resolution,
                     child_env,
                 ),
-                registry_root,
-                run_id,
             ),
             warnings=tuple(
                 dict.fromkeys(
@@ -1335,8 +1371,7 @@ def execute_request(
             return exit_code, None
         registry_root, registry_timeout = _launch_registry(source_workspace, config)
         maybe_run_retention_pass(registry_root, config)
-        if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-            _mail.prepare_mail_storage(registry_root)
+        _mail.prepare_launch_storage(isolated_request, config, registry_root, stderr)
         _mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
         metadata = {
             "mode": isolated_request.mode,
@@ -1368,7 +1403,7 @@ def execute_request(
         mail_push_cleanup_transferred = False
         try:
             mail_launch = _mail.prepare_work_mail_launch(
-                enabled=isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config),
+                enabled=_mail.launch_enabled(isolated_request.mode, config),
                 mail_push=isolated_request.mail_push,
                 engine=isolated_request.engine,
                 argv=isolated_request.argv,
@@ -1644,6 +1679,9 @@ def main(
             config, source = request_build.load_config(workspace=config_workspace)
             request_build.validate_config(config)
 
+        if global_options.no_mail:
+            config = {**config, "mail": {"enabled": False}}
+
         if parsed.subcommand == "personas":
             workspace = workspace or request_build.resolve_workspace(global_options.cwd)
             return emit_personas(workspace, json_mode=global_options.json_mode, stdout=stdout)
@@ -1806,6 +1844,7 @@ def main(
             request = _resume_command.apply_resume_to_request(request, resume_plan)
         if followup_plan is not None:
             request = _followup_command.apply_followup_to_request(request, followup_plan)
+        request = _apply_stall_watchdog_policy(request, config)
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (

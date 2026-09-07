@@ -295,26 +295,6 @@ def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
     return _legacy_models({"models": harness_discovery.parse_droid_settings_models(custom_models)})
 
 
-def parse_opencode_models_output(raw: str) -> list[JsonObject]:
-    try:
-        fragment = harness_discovery.parse_opencode_catalog(strip_ansi(raw))
-    except ValueError:
-        fragment = None
-    if isinstance(fragment, dict):
-        return [{"id": item["id"]} for item in _legacy_models(fragment)]
-    models: list[JsonObject] = []
-    for line in strip_ansi(raw).splitlines():
-        model_id = line.strip()
-        # Verified shape: provider/model with no whitespace (e.g. openai/gpt-5).
-        # Reject single-token junk like "warning:" or "loading".
-        if not model_id or any(char.isspace() for char in model_id) or "/" not in model_id:
-            continue
-        models.append({"id": model_id})
-    if not models:
-        raise RuntimeError("opencode models output had no parseable model lines")
-    return models
-
-
 def parse_pi_models_output(raw: str) -> list[JsonObject]:
     try:
         fragment = harness_discovery.parse_pi_catalog(strip_ansi(raw))

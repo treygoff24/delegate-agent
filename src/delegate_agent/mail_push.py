@@ -50,8 +50,6 @@ MAIL_PUSH_ADAPTER_ROWS: dict[str, str] = {
     engine: "verified" if engine in {"claude", "codex"} else "unverified"
     for engine in KNOWN_ENGINES
 }
-if set(MAIL_PUSH_ADAPTER_ROWS) != set(KNOWN_ENGINES):
-    raise RuntimeError("Every known engine needs an explicit mail push adapter row.")
 
 
 @dataclass
@@ -190,11 +188,8 @@ def _codex_home_for_mail_push(
 def mail_push_fallback_env_overrides(
     provision: MailPushProvision | None,
     fallback_env_overrides: Mapping[str, str],
-    registry_root: Path,
-    run_id: str,
 ) -> dict[str, str]:
     """Keep a Codex fallback account distinct while preserving the mail hook."""
-    del registry_root, run_id
     if provision is not None and provision.fallback_env is not None:
         return dict(provision.fallback_env)
     return dict(fallback_env_overrides)

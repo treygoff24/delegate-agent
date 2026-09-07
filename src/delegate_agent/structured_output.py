@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import copy
+import json
 
 from delegate_agent.json_types import JsonObject
 
 
 class SchemaPreflightError(ValueError):
     pass
+
+
+NATIVE_SCHEMA_ENGINES = frozenset({"claude", "codex"})
+CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES = 120_000
+
+
+def native_schema_eligible(engine: str, schema: object) -> str | None:
+    """Return why a schema cannot use an engine's native enforcement."""
+    if engine not in NATIVE_SCHEMA_ENGINES:
+        return f"{engine} does not support native structured output."
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return f'{engine} native structured output requires root type "object".'
+    if engine == "claude":
+        serialized_bytes = len(json.dumps(schema).encode("utf-8"))
+        if serialized_bytes >= CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES:
+            return (
+                "claude native schema is "
+                f"{serialized_bytes} bytes; the argv limit is under "
+                f"{CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES} bytes."
+            )
+    return None
 
 
 def normalize_codex_schema(schema: object) -> tuple[JsonObject, tuple[str, ...]]:

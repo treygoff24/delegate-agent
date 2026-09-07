@@ -200,7 +200,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "structuredOutputRetries": 2,
     },
     "mail": {
-        "enabled": False,
+        "enabled": True,
     },
 }
 
@@ -1130,10 +1130,13 @@ def _validate_pi_family_models(models: JsonValue, *, engine: str) -> None:
             path=f"{path}.{alias}.thinking",
             error=error,
         )
-        if thinking not in reasoning.PI_THINKING_LEVELS:
+        thinking_levels = (
+            reasoning.PI_NATIVE_EFFORTS if engine == "pi" else reasoning.PI_THINKING_LEVELS
+        )
+        if thinking not in thinking_levels:
             raise ConfigError(
                 error,
-                f"{path}.{alias}.thinking must be one of: {', '.join(reasoning.PI_THINKING_LEVELS)}.",
+                f"{path}.{alias}.thinking must be one of: {', '.join(thinking_levels)}.",
             )
 
 
@@ -1683,8 +1686,8 @@ def skill_review_preamble_enabled(config: JsonObject) -> bool:
 
 
 def mail_enabled(config: JsonObject) -> bool:
-    section = config.get("mail")
-    return isinstance(section, dict) and section.get("enabled") is True
+    section = config.get("mail", {})
+    return isinstance(section, dict) and section.get("enabled", True) is True
 
 
 def completion_report_default_mode(config: JsonObject) -> str:
