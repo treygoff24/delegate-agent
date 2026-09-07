@@ -17,7 +17,14 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import argv_builders as argv_api
-from delegate_agent import argv_utils, command_help, harness_discovery, mail_core, request_build
+from delegate_agent import (
+    argv_utils,
+    command_help,
+    harness_discovery,
+    mail_core,
+    request_build,
+    structured_output,
+)
 from delegate_agent import cli_parser as parser_api
 from delegate_agent import (
     config as delegate_config,
@@ -738,3 +745,71 @@ class OpencodeClaudeInstructionLeakTests(CommandTestBase):
             dry_run=True,
         )
         self.assertNotIn("OPENCODE_DISABLE_CLAUDE_CODE", request.env_overrides)
+
+
+class ClaudeNativeSchemaPreflightTests(CommandTestBase):
+    """Lane S's eligibility helper, wired into the direct --output-schema path.
+
+    Claude enforces `--json-schema` natively, so a schema the API will reject
+    should be refused at preflight rather than after the launch. The rule itself
+    belongs to Lane S; this only calls it and reports the reason.
+    """
+
+    def _schema_path(self, schema):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = Path(directory) / "schema.json"
+        path.write_text(json.dumps(schema), encoding="utf-8")
+        return str(path)
+
+    def _build(self, schema, engine="claude"):
+        return self.build_git_request(
+            engine,
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            output_schema=self._schema_path(schema),
+        )
+
+    def test_ineligible_schema_is_refused_with_schema_not_native(self):
+        with (
+            mock.patch.object(
+                structured_output,
+                "native_schema_eligible",
+                create=True,
+                return_value="root type must be object",
+            ),
+            self.assertRaises(errors_api.DelegateError) as caught,
+        ):
+            self._build({"type": "array", "items": {"type": "string"}})
+        self.assertEqual(caught.exception.error, "schema_not_native")
+        self.assertIn("root type must be object", caught.exception.message)
+
+    def test_eligible_schema_still_builds(self):
+        # The planted negative: an eligible schema must reach argv untouched.
+        with mock.patch.object(
+            structured_output, "native_schema_eligible", create=True, return_value=None
+        ):
+            request = self._build({"type": "object", "properties": {"ok": {"type": "boolean"}}})
+        self.assertIn("--json-schema", request.argv)
+
+    def test_the_helper_is_only_asked_about_claude(self):
+        with mock.patch.object(
+            structured_output, "native_schema_eligible", create=True, return_value="nope"
+        ) as helper:
+            self._build(
+                {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+                engine="codex",
+            )
+        for call in helper.call_args_list:
+            self.assertNotEqual(call.args[0], "codex")
+
+    def test_an_absent_helper_leaves_the_path_unchanged(self):
+        # Lane S's helper may not have landed yet. An absent symbol must leave
+        # claude exactly as it was rather than refusing every schema.
+        with mock.patch.object(structured_output, "native_schema_eligible", None, create=True):
+            request = self._build({"type": "array", "items": {"type": "string"}})
+        self.assertIn("--json-schema", request.argv)

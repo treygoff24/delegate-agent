@@ -578,6 +578,48 @@ def _preflight_codex_output_schema(
     return json.dumps(normalized), warnings
 
 
+def _preflight_claude_output_schema(
+    engine: str, output_schema: str | None, *, schema_text: str | None = None
+) -> None:
+    """Refuse a direct Claude --output-schema the API would reject.
+
+    Claude enforces the schema natively, so an ineligible one fails after the
+    launch rather than before it. The eligibility rule itself belongs to
+    structured_output, which owns the same decision on the workflow path; this
+    only asks and reports the reason. The helper is looked up dynamically so a
+    tree without it keeps the previous behaviour instead of refusing everything.
+    """
+    if engine != "claude" or (output_schema is None and schema_text is None):
+        return
+    eligible = getattr(structured_output, "native_schema_eligible", None)
+    if not callable(eligible):
+        return
+    try:
+        schema = json.loads(
+            schema_text
+            if schema_text is not None
+            else Path(str(output_schema)).read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        raise DelegateError(
+            "invalid_output_schema",
+            f"Claude output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DelegateError(
+            "invalid_output_schema", f"Output schema is not readable: {output_schema}"
+        ) from exc
+    reason = eligible("claude", schema)
+    if reason is None:
+        return
+    raise DelegateError(
+        "schema_not_native",
+        f"Claude cannot enforce this --output-schema natively: {reason}. Use a schema "
+        "Claude accepts, or run the stage through a workflow, which falls back to "
+        "prompt-and-parse." + DRY_RUN_HINT,
+    )
+
+
 def _completion_report_prompt_mode(
     completion_report_mode: str,
     output_schema: str | None,
@@ -3532,6 +3574,7 @@ def _build_request_for_workspace(
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
         engine, output_schema, schema_text=output_schema_text
     )
+    _preflight_claude_output_schema(engine, output_schema, schema_text=output_schema_text)
     # Tracked runs record the schema text in the manifest so resume can
     # re-materialize it: codex stores its normalized preflight form, claude the
     # raw text it inlines as --json-schema. Call mode has no manifest.
