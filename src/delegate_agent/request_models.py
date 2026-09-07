@@ -27,6 +27,7 @@ class GlobalOptions:
     cwd: str | None = None
     pass_through: bool = False
     completion_report: str | None = None
+    no_mail: bool = False
     isolation: str | None = None
     auth_profile: str | None = None
     group: str | None = None
