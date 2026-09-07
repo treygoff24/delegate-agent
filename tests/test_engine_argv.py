@@ -83,14 +83,13 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "-p",
                 "--trust",
-                "--mode",
-                "ask",
                 "--model",
                 "composer-2.5",
                 "--output-format",
                 "stream-json",
             ],
         )
+        self.assertNotIn("--mode", argv)
         prompt = request.stdin_text
         self.assertTrue(prompt.startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
         self.assertIn(argv_api.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], prompt)
@@ -2414,7 +2413,7 @@ class EngineArgvTests(CommandTestBase):
                 with self.subTest(engine=engine, mode=mode):
                     self.assertTrue(all(isinstance(item, str) for item in mapping[mode]))
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
-        self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", cursor_safe)
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--approve-mcps", cursor_safe)
         self.assertIn("<isolated-workspace>", cursor_safe)
@@ -2963,6 +2962,30 @@ class EngineArgvTests(CommandTestBase):
             "--auto-approve",
         ):
             self.assertNotIn(forbidden, request.argv)
+
+    def test_omp_approval_mode_matches_what_each_mode_may_do(self):
+        """In headless -p there is no approver, so the approval mode is the boundary."""
+        omp = {"binary": "omp"}
+        cases = (
+            ("safe", False, "always-ask"),
+            ("work", False, "yolo"),
+            ("call", True, "always-ask"),
+            # A write-capable call is "work minus a repo"; without yolo every
+            # write it attempts is denied by an approver that is not there.
+            ("call", False, "yolo"),
+        )
+        for mode, read_only, expected in cases:
+            with self.subTest(mode=mode, call_read_only=read_only):
+                argv = argv_api.build_omp_argv(
+                    omp, mode, None, None, "/ws", call_read_only=read_only
+                )
+                self.assertEqual(argv[argv.index("--approval-mode") + 1], expected)
+
+    def test_pi_write_capable_call_gets_no_omp_approval_flag(self):
+        """The planted negative: --approval-mode is omp's flag, not pi's."""
+        argv = argv_api.build_pi_argv({"binary": "pi"}, "call", None, None)
+        self.assertNotIn("--approval-mode", argv)
+        self.assertNotIn("yolo", argv)
 
     def test_omp_never_emits_fork_role_flags(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))

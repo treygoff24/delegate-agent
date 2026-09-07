@@ -232,6 +232,68 @@ class SnapshotSchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate_snapshot(snapshot, allow_unknown_harnesses=True)
 
+    def test_an_unknown_harness_field_is_dropped_with_a_warning(self):
+        """A newer delegate's cache must not blank every other harness's rows."""
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["claude"] = _harness_record()
+        snapshot["harnesses"]["claude"]["selector"] = ["claude"]
+        snapshot["harnesses"]["claude"]["fromTheFuture"] = {"anything": 1}
+
+        warnings = self.validate_snapshot(
+            snapshot, allow_unknown_harnesses=True, drop_unknown_fields=True
+        )
+
+        self.assertIn(
+            "ignored unsupported field 'fromTheFuture' in discovery harness claude", warnings
+        )
+        self.assertNotIn("fromTheFuture", snapshot["harnesses"]["claude"])
+        self.assertIn("gpt-test", snapshot["harnesses"]["codex"]["models"])
+
+    def test_an_unknown_capabilities_field_is_dropped_with_a_warning(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["capabilities"] = {
+            "permissionPrompts": True,
+            "somethingNewer": "yes",
+        }
+
+        warnings = self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
+        self.assertIn(
+            "ignored unsupported field 'somethingNewer' in discovery harness codex.capabilities",
+            warnings,
+        )
+        self.assertEqual(
+            snapshot["harnesses"]["codex"]["capabilities"], {"permissionPrompts": True}
+        )
+
+    def test_a_capabilities_object_carrying_only_future_keys_is_dropped_whole(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["capabilities"] = {"somethingNewer": "yes"}
+
+        self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
+        self.assertIsNone(snapshot["harnesses"]["codex"].get("capabilities"))
+
+    def test_writing_an_unknown_field_is_still_fatal(self):
+        """Producing a field this build does not know is a bug, not version skew."""
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["harnesses"]["codex"]["fromTheFuture"] = 1
+        with self.assertRaises(ValueError):
+            self.validate_snapshot(snapshot)
+
+    def test_a_wrong_type_on_a_known_field_is_still_rejected(self):
+        """The planted negative: forward tolerance is for unknown names only."""
+        for mutation in (
+            ("installed", "yes"),
+            ("capabilities", {"permissionPrompts": "yes"}),
+            ("capabilities", ["permissionPrompts"]),
+        ):
+            with self.subTest(field=mutation[0], value=mutation[1]):
+                snapshot = copy.deepcopy(self.snapshot)
+                snapshot["harnesses"]["codex"][mutation[0]] = mutation[1]
+                with self.assertRaises(ValueError):
+                    self.validate_snapshot(snapshot, drop_unknown_fields=True)
+
     def test_fixture_provenance_has_safe_complete_shape(self):
         provenance = json.loads((FIXTURES / "provenance.json").read_text(encoding="utf-8"))
         self.assertRegex(provenance["capturedAt"], r"^\d{4}-\d{2}-\d{2}$")
@@ -675,6 +737,24 @@ class TextParserTests(unittest.TestCase):
             {"grok-4.6": {}, "grok-4.5": {}},
         )
 
+    def test_grok_accepts_a_wholly_unbulleted_model_list(self):
+        """A build that prints plain selectors must not fail the whole probe."""
+        raw = "Default model: grok-4.6\n\nAvailable models:\n  grok-4.6 (default)\n  grok-4.5\n"
+
+        fragment = self.parse_grok(raw)
+
+        self.assertEqual(fragment["models"], {"grok-4.6": {}, "grok-4.5": {}})
+        self.assertEqual(fragment["defaultModel"], "grok-4.6")
+
+    def test_grok_accepts_each_bullet_form(self):
+        for bullet, expected in (("*", "grok-4.6"), ("-", "grok-4.6"), ("", "grok-4.6")):
+            with self.subTest(bullet=bullet or "none"):
+                prefix = f"{bullet} " if bullet else ""
+                raw = (
+                    f"Default model: grok-4.6\n\nAvailable models:\n  {prefix}grok-4.6 (default)\n"
+                )
+                self.assertEqual(self.parse_grok(raw)["models"], {expected: {}})
+
 
 class AdapterOrchestrationTests(unittest.TestCase):
     def test_claude_only_parses_expected_nonzero_sentinel_output(self):
@@ -896,6 +976,28 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
             self.assertTrue(path.exists())
 
+    def test_a_cache_written_by_a_newer_delegate_still_loads_its_known_rows(self):
+        """The live incident: a new per-harness field blanked every codex row."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", snapshot, home=home)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["harnesses"]["claude"] = _harness_record()
+            raw["harnesses"]["claude"]["selector"] = ["/claude"]
+            raw["harnesses"]["claude"]["capabilities"] = {"permissionPrompts": True}
+            raw["harnesses"]["claude"]["fieldFromANewerBuild"] = True
+            path.write_text(json.dumps(raw), encoding="utf-8")
+
+            loaded = self.discovery.load_discovery_cache("work", home=home)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(
+            loaded["harnesses"]["codex"]["models"]["gpt-test"]["reasoning"]["supported"],
+            ["low", "high"],
+        )
+        self.assertNotIn("fieldFromANewerBuild", loaded["harnesses"]["claude"])
+
     def test_discovery_cache_load_memo_invalidates_on_stat_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -968,9 +1070,16 @@ class DiscoveryCacheTests(unittest.TestCase):
             loaded = self.discovery.load_discovery_cache("work", home=home)
             self.assertEqual(set(loaded["harnesses"]), {"codex"})
 
+            # An unknown field is version skew, not corruption: it is stripped
+            # on read so the rest of the file survives, and never surfaced.
             snapshot["harnesses"]["codex"]["rawStderr"] = "benign but raw"
             private_io.write_json_atomic(path, snapshot)
-            self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
+            reloaded = self.discovery.load_discovery_cache("work", home=home)
+            self.assertEqual(set(reloaded["harnesses"]), {"codex"})
+            self.assertNotIn("rawStderr", reloaded["harnesses"]["codex"])
+            # Writing that same field from this build is still fatal.
+            with self.assertRaises(ValueError):
+                self.discovery.write_discovery_cache("work", snapshot, home=home)
 
     def test_different_profiles_write_independently(self):
         with tempfile.TemporaryDirectory() as tmp:

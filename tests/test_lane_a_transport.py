@@ -24,6 +24,7 @@ from delegate_agent import (
     mail_core,
     reasoning,
     request_build,
+    structured_output,
 )
 from delegate_agent import cli_parser as parser_api
 from delegate_agent import (
@@ -134,7 +135,21 @@ class OmpStdinTransportTests(CommandTestBase):
         argv = argv_api.build_omp_argv(
             delegate_config.embedded_default_config()["omp"], "call", None, None, "/ws"
         )
-        self.assertEqual(argv, ["omp", "-p", "--no-session", "--mode", "json", "--cwd", "/ws"])
+        self.assertEqual(
+            argv,
+            [
+                "omp",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--cwd",
+                "/ws",
+                "--approval-mode",
+                "yolo",
+            ],
+        )
+        self.assertNotIn("task", argv)
 
 
 class SharedTransportSurfaceTests(unittest.TestCase):
@@ -177,15 +192,18 @@ if __name__ == "__main__":
 
 
 class CursorReadOnlyModeTests(CommandTestBase):
-    """A2: the cursor read-only boundary moves from prompt text into the harness.
+    """A2, as amended: the harness read-only mode is worth its cost only in call.
 
     Cursor documents `--mode ask` as "Q&A style for explanations and questions
-    (read-only)" and `-p/--print` as having "access to all tools, including write
-    and shell", so safe mode without a mode flag rested on the prompt prefix plus
-    workspace isolation alone.
+    (read-only)" and `-p/--print` as having "access to all tools, including
+    write and shell". Live testing found that both read-only modes, `ask` and
+    `plan`, block the shell outright, so a `cursor safe` reviewer cannot run
+    `git diff` or the test suite. Safe mode keeps the isolated workspace copy as
+    its boundary and no longer emits the flag; read-only call, which has no
+    isolated copy, keeps it.
     """
 
-    def test_cursor_safe_argv_carries_mode_ask(self):
+    def test_cursor_safe_argv_keeps_the_isolated_copy_as_its_boundary(self):
         request = self.build_git_request(
             "cursor",
             "safe",
@@ -195,7 +213,7 @@ class CursorReadOnlyModeTests(CommandTestBase):
             delegate_config.embedded_default_config(),
             dry_run=True,
         )
-        self.assertEqual(request.argv[request.argv.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", request.argv)
         self.assertNotIn("--force", request.argv)
         self.assertNotIn("--approve-mcps", request.argv)
 
@@ -217,22 +235,39 @@ class CursorReadOnlyModeTests(CommandTestBase):
         self.assertNotIn("--mode", work)
         self.assertIn("--force", work)
 
-    def test_cursor_resume_and_text_output_paths_keep_mode_ask(self):
-        # Both argv branches (stream-json and pass-through text) and the resume
-        # branch must carry the flag; a mode flag on only one is not a boundary.
+    def test_cursor_read_only_call_carries_mode_ask_on_every_argv_branch(self):
+        # Both output branches and the resume branch must carry the flag; a mode
+        # flag on only one is not a boundary.
+        for kwargs in ({}, {"stream_capture": False}, {"resume_session_id": "s1"}):
+            with self.subTest(kwargs=sorted(kwargs)):
+                argv = argv_api.build_cursor_argv(
+                    ["cursor-agent"], "call", "/ws", "model", call_read_only=True, **kwargs
+                )
+                self.assertEqual(argv[argv.index("--mode") + 1], "ask")
+
+    def test_cursor_safe_emits_no_mode_flag_on_any_argv_branch(self):
         for kwargs in ({}, {"stream_capture": False}, {"resume_session_id": "s1"}):
             with self.subTest(kwargs=sorted(kwargs)):
                 argv = argv_api.build_cursor_argv(
                     ["cursor-agent"], "safe", "/ws", "model", **kwargs
                 )
-                self.assertEqual(argv[argv.index("--mode") + 1], "ask")
+                self.assertNotIn("--mode", argv)
+                self.assertNotIn("--force", argv)
+                self.assertNotIn("--approve-mcps", argv)
 
-    def test_describe_mode_mapping_shows_mode_ask_for_cursor_safe(self):
+    def test_cursor_safe_still_emits_print_once(self):
+        # The `-p`/`--print` dedupe from the same change stays: cursor took both
+        # spellings of the same flag before it.
+        argv = argv_api.build_cursor_argv(["cursor-agent"], "safe", "/ws", "model")
+        self.assertEqual(argv.count("-p"), 1)
+        self.assertNotIn("--print", argv)
+
+    def test_describe_mode_mapping_shows_no_mode_flag_for_cursor_safe(self):
         payload = describe_api.describe_payload(
             delegate_config.embedded_default_config(), "embedded default"
         )
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
-        self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
+        self.assertNotIn("--mode", cursor_safe)
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--mode", payload["modeMapping"]["cursor"]["work"])
 
@@ -813,6 +848,64 @@ class ClaudeNativeSchemaPreflightTests(CommandTestBase):
             self._build(oversize)
         self.assertEqual(caught.exception.error, "schema_not_native")
         self.assertIn("argv limit", caught.exception.message)
+
+    def _schema_text_path(self, text: str) -> str:
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = Path(directory) / "schema.json"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_a_pretty_printed_schema_is_measured_by_its_own_bytes(self):
+        """Claude carries the file's bytes in argv; whitespace counts against the limit."""
+        limit = structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES
+        schema = {
+            "type": "object",
+            "properties": {f"field_{index}": {"type": "string"} for index in range(2600)},
+        }
+        pretty = json.dumps(schema, indent=2)
+        self.assertLess(len(json.dumps(schema).encode("utf-8")), limit)
+        self.assertGreaterEqual(len(pretty.encode("utf-8")), limit)
+
+        with self.assertRaises(errors_api.DelegateError) as caught:
+            self.build_git_request(
+                "claude",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
+                output_schema=self._schema_text_path(pretty),
+            )
+
+        self.assertEqual(caught.exception.error, "schema_not_native")
+        self.assertIn("argv limit", caught.exception.message)
+
+    def test_a_pretty_printed_schema_under_the_limit_still_builds(self):
+        """The planted negative: measuring the real bytes must not reject everything."""
+        schema = {
+            "type": "object",
+            "properties": {f"field_{index}": {"type": "string"} for index in range(1000)},
+        }
+        pretty = json.dumps(schema, indent=2)
+        self.assertLess(
+            len(pretty.encode("utf-8")), structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES
+        )
+
+        request = self.build_git_request(
+            "claude",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            output_schema=self._schema_text_path(pretty),
+        )
+
+        self.assertIn("--json-schema", request.argv)
+        self.assertIn(pretty, request.argv)
 
     def test_eligible_schema_still_builds(self):
         # The planted negative: an eligible schema must reach argv untouched.

@@ -1527,6 +1527,31 @@ def parse_dry_run(
     )
 
 
+# An option-shaped token: a single flag, not prose and not a negative number.
+_OPTION_SHAPED_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*$")
+
+
+def _absorbed_option_warning(option: str) -> str:
+    return (
+        f"option after the prompt is treated as prompt text: {option}. "
+        "Move it before the prompt to apply it."
+    )
+
+
+def _absorbed_option_warnings(prompt_parts: list[str]) -> tuple[str, ...]:
+    """Advisories for options swallowed by a resume/followup prompt tail.
+
+    The launch parsers raise on an unrecognized option in the tail, so only a
+    recognized one can be absorbed silently there. `resume` and `followup`
+    accept no options at all after the handle: every option-shaped token in the
+    tail becomes prompt text, so every one of them is warned about. Tokens after
+    a literal `--` are excluded by the caller, which is an explicit
+    "this is prompt text".
+    """
+    absorbed = [token for token in prompt_parts if _OPTION_SHAPED_TOKEN.match(token)]
+    return tuple(_absorbed_option_warning(option) for option in dict.fromkeys(absorbed))
+
+
 def parse_resume(
     rest: list[str],
     json_mode: bool,
@@ -1563,6 +1588,7 @@ def parse_resume(
     continuity_mode: str | None = None
     handle: str | None = None
     extra_parts: list[str] = []
+    tail_warnings: tuple[str, ...] = ()
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -1707,7 +1733,10 @@ def parse_resume(
         extra_parts = rest[i:]
         if "--" in extra_parts:
             terminator = extra_parts.index("--")
+            tail_warnings = _absorbed_option_warnings(extra_parts[:terminator])
             extra_parts = [*extra_parts[:terminator], *extra_parts[terminator + 1 :]]
+        else:
+            tail_warnings = _absorbed_option_warnings(extra_parts)
         break
     if handle is None:
         raise DelegateError("missing_handle", "resume requires a run handle (alias or run id).")
@@ -1746,6 +1775,7 @@ def parse_resume(
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
             continuity_mode=continuity_mode,
+            warnings=tail_warnings,
         ),
     )
 
@@ -1768,6 +1798,7 @@ def parse_followup(
     dry_run = False
     handle: str | None = None
     prompt_parts: list[str] = []
+    tail_warnings: tuple[str, ...] = ()
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -1811,6 +1842,12 @@ def parse_followup(
             i += 1
             continue
         prompt_parts = rest[i:]
+        if "--" in prompt_parts:
+            terminator = prompt_parts.index("--")
+            tail_warnings = _absorbed_option_warnings(prompt_parts[:terminator])
+            prompt_parts = [*prompt_parts[:terminator], *prompt_parts[terminator + 1 :]]
+        else:
+            tail_warnings = _absorbed_option_warnings(prompt_parts)
         break
     if handle is None:
         raise DelegateError("missing_handle", "followup requires a run handle (alias or run id).")
@@ -1832,6 +1869,7 @@ def parse_followup(
             prompt_file=prompt_file,
             timeout=timeout,
             dry_run=dry_run,
+            warnings=tail_warnings,
         ),
     )
 
@@ -2187,9 +2225,7 @@ def parse_prompt_tail(
     # everything after a literal `--`, which is an explicit "this is prompt text".
     absorbed_options = [token for token in checked_prompt_parts if token in known_options]
     tail_warnings = tuple(
-        f"option after the prompt is treated as prompt text: {option}. "
-        "Move it before the prompt to apply it."
-        for option in dict.fromkeys(absorbed_options)
+        _absorbed_option_warning(option) for option in dict.fromkeys(absorbed_options)
     )
     return PromptTail(
         prompt_file,
