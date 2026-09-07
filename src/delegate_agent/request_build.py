@@ -285,10 +285,10 @@ def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
 # workspace") that derails a judge prompt on an empty cwd, so neutralize that
-# framing. The no-mutation clause is load-bearing for cursor/droid/kimi, whose
-# read-only call has no CLI sandbox — the prompt is the only write boundary there
-# (codex/claude/grok also get a real read-only sandbox flag). Work-level call is
-# left raw — it may legitimately act in the cwd.
+# framing. The no-mutation clause is load-bearing for droid/kimi, whose read-only
+# call has no CLI-side boundary — the prompt is the only write boundary there
+# (codex/claude/grok get a real read-only sandbox flag, and cursor now takes
+# --mode ask). Work-level call is left raw — it may legitimately act in the cwd.
 CALL_READONLY_PREAMBLE = (
     "You are being called to respond to the following prompt directly. There is "
     "no repository, working tree, or codebase to inspect, open, or review, and "

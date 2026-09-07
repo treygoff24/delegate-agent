@@ -52,6 +52,11 @@ SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
     engine: f"{label} {_SAFE_REVIEW_BODY}" for engine, label in _SAFE_REVIEW_LABEL_BY_ENGINE.items()
 }
 
+# Cursor documents --mode ask as "Q&A style for explanations and questions
+# (read-only)"; --mode plan is the other read-only mode. ask is what the audit
+# proved live.
+CURSOR_READ_ONLY_MODE = ("--mode", "ask")
+
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
 
 CLAUDE_SAFE_ALLOWED_TOOLS = (
@@ -166,9 +171,19 @@ def build_cursor_argv(
         argv.extend(["--approve-mcps", "--force"])
     elif mode == MODE_CALL:
         # Call defaults to work-level capability ("work minus a repo"); --read-only
-        # drops the write flags for the stateless judge/completion contract.
-        if not call_read_only:
+        # drops the write flags for the stateless judge/completion contract and
+        # takes the harness-enforced read-only mode.
+        if call_read_only:
+            argv.extend(CURSOR_READ_ONLY_MODE)
+        else:
             argv.extend(["--approve-mcps", "--force"])
+    elif mode == MODE_SAFE:
+        # `-p` alone "has access to all tools, including write and shell" per
+        # Cursor's parameter reference, so without a mode flag the read-only
+        # claim rested on the prompt prefix and the isolated workspace copy.
+        # `--mode ask` is documented read-only and is the mode the live stdin
+        # proof used.
+        argv.extend(CURSOR_READ_ONLY_MODE)
     else:
         validate_mode(mode)
     if resume_session_id is not None:
