@@ -1423,7 +1423,10 @@ def validate_cache_payload(cache: JsonObject) -> None:
             "reasoning cache must contain a harnesses object.",
         )
     for harness, harness_decl in harnesses.items():
-        if harness not in ("codex", "droid", "grok") or not isinstance(harness_decl, dict):
+        # grok resolves its efforts from a static enum rather than a transport,
+        # so it is not in TRANSPORT_BY_HARNESS, but a cache may legitimately
+        # carry a row for it. Spelling the set out as a literal dropped cursor.
+        if harness not in (*TRANSPORT_BY_HARNESS, "grok") or not isinstance(harness_decl, dict):
             raise ReasoningCapabilityError(
                 "invalid_reasoning_config",
                 "reasoning cache harness entries must be objects for known harnesses.",
