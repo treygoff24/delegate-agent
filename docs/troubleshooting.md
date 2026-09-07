@@ -12,7 +12,7 @@ python3 bin/delegate.py ...
 Real runs require the selected child runtime on `PATH`:
 
 ```bash
-command -v agent
+cursor-agent --version
 command -v droid
 command -v codex
 command -v claude
@@ -191,13 +191,14 @@ delegate --json models pi --live
 
 ## Oh My Pi exits after only a session event
 
-Oh My Pi 17.0.4 was observed to exit successfully without processing piped
-stdin in non-interactive JSON mode. Delegate therefore passes the resolved
-prompt as a positional argument. Confirm the direct positional form works, then
-inspect Delegate's planned argv:
+Oh My Pi 18.1.13 reads a piped prompt in every non-protocol mode, including
+`--mode json`, and Delegate delivers the prompt on stdin. Whitespace-only stdin
+counts as no prompt at all, and the read blocks until EOF, so a caller that
+holds the pipe open leaves the child waiting. Confirm the direct piped form
+works, then inspect Delegate's planned argv:
 
 ```bash
-omp -p --mode json --no-session "Reply with OK"
+printf '%s\n' "Reply with OK" | omp -p --mode json --no-session
 delegate --json dry-run omp safe --model provider/model-id "Review only."
 delegate --json models omp --live
 ```

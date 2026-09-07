@@ -54,7 +54,11 @@ class KimiCommandTests(CommandTestBase):
         )
         self.assertTrue(prompt_arg.endswith("hello"))
 
-    def test_kimi_pass_through_argv(self):
+    def test_kimi_pass_through_argv_pins_text_output(self):
+        # Kimi resolves --output-format from the flag, then KIMI_MODEL_OUTPUT_FORMAT,
+        # then "text", and it honours that env var in prompt mode — exactly the
+        # pass-through case. Omitting the flag let an ambient export flip a
+        # pass-through run to stream-json and break its captured output.
         request = self.build_git_request(
             "kimi",
             "safe",
@@ -65,11 +69,26 @@ class KimiCommandTests(CommandTestBase):
             dry_run=True,
             stream_capture=False,
         )
-        self.assertNotIn("--output-format", request.argv)
+        self.assertEqual(request.argv[request.argv.index("--output-format") + 1], "text")
         self.assertNotIn("stream-json", request.argv)
         self.assertNotIn("--plan", request.argv)
         self.assertNotIn("--yolo", request.argv)
         self.assertIn("--prompt", request.argv)
+
+    def test_kimi_tracked_argv_still_pins_stream_json(self):
+        # The planted negative: pinning text must not leak into tracked runs,
+        # whose snapshots need the structured stream.
+        request = self.build_git_request(
+            "kimi",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config_api.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.argv[request.argv.index("--output-format") + 1], "stream-json")
+        self.assertNotIn("text", request.argv)
 
     def test_kimi_model_override_from_config(self):
         config = config_api.embedded_default_config()

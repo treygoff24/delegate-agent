@@ -3838,18 +3838,20 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["stderrBytes"], len(primary_child) + len(retry_stderr))
 
     def test_safe_resume_empty_retry_refuses_argv_overflow_before_spawning(self):
+        # Kimi is the last engine whose prompt rides argv, so it is the only one
+        # the resume final-prompt size guard still covers.
         with tempfile.TemporaryDirectory() as workspace:
-            script = Path(workspace) / "cursor"
+            script = Path(workspace) / "kimi"
             script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_id, alias = self.registry.register_run(root, harness="kimi")
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
                 alias=alias,
-                harness="cursor",
-                engine="cursor",
+                harness="kimi",
+                engine="kimi",
                 mode="safe",
                 model=None,
                 source_cwd=workspace,
@@ -3857,7 +3859,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 workspace_kind="directory",
                 isolated_workspace=False,
                 started_at="2026-07-31T12:00:00Z",
-                resumed_from={"runId": "del_source", "alias": "cursor-1"},
+                resumed_from={"runId": "del_source", "alias": "kimi-1"},
             )
             prompt = "x" * (self.runner.resume_command.ARGV_PROMPT_GUARD_BYTES - 1)
 
@@ -3882,17 +3884,17 @@ class RunnerCaptureTests(unittest.TestCase):
 
     def test_non_resume_empty_retry_does_not_raise_resume_prompt_overflow(self):
         with tempfile.TemporaryDirectory() as workspace:
-            script = Path(workspace) / "cursor"
+            script = Path(workspace) / "kimi"
             script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_id, alias = self.registry.register_run(root, harness="kimi")
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
                 alias=alias,
-                harness="cursor",
-                engine="cursor",
+                harness="kimi",
+                engine="kimi",
                 mode="safe",
                 model=None,
                 source_cwd=workspace,

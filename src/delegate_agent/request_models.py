@@ -68,6 +68,9 @@ class LaunchOptions:
     resumable: bool = False
     resume_session_id: str | None = None
     continuity_mode: str | None = None
+    # Parse-time advisories that only the parser can see (token positions are
+    # gone by the time the prompt is one joined string).
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass
@@ -196,6 +199,7 @@ class PromptTail(NamedTuple):
     allow_repo_persona: bool
     resumable: bool = False
     continuity_mode: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass

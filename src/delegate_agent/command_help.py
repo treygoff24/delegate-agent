@@ -506,7 +506,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "safe-mode isolation is filesystem-only.",
             "Work mode uses grok.workPermissionMode, unless Delegate policy explicitly "
             "enables policy.harness.grok.work.bypassApprovalsAndSandbox.",
-            "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+            "Reasoning effort maps to Grok --effort (low, medium, high, xhigh).",
             "--output-schema is unsupported in v1 because Grok --json-schema forces final json output.",
             "The top-level grok engine is distinct from any Droid-served Grok model alias.",
         ),

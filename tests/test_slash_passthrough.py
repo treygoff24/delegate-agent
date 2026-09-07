@@ -107,11 +107,12 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
                 self.build(argv)
             self.assertEqual(caught.exception.error, "slash_passthrough_unsupported")
 
-    def test_cursor_work_slash_prompt_verbatim_in_argv(self):
+    def test_cursor_work_slash_prompt_verbatim_on_stdin(self):
         prompt = "/goal implement the thing"
         request = self.build(["cursor", "work", prompt])
         self.assertEqual(request.prompt_instruction_mode, PROMPT_INSTRUCTION_MODE_SLASH)
-        self.assertEqual(request.argv[-1], prompt)
+        self.assertEqual(request.stdin_text, prompt)
+        self.assertNotIn(prompt, request.argv)
 
     def test_kimi_work_slash_prompt_verbatim_in_argv(self):
         prompt = "/goal implement the thing"

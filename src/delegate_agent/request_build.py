@@ -54,6 +54,7 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
+    CLAUDE_UNPINNABLE_ALIASES,
     DRY_RUN_HINT,
     ENGINES_PROSE,
     KNOWN_ENGINES,
@@ -65,6 +66,7 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
+    claude_alias_base,
     validate_mode,
     validate_pure_call,
 )
@@ -81,8 +83,6 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
     ARGV_PROMPT_TRANSPORT_ENGINES,
-    KIMI_PROMPT_REDACTION,
-    OMP_PROMPT_REDACTION,
     PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
@@ -276,6 +276,18 @@ def _prepare_persona_transport(
     )
 
 
+def _claude_permission_prompts_supported(discovery: JsonObject | None) -> bool:
+    """True only when discovery observed --permission-prompts in claude --help.
+
+    An unknown flag is an immediate Claude usage error, so an unproven capability
+    must stay unused rather than be guessed from a version number.
+    """
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("claude") if isinstance(harnesses, dict) else None
+    capabilities = record.get("capabilities") if isinstance(record, dict) else None
+    return isinstance(capabilities, dict) and capabilities.get("permissionPrompts") is True
+
+
 def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
     harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
     record = harnesses.get("claude") if isinstance(harnesses, dict) else None
@@ -286,10 +298,10 @@ def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
 # workspace") that derails a judge prompt on an empty cwd, so neutralize that
-# framing. The no-mutation clause is load-bearing for cursor/droid/kimi, whose
-# read-only call has no CLI sandbox — the prompt is the only write boundary there
-# (codex/claude/grok also get a real read-only sandbox flag). Work-level call is
-# left raw — it may legitimately act in the cwd.
+# framing. The no-mutation clause is load-bearing for droid/kimi, whose read-only
+# call has no CLI-side boundary — the prompt is the only write boundary there
+# (codex/claude/grok get a real read-only sandbox flag, and cursor now takes
+# --mode ask). Work-level call is left raw — it may legitimately act in the cwd.
 CALL_READONLY_PREAMBLE = (
     "You are being called to respond to the following prompt directly. There is "
     "no repository, working tree, or codebase to inspect, open, or review, and "
@@ -563,6 +575,44 @@ def _preflight_codex_output_schema(
     # Property order drives generation order under strict structured output, so
     # the normalized schema must keep the author's key order.
     return json.dumps(normalized), warnings
+
+
+def _preflight_claude_output_schema(
+    engine: str, output_schema: str | None, *, schema_text: str | None = None
+) -> None:
+    """Refuse a direct Claude --output-schema the API would reject.
+
+    Claude enforces the schema natively, so an ineligible one fails after the
+    launch rather than before it. The eligibility rule itself belongs to
+    structured_output, which owns the same decision on the workflow path; this
+    only asks and reports the reason.
+    """
+    if engine != "claude" or (output_schema is None and schema_text is None):
+        return
+    try:
+        schema = json.loads(
+            schema_text
+            if schema_text is not None
+            else Path(str(output_schema)).read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        raise DelegateError(
+            "invalid_output_schema",
+            f"Claude output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DelegateError(
+            "invalid_output_schema", f"Output schema is not readable: {output_schema}"
+        ) from exc
+    reason = structured_output.native_schema_eligible("claude", schema)
+    if reason is None:
+        return
+    raise DelegateError(
+        "schema_not_native",
+        f"Claude cannot enforce this --output-schema natively: {reason}. Use a schema "
+        "Claude accepts, or run the stage through a workflow, which falls back to "
+        "prompt-and-parse." + DRY_RUN_HINT,
+    )
 
 
 def _completion_report_prompt_mode(
@@ -1628,7 +1678,7 @@ def _build_normalized_launch(
             auth_profile_override=global_options.auth_profile,
             output_schema=spec.output_schema,
             output_schema_text=launch.output_schema_text,
-            warnings=(*output_schema_warnings, *isolation_warnings),
+            warnings=(*launch.warnings, *output_schema_warnings, *isolation_warnings),
             cleanup_workspace=cleanup_workspace,
             call_read_only=launch.read_only,
             pure=launch.pure,
@@ -2757,7 +2807,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.mode,
         build.resolved.path,
         model,
-        build.prompt,
         stream_capture=build.stream_capture,
         call_read_only=build.call_read_only,
         pure=build.pure,
@@ -2768,8 +2817,9 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model=model,
         argv=argv,
         model_alias=build.model_alias,
-        prompt_transport=PROMPT_TRANSPORT_ARGV,
-        display_argv=redacted_prompt_argv(argv),
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
+        stdin_text=build.prompt,
+        display_argv=list(argv),
         warnings=tuple(warnings),
         **_model_context_kwargs(model, capability_model_source),
         **reasoning_kwargs,
@@ -2976,6 +3026,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
         output_schema=schema_contents,
         persona_file=build.persona_transport == "native-file",
+        permission_prompts_supported=_claude_permission_prompts_supported(build.discovery),
         resumable=build.resumable,
         persist_session=build.persist_session,
         resume_session_id=build.resume_session_id,
@@ -3113,6 +3164,12 @@ def _opencode_env_overrides(
         env["OPENCODE_PERMISSION"] = (
             OPENCODE_PURE_PERMISSION_JSON if pure else OPENCODE_SAFE_PERMISSION_JSON
         )
+        # OpenCode reads ~/.claude/CLAUDE.md and .claude/skills by default, so a
+        # read-only review would inherit the operator's global Claude Code
+        # instructions and any skills in the mirrored workspace. --pure does not
+        # cover this: it only skips external plugins. The permission deny-all
+        # still binds, so this is instruction surface, not write capability.
+        env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
     return env
 
 
@@ -3267,6 +3324,55 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mode: str) -> None:
+    """Refuse a pinned Claude run whose selector can never be verified as served.
+
+    Claude answers with a fully-dated served model id, so pinned continuity
+    compares the requested selector against that id. `opus`, `sonnet`, `haiku`,
+    and `fable` still name a family segment the served id carries, so they stay
+    checkable. `best`, `opusplan`, and `default` name no family at all: whichever
+    model they resolve to is the provider's choice, so the run could only end as
+    a mid-launch continuity failure after the workspace and prompt were prepared.
+    """
+    if engine != "claude" or continuity_mode != "pinned" or not model:
+        return
+    if claude_alias_base(model) not in CLAUDE_UNPINNABLE_ALIASES:
+        return
+    raise DelegateError(
+        "unsupported_continuity_mode",
+        f"--continuity-mode pinned cannot verify the Claude alias {model!r}: it names no "
+        "model family, and Claude reports a dated served id rather than the alias. Pin a "
+        "concrete model id (for example claude-opus-5), use a family alias (opus, sonnet, "
+        "haiku, fable), or run with --continuity-mode fungible." + DRY_RUN_HINT,
+    )
+
+
+def _omp_catalog_absence_warning(
+    model: str | None, discovery: JsonObject | None
+) -> tuple[str, ...]:
+    """Warn when a resolved omp selector is not in the discovered catalog.
+
+    omp resolves --model by exact provider/modelId, then exact bare id, then a
+    provider-scoped fuzzy and substring pass, so a stale exact-form selector does
+    not fail — it can land on a different concrete model, and omp runs under
+    fungible continuity so the substitution is not recorded as a violation. The
+    operator's alias is never rewritten and the launch is never refused: an empty
+    or missing catalog is absence of evidence, not evidence of absence.
+    """
+    if not model:
+        return ()
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("omp") if isinstance(harnesses, dict) else None
+    catalog = record.get("models") if isinstance(record, dict) else None
+    if not isinstance(catalog, dict) or not catalog or model in catalog:
+        return ()
+    return (
+        f"omp model {model!r} is absent from the discovered catalog; omp resolves an "
+        "unknown selector by fuzzy match, so the run may be served by a different "
+        "model. Check `delegate models omp --live`.",
+    )
+
+
 def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     omp = build.config["omp"]
@@ -3321,7 +3427,7 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.mode,
         model,
         resolved_thinking,
-        build.prompt,
+        build.resolved.path,
         call_read_only=build.call_read_only,
         pure=build.pure,
         persist_session=build.persist_session,
@@ -3331,9 +3437,14 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model=model,
         argv=argv,
         model_alias=build.model_alias,
-        prompt_transport=PROMPT_TRANSPORT_ARGV,
-        display_argv=redacted_prompt_argv(argv, replacement=OMP_PROMPT_REDACTION),
-        warnings=(*capability_warnings, *fallback_warnings),
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
+        stdin_text=build.prompt,
+        display_argv=list(argv),
+        warnings=(
+            *capability_warnings,
+            *fallback_warnings,
+            *_omp_catalog_absence_warning(model, build.discovery),
+        ),
         **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, thinking_source),
     )
@@ -3370,7 +3481,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         argv=argv,
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
-        display_argv=redacted_prompt_argv(argv, replacement=KIMI_PROMPT_REDACTION),
+        display_argv=redacted_prompt_argv(argv),
         **_model_context_kwargs(capability_model, capability_model_source),
     )
 
@@ -3458,6 +3569,7 @@ def _build_request_for_workspace(
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
         engine, output_schema, schema_text=output_schema_text
     )
+    _preflight_claude_output_schema(engine, output_schema, schema_text=output_schema_text)
     # Tracked runs record the schema text in the manifest so resume can
     # re-materialize it: codex stores its normalized preflight form, claude the
     # raw text it inlines as --json-schema. Call mode has no manifest.
@@ -3588,6 +3700,7 @@ def _build_request_for_workspace(
             resume_session_id=resume_session_id,
         ),
     )
+    _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})
     if isolation_context is not None and isolation_context.isolation_lifecycle == "persistent":

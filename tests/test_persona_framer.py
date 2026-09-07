@@ -42,7 +42,8 @@ class PersonaFramerTests(CommandTestBase):
         "omp",
     )
     _SAFE_ENGINES = tuple(engine for engine in _ENGINES if engine != "devin")
-    _TRANSPORT_ENGINES = (("argv", "cursor"), ("stdin", "codex"), ("file", "droid"))
+    # Kimi is the last argv-transport engine; cursor and omp moved to stdin.
+    _TRANSPORT_ENGINES = (("argv", "kimi"), ("stdin", "codex"), ("file", "droid"))
 
     def _dirty_repo(self):
         repo = make_git_repo(with_commit=True)
@@ -144,7 +145,6 @@ class PersonaFramerTests(CommandTestBase):
                 self.assertEqual(prompt.count("Note: "), 1)
 
     def test_prompt_enforced_builders_do_not_self_prefix_when_framer_marks_prompt_complete(self):
-        cursor = argv_builders.build_cursor_argv(["agent"], "safe", "/repo", "model", "RAW PROMPT")
         droid = argv_builders.build_droid_argv(
             "droid",
             "safe",
@@ -157,7 +157,6 @@ class PersonaFramerTests(CommandTestBase):
             {"binary": "kimi"}, "safe", "/repo", None, "RAW PROMPT"
         )
 
-        self.assertEqual(cursor[-1], "RAW PROMPT")
         self.assertEqual(droid[-1], "RAW PROMPT")
         self.assertEqual(kimi[-1], "RAW PROMPT")
 
@@ -391,7 +390,7 @@ class PersonaFramerTests(CommandTestBase):
             ),
             ("short_persona", "the", "USER", 1),
         )
-        engines = (("argv", "cursor"), ("stdin", "codex"), ("file", "droid"))
+        engines = self._TRANSPORT_ENGINES
         for collision, persona, user, note_count in collisions:
             for transport, engine in engines:
                 with self.subTest(collision=collision, transport=transport):

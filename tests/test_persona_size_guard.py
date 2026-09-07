@@ -43,7 +43,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         return len(
             request_build.effective_prompt(
                 prompt,
-                engine="cursor",
+                engine="kimi",
                 mode="work",
                 completion_report_mode=config.COMPLETION_REPORT_MODE_MARKDOWN,
                 persona_text=self.persona_text,
@@ -74,7 +74,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
             [
                 "--cwd",
                 str(self.workspace),
-                "cursor",
+                "kimi",
                 "work",
                 "--persona",
                 "editor",
@@ -93,7 +93,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
         input_path.write_text(
             json.dumps(
                 {
-                    "engine": "cursor",
+                    "engine": "kimi",
                     "mode": "work",
                     "cwd": str(self.workspace),
                     "prompt": prompt,
@@ -144,11 +144,9 @@ class PersonaSizeGuardTests(unittest.TestCase):
             budget=workflow_runtime.Budget(None),
             dry_run=True,
         )
-        workflow_runtime.WorkflowDsl(
-            state, {"defaults": {"engine": "cursor", "mode": "safe"}}
-        ).agent(
+        workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "kimi", "mode": "safe"}}).agent(
             prompt,
-            engine="cursor",
+            engine="kimi",
             mode="safe",
             persona="editor",
         )
@@ -178,7 +176,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
             len(
                 request_build.effective_prompt(
                     "x",
-                    engine="cursor",
+                    engine="kimi",
                     mode="safe",
                     completion_report_mode=config.COMPLETION_REPORT_MODE_MARKDOWN,
                     persona_text=self.persona_text,

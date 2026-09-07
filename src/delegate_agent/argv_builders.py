@@ -16,9 +16,9 @@ from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_m
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
-    CURSOR_PROMPT_REDACTION,
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    KIMI_PROMPT_REDACTION,
     PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
@@ -52,12 +52,31 @@ SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
     engine: f"{label} {_SAFE_REVIEW_BODY}" for engine, label in _SAFE_REVIEW_LABEL_BY_ENGINE.items()
 }
 
+# Cursor documents --mode ask as "Q&A style for explanations and questions
+# (read-only)"; --mode plan is the other read-only mode. ask is what the audit
+# proved live.
+CURSOR_READ_ONLY_MODE = ("--mode", "ask")
+
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
+
+# Claude Code 2.1.259 added --permission-prompts; 2.1.263 documents "none" as
+# "nobody: anything that would prompt is denied automatically; the permission
+# mode still decides everything else". Delegate's read-only modes otherwise rely
+# on there being no approver in -p, which is incidental rather than stated. An
+# unknown flag is an immediate usage error, so this is emitted only when
+# discovery proved the installed binary lists it.
+CLAUDE_READ_ONLY_PERMISSION_PROMPTS = ("--permission-prompts", "none")
 
 CLAUDE_SAFE_ALLOWED_TOOLS = (
     "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
     "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
 )
+
+# omp's tools.approvalMode schema default is yolo, but a user- or project-level
+# config.yml can set always-ask or write, which silently downgrades a work run to
+# read-only with no Delegate-side signal. Work capability is a property of the
+# invocation, not of ambient config.
+OMP_WORK_APPROVAL = ("--approval-mode", "yolo")
 
 PI_FAMILY_SAFE_LOCKDOWN = {
     "pi": (
@@ -69,7 +88,7 @@ PI_FAMILY_SAFE_LOCKDOWN = {
         "--no-approve",
     ),
     "omp": (
-        # --tools read is NOT self-enforcing in omp 17.0.4 (the write/bash/python
+        # --tools read is NOT self-enforcing in omp 18.1.13 (the write/bash/python
         # tools still execute under it). --approval-mode always-ask is the load-
         # bearing flag: in headless -p there is no approver, so every write/exec
         # tool call auto-denies while the read capability stays auto-allowed. It
@@ -87,11 +106,16 @@ PI_FAMILY_SAFE_LOCKDOWN = {
 }
 
 
-def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDACTION) -> list[str]:
+def redacted_prompt_argv(argv: list[str]) -> list[str]:
+    """Replace a trailing argv prompt with a placeholder for parent-facing output.
+
+    Kimi is the only engine left on argv transport; cursor and omp moved to
+    stdin, where there is no argv prompt to hide.
+    """
     if not argv:
         return []
     redacted = list(argv)
-    redacted[-1] = replacement
+    redacted[-1] = KIMI_PROMPT_REDACTION
     return redacted
 
 
@@ -149,7 +173,6 @@ def build_cursor_argv(
     mode: str,
     workspace: str,
     model: str,
-    prompt: str,
     *,
     stream_capture: bool = True,
     call_read_only: bool = False,
@@ -162,17 +185,30 @@ def build_cursor_argv(
         argv.extend(["--approve-mcps", "--force"])
     elif mode == MODE_CALL:
         # Call defaults to work-level capability ("work minus a repo"); --read-only
-        # drops the write flags for the stateless judge/completion contract.
-        if not call_read_only:
+        # drops the write flags for the stateless judge/completion contract and
+        # takes the harness-enforced read-only mode.
+        if call_read_only:
+            argv.extend(CURSOR_READ_ONLY_MODE)
+        else:
             argv.extend(["--approve-mcps", "--force"])
+    elif mode == MODE_SAFE:
+        # `-p` alone "has access to all tools, including write and shell" per
+        # Cursor's parameter reference, so without a mode flag the read-only
+        # claim rested on the prompt prefix and the isolated workspace copy.
+        # `--mode ask` is documented read-only and is the mode the live stdin
+        # proof used.
+        argv.extend(CURSOR_READ_ONLY_MODE)
     else:
         validate_mode(mode)
     if resume_session_id is not None:
         argv.extend(["--resume", resume_session_id])
+    # The prompt rides stdin (verified live on 2026.09.02-c22c1a3: a piped prompt
+    # with no argv positional is echoed back as the user message), so it never
+    # reaches /proc/<pid>/cmdline.
     if stream_capture:
-        argv.extend(["--model", model, "--print", "--output-format", "stream-json", prompt])
+        argv.extend(["--model", model, "--output-format", "stream-json"])
     else:
-        argv.extend(["--model", model, "--output-format", "text", prompt])
+        argv.extend(["--model", model, "--output-format", "text"])
     return argv
 
 
@@ -232,8 +268,11 @@ def build_kimi_argv(
         validate_mode(mode)
     if model:
         argv.extend(["--model", model])
-    if stream_capture:
-        argv.extend(["--output-format", "stream-json"])
+    # Kimi resolves the output format from --output-format, then
+    # KIMI_MODEL_OUTPUT_FORMAT, then "text", and it honours that environment
+    # variable in prompt mode — which is every Delegate launch. Pin the format
+    # explicitly on both branches so an ambient export cannot flip a run.
+    argv.extend(["--output-format", "stream-json" if stream_capture else "text"])
     argv.extend(["--prompt", prompt])
     return argv
 
@@ -254,6 +293,7 @@ def build_claude_argv(
     persist_session: bool = False,
     resume_session_id: str | None = None,
     resumable: bool = False,
+    permission_prompts_supported: bool = False,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
     # Call mode reads one JSON envelope; tracked safe/work runs keep stream-json
@@ -295,6 +335,8 @@ def build_claude_argv(
                 "--strict-mcp-config",
             ]
         )
+        if permission_prompts_supported:
+            argv.extend(CLAUDE_READ_ONLY_PERMISSION_PROMPTS)
     elif mode == MODE_WORK:
         permission_mode = (
             "bypassPermissions"
@@ -315,6 +357,8 @@ def build_claude_argv(
                     "--strict-mcp-config",
                 ]
             )
+            if permission_prompts_supported:
+                argv.extend(CLAUDE_READ_ONLY_PERMISSION_PROMPTS)
         else:
             argv.extend(["--permission-mode", str(claude.get("workPermissionMode", "auto"))])
     else:
@@ -498,8 +542,8 @@ def _build_pi_family_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
-    prompt: str | None = None,
     *,
+    workspace: str | None = None,
     call_read_only: bool = False,
     pure: bool = False,
     persist_session: bool = False,
@@ -512,29 +556,26 @@ def _build_pi_family_argv(
     if not persist_session and resume_session_id is None:
         argv.append("--no-session")
     argv.extend(["--mode", "json"])
+    if workspace is not None:
+        # omp auto-chdirs to a temp directory when the launch cwd is the home
+        # directory and neither --cwd nor --allow-home is given, so the run would
+        # read and write somewhere other than the workspace the manifest records.
+        # pi's parser has no --cwd, which is why this is opt-in per engine.
+        argv.extend(["--cwd", workspace])
     if resume_session_id is not None:
         argv.append(f"--resume={resume_session_id}")
     if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN[engine])
+    elif engine == "omp" and mode == MODE_WORK:
+        argv.extend(OMP_WORK_APPROVAL)
     if model:
         argv.extend(["--model", model])
     if thinking:
         argv.extend(["--thinking", thinking])
-    if prompt is not None:
-        # The prompt is a bare trailing positional and omp does not honor `--` as
-        # an end-of-options separator, so a prompt whose first char is `-` would be
-        # parsed as a flag (e.g. a lone `--auto-approve` re-enabling writes) and `@`
-        # is omp's file-include sigil. safe/call--read-only never reach here flag-
-        # shaped because the safe prefix / read-only preamble is prepended upstream;
-        # this makes that boundary explicit instead of incidental and also fails
-        # plain call/work closed with a clear error instead of omp's opaque one.
-        if prompt[:1] in ("-", "@"):
-            raise DelegateError(
-                "pi_family_prompt_flag_like",
-                f"{engine} prompt may not start with '-' or '@' (argv transport has no "
-                "end-of-options separator); rephrase, or lead with a space or period.",
-            )
-        argv.append(prompt)
+    # Both forks read the prompt from non-TTY stdin (omp 18.1.13 `src/main.ts`
+    # reads piped input for every non-protocol mode, and `--mode json` is not a
+    # protocol mode), so neither carries a positional prompt: no ARG_MAX ceiling,
+    # no flag-shaped-prompt hazard, and nothing prompt-shaped in the child argv.
     return argv
 
 
@@ -563,7 +604,7 @@ def build_omp_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
-    prompt: str,
+    workspace: str,
     *,
     call_read_only: bool = False,
     pure: bool = False,
@@ -576,7 +617,7 @@ def build_omp_argv(
         mode,
         model,
         thinking,
-        prompt,
+        workspace=workspace,
         call_read_only=call_read_only,
         pure=pure,
         persist_session=persist_session,
@@ -627,10 +668,16 @@ def build_codex_argv(
             sandbox_tokens.extend(["-c", "sandbox_workspace_write.network_access=true"])
     if bypass_hook_trust:
         sandbox_tokens.append("--dangerously-bypass-hook-trust")
+    # `--search` and `--ask-for-approval` are declared on codex's interactive TUI
+    # parser, not on the shared options the `exec` subcommand inherits, so codex
+    # parsed both and dropped them: webSearch bought nothing under the read-only
+    # and workspace-write sandboxes, and the safe-mode approval contract rested on
+    # an inert flag. The equivalent config overrides ride `-c` inside the exec
+    # scope, which exec does read.
     if policy.get("webSearch") is True:
-        argv.append("--search")
+        sandbox_tokens.extend(["-c", 'web_search="live"'])
     if not bypass_sandbox:
-        argv.extend(["--ask-for-approval", "never"])
+        sandbox_tokens.extend(["-c", 'approval_policy="never"'])
     if codex.get("profile"):
         argv.extend(["--profile", str(codex["profile"])])
     if model:
