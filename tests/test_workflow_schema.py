@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from typing import ClassVar
 
+from delegate_agent import structured_output
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 from delegate_agent.workflows import schema as workflow_schema
@@ -205,6 +206,38 @@ class CodexNativeSchema(unittest.TestCase):
             "properties": {"summary": {"type": "string"}},
         }
         self.assertIs(workflow_runtime._codex_native_schema(schema), schema)
+
+
+class NativeSchemaEligibility(unittest.TestCase):
+    def test_native_roots_require_an_explicit_object_type(self) -> None:
+        ineligible = (
+            {"type": "array", "items": {"type": "string"}},
+            {},
+            {"enum": ["a", "b"]},
+            {"type": ["object", "null"]},
+            {"properties": {"value": {"type": "string"}}},
+            {"type": "array", "properties": {}},
+        )
+        for engine in ("codex", "claude"):
+            for schema in ineligible:
+                with self.subTest(engine=engine, schema=schema):
+                    self.assertIsNotNone(structured_output.native_schema_eligible(engine, schema))
+            with self.subTest(engine=engine, schema="object"):
+                self.assertIsNone(
+                    structured_output.native_schema_eligible(engine, {"type": "object"})
+                )
+
+    def test_only_claude_rejects_an_oversize_serialized_schema(self) -> None:
+        empty = {"type": "object", "description": ""}
+        overhead = len(json.dumps(empty).encode("utf-8"))
+        at_limit = {
+            "type": "object",
+            "description": "x" * (structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES - overhead),
+        }
+        under_limit = {**at_limit, "description": at_limit["description"][:-1]}
+        self.assertIsNone(structured_output.native_schema_eligible("codex", at_limit))
+        self.assertIsNotNone(structured_output.native_schema_eligible("claude", at_limit))
+        self.assertIsNone(structured_output.native_schema_eligible("claude", under_limit))
 
 
 class ResumeExhaustedKeys(unittest.TestCase):
