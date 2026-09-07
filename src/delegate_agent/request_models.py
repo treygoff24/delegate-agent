@@ -243,6 +243,9 @@ class Request:
     # Bounded wait for the workspace registry lock. Finalization publishes a
     # WAL when this budget expires; launch admission fails before spawning.
     registry_lock_timeout_seconds: float = 120.0
+    # Per-stream retained-output ceiling, pinned from validated config before
+    # any tracked context or child is created.
+    tracked_stream_max_bytes: int | None = None
     forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
