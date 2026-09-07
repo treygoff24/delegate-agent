@@ -10,8 +10,9 @@ from subprocess import CompletedProcess
 from unittest import mock
 
 from delegate_agent import config, describe_payload, run_registry, runner
-from delegate_agent.cli import parse_cli, request_from_parsed
+from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
+from delegate_agent.request_build import request_from_parsed
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 

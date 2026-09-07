@@ -1,7 +1,7 @@
 import unittest
 
-from delegate_agent import cli_parser
-from delegate_agent.cli import DelegateError, parse_cli
+from delegate_agent.cli_parser import parse_cli
+from delegate_agent.errors import DelegateError
 
 
 class FollowupParserTests(unittest.TestCase):
@@ -19,12 +19,12 @@ class FollowupParserTests(unittest.TestCase):
             ]
         )
 
-        self.assertIsNotNone(parsed.followup)
-        self.assertEqual(parsed.followup.handle, "run-1")
-        self.assertEqual(parsed.followup.timeout, 120)
-        self.assertTrue(parsed.followup.dry_run)
+        self.assertIsNotNone(parsed.payload)
+        self.assertEqual(parsed.payload.handle, "run-1")
+        self.assertEqual(parsed.payload.timeout, 120)
+        self.assertTrue(parsed.payload.dry_run)
         self.assertEqual(
-            parsed.followup.prompt_parts,
+            parsed.payload.prompt_parts,
             ["--model", "literal prompt part", "--fast"],
         )
 
@@ -37,10 +37,10 @@ class FollowupParserTests(unittest.TestCase):
                 "run-1",
             ]
         )
-        self.assertIsNotNone(parsed.followup)
-        self.assertEqual(parsed.followup.handle, "run-1")
-        self.assertEqual(parsed.followup.prompt_file, "prompt.md")
-        self.assertEqual(parsed.followup.prompt_parts, [])
+        self.assertIsNotNone(parsed.payload)
+        self.assertEqual(parsed.payload.handle, "run-1")
+        self.assertEqual(parsed.payload.prompt_file, "prompt.md")
+        self.assertEqual(parsed.payload.prompt_parts, [])
 
     def test_followup_rejects_missing_prompt_file_arg(self):
         with self.assertRaises(DelegateError) as caught:
@@ -53,14 +53,11 @@ class FollowupParserTests(unittest.TestCase):
         self.assertEqual(caught.exception.error, "ambiguous_prompt_source")
 
     def test_followup_is_allowed_for_auth_profiles_and_groups(self):
-        self.assertIn("followup", cli_parser.AUTH_PROFILE_SUBCOMMANDS)
-        self.assertIn("followup", cli_parser.GROUP_SUBCOMMANDS)
         parsed = parse_cli(["--auth-profile", "work", "--group", "batch", "followup", "run-1"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertEqual(parsed.global_options.group, "batch")
 
     def test_followup_is_allowed_for_notify(self):
-        self.assertIn("followup", cli_parser.NOTIFY_SUBCOMMANDS)
         parsed = parse_cli(["--notify", "room:ops", "followup", "run-1"])
         self.assertEqual(parsed.global_options.notify, "room:ops")
 
@@ -86,11 +83,11 @@ class FollowupParserTests(unittest.TestCase):
 
     def test_followup_accepts_timeout_and_dry_run(self):
         parsed = parse_cli(["followup", "--timeout", "45", "--dry-run", "codex-1", "do more"])
-        self.assertIsNotNone(parsed.followup)
-        self.assertEqual(parsed.followup.handle, "codex-1")
-        self.assertEqual(parsed.followup.timeout, 45)
-        self.assertTrue(parsed.followup.dry_run)
-        self.assertEqual(parsed.followup.prompt_parts, ["do more"])
+        self.assertIsNotNone(parsed.payload)
+        self.assertEqual(parsed.payload.handle, "codex-1")
+        self.assertEqual(parsed.payload.timeout, 45)
+        self.assertTrue(parsed.payload.dry_run)
+        self.assertEqual(parsed.payload.prompt_parts, ["do more"])
 
 
 if __name__ == "__main__":

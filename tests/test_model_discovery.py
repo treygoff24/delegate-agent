@@ -129,29 +129,29 @@ class ModelsCommandParseTests(unittest.TestCase):
     def test_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "cursor", "--live"])
         self.assertEqual(parsed.subcommand, "models")
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "cursor")
-        self.assertTrue(parsed.inspection.live)
-        self.assertFalse(parsed.inspection.summary)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "cursor")
+        self.assertTrue(parsed.payload.live)
+        self.assertFalse(parsed.payload.summary)
 
     def test_opencode_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "opencode", "--live"])
         self.assertEqual(parsed.subcommand, "models")
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "opencode")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "opencode")
+        self.assertTrue(parsed.payload.live)
 
     def test_pi_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "pi", "--live"])
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "pi")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "pi")
+        self.assertTrue(parsed.payload.live)
 
     def test_omp_engine_and_live_parse(self):
         parsed = self.parse_cli(["models", "omp", "--live"])
-        assert parsed.inspection is not None
-        self.assertEqual(parsed.inspection.engine, "omp")
-        self.assertTrue(parsed.inspection.live)
+        assert parsed.payload is not None
+        self.assertEqual(parsed.payload.engine, "omp")
+        self.assertTrue(parsed.payload.live)
 
 
 class LiveProbeParseHelpersTests(unittest.TestCase):

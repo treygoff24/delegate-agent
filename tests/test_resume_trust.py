@@ -174,7 +174,7 @@ class ResumeTrustTests(unittest.TestCase):
                 cli.DEFAULT_CONFIG,
                 stderr=io.StringIO(),
             )
-            self.assertIn(tampered, plan.parsed.launch.prompt_parts[0])
+            self.assertIn(tampered, plan.parsed.payload.prompt_parts[0])
 
     def test_bare_handle_ignores_unrelated_hardlinked_record(self):
         with tempfile.TemporaryDirectory() as tmp:

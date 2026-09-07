@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli_parser, mail, request_build, run_registry, runner
 from delegate_agent import config as delegate_config
-from delegate_agent import mail, request_build, run_registry, runner
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
@@ -104,8 +104,8 @@ class MailGatingTests(CommandTestBase):
                 self.assertNotIn(mail.MAIL_PROMPT_SUFFIX, disabled.prompt)
 
     def test_mail_push_is_plumbed_through_input_request_dry_run_context_and_manifest(self):
-        parsed = self.delegate.parse_cli(["codex", "work", "--mail-push", "prompt"])
-        self.assertTrue(parsed.launch.mail_push)
+        parsed = cli_parser.parse_cli(["codex", "work", "--mail-push", "prompt"])
+        self.assertTrue(parsed.payload.mail_push)
         self.assertIn("mailPush", request_build.RUN_INPUT_KEYS)
 
         request = self.build_git_request(
@@ -156,7 +156,7 @@ class MailGatingTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.parse_cli(
+            parsed = cli_parser.parse_cli(
                 ["--cwd", str(workspace), "run", "--input-json", str(input_path)]
             )
             request = request_build.request_from_input_json(parsed, self._config(True))

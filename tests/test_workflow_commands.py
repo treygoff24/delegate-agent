@@ -425,7 +425,7 @@ class WorkflowCommandTests(unittest.TestCase):
             ["--cwd", str(self.workspace), "--notify", "channel:x", "workflow", "run", "s.py"]
         )
         self.assertEqual(parsed.subcommand, "workflow")
-        self.assertEqual(parsed.workflow_command.notify, "channel:x")
+        self.assertEqual(parsed.payload.notify, "channel:x")
 
         # And it is still refused where it genuinely does not apply.
         with self.assertRaises(Exception) as ctx:
@@ -5287,7 +5287,7 @@ class WorkflowCommandTests(unittest.TestCase):
         parsed = ParsedCommand(
             "run",
             global_options=GlobalOptions(json_mode=True, group="wf-bwrap-context"),
-            run_json=RunJsonOptions(str(input_path)),
+            payload=RunJsonOptions(str(input_path)),
         )
         retry_request = request_build.request_from_input_json(
             parsed,
@@ -5479,7 +5479,7 @@ class WorkflowCommandTests(unittest.TestCase):
         parsed = ParsedCommand(
             "run",
             global_options=GlobalOptions(json_mode=True, group="workflow-attachment"),
-            run_json=RunJsonOptions(str(input_path)),
+            payload=RunJsonOptions(str(input_path)),
         )
         request = request_build.request_from_input_json(
             parsed,

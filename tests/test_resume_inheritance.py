@@ -322,8 +322,8 @@ class ResumeInheritanceTests(ResumeFixture):
                 self.loaded_config(),
                 stderr=io.StringIO(),
             )
-        self.assertIsNone(plan.parsed.launch.output_schema)
-        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertIsNone(plan.parsed.payload.output_schema)
+        self.assertEqual(plan.parsed.payload.output_schema_text, schema_text)
         self.assertFalse(list((self.workspace / ".delegate" / "tmp").glob("resume-schema-*")))
         with mock.patch.object(request_build, "resolve_output_schema") as resolve:
             request = self.delegate.request_from_parsed(
@@ -358,7 +358,7 @@ class ResumeInheritanceTests(ResumeFixture):
                 plan.parsed, self.loaded_config(), io.StringIO()
             )
         self.assertNotIn("output schema dropped", stderr.getvalue())
-        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertEqual(plan.parsed.payload.output_schema_text, schema_text)
         self.assertEqual(request.argv[request.argv.index("--json-schema") + 1], schema_text)
         self.assertEqual(request.argv[request.argv.index("--output-format") + 1], "stream-json")
         self.assertNotIn(schema_text, self.delegate.argv_utils.public_argv(request))
