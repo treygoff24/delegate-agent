@@ -58,8 +58,10 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 
 - Astra major 2 fixed: Sol followup 8bbbdc0 merged 431ecdf (limit pinned in Request/RunContext). Opus #5/#7 done by operator in 7fed990. Remaining in flight: Astra rmtree fix (runs/278-1-fix.json), Luna minors (runs/opus-minors.json); then Opus #2 fold-in, re-gate, Forgejo push.
 
+- Astra major 1 fixed: eb2d185 merged 3e2ce06. Opus #2 done by operator 2e6609c. Luna minors merged ffac99f. All review findings closed.
+
 ## Gate
-- Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Re-gate after the two review fixes merge.
+- Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Final gate at 2e6609c: see runs/gate-final.log.
 
 ## Rulings
 - Ruling: extended dlg-278.1's write boundary to workflow_attempts.py via followup rather than a new bead — same defect, same lane context; cost if wrong: a slightly larger diff to review in one merge.
