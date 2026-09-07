@@ -258,6 +258,9 @@ def _registry_lock_timeout(ctx: RunContext) -> float:
 def _tracked_stream_max_bytes(ctx: RunContext) -> int:
     if ctx.tracked_stream_max_bytes is not None:
         return ctx.tracked_stream_max_bytes
+    # Normal CLI request construction pins this field from the already-validated
+    # launch config. Late resolution exists only for direct runner callers that
+    # construct RunContext themselves.
     try:
         config, _source = delegate_config.load_config(workspace=Path(ctx.source_cwd))
         delegate_config.validate_config(config)
