@@ -417,6 +417,70 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(result.error, "call_output_invalid")
         self.assertEqual(result.text, "")
 
+    def test_claude_deferred_tool_use_empty_result_is_a_successful_empty_answer(self):
+        """claude 2.1 emits stop_reason tool_deferred with is_error false and result ""."""
+        events = [
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "stop_reason": "tool_deferred",
+                "result": "",
+                "permission_denials": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "deferred_claude.py"
+            script.write_text(
+                f"print({json.dumps(json.dumps(events))})\n",
+                encoding="utf-8",
+            )
+            result = runner_api.execute_call(
+                [sys.executable, str(script)], tmp, harness="claude", pure=True
+            )
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIsNone(result.error)
+
+    def test_claude_empty_result_with_is_error_still_fails(self):
+        """The empty string is a valid answer; `is_error` is what decides the exit."""
+        events = [
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": "",
+                "permission_denials": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "empty_error_claude.py"
+            script.write_text(
+                f"print({json.dumps(json.dumps(events))})\n",
+                encoding="utf-8",
+            )
+            result = runner_api.execute_call(
+                [sys.executable, str(script)], tmp, harness="claude", pure=True
+            )
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.error, "child_failed")
+
+    def test_claude_result_missing_entirely_is_still_call_output_invalid(self):
+        """A `result` event with no `result` key at all is a broken transport."""
+        events = [{"type": "result", "subtype": "success", "is_error": False}]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "no_result_claude.py"
+            script.write_text(
+                f"print({json.dumps(json.dumps(events))})\n",
+                encoding="utf-8",
+            )
+            result = runner_api.execute_call(
+                [sys.executable, str(script)], tmp, harness="claude", pure=True
+            )
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.error, "call_output_invalid")
+
     def test_claude_is_error_result_keeps_typed_usage_limit(self):
         events = [
             {
