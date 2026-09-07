@@ -714,7 +714,12 @@ def _expected_version(
         if match is not None:
             return match.group(0)
     binary_name = Path(selector[0]).name
-    if binary_name in _AMBIGUOUS_VERSION_BASENAMES:
+    named_for_other_harness = explicit and any(
+        binary_name in candidates
+        for other_harness, candidates in _PATH_CANDIDATES.items()
+        if other_harness != harness
+    )
+    if binary_name in _AMBIGUOUS_VERSION_BASENAMES or named_for_other_harness:
         return None
     if not explicit and binary_name not in _PATH_CANDIDATES[harness]:
         return None

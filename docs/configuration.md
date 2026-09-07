@@ -354,6 +354,7 @@ ambient pass returns immediately.
 - `defaultModel`: non-empty model name passed to Cursor.
 - `models`: optional map of local aliases to Cursor model IDs. Used by `--model` and JSON `model`. Alias keys must not collide with mode names (`safe`/`work`/`call`), equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. It needs either a matching `reasoningEffortModels` entry or an exact discovered route for the selected model family. When neither can satisfy a configured default, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting a model. Without an explicit model pin, this map outranks discovered routes. An explicit `--model` blocks the global map; Delegate may still select a different exact same-family selector when discovery corroborates that effort route, and reports the replacement as a warning. If no exact same-family route exists, an explicit effort fails closed while a configured default is ignored with a warning.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
@@ -377,6 +378,7 @@ ambient pass returns immediately.
 - `defaultModel`: optional default model ID used when `--model` is omitted.
 - `models`: local aliases resolved by `--model`, as with other engines. The map may be empty. Alias keys must not be mode names, the engine name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch. When the model has no matching capability declaration, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
 ### `codex`
@@ -402,6 +404,7 @@ ambient pass returns immediately.
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
 - `models`: optional map of local aliases to Codex model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `profile`: optional Codex CLI config overlay name. Codex reads it as a file:
   `--profile <name>` layers `$CODEX_HOME/<name>.config.toml` on top of the base
   user config. It is not a `[profiles.<name>]` table inside `config.toml`, which
@@ -492,6 +495,7 @@ fallback.
 - `defaultModel`: optional Claude model string. `null` lets Claude Code choose its own default.
 - `models`: optional map of local aliases to Claude model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional Claude Code effort string. Delegate validates it against the selected profile's discovered harness enum when available (with bundled native labels as compatibility fallback) and emits it as `--effort`. This allows a newly advertised Claude effort label without requiring a Delegate release.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `workPermissionMode`: Claude Code permission mode for work runs. Allowed values are `acceptEdits`, `auto`, `default`, `dontAsk`, and `plan`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
 - `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to headless calls.
@@ -521,6 +525,7 @@ fallback.
 - `defaultModel`: optional Grok model string. `null` lets Grok choose its own default.
 - `models`: optional map of local aliases to Grok model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional Grok effort string. Delegate validates exact model declarations before using the harness-wide compatibility enum and emits accepted values as `--effort`. A manual `reasoning.capabilities.grok` declaration can teach Delegate a newly released exact model/effort pair.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
 - `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
@@ -547,6 +552,7 @@ fallback.
 - `defaultModel`: optional Kimi model alias. The editable example pins one; the embedded default is `null` so Kimi can use its own configured default.
 - `models`: optional map of local aliases to Kimi model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
 - Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace. Kimi prompt mode auto-approves tool actions, so the isolated workspace is the effective write boundary.
 - Kimi work mode uses prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
@@ -568,6 +574,7 @@ fallback.
 - `defaultModel`: optional Devin model ID. The editable example pins one; the embedded default is `null` so Devin can use its own configured default.
 - `models`: optional map of local aliases to Devin model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - Discover live Devin model IDs with `delegate models devin --live`.
 - Devin safe mode is rejected during preflight because filesystem surveys may require generic `exec`, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review.
 
@@ -601,6 +608,7 @@ fallback.
   selected model. Without exact evidence, Delegate preserves pass-through
   compatibility and reports `opencode_variant_unvalidated`; OpenCode may then
   silently ignore a bogus variant.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 16 MiB (`16777216`), or 64 MiB (`67108864`) for Pi and Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `defaultAgent`: optional OpenCode agent name used when a run does not pass
   `--agent`.
 - `models`: optional map of local aliases. A value may be a model string or an
@@ -634,6 +642,7 @@ provider, including configured custom or local providers.
 - `binary`: path to the Pi executable.
 - `defaultModel`: optional Pi `provider/model` ID. `null` preserves Pi's configured default.
 - `defaultReasoningEffort`: optional `low`, `medium`, `high`, `xhigh`, or `max` default.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 64 MiB (`67108864`) for Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `models`: optional alias map. Values may be model strings or objects with `model` and `thinking`; structured aliases may also pin `off` or `minimal` thinking.
 - Explicit `--reasoning-effort` overrides alias-pinned thinking, which overrides the configured default.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only Pi's `read` tool and disable extensions, skills, prompt templates, and project approval discovery.
@@ -658,6 +667,7 @@ provider, including configured custom or local providers.
 - `binary`: path to the Oh My Pi executable.
 - `defaultModel`: optional `provider/model` ID. `null` preserves Oh My Pi's configured default.
 - `defaultReasoningEffort`: optional `low`, `medium`, `high`, `xhigh`, or `max` default.
+- `trackedStreamMaxBytes`: positive integer retained-stream cap for tracked runs. Defaults to 64 MiB (`67108864`) for Oh My Pi. The 256 MiB transport and 16 MiB per-record ceilings are separate and not configurable.
 - `models`: the same string or `{ "model", "thinking" }` alias shape as `pi.models`; model values containing a colon suffix are rejected.
 - Explicit `--reasoning-effort` overrides alias-pinned thinking, which overrides the configured default.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
