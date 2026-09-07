@@ -1215,7 +1215,7 @@ def describe_payload(
                 "work": grok_work_argv,
                 "workNotes": [
                     "Uses grok.workPermissionMode unless policy.harness.grok.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
-                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh).",
+                    f"Reasoning effort maps to Grok --effort ({', '.join(reasoning.GROK_NATIVE_EFFORTS)}).",
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },
@@ -1262,8 +1262,7 @@ def describe_payload(
                 "work": pi_work_argv,
                 "workNotes": [
                     "All modes use --no-session; Delegate run tracking is the durable record.",
-                    "Reasoning effort maps directly to pi --thinking "
-                    f"({', '.join(reasoning.PI_NATIVE_EFFORTS)}).",
+                    f"Reasoning effort maps directly to pi --thinking ({', '.join(reasoning.PI_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
                 ],
             },
@@ -1271,15 +1270,14 @@ def describe_payload(
                 "safe": omp_safe_argv,
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
-                    "Uses omp -p --mode json --no-session with prompt delivered on stdin.",
+                    "Uses omp -p --mode json --no-session --cwd <workspace> with prompt delivered on stdin.",
                     "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
                     "Oh My Pi 18.1.13 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
                 ],
                 "work": omp_work_argv,
                 "workNotes": [
                     "All modes use --no-session; Delegate run tracking is the durable record.",
-                    "Reasoning effort maps directly to omp --thinking "
-                    f"({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
+                    f"Reasoning effort maps directly to omp --thinking ({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
                 ],
             },
