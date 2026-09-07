@@ -82,14 +82,14 @@ class WorktreeRecordBundle:
     ) -> WorktreeRecordBundle:
         values: list[JsonObject | None] = []
         warnings: list[str] = []
-        root = run_registry.run_directory(registry_root, run_id)
-        for filename in (
-            run_registry.STATE_FILE,
-            run_registry.MANIFEST_FILE,
-            run_registry.SNAPSHOT_FILE,
-        ):
+        readers = (
+            (run_registry.STATE_FILE, run_registry.load_run_state),
+            (run_registry.MANIFEST_FILE, run_registry.load_run_manifest),
+            (run_registry.SNAPSHOT_FILE, run_registry.load_run_snapshot),
+        )
+        for filename, reader in readers:
             try:
-                value = run_registry.read_json_object(root / filename)
+                value = reader(registry_root, run_id)
             except (OSError, ValueError):
                 value = None
                 warnings.append(f"unreadable {filename}")
