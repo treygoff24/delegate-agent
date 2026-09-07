@@ -19,5 +19,6 @@ Updated: 2026-09-07 (simplification installed for local dogfood)
   Installation and rollback: [live runtime](docs/live-runtime.md).
 - Retained worktrees are preserved; Beads export changes remain unstaged.
   Unrelated Claude duplicate-final-text bug: `dlg-y5c`.
-- GitHub push is authorized without a release, but held for the public-history
-  decision recorded in `dlg-4hu`. Forgejo remains current. See `bd ready`.
+- Raw audit/debug artifacts were deleted and ignored under `dlg-ohh`; concise
+  reports remain. Public history is being cleaned before the authorized GitHub
+  push, without a release or force-push. Publication task: `dlg-4hu`.

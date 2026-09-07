@@ -72,3 +72,9 @@ docs/briefs/
 
 # Raw agent/runtime audit artifacts; retain concise sanitized reports instead.
 /docs/receipts/
+/docs/acceptance/
+/docs/evidence/**/generated-*.py
+/docs/evidence/**/trigger-plan.md
+/docs/evidence/**/process-state.txt
+/docs/evidence/**/py-spy-dump.txt
+/docs/evidence/worktree-sweep-*/
