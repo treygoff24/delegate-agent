@@ -1084,7 +1084,10 @@ class HarnessEventsTests(unittest.TestCase):
             acc.ingest_line(line)
 
         self.assertEqual(acc.assistant_text, "")
-        self.assertEqual(acc.events, [])
+        # Only the last line is malformed; the five structured-but-unmodelled
+        # ones are still dropped without an event.
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
+        self.assertEqual(acc.malformed_lines, 1)
         self.assertIsNone(acc.completion_text)
         self.assertIsNone(acc.terminal_status)
 
@@ -1098,7 +1101,60 @@ class HarnessEventsTests(unittest.TestCase):
         kimi = self.events.StreamAccumulator(harness="kimi")
         kimi.ingest_line("plain Kimi progress")
         kimi.ingest_line(json.dumps(["non-object Kimi output"]))
-        self.assertEqual(kimi.events, [])
+        # Recorded as a diagnostic, never as text the run can deliver.
+        self.assertEqual([event.kind for event in kimi.events], ["stream.malformed"] * 2)
+        self.assertEqual(kimi.malformed_lines, 2)
+        self.assertEqual(kimi.assistant_text, "")
+        self.assertIsNone(kimi.recoverable_assistant_text)
+        self.assertIsNone(kimi.current)
+
+    def test_malformed_lines_are_bounded_counted_and_redacted(self):
+        """shared B4: these lines used to vanish with no event and no counter."""
+        acc = self.events.StreamAccumulator(harness="opencode")
+        for index in range(5):
+            acc.ingest_line(f"Error {index}: 401 authentication_error from provider anthropic")
+
+        self.assertEqual(acc.malformed_lines, 5)
+        malformed = [event for event in acc.events if event.kind == "stream.malformed"]
+        self.assertEqual(len(malformed), self.events.MALFORMED_SAMPLE_LIMIT)
+        self.assertEqual(
+            [event.message for event in malformed],
+            [
+                f"Error {index}: 401 authentication_error from provider anthropic"
+                for index in range(3)
+            ],
+        )
+
+    def test_a_malformed_sample_is_bounded_and_redacted(self):
+        acc = self.events.StreamAccumulator(harness="pi")
+        acc.ingest_line("token sk-ant-api03-" + "A" * 400)
+        sample = acc.malformed_samples[0]
+        self.assertLessEqual(len(sample), self.events.MALFORMED_SAMPLE_CHARS)
+        self.assertNotIn("sk-ant-api03-AAAA", sample)
+
+    def test_malformed_lines_alone_do_not_reach_the_raw_stdout_fallback(self):
+        """The runner reads structured_events_seen to decide the parser owned stdout."""
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: fatal: no credentials configured")
+        self.assertGreater(acc.structured_events_seen, 0)
+        self.assertEqual(acc.assistant_text, "")
+
+    def test_a_later_valid_assistant_message_clears_the_textless_state(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line("kimi: warning: retrying")
+        acc.ingest_line(
+            json.dumps({"role": "assistant", "content": "Status: completed\n- recovered"})
+        )
+        self.assertEqual(acc.malformed_lines, 1)
+        self.assertEqual(acc.assistant_text, "Status: completed\n- recovered")
+        self.assertEqual(acc.recoverable_assistant_text, "Status: completed\n- recovered")
+
+    def test_omp_keeps_the_plain_text_fallback(self):
+        """omp shares pi's parser but its stdout carries no raw passthrough."""
+        acc = self.events.StreamAccumulator(harness="omp")
+        acc.ingest_line("omp banner line")
+        self.assertEqual([event.kind for event in acc.events], ["text"])
+        self.assertEqual(acc.malformed_lines, 0)
 
     def test_deeply_nested_json_line_falls_back_to_text_event(self):
         acc = self.events.StreamAccumulator()
@@ -1719,7 +1775,7 @@ class HarnessEventsTests(unittest.TestCase):
 
         acc.ingest_line(line)
 
-        self.assertEqual(acc.events, [])
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
         self.assertIsNone(acc.current)
         self.assertNotIn(secret, acc.assistant_text)
         self.assertIsNone(acc.recoverable_assistant_text)
@@ -1731,7 +1787,7 @@ class HarnessEventsTests(unittest.TestCase):
 
         acc.ingest_line('{"role":"tool","content":"' + secret)
 
-        self.assertEqual(acc.events, [])
+        self.assertEqual([event.kind for event in acc.events], ["stream.malformed"])
         self.assertIsNone(acc.current)
         self.assertNotIn(secret, acc.assistant_text)
         self.assertIsNone(acc.recoverable_assistant_text)
