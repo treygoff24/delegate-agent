@@ -807,7 +807,7 @@ class StreamAccumulator:
             self._ingest_codex_item(payload, completed=event_type == "item.completed")
             return
         if event_type == "turn.completed":
-            self._ingest_codex_turn_completed()
+            self._ingest_codex_turn_completed(payload)
             return
         if event_type == "turn.started":
             self._codex_completion_candidate = None
@@ -1166,6 +1166,13 @@ class StreamAccumulator:
             else:
                 self._codex_completion_candidate = None
             return
+        # Every other item type is activity, not the turn's answer: an
+        # `agent_message` followed by one is preamble. `apply_patch` surfaces as
+        # `file_change`, and there are also `mcp_tool_call`, `collab_tool_call`,
+        # `web_search`, `todo_list`, `reasoning` and `error` items, so clearing
+        # only on `command_execution` let a run that ended in a patch or a
+        # search promote its "I'll start by..." intro as the completion report.
+        self._codex_completion_candidate = None
         if item_type == "command_execution":
             self._ingest_codex_command_execution(item, completed=completed)
 
@@ -1173,12 +1180,6 @@ class StreamAccumulator:
         command = _string_field(item, "command")
         status = _codex_command_status(_string_field(item, "status"), completed=completed)
         kind = "tool.completed" if completed else "tool.started"
-        # Clear the completion candidate: an agent_message followed by a command is
-        # preamble/progress, not the turn's final answer. Only a message emitted
-        # after the last tool activity (then sealed by turn.completed) is promoted,
-        # which is the shape real Codex runs produce. Promoting a pre-command
-        # message would surface an intro line ("I'll start by…") as the report.
-        self._codex_completion_candidate = None
         self.events.append(
             NormalizedEvent(
                 kind=kind,
@@ -1189,7 +1190,10 @@ class StreamAccumulator:
         )
         self.current = _tool_current("command_execution", command)
 
-    def _ingest_codex_turn_completed(self) -> None:
+    def _ingest_codex_turn_completed(self, payload: JsonObject) -> None:
+        usage = _normalize_reported_usage(payload.get("usage"))
+        if usage is not None:
+            self.usage = usage
         if not self._codex_completion_candidate:
             return
         self.completion_text = self._codex_completion_candidate
