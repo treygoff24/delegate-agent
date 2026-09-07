@@ -39,6 +39,7 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - codex-72 = dlg-278.1 (Astra, confirmed): merged d8dc170 (workflow_pinning). Astra found a second seal-before-rename site in workflow_attempts.py:172-174; followup launched on codex-72 (envelope /var/tmp/dlg-lanes/runs/278-1-fu.json) with the write boundary extended. Followup e0df7cf merged. Bead stays open until macOS CI runs (needs a gated GitHub push).
 
 ## Failure modes seen
+- 2026-09-07 ~21:10Z herdr update killed the Claude session and with it the parent processes of codex-73 (dlg-278.2) and codex-77 (dlg-o7i) mid-gate; both marked stale with uncommitted diffs intact. Resumed via `delegate followup codex-73|77 --prompt-file briefs/resume-after-kill.md` (envelopes runs/278-2-fu.json, runs/o7i-fu.json).
 - Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
 
 ## Rulings
