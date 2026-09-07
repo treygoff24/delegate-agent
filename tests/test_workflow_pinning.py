@@ -329,6 +329,24 @@ class WorkflowPinningTests(unittest.TestCase):
 
         self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), 0o500)
 
+    def test_unremovable_runtime_temporary_directory_raises_typed_error(self) -> None:
+        digest = workflow_pinning._runtime_digest(workflow_pinning._runtime_source_files())
+        pool = self.home / workflow_pinning.PIN_ROOT_DIRNAME / workflow_pinning.RUNTIME_DIR
+        partial = pool / f"{digest}.tmp"
+        unsearchable = partial / "src"
+        (unsearchable / "sub").mkdir(parents=True)
+        (unsearchable / "sub").chmod(0o500)
+        # Readable but not searchable: the pre-pass cannot descend, so removal fails.
+        unsearchable.chmod(0o400)
+        partial.chmod(0o500)
+        self.addCleanup(lambda: [p.chmod(0o700) for p in (partial, unsearchable) if p.exists()])
+
+        with self.assertRaises(workflow_pinning.WorkflowPinError) as raised:
+            workflow_pinning._write_runtime_snapshot(self.workspace, home=self.home)
+
+        self.assertEqual(raised.exception.error, "runtime_snapshot_collision")
+        self.assertIn(str(partial), raised.exception.message)
+
     def test_readonly_runtime_temporary_directory_is_rebuilt_before_publish(self) -> None:
         files = workflow_pinning._runtime_source_files()
         digest = workflow_pinning._runtime_digest(files)

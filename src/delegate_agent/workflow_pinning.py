@@ -454,8 +454,14 @@ def _write_runtime_snapshot(
                         "runtime_snapshot_collision",
                         f"runtime snapshot temporary path is unsafe: {temporary_root}",
                     )
-                _make_runtime_directories_writable(temporary_root)
-                shutil.rmtree(temporary_root)
+                try:
+                    _make_runtime_directories_writable(temporary_root)
+                    shutil.rmtree(temporary_root)
+                except OSError as exc:
+                    raise WorkflowPinError(
+                        "runtime_snapshot_collision",
+                        f"stale runtime snapshot could not be removed: {temporary_root} ({exc})",
+                    ) from exc
             for relative, content in files:
                 target = temporary_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
