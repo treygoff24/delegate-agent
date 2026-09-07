@@ -1503,9 +1503,14 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "Cancelled"}))
         self.assertEqual(acc.terminal_status, "cancelled")
+        # The provider-terminal table owns this terminal, as it does for every
+        # other classified stop reason, so the terminal is named for the raw
+        # event type and carries the trusted reason.
         self.assertEqual(
-            acc.terminal_event, {"event": "grok.end", "status": "cancelled", "reason": "Cancelled"}
+            acc.terminal_event,
+            {"event": "end", "status": "cancelled", "reason": "end Cancelled"},
         )
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial report")
 
@@ -1545,6 +1550,37 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
         self.assertIsNone(acc.provider_terminal_state)
         self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "the answer")
+
+    def test_a_cancelled_grok_end_records_exactly_one_terminal(self):
+        """The provider table already recorded it; the end handler must not repeat it."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
+        self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_a_cancelled_codex_turn_records_exactly_one_terminal(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "turn.cancelled"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["cancelled"])
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(acc.provider_terminal_state, "provider_cancelled")
+
+    def test_an_uncancelled_grok_end_still_records_its_own_terminal(self):
+        """The planted negative: the guard must not swallow the ordinary path."""
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "the answer"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "end_turn"}))
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual([event.status for event in completed], ["succeeded"])
         self.assertEqual(acc.completion_text, "the answer")
 
     def test_grok_max_turns_reached_event_is_a_terminal(self):
