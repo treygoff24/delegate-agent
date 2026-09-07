@@ -83,6 +83,8 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "-p",
                 "--trust",
+                "--mode",
+                "ask",
                 "--model",
                 "composer-2.5",
                 "--output-format",
