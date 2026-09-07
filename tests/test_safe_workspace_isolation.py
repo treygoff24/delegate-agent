@@ -78,8 +78,11 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
         self.assertTrue(payload["isolatedWorkspace"])
         self.assertIn("isolation", payload)
-        self.assertEqual(payload["argv"][payload["argv"].index("--mode") + 1], "ask")
+        # cursor safe emits no harness mode flag: both of Cursor's read-only
+        # modes block the shell, so the isolated copy is the boundary here.
+        self.assertNotIn("--mode", payload["argv"])
         self.assertNotIn("--approve-mcps", payload["argv"])
+        self.assertNotIn("--force", payload["argv"])
 
     def test_cleanup_refuses_target_containing_source_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:
