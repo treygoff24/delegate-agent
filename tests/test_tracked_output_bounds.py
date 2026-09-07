@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -7,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import config, run_registry, runner
+from delegate_agent import cli, cli_parser, config, request_build, run_registry, runner
+from delegate_agent.request_models import ResolvedWorkspace
 
 
 class TrackedOutputBoundsTests(unittest.TestCase):
@@ -28,6 +30,68 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             isolated_workspace=False,
             started_at=run_registry.utc_now_iso(),
         )
+
+    def configured_cli_context(
+        self, workspace: Path, configured: dict
+    ) -> tuple[runner.RunContext, list[str]]:
+        parsed = cli_parser.parse_cli(
+            ["--cwd", str(workspace), "--isolation", "none", "omp", "work", "review"]
+        )
+        request = request_build.request_from_parsed(parsed, configured, io.StringIO())
+        registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+        run_id, alias = run_registry.register_run(registry_root, harness="omp")
+        context = cli.make_run_context(
+            registry_root,
+            request,
+            run_id=run_id,
+            alias=alias,
+            source_workspace=ResolvedWorkspace(str(workspace), "directory"),
+        )
+        return context, request.argv
+
+    def test_cli_built_context_and_manifest_pin_configured_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            configured = config.embedded_default_config()
+            configured["omp"]["trackedStreamMaxBytes"] = 8192
+
+            context, argv = self.configured_cli_context(workspace, configured)
+
+            self.assertEqual(context.tracked_stream_max_bytes, 8192)
+            self.assertEqual(runner.build_manifest(context, argv)["trackedStreamMaxBytes"], 8192)
+
+    def test_config_change_after_context_build_does_not_change_enforced_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            config_path = workspace / "config.json"
+            configured = config.embedded_default_config()
+            configured["omp"]["trackedStreamMaxBytes"] = 8192
+            config_path.write_text(json.dumps(configured), encoding="utf-8")
+            context, _argv = self.configured_cli_context(workspace, configured)
+
+            changed = config.embedded_default_config()
+            changed["omp"]["trackedStreamMaxBytes"] = 32768
+            config_path.write_text(json.dumps(changed), encoding="utf-8")
+            script = (
+                "import os\nchunk = b'x' * 4095 + b'\\n'\n"
+                "for _ in range(4):\n    os.write(1, chunk)\n"
+            )
+
+            with (
+                mock.patch.dict(os.environ, {config.CONFIG_ENV: str(config_path)}),
+                self.assertRaises(runner.RunnerLaunchError) as caught,
+            ):
+                runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "output_limit_exceeded")
+            self.assertIn("configured tracked stream limit of 8192 bytes", caught.exception.message)
 
     def test_tracked_stream_limit_stops_child_and_caps_raw_log(self):
         with tempfile.TemporaryDirectory() as tmp:

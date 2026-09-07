@@ -79,6 +79,7 @@ def from_request(
         stall_seconds=request.stall_seconds,
         process_group_termination_grace_sec=request.process_group_termination_grace_sec,
         registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
+        tracked_stream_max_bytes=request.tracked_stream_max_bytes,
         env_overrides=env,
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution, env

@@ -3756,6 +3756,9 @@ def _build_request_for_workspace(
             registry_lock_timeout_seconds=run_registry.resolve_registry_lock_timeout_seconds(
                 config
             ),
+            tracked_stream_max_bytes=delegate_config.resolve_tracked_stream_max_bytes(
+                config, engine
+            ),
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,
