@@ -77,6 +77,10 @@ class SnapshotView(TypedDict, total=False):
     terminalRecord: JsonObject
     continuityMode: str
     modelProvenance: JsonObject
+    malformedLines: int
+    malformedSamples: list[str]
+    unhandledEventTypes: JsonObject
+    unhandledEventTypesTruncated: bool
 
 
 def merge_snapshot_view(

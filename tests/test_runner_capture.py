@@ -5568,3 +5568,118 @@ class AggregatedUsageCostTests(unittest.TestCase):
                     self._reported(costUsd=bad), self._reported(costUsd=0.5)
                 )
                 self.assertIsNone(aggregated["costUsd"])
+
+
+class StreamDiagnosticsSurfaceTests(unittest.TestCase):
+    """Malformed lines and unknown event types must reach the run record."""
+
+    def setUp(self):
+        self.runner = load_module(RUNNER_PATH, "delegate_runner_diagnostics_under_test")
+
+    def _context(self):
+        return self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="kimi-1",
+            harness="kimi",
+            engine="kimi",
+            mode="safe",
+            model="kimi-latest",
+            source_cwd="/repo",
+            execution_cwd="/repo",
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-07T00:00:00Z",
+        )
+
+    def _record(self, accumulator):
+        return self.runner.build_run_record(
+            self._context(),
+            status="succeeded",
+            accumulator=accumulator,
+            exit_code=0,
+        )
+
+    def test_a_clean_stream_adds_no_diagnostic_keys(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line(json.dumps({"type": "assistant", "text": "done"}))
+
+        record = self._record(accumulator)
+
+        for key in (
+            "malformedLines",
+            "malformedSamples",
+            "unhandledEventTypes",
+            "unhandledEventTypesTruncated",
+        ):
+            self.assertNotIn(key, record)
+
+    def test_malformed_stdout_reaches_the_run_record(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line("Error: could not reach the provider")
+
+        record = self._record(accumulator)
+
+        self.assertEqual(record["malformedLines"], 1)
+        self.assertEqual(len(record["malformedSamples"]), 1)
+        self.assertIn("could not reach the provider", record["malformedSamples"][0])
+        self.assertEqual(record["unhandledEventTypes"], {})
+        self.assertFalse(record["unhandledEventTypesTruncated"])
+
+    def test_an_unknown_event_type_reaches_the_run_record(self):
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+
+        record = self._record(accumulator)
+
+        self.assertEqual(record["unhandledEventTypes"], {"session.resume_hint": 2})
+        self.assertEqual(record["malformedLines"], 0)
+
+    def test_the_snapshot_view_declares_the_diagnostic_fields(self):
+        from delegate_agent.snapshot_view import SnapshotView
+
+        annotations = SnapshotView.__annotations__
+        self.assertIn("malformedLines", annotations)
+        self.assertIn("malformedSamples", annotations)
+        self.assertIn("unhandledEventTypes", annotations)
+        self.assertIn("unhandledEventTypesTruncated", annotations)
+
+    def test_structured_stdout_with_no_text_is_classified_no_assistant_text(self):
+        """The E10 warning must fire when the parser owned stdout but got nothing.
+
+        A kimi run whose every line was malformed exits 0 with no assistant text
+        and no completion; without this branch it is published as a clean
+        success and the operator never learns the answer was never parsed.
+        """
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line("Traceback (most recent call last):")
+
+        quality = self.runner._classify_result_quality(
+            ctx=self._context(),
+            exit_code=0,
+            report_text="",
+            report_written=False,
+            report_source=None,
+            accumulator=accumulator,
+        )
+
+        self.assertEqual(quality, self.runner.RESULT_QUALITY_NO_ASSISTANT_TEXT)
+        warning = self.runner._quality_warning(quality, harness="kimi")
+        self.assertIsNotNone(warning)
+        self.assertIn("no_assistant_text", warning)
+
+    def test_a_stream_the_parser_never_saw_is_not_no_assistant_text(self):
+        """Planted negative: an empty stream is `empty`, not a parse failure."""
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+
+        quality = self.runner._classify_result_quality(
+            ctx=self._context(),
+            exit_code=0,
+            report_text="",
+            report_written=False,
+            report_source=None,
+            accumulator=accumulator,
+        )
+
+        self.assertEqual(quality, self.runner.RESULT_QUALITY_EMPTY)
