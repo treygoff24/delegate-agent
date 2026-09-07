@@ -585,13 +585,9 @@ def _preflight_claude_output_schema(
     Claude enforces the schema natively, so an ineligible one fails after the
     launch rather than before it. The eligibility rule itself belongs to
     structured_output, which owns the same decision on the workflow path; this
-    only asks and reports the reason. The helper is looked up dynamically so a
-    tree without it keeps the previous behaviour instead of refusing everything.
+    only asks and reports the reason.
     """
     if engine != "claude" or (output_schema is None and schema_text is None):
-        return
-    eligible = getattr(structured_output, "native_schema_eligible", None)
-    if not callable(eligible):
         return
     try:
         schema = json.loads(
@@ -608,7 +604,7 @@ def _preflight_claude_output_schema(
         raise DelegateError(
             "invalid_output_schema", f"Output schema is not readable: {output_schema}"
         ) from exc
-    reason = eligible("claude", schema)
+    reason = structured_output.native_schema_eligible("claude", schema)
     if reason is None:
         return
     raise DelegateError(

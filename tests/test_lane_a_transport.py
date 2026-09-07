@@ -23,7 +23,6 @@ from delegate_agent import (
     harness_discovery,
     mail_core,
     request_build,
-    structured_output,
 )
 from delegate_agent import cli_parser as parser_api
 from delegate_agent import (
@@ -160,9 +159,10 @@ class SharedTransportSurfaceTests(unittest.TestCase):
         # the prompt on stdin the flags simply append; a splice would now put
         # them before nothing and is no longer needed.
         with tempfile.TemporaryDirectory() as registry_root:
-            argv = mail_core.wire_work_mail_argv(
+            argv, _display = mail_core.wire_work_mail_launch(
                 "omp",
                 ["omp", "-p", "--mode", "json"],
+                None,
                 Path(registry_root),
                 prompt_transport=transport_api.PROMPT_TRANSPORT_STDIN,
                 isolated_workspace=True,
@@ -775,41 +775,40 @@ class ClaudeNativeSchemaPreflightTests(CommandTestBase):
         )
 
     def test_ineligible_schema_is_refused_with_schema_not_native(self):
-        with (
-            mock.patch.object(
-                structured_output,
-                "native_schema_eligible",
-                create=True,
-                return_value="root type must be object",
-            ),
-            self.assertRaises(errors_api.DelegateError) as caught,
-        ):
+        # Lane S's helper rejects a non-object root; this asserts the direct path
+        # reports that verdict instead of forwarding an argv Claude will reject.
+        with self.assertRaises(errors_api.DelegateError) as caught:
             self._build({"type": "array", "items": {"type": "string"}})
         self.assertEqual(caught.exception.error, "schema_not_native")
-        self.assertIn("root type must be object", caught.exception.message)
+        self.assertIn("object", caught.exception.message)
+
+    def test_an_oversize_schema_is_refused_before_the_argv_is_built(self):
+        # The other half of Lane S's rule: Claude carries the schema in argv, so
+        # a schema over the argv ceiling cannot be launched at all.
+        oversize = {
+            "type": "object",
+            "properties": {f"field_{index}": {"type": "string"} for index in range(12000)},
+        }
+        with self.assertRaises(errors_api.DelegateError) as caught:
+            self._build(oversize)
+        self.assertEqual(caught.exception.error, "schema_not_native")
+        self.assertIn("argv limit", caught.exception.message)
 
     def test_eligible_schema_still_builds(self):
         # The planted negative: an eligible schema must reach argv untouched.
-        with mock.patch.object(
-            structured_output, "native_schema_eligible", create=True, return_value=None
-        ):
-            request = self._build({"type": "object", "properties": {"ok": {"type": "boolean"}}})
+        request = self._build({"type": "object", "properties": {"ok": {"type": "boolean"}}})
         self.assertIn("--json-schema", request.argv)
 
-    def test_the_helper_is_only_asked_about_claude(self):
-        with mock.patch.object(
-            structured_output, "native_schema_eligible", create=True, return_value="nope"
-        ) as helper:
-            self._build(
-                {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
-                engine="codex",
-            )
-        for call in helper.call_args_list:
-            self.assertNotEqual(call.args[0], "codex")
-
-    def test_an_absent_helper_leaves_the_path_unchanged(self):
-        # Lane S's helper may not have landed yet. An absent symbol must leave
-        # claude exactly as it was rather than refusing every schema.
-        with mock.patch.object(structured_output, "native_schema_eligible", None, create=True):
-            request = self._build({"type": "array", "items": {"type": "string"}})
-        self.assertIn("--json-schema", request.argv)
+    def test_codex_keeps_its_own_preflight(self):
+        # The claude branch must not intercept codex, which has a different rule
+        # (strict-mode normalization) and its own error.
+        request = self._build(
+            {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+            engine="codex",
+        )
+        self.assertIn("--output-schema", request.argv)
