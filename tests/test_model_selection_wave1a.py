@@ -8,6 +8,8 @@ import json
 import unittest
 from unittest import mock
 
+from delegate_agent import cli_parser, errors
+from delegate_agent import config as delegate_config
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 
@@ -46,48 +48,45 @@ class ResolveModelSelectionTests(unittest.TestCase):
 
 class ModelOptionParserTests(CommandTestBase):
     def test_model_option_value_ok(self):
-        parsed = self.delegate.parse_cli(["codex", "safe", "--model", "gpt-5.5", "review"])
-        self.assertEqual(parsed.launch.model, "gpt-5.5")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        parsed = cli_parser.parse_cli(["codex", "safe", "--model", "gpt-5.5", "review"])
+        self.assertEqual(parsed.payload.model, "gpt-5.5")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_model_option_on_droid_after_mode(self):
-        parsed = self.delegate.parse_cli(
-            ["droid", "reviewer", "safe", "--model", "raw-id", "review"]
-        )
-        self.assertEqual(parsed.launch.model_alias, "reviewer")
-        self.assertEqual(parsed.launch.model, "raw-id")
-        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+        parsed = cli_parser.parse_cli(["droid", "safe", "--model", "raw-id", "review"])
+        self.assertEqual(parsed.payload.model, "raw-id")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
     def test_model_option_duplicate_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "safe", "--model", "a", "--model", "b", "review"])
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli_parser.parse_cli(["codex", "safe", "--model", "a", "--model", "b", "review"])
         self.assertEqual(ctx.exception.error, "invalid_model")
         self.assertIn("Only one --model is allowed", ctx.exception.message)
 
     def test_model_option_requires_value(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "safe", "--model"])
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli_parser.parse_cli(["codex", "safe", "--model"])
         self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_model_option_rejects_dash_prefixed_value(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "safe", "--model", "--prompt-file", "task.md"])
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli_parser.parse_cli(["codex", "safe", "--model", "--prompt-file", "task.md"])
         self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_model_option_rejects_help_token_as_value(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "safe", "--model", "--help"])
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli_parser.parse_cli(["codex", "safe", "--model", "--help"])
         self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_model_after_prompt_is_prompt_text(self):
-        parsed = self.delegate.parse_cli(["codex", "safe", "review", "--model", "gpt-5.5"])
-        self.assertIsNone(parsed.launch.model)
-        self.assertEqual(parsed.launch.prompt_parts, ["review", "--model", "gpt-5.5"])
+        parsed = cli_parser.parse_cli(["codex", "safe", "review", "--model", "gpt-5.5"])
+        self.assertIsNone(parsed.payload.model)
+        self.assertEqual(parsed.payload.prompt_parts, ["review", "--model", "gpt-5.5"])
 
     def test_droid_model_before_mode_is_not_a_launch_option(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["droid", "--model", "X", "safe"])
-        self.assertEqual(ctx.exception.error, "invalid_mode")
+        with self.assertRaises(errors.DelegateError) as ctx:
+            cli_parser.parse_cli(["droid", "--model", "X", "safe"])
+        self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
 
 
 class EngineModelsConfigTests(unittest.TestCase):
@@ -419,7 +418,7 @@ class ModelOverrideThreadingTests(CommandTestBase):
 
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
 
         # Channel contract: modeless engines route CLI --model through the
@@ -436,8 +435,8 @@ class ModelOverrideThreadingTests(CommandTestBase):
         )
         for argv, engine, expected, channel in cases:
             with self.subTest(engine=engine):
-                parsed = self.delegate.parse_cli(["--cwd", repo.name, *argv])
-                self.assertEqual(parsed.launch.model, expected)
+                parsed = cli_parser.parse_cli(["--cwd", repo.name, *argv])
+                self.assertEqual(parsed.payload.model, expected)
                 captured: list[object] = []
                 original = request_build._engine_request_parts
 
@@ -448,7 +447,7 @@ class ModelOverrideThreadingTests(CommandTestBase):
                 with mock.patch.object(
                     request_build, "_engine_request_parts", side_effect=_capture
                 ):
-                    self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+                    request_build.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(len(captured), 1)
                 build = captured[0]
                 if channel == "override":

@@ -210,8 +210,8 @@ class DroidModelSelectionTests(CommandTestBase):
         parsed = self.delegate.parse_cli(
             ["--cwd", repo.name, "droid", "reviewer", "safe", "--model", "other", "review"]
         )
-        self.assertEqual(parsed.launch.model_alias, "reviewer")
-        self.assertEqual(parsed.launch.model, "other")
+        self.assertEqual(parsed.payload.model_alias, "reviewer")
+        self.assertEqual(parsed.payload.model, "other")
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(ctx.exception.error, "model_conflict")
@@ -226,9 +226,9 @@ class DroidModelSelectionTests(CommandTestBase):
         parsed = self.delegate.parse_cli(
             ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "raw-droid", "review"]
         )
-        self.assertIsNone(parsed.launch.model_alias)
-        self.assertEqual(parsed.launch.mode, "safe")
-        self.assertEqual(parsed.launch.model, "raw-droid")
+        self.assertIsNone(parsed.payload.model_alias)
+        self.assertEqual(parsed.payload.mode, "safe")
+        self.assertEqual(parsed.payload.model, "raw-droid")
         request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "raw-droid")
         _assert_argv_has_model(self, request.argv, "raw-droid")
@@ -240,7 +240,7 @@ class DroidModelSelectionTests(CommandTestBase):
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
         config["droid"]["defaultModel"] = "factory/default-model"
         parsed = self.delegate.parse_cli(["--cwd", repo.name, "dry-run", "droid", "safe", "review"])
-        self.assertIsNone(parsed.launch.model_alias)
+        self.assertIsNone(parsed.payload.model_alias)
         request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "factory/default-model")
         _assert_argv_has_model(self, request.argv, "factory/default-model")
@@ -381,7 +381,7 @@ class DroidModelSelectionTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["droid"]["defaultModel"] = "factory/json-default"
@@ -645,7 +645,7 @@ class CursorModelOverrideTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             request = self.delegate.request_from_input_json(parsed, config)
@@ -671,7 +671,7 @@ class CursorModelOverrideTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
@@ -697,7 +697,7 @@ class CursorModelOverrideTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             # Must not raise invalid_model for mismatch with defaultModel.
@@ -724,7 +724,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["codex"]["models"] = {"fast": "gpt-5.5"}
@@ -775,7 +775,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["droid"]["models"] = {"minimax": "custom:minimax-e2e"}
@@ -803,7 +803,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["droid"]["models"] = {"minimax": "custom:minimax-e2e"}
@@ -831,7 +831,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
                 parsed = self.delegate.ParsedCommand(
                     "run",
                     global_options=self.delegate.GlobalOptions(json_mode=True),
-                    run_json=self.delegate.RunJsonOptions(str(task)),
+                    payload=self.delegate.RunJsonOptions(str(task)),
                 )
                 with self.assertRaises(self.delegate.DelegateError) as ctx:
                     self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -860,7 +860,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
             parsed = self.delegate.ParsedCommand(
                 "run",
                 global_options=self.delegate.GlobalOptions(json_mode=True),
-                run_json=self.delegate.RunJsonOptions(str(task)),
+                payload=self.delegate.RunJsonOptions(str(task)),
             )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)

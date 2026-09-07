@@ -12,7 +12,7 @@ from delegate_agent.workflows import commands, registry
 class WorkflowJsonlCliTests(unittest.TestCase):
     def test_watch_jsonl_flag_is_discoverable_and_watch_only(self):
         parsed = cli_parser.parse_cli(["workflow", "watch", "wf_123456abcdef", "--jsonl"])
-        self.assertTrue(parsed.workflow_command.jsonl)
+        self.assertTrue(parsed.payload.jsonl)
         self.assertIn(
             "--jsonl", {o.flag for o in command_help.COMMAND_SPECS["workflow watch"].options}
         )

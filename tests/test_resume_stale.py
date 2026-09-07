@@ -93,7 +93,7 @@ class ResumeStaleTests(CommandTestBase):
         )
 
         plan = self.build_plan(alias)
-        continuation = plan.parsed.launch.prompt_parts[0]
+        continuation = plan.parsed.payload.prompt_parts[0]
 
         self.assertIn("REPORT IS THE TERMINAL RECORD", continuation)
         self.assertNotIn("SNAPSHOT MUST NOT REPLACE REPORT", continuation)
@@ -155,7 +155,7 @@ class ResumeStaleTests(CommandTestBase):
         finally:
             release.set()
             finalizer.join(timeout=5)
-        continuation = plan.parsed.launch.prompt_parts[0]
+        continuation = plan.parsed.payload.prompt_parts[0]
 
         self.assertNotIn("PARTIAL REPORT FROM BLOCKED FINALIZER", continuation)
         self.assertIn("SNAPSHOT ASSISTANT TEXT", continuation)

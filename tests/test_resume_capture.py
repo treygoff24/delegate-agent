@@ -162,7 +162,7 @@ class ResumeCaptureTests(unittest.TestCase):
                 mock.patch.object(runner, "write_manifest", side_effect=write_manifest),
                 mock.patch.object(
                     worktree_execution.delegate_runner,
-                    "build_state",
+                    "build_run_record",
                     runner.build_run_record,
                     create=True,
                 ),

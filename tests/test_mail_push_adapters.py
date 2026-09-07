@@ -196,7 +196,7 @@ class MailPushAdapterTests(CommandTestBase):
 
     def test_provisioning_is_absent_without_mail_push_flag(self):
         parsed = cli.parse_cli(["claude", "work", "prompt"])
-        self.assertFalse(parsed.launch.mail_push)
+        self.assertFalse(parsed.payload.mail_push)
         self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
     def test_hook_pump_is_classified_as_a_mutation_by_both_python_and_shell_guards(self):

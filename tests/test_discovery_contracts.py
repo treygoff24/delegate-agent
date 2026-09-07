@@ -180,9 +180,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         self.assertEqual(set(arguments), set(actions))
         for action in actions:
             parsed = self.delegate.parse_cli(["workflow", action, *arguments[action]])
-            self.assertEqual(
-                parsed.workflow_command.action, "run" if action == "resume" else action
-            )
+            self.assertEqual(parsed.payload.action, "run" if action == "resume" else action)
             code, out, err = self.run_main(["--json", "workflow", action, "--help"])
             self.assertEqual(code, 0, err)
             self.assertEqual(json.loads(out)["command"], f"workflow {action}")

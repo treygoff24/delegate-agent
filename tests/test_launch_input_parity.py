@@ -457,7 +457,7 @@ class LaunchInputParityTests(unittest.TestCase):
             )
         self.assertEqual(error.exception.error, "workflow_persona_digest_mismatch")
         parsed = cli_parser.parse_cli(["--cwd", str(self.repo), "codex", "work", "task"])
-        parsed.launch.output_schema_text = self.schema.read_text()
+        parsed.payload.output_schema_text = self.schema.read_text()
         inherited = request_build.request_from_parsed(parsed, self.config, io.StringIO())
         _, from_file = self.pair(values={"outputSchema": str(self.schema)})
         self.assertEqual(inherited.output_schema, request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER)
