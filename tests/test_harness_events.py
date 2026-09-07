@@ -60,8 +60,93 @@ class HarnessEventsTests(unittest.TestCase):
             with self.subTest(message=message):
                 acc = self.events.StreamAccumulator(harness="codex")
                 acc.ingest_line(json.dumps({"type": "error", "message": message}))
+                # The run is failed because an error event arrived, but the
+                # typed provider state stays unset: error prose cannot forge it.
                 self.assertIsNone(acc.provider_terminal_state)
-                self.assertIsNone(acc.terminal_status)
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_generic_error_event_records_failed_terminal(self):
+        """shared B1: an error event is a terminal signal on every harness."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Partial answer"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "error", "message": "429 rate limit"}))
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "error", "status": "failed", "reason": "429 rate limit"},
+        )
+        self.assertEqual(acc._last_error_message, "429 rate limit")
+        # The pre-error preamble must not be promoted over the failure.
+        self.assertIsNone(acc.completion_text)
+
+    def test_codex_error_followed_by_a_fresh_sealed_message_recovers(self):
+        """An error the stream recovers from must not fail an exit-zero run."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps({"type": "error", "message": "stream cancelled while reconnecting"})
+        )
+        self.assertEqual(acc.terminal_status, "failed")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed after reconnect."},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.completion_text, "Status: completed after reconnect.")
+
+    def test_error_event_reads_nested_error_message(self):
+        """shared B2: Anthropic/OpenAI-shaped errors nest the text one level down."""
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps({"type": "error", "error": {"message": "429 rate_limit_exceeded"}})
+        )
+
+        self.assertEqual(acc._last_error_message, "429 rate_limit_exceeded")
+        error_events = [event for event in acc.events if event.kind == "error"]
+        self.assertEqual([event.message for event in error_events], ["429 rate_limit_exceeded"])
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "error", "status": "failed", "reason": "429 rate_limit_exceeded"},
+        )
+
+    def test_typed_provider_error_records_exactly_one_terminal(self):
+        """A provider-typed error must not publish a second run.completed."""
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "error", "code": "provider_refusal", "message": "Provider refusal: policy"}
+            )
+        )
+
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(acc.provider_terminal_state, "provider_refusal")
+        self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pi_error_event_still_records_exactly_one_terminal(self):
+        """pi/omp own their error branch; the generic path must not double up."""
+        for harness in ("pi", "omp"):
+            with self.subTest(harness=harness):
+                acc = self.events.StreamAccumulator(harness=harness)
+                acc.ingest_line(json.dumps({"type": "error", "message": "provider exploded"}))
+                completed = [event for event in acc.events if event.kind == "run.completed"]
+                self.assertEqual(len(completed), 1)
+                self.assertEqual(acc.terminal_event["event"], f"{harness}.error")
 
     def test_provider_max_turns_is_typed_from_result_metadata(self):
         acc = self.events.StreamAccumulator(harness="claude")
@@ -1577,20 +1662,22 @@ class HarnessEventsTests(unittest.TestCase):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(json.dumps({"type": "error", "message": long_error}))
         self.assertEqual(acc._last_error_message, long_error)
-        self.assertEqual(acc.events[-1].message, long_error)
-        error_payload = acc.events[-1].to_dict()
+        error_event = next(event for event in acc.events if event.kind == "error")
+        self.assertEqual(error_event.message, long_error)
+        error_payload = error_event.to_dict()
         self.assertTrue(error_payload["truncated"])
         self.assertEqual(error_payload["textChars"], 5000)
         self.assertTrue(error_payload["message"].endswith("…"))
         self.assertEqual(len(error_payload["message"]), self.events.EVENT_TEXT_LIMIT)
         recent, _meta = acc.bounded_recent_events()
-        self.assertEqual(recent[-1]["message"], error_payload["message"])
-        self.assertTrue(recent[-1]["truncated"])
+        recent_error = next(event for event in recent if event["kind"] == "error")
+        self.assertEqual(recent_error["message"], error_payload["message"])
+        self.assertTrue(recent_error["truncated"])
 
         short = "short error"
         short_acc = self.events.StreamAccumulator()
         short_acc.ingest_line(json.dumps({"type": "error", "message": short}))
-        short_payload = short_acc.events[-1].to_dict()
+        short_payload = next(event for event in short_acc.events if event.kind == "error").to_dict()
         self.assertEqual(short_payload["message"], short)
         self.assertNotIn("truncated", short_payload)
         self.assertNotIn("textChars", short_payload)
