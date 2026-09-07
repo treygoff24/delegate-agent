@@ -32,8 +32,8 @@ Also in scope (Trey, mid-turn): put the auto-injected skill-review preamble
    08:27Z: gate on b997f84 PASS 3225 (pushed). Lane F done (24 commits, F1–F21) and merged with no conflicts; final gate running (/var/tmp/gate-final.log). Next: push, final report, PushNotification, worktree cleanup (lane-* worktrees are merged; leave branches). (`delegate codex safe --model astra --reasoning-effort medium`), patch
 4. [done] implement in waves (disjoint files per lane), each lane verified
 5. [done] cross-model review (Opus, Cursor Grok, GLM 5.3) + fix lane F
-6. [running] gate: `tests/acceptance.sh` / `python3 -m pytest -q` + ruff
-7. [ ] commit, push origin, final report + PushNotification
+6. [done] gate: final PASS 3278 on the merged tree (08:35Z) `tests/acceptance.sh` / `python3 -m pytest -q` + ruff
+7. [done] pushed origin; REPORT.md + SMOKE.md written; lane worktrees removed (branches kept); bead dlg-cjz closed
 
 ## Rulings
 - 07:35Z Cursor safe: revert `--mode ask` for `safe` (keep for `call --read-only`). Reason: both cursor read-only modes block the shell (verified live), so reviewers lose git/pytest; the isolated copy was and remains the safe boundary. Cost if wrong: cursor safe stays prompt-enforced read-only, as before this branch.

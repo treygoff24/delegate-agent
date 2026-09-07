@@ -115,7 +115,7 @@ pre-run launch failures.
 ## Verification, stated plainly
 
 - `scripts/gate.sh` (pytest, compileall, ruff check, ruff format, pinned ruff 0.15.15) PASS at every
-  merged checkpoint; final: see the gate line in the closing message.
+  merged checkpoint; final tree: **3278 passed, 15 skipped, 2378 subtests, GATE PASS [ruff 0.15.15]** (/var/tmp/gate-final.log).
 - Live smokes: SMOKE.md (18 rows). Not exercised live: any Kimi/Devin/Droid/OpenCode child; Cursor
   `--resume` with a stdin prompt; Codex session-file flush after `turn.completed` (F5 chose not to arm the
   exit kill rather than prove the timing).
