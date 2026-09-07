@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import cli, command_help, mail, profiles, run_registry
+from delegate_agent import cli_parser as parser_api
+from delegate_agent import command_help, mail, profiles, run_registry
 from delegate_agent.errors import DelegateError
 from tests.mail_test_helpers import mail_temporary_directory
 
@@ -157,7 +158,7 @@ class MailIdentityTests(unittest.TestCase):
         for engine in ("cursor", "codex", "claude", "grok", "devin", "opencode"):
             with self.subTest(engine=engine):
                 with self.assertRaises(DelegateError) as ctx:
-                    cli.parse_cli([engine, "work", "--from", "someone", "prompt"])
+                    parser_api.parse_cli([engine, "work", "--from", "someone", "prompt"])
                 self.assertEqual(ctx.exception.error, "unknown_option")
 
         for name, spec in command_help.COMMAND_SPECS.items():

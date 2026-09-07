@@ -11,7 +11,10 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import config as delegate_config
+from delegate_agent import errors as errors_api
 from delegate_agent import mail, runner
+from delegate_agent import resume_command as resume_api
+from delegate_agent import run_registry as registry_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -420,7 +423,7 @@ class MailPushSeamTests(CommandTestBase):
                 nonlocal binary_validation_calls
                 binary_validation_calls += 1
                 if binary_validation_calls == 2:
-                    raise self.delegate.DelegateError(
+                    raise errors_api.DelegateError(
                         "injected_pre_child_failure", "injected binary validation failure"
                     )
                 original_binary_validator(*args, **kwargs)
@@ -449,7 +452,7 @@ class MailPushSeamTests(CommandTestBase):
                     ],
                     observations=observations,
                 )
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(stdout)["error"], "injected_pre_child_failure")
             self.assertEqual(binary_validation_calls, 2)
             self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
@@ -458,7 +461,7 @@ class MailPushSeamTests(CommandTestBase):
             self._assert_no_private_credentials(workspace, run_path)
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "failed")
-            snapshot = json.loads((run_path / runner.SNAPSHOT_FILE).read_text(encoding="utf-8"))
+            snapshot = registry_api.load_run_snapshot(run_path.parent.parent, run_path.name)
             self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, snapshot["warnings"])
 
     def test_codex_mail_push_direct_context_failure_cleans_credentials_and_warns(self):
@@ -483,7 +486,7 @@ class MailPushSeamTests(CommandTestBase):
                 mock.patch.object(
                     self.delegate,
                     "make_run_context",
-                    side_effect=self.delegate.DelegateError(
+                    side_effect=errors_api.DelegateError(
                         "injected_context_failure", "injected context construction failure"
                     ),
                 ),
@@ -504,7 +507,7 @@ class MailPushSeamTests(CommandTestBase):
                     observations=observations,
                 )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(stdout)["error"], "injected_context_failure")
             self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
             self.assertFalse(observations.exists())
@@ -530,7 +533,7 @@ class MailPushSeamTests(CommandTestBase):
             with mock.patch.object(
                 self.delegate,
                 "public_argv",
-                side_effect=self.delegate.DelegateError(
+                side_effect=errors_api.DelegateError(
                     "injected_argv_failure", "injected manifest argv failure"
                 ),
             ):
@@ -547,7 +550,7 @@ class MailPushSeamTests(CommandTestBase):
                     observations=observations,
                 )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(stdout)["error"], "injected_argv_failure")
             self.assertFalse(observations.exists())
             run_paths = list((workspace / ".delegate" / "runs").iterdir())
@@ -559,7 +562,7 @@ class MailPushSeamTests(CommandTestBase):
         _owner_run_path, owner_manifest = self._only_run(workspace)
         observations.unlink()
         worktree_path = owner_manifest["executionCwd"]
-        original_register = self.delegate.run_registry.register_run
+        original_register = registry_api.register_run
 
         def register_then_remove(*args, **kwargs):
             result = original_register(*args, **kwargs)
@@ -571,9 +574,7 @@ class MailPushSeamTests(CommandTestBase):
             )
             return result
 
-        with mock.patch.object(
-            self.delegate.run_registry, "register_run", side_effect=register_then_remove
-        ):
+        with mock.patch.object(registry_api, "register_run", side_effect=register_then_remove):
             code, stdout, _stderr = self._run_launch(
                 [
                     "--json",
@@ -586,7 +587,7 @@ class MailPushSeamTests(CommandTestBase):
                 ],
                 observations=observations,
             )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(json.loads(stdout)["error"], "worktree_missing")
         self.assertFalse(observations.exists())
         manifests = list((workspace / ".delegate" / "runs").glob("*/manifest.json"))
@@ -617,7 +618,7 @@ class MailPushSeamTests(CommandTestBase):
 
         with (
             mock.patch.object(
-                self.delegate.resume_command,
+                resume_api,
                 "revalidate_attached_target",
                 side_effect=TimeoutError("injected registry lock timeout"),
             ),
@@ -658,7 +659,7 @@ class MailPushSeamTests(CommandTestBase):
         observations.unlink()
         worktree_path = owner_manifest["executionCwd"]
         original_cleanup = mail.cleanup_mail_push_private_homes
-        original_revalidate = self.delegate.resume_command.revalidate_attached_target
+        original_revalidate = resume_api.revalidate_attached_target
         original_resolve = Path.resolve
         revalidated = False
 
@@ -674,14 +675,14 @@ class MailPushSeamTests(CommandTestBase):
 
         def fail_post_revalidation_path_resolution(path: Path, *args, **kwargs) -> Path:
             if revalidated and path == Path(worktree_path):
-                raise self.delegate.DelegateError(
+                raise errors_api.DelegateError(
                     "injected_path_resolution_failure", "injected post-revalidation path failure"
                 )
             return original_resolve(path, *args, **kwargs)
 
         with (
             mock.patch.object(
-                self.delegate.resume_command,
+                resume_api,
                 "revalidate_attached_target",
                 side_effect=revalidate_then_continue,
             ),
@@ -704,7 +705,7 @@ class MailPushSeamTests(CommandTestBase):
             )
 
         self.assertTrue(revalidated)
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertEqual(json.loads(stdout)["error"], "injected_path_resolution_failure")
         self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
         self.assertFalse(observations.exists())
@@ -820,7 +821,7 @@ class MailPushSeamTests(CommandTestBase):
             box = mail.boxes_root(workspace / ".delegate") / manifest["runId"]
             self.assertFalse((box / mail.MAIL_PUSH_CURSOR_FILE_NAME).exists())
             self.assertFalse((box / mail.MAIL_PUSH_SETTINGS_FILE_NAME).exists())
-            snapshot = json.loads((run_path / runner.SNAPSHOT_FILE).read_text(encoding="utf-8"))
+            snapshot = registry_api.load_run_snapshot(run_path.parent.parent, run_path.name)
             events = [
                 json.loads(line)
                 for line in (run_path / runner.EVENTS_JSONL)

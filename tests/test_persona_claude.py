@@ -7,6 +7,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import config as config_api
+from delegate_agent import harness_discovery as discovery_api
+from delegate_agent import prompt_transport as transport_api
+from delegate_agent import request_models as request_types
+from delegate_agent import runner as runner_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -14,9 +19,9 @@ class PersonaClaudeTests(CommandTestBase):
     _SENTINEL = "CLAUDE PERSONA PRIVATE SENTINEL"
 
     def _request(self, discovery: dict[str, object]):
-        config = self.delegate.DEFAULT_CONFIG
+        config = config_api.embedded_default_config()
         with mock.patch.object(
-            self.delegate.harness_discovery,
+            discovery_api,
             "load_discovery_cache",
             return_value=discovery,
         ):
@@ -49,17 +54,17 @@ class PersonaClaudeTests(CommandTestBase):
                 request,
                 run_id="del_20260731T120000Z_abcdef",
                 alias="quiet-otter",
-                source_workspace=self.delegate.ResolvedWorkspace("/repo", "git"),
+                source_workspace=request_types.ResolvedWorkspace("/repo", "git"),
             )
-            manifest = self.delegate.delegate_runner.build_manifest(context, request.display_argv)
+            manifest = runner_api.build_manifest(context, request.display_argv)
             self.assertNotIn(self._SENTINEL, json.dumps(manifest))
 
-            launch_argv, temp_dir = self.delegate.delegate_runner._materialize_prompt_file_argv(
+            launch_argv, temp_dir = runner_api._materialize_prompt_file_argv(
                 request.argv,
                 prompt_file_text=None,
                 prompt_file_placeholder=None,
                 persona_file_text=request.persona_text,
-                persona_file_placeholder=self.delegate.PERSONA_FILE_ARG_PLACEHOLDER,
+                persona_file_placeholder=transport_api.PERSONA_FILE_ARG_PLACEHOLDER,
             )
             try:
                 persona_path = Path(

@@ -8,6 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import errors as errors_api
+from delegate_agent import run_registry as registry_api
+from delegate_agent import worktree_gc as worktree_gc_api
+from delegate_agent import worktree_mgmt as worktree_api
+from delegate_agent import worktree_remove as worktree_remove_api
 from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git  # isort: split
 
 # Imported after the base module, which is what puts src/ on sys.path.
@@ -23,7 +28,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 ["--cwd", path, "--json", "worktree", "prune"],
                 home=fake_home,
             )
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(out)["code"], "prune_filter_required")
 
     def test_worktree_prune_dry_run_mutates_nothing(self):
@@ -67,7 +72,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, matching_branch, matching_wt)
             self._create_worktree_at(path, other_branch, other_wt)
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 group="wave4",
@@ -171,7 +176,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertFalse(payload["effects"]["deletesWorktreePaths"])
             self.assertEqual(payload["reconciledEntries"][0]["reason"], "path_missing")
             self.assertEqual(payload["reconciledEntries"][0]["action"], "marked_missing")
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "missing")
             self.assertNotIn("worktreeRemovedAt", state)
 
@@ -198,19 +203,19 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             execution = Path(fake_home) / "wt" / "orphan"
             run_id, _alias = self._seed_persistent_run(path, execution_cwd=str(execution))
             registry_root = self._registry_root(path)
-            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            manifest = registry_api.load_run_manifest(registry_root, run_id)
             manifest["sourceGitRoot"] = str(Path(fake_home) / "missing-source")
-            self.delegate.run_registry.write_json_atomic(
-                self.delegate.run_registry.run_directory(registry_root, run_id) / "manifest.json",
+            registry_api.write_json_atomic(
+                registry_api.run_directory(registry_root, run_id) / "manifest.json",
                 manifest,
             )
 
-            result = self.delegate.worktree_mgmt.gc_worktrees(registry_root, dry_run=True)
+            result = worktree_gc_api.gc_worktrees(registry_root, dry_run=True)
 
             self.assertEqual(result["orphans"][0]["reason"], "source_root_missing")
-            result = self.delegate.worktree_mgmt.gc_worktrees(registry_root)
+            result = worktree_gc_api.gc_worktrees(registry_root)
             self.assertEqual(result["orphans"][0]["reason"], "source_root_missing")
-            state = self.delegate.run_registry.load_run_state(registry_root, run_id)
+            state = registry_api.load_run_state(registry_root, run_id)
             self.assertEqual(state["worktreeStatus"], "unknown")
 
     def test_worktree_gc_classifies_detached_backlink(self):
@@ -225,9 +230,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._seed_persistent_run(path, execution_cwd=str(execution))
 
-            result = self.delegate.worktree_mgmt.gc_worktrees(
-                self._registry_root(path), dry_run=True
-            )
+            result = worktree_gc_api.gc_worktrees(self._registry_root(path), dry_run=True)
 
             self.assertEqual(result["orphans"][0]["reason"], "detached_backlink")
 
@@ -239,19 +242,17 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._seed_persistent_run(path, execution_cwd=str(execution))
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_worktree_list_paths_with_warning",
                     return_value=({str(execution)}, None),
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "_branch_exists",
                     return_value=False,
                 ),
             ):
-                result = self.delegate.worktree_mgmt.gc_worktrees(
-                    self._registry_root(path), dry_run=True
-                )
+                result = worktree_gc_api.gc_worktrees(self._registry_root(path), dry_run=True)
 
             self.assertEqual(result["orphans"][0]["reason"], "branch_missing")
 
@@ -281,9 +282,9 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertEqual(
                 payload["orphans"][0]["safeAction"], "inspect_path_before_manual_cleanup"
             )
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "unknown")
-            listed = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            listed = worktree_api.list_worktrees(self._registry_root(path))
             entry = listed["entries"][0]
             self.assertEqual(entry["worktreeStatus"], "unknown")
             self.assertIn("worktree path is not registered with git", entry["warnings"])
@@ -302,11 +303,11 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, branch, wt_path)
 
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "porcelain_status",
                 return_value=(None, None, ["git status failed: boom"]),
             ):
-                result = self.delegate.worktree_mgmt.prune_worktrees(
+                result = worktree_gc_api.prune_worktrees(
                     self._registry_root(path),
                     merged=True,
                     dry_run=True,
@@ -329,21 +330,21 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 execution_cwd=wt_path,
             )
             self._create_worktree_at(path, branch, wt_path)
-            branch_failure = self.delegate.worktree_mgmt.BranchRemovalResult(
+            branch_failure = worktree_remove_api.BranchRemovalResult(
                 removed=False,
                 error="fatal: cannot delete branch",
             )
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_remove_api,
                 "_remove_branch",
                 return_value=branch_failure,
             ):
-                result = self.delegate.worktree_mgmt.prune_worktrees(
+                result = worktree_gc_api.prune_worktrees(
                     self._registry_root(path),
                     merged=True,
                 )
             self.assertFalse(result["ok"])
-            self.assertEqual(result["exitCode"], self.delegate.EXIT_USAGE)
+            self.assertEqual(result["exitCode"], errors_api.EXIT_USAGE)
             self.assertEqual(len(result["errors"]), 1)
             self.assertEqual(result["errors"][0]["code"], "branch_remove_failed")
             self.assertEqual(result["removed"][0]["code"], "branch_remove_failed")
@@ -363,7 +364,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, branch, wt_path)
             # sourceHeadRef=None makes creationContext.sourceHeadRef null
             # include_detached=True should override the detached skip
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 include_detached=True,
@@ -387,11 +388,11 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "merged_into_source",
                 return_value=(None, ["merge state unavailable"]),
             ):
-                result = self.delegate.worktree_mgmt.prune_worktrees(
+                result = worktree_gc_api.prune_worktrees(
                     self._registry_root(path),
                     merged=True,
                     dry_run=True,
@@ -402,10 +403,10 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
 
     def _set_run_state(self, repo_path, run_id, **fields):
         registry_root = self._registry_root(repo_path)
-        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
-        state = self.delegate.run_registry.read_json_object(run_path / "state.json") or {}
+        run_path = registry_api.run_directory(registry_root, run_id)
+        state = registry_api.read_json_object(run_path / "state.json") or {}
         state.update(fields)
-        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
+        registry_api.write_json_atomic(run_path / "state.json", state)
 
     def _seed_prunable_tree(self, repo_path, fake_home, alias):
         branch = f"delegate/{alias}"
@@ -422,7 +423,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             run_id = self._seed_prunable_tree(path, fake_home, "cursor-live-owner")
             self._set_run_state(path, run_id, status="running", pid=os.getpid())
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, dry_run=True
             )
 
@@ -442,7 +443,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 pgid=99999999,
             )
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, dry_run=True
             )
 
@@ -460,7 +461,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 pgid=os.getpgid(0),
             )
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, dry_run=True
             )
 
@@ -474,7 +475,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             run_id = self._seed_prunable_tree(path, fake_home, "cursor-live-pgid")
             self._set_run_state(path, run_id, status="succeeded", pgid=os.getpgid(0))
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, dry_run=True
             )
 
@@ -488,7 +489,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             run_id = self._seed_prunable_tree(path, fake_home, "cursor-forced")
             self._set_run_state(path, run_id, status="running", pid=os.getpid())
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, dry_run=True, force=True
             )
 
@@ -503,7 +504,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             worktree = Path(fake_home) / "wt" / alias
             self._set_run_state(path, run_id, status="succeeded", pgid=os.getpgid(0))
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path), merged=True, force=True
             )
 
@@ -518,10 +519,10 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             from datetime import UTC, datetime, timedelta
 
             old_ts = (datetime.now(UTC) - timedelta(days=10)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             recent_ts = (datetime.now(UTC) - timedelta(hours=1)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             branch_old = "delegate/cursor-old"
             wt_path_old = str(Path(fake_home) / "wt" / "cursor-old")
@@ -543,7 +544,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch_old, wt_path_old)
             self._create_worktree_at(path, branch_recent, wt_path_recent)
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 older_than_days=7,
@@ -568,7 +569,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 older_than_days=7,
@@ -587,7 +588,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             from datetime import UTC, datetime, timedelta
 
             old_ts = (datetime.now(UTC) - timedelta(days=2)).strftime(
-                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+                registry_api.UTC_TIMESTAMP_FORMAT
             )
             self._seed_persistent_run(
                 path,
@@ -598,12 +599,12 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
             config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
-            result = self.delegate.worktree_mgmt.maybe_auto_prune(self._registry_root(path), config)
+            result = worktree_gc_api.maybe_auto_prune(self._registry_root(path), config)
             self.assertIsNotNone(result)
-            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            index = registry_api.load_index(self._registry_root(path))
             run_id = index["aliases"].get("cursor-ap")
             self.assertIsNotNone(run_id)
-            st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            st = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(st.get("worktreeStatus"), "removed")
 
     def test_maybe_auto_prune_skipped_when_disabled(self):
@@ -611,18 +612,18 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory():
             self._seed_persistent_run(path, alias="cursor-ap-off")
             config = {"worktrees": {"autoPrune": {"enabled": False}}}
-            result = self.delegate.worktree_mgmt.maybe_auto_prune(self._registry_root(path), config)
+            result = worktree_gc_api.maybe_auto_prune(self._registry_root(path), config)
             self.assertIsNone(result)
 
     def test_maybe_auto_prune_bool_days_falls_back_to_default(self):
         _repo, path = self._make_repo()
         config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": True}}}
         with mock.patch.object(
-            self.delegate.worktree_mgmt,
+            worktree_gc_api,
             "prune_worktrees",
             return_value={"ok": True},
         ) as prune:
-            result = self.delegate.worktree_mgmt.maybe_auto_prune(self._registry_root(path), config)
+            result = worktree_gc_api.maybe_auto_prune(self._registry_root(path), config)
         self.assertEqual(result, {"ok": True})
         self.assertEqual(prune.call_args.kwargs["older_than_days"], 7)
 
@@ -636,13 +637,11 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
             config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
-            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            index = registry_api.load_index(self._registry_root(path))
             run_id = index["aliases"].get("cursor-noap")
             self.assertIsNotNone(run_id)
-            self.delegate.worktree_mgmt.maybe_auto_prune(
-                self._registry_root(path), config, no_auto_prune=True
-            )
-            st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            worktree_gc_api.maybe_auto_prune(self._registry_root(path), config, no_auto_prune=True)
+            st = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(st.get("worktreeStatus"), "present")
 
     def test_worktree_list_no_auto_prune_cli_skips_opportunistic_pass(self):
@@ -661,7 +660,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 ),
                 encoding="utf-8",
             )
-            run_id = self.delegate.run_registry.load_index(self._registry_root(path))["aliases"][
+            run_id = registry_api.load_index(self._registry_root(path))["aliases"][
                 "cursor-noap-cli"
             ]
 
@@ -675,7 +674,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertNotIn("autoPrune", payload)
             self.assertEqual(payload["summary"]["autoPruneMode"], "suppressed")
             self.assertTrue(payload["summary"]["readOnly"])
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state.get("worktreeStatus"), "present")
             self.assertTrue(Path(wt_path).exists())
 
@@ -697,7 +696,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 "message": "branch cleanup failed",
             }
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_gc_api,
                 "maybe_auto_prune",
                 return_value=failed_auto_prune,
             ):
@@ -707,11 +706,9 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 )
 
             payload = json.loads(out)
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertFalse(payload["ok"])
-            self.assertEqual(
-                payload["exitCode"], self.delegate.worktree_mgmt.WORKTREE_ERROR_EXIT_CODE
-            )
+            self.assertEqual(payload["exitCode"], worktree_api.WORKTREE_ERROR_EXIT_CODE)
             self.assertEqual(payload["autoPrune"]["code"], "branch_remove_failed")
             self.assertNotIn("exitCode", payload["autoPrune"])
 
@@ -786,7 +783,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 git("rev-parse", "--verify", branch, cwd=path, check=False).returncode,
                 0,
             )
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "removed")
 
     def test_worktree_prune_harness_filter_limits_candidates(self):
@@ -813,7 +810,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, cursor_branch, cursor_wt)
             self._create_worktree_at(path, droid_branch, droid_wt)
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 harness="droid",
@@ -839,7 +836,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path, dirty_file="scratch.txt")
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 force=True,
@@ -856,7 +853,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertNotEqual(
                 git("rev-parse", "--verify", branch, cwd=path, check=False).returncode, 0
             )
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertIn("discardedDirtyPaths", state)
 
     def test_worktree_prune_force_branch_removes_clean_unmerged_branch(self):
@@ -875,7 +872,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             git("add", "feature.txt", cwd=wt_path)
             git("commit", "-m", "feature", cwd=wt_path)
 
-            result = self.delegate.worktree_mgmt.prune_worktrees(
+            result = worktree_gc_api.prune_worktrees(
                 self._registry_root(path),
                 merged=True,
                 force_branch=True,
@@ -894,7 +891,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 git("rev-parse", "--verify", branch, cwd=path, check=False).returncode,
                 0,
             )
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "removed")
 
     def test_maybe_auto_prune_skips_when_lock_contended(self):
@@ -919,7 +916,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             release_lock = threading.Event()
 
             def hold_lock():
-                with self.delegate.run_registry.registry_lock(registry_root, timeout_seconds=30):
+                with registry_api.registry_lock(registry_root, timeout_seconds=30):
                     lock_held.set()
                     release_lock.wait(timeout=10)
 
@@ -928,7 +925,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertTrue(lock_held.wait(timeout=5), "registry lock was not acquired")
             try:
                 t0 = time.monotonic()
-                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+                result = worktree_gc_api.maybe_auto_prune(registry_root, config)
                 elapsed = time.monotonic() - t0
             finally:
                 release_lock.set()
@@ -944,24 +941,22 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
     def test_maybe_auto_prune_preserves_management_error_payload(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory():
-            registry_root = self.delegate.run_registry.ensure_registry(
-                Path(path), workspace_kind="git"
-            )
+            registry_root = registry_api.ensure_registry(Path(path), workspace_kind="git")
             config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
-            error = self.delegate.worktree_mgmt.WorktreeManagementError(
+            error = worktree_api.WorktreeManagementError(
                 {
                     "ok": False,
                     "code": "bad_auto_prune",
                     "message": "auto-prune failed",
-                    "exitCode": self.delegate.EXIT_USAGE,
+                    "exitCode": errors_api.EXIT_USAGE,
                 }
             )
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_gc_api,
                 "prune_worktrees",
                 side_effect=error,
             ):
-                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+                result = worktree_gc_api.maybe_auto_prune(registry_root, config)
 
             self.assertIsNotNone(result)
             self.assertFalse(result["ok"])
@@ -971,16 +966,14 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
     def test_maybe_auto_prune_uses_normal_per_entry_locks_after_probe(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory():
-            registry_root = self.delegate.run_registry.ensure_registry(
-                Path(path), workspace_kind="git"
-            )
+            registry_root = registry_api.ensure_registry(Path(path), workspace_kind="git")
             config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_gc_api,
                 "prune_worktrees",
                 return_value={"ok": True, "removed": [], "skipped": [], "errors": []},
             ) as prune:
-                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+                result = worktree_gc_api.maybe_auto_prune(registry_root, config)
 
             self.assertTrue(result["ok"])
             self.assertNotIn("_skip_lock", prune.call_args.kwargs)
@@ -994,28 +987,28 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._create_worktree_at(path, branch, wt_path)
 
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "_worktree_list_paths_with_warning",
                 return_value=(None, "fatal: worktree list failed"),
             ):
-                result = self.delegate.worktree_mgmt.gc_worktrees(self._registry_root(path))
+                result = worktree_gc_api.gc_worktrees(self._registry_root(path))
 
             self.assertTrue(result["warnings"])
             self.assertEqual(result["warnings"][0]["sourceGitRoot"], path)
             self.assertIn("worktree list failed", result["warnings"][0]["message"])
             self.assertEqual(result["orphans"][0]["reason"], "worktree_list_failed")
             self.assertIn("worktree list failed", result["orphans"][0]["message"])
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "unknown")
 
     def test_merge_base_checks_qualified_branch_ref(self):
         completed = subprocess.CompletedProcess(["git"], 0, "", "")
         with mock.patch.object(
-            self.delegate.worktree_mgmt,
+            worktree_api,
             "_run_git",
             return_value=completed,
         ) as run_git:
-            result = self.delegate.worktree_mgmt._merge_base_is_ancestor(
+            result = worktree_api._merge_base_is_ancestor(
                 "/repo",
                 "delegate/cursor-demo",
             )
@@ -1024,7 +1017,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
         run_git.assert_called_once_with(
             "/repo",
             ["merge-base", "--is-ancestor", "refs/heads/delegate/cursor-demo", "HEAD"],
-            timeout_seconds=self.delegate.worktree_mgmt.GIT_QUICK_TIMEOUT_SECONDS,
+            timeout_seconds=worktree_api.GIT_QUICK_TIMEOUT_SECONDS,
         )
 
     def test_run_git_timeout_returns_structured_failure(self):
@@ -1036,7 +1029,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             "run",
             side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
         ):
-            result = self.delegate.worktree_mgmt._run_git(path, ["status"])
+            result = worktree_api._run_git(path, ["status"])
         self.assertEqual(result.returncode, 124)
         self.assertIn("git command timed out", result.stderr)
 
@@ -1050,11 +1043,11 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             "run",
             return_value=completed,
         ) as run:
-            self.delegate.worktree_mgmt.porcelain_status(path)
+            worktree_api.porcelain_status(path)
 
         self.assertEqual(
             run.call_args.kwargs["timeout"],
-            self.delegate.worktree_mgmt.GIT_QUICK_TIMEOUT_SECONDS,
+            worktree_api.GIT_QUICK_TIMEOUT_SECONDS,
         )
 
     def test_merged_into_source_returns_null_when_git_unavailable(self):
@@ -1064,12 +1057,10 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             plain_dir.mkdir()
             (plain_dir / "somefile.txt").write_text("content\n", encoding="utf-8")
             self._seed_persistent_run(path, alias="cursor-mgitfail", execution_cwd=str(plain_dir))
-            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            index = registry_api.load_index(self._registry_root(path))
             run_id = index["aliases"].get("cursor-mgitfail")
-            record = self.delegate.worktree_mgmt._record_for_run(
-                self._registry_root(path), run_id, {}
-            )
-            result, warnings = self.delegate.worktree_mgmt.merged_into_source(record, "present")
+            record = worktree_api._record_for_run(self._registry_root(path), run_id, {})
+            result, warnings = worktree_api.merged_into_source(record, "present")
             self.assertIsNone(result)
             self.assertTrue(len(warnings) > 0)
             self.assertIn("could not determine whether branch is merged", warnings[0])
@@ -1084,11 +1075,11 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, wt_path)
             registry_root = self._registry_root(path)
-            run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+            run_path = registry_api.run_directory(registry_root, run_id)
 
             # Add worktreeCleanupCommands to the MANIFEST (not the snapshot).
             # This proves merge_snapshot_view lifts it from manifest → view.
-            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            manifest = registry_api.load_run_manifest(registry_root, run_id)
             assert isinstance(manifest, dict)
             manifest["worktreeCleanupCommands"] = {
                 "safe": "delegate worktree remove cursor-cleanup",
@@ -1096,19 +1087,19 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
                 "discardUncommitted": "delegate worktree remove cursor-cleanup --discard-uncommitted",
                 "rawGit": "git -C /src worktree remove /wt/cursor-cleanup && git -C /src branch -d delegate/cursor-cleanup",
             }
-            self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
+            registry_api.write_json_atomic(run_path / "manifest.json", manifest)
 
             # Write snapshot WITHOUT worktreeCleanupCommands (proves lift from manifest).
             snapshot_data = {
                 "runId": run_id,
                 "alias": "cursor-cleanup",
             }
-            self.delegate.run_registry.write_json_atomic(run_path / "snapshot.json", snapshot_data)
+            registry_api.write_json_atomic(run_path / "snapshot.json", snapshot_data)
 
             # merge_snapshot_view should lift worktreeCleanupCommands from manifest.
             from delegate_agent import snapshot_view
 
-            loaded_snapshot = self.delegate.run_registry.load_run_snapshot(registry_root, run_id)
+            loaded_snapshot = registry_api.load_run_snapshot(registry_root, run_id)
             view = snapshot_view.merge_snapshot_view(
                 registry_root,
                 run_id,
@@ -1132,7 +1123,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         test builds is seconds old. Backdating is how a test says "this has been
         sitting here", which is the state every orphan assertion is about.
         """
-        settled = time.time() - self.delegate.worktree_mgmt.POOL_SETTLE_SECONDS - 60
+        settled = time.time() - worktree_gc_api.POOL_SETTLE_SECONDS - 60
         for path in paths:
             os.utime(path, (settled, settled))
 
@@ -1164,7 +1155,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         return str(admin)
 
     def _scan(self, pool: Path, **kwargs) -> dict:
-        return self.delegate.worktree_mgmt.scan_worktree_pool(pool, **kwargs)
+        return worktree_gc_api.scan_worktree_pool(pool, **kwargs)
 
     def _configure_pool(self, home: str, pool: Path) -> None:
         config_path = Path(home) / ".delegate" / "config.json"
@@ -1178,7 +1169,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir="/gone/.git/x")
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
 
             self.assertEqual(parsed.gitdir, "/gone/.git/x")
             self.assertIsNone(parsed.unverifiable)
@@ -1193,7 +1184,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
 
             self.assertIsNone(parsed.gitdir)
             self.assertIsNone(parsed.unverifiable)
@@ -1228,7 +1219,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             vanished = Path(tmp) / "abc123def456" / "cursor-1"
 
-            verdict = self.delegate.worktree_mgmt._classify_pool_worktree(vanished)
+            verdict = worktree_gc_api._classify_pool_worktree(vanished)
 
             self.assertIsNone(verdict.orphan)
             self.assertEqual(verdict.warning["reason"], "worktree_unsettled")
@@ -1257,7 +1248,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             (worktree / ".git").mkdir()
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
             result = self._scan(pool)
 
             self.assertIsNone(parsed.gitdir)
@@ -1267,15 +1258,13 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
 
     def test_source_root_recovered_from_standard_backlink(self):
         self.assertEqual(
-            self.delegate.worktree_mgmt._source_root_from_backlink(
-                "/tmp/src/.git/worktrees/cursor-1"
-            ),
+            worktree_gc_api._source_root_from_backlink("/tmp/src/.git/worktrees/cursor-1"),
             "/tmp/src",
         )
 
     def test_source_root_is_none_for_non_standard_backlink(self):
         self.assertIsNone(
-            self.delegate.worktree_mgmt._source_root_from_backlink("/elsewhere/gitdir/worktrees/x")
+            worktree_gc_api._source_root_from_backlink("/elsewhere/gitdir/worktrees/x")
         )
 
     def test_pool_scan_reports_orphan_whose_source_repo_is_gone(self):
@@ -1315,7 +1304,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 contents="work.txt",
             )
 
-            refused = self.delegate.worktree_mgmt.reap_worktrees(
+            refused = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1325,7 +1314,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(refused["errors"][0]["code"], "confirmation_required")
             self.assertTrue(worktree.exists())
 
-            unknown_dirt = self.delegate.worktree_mgmt.reap_worktrees(
+            unknown_dirt = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1336,7 +1325,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(unknown_dirt["skipped"][0]["reason"], "dirty_unknown")
             self.assertTrue(worktree.exists())
 
-            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+            reaped = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1371,7 +1360,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             payload = json.loads(out)
             self.assertEqual(payload["code"], "invalid_reap_path")
             self.assertIn("path_outside_pool", payload["message"])
@@ -1400,7 +1389,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(out)["code"], "no_matching_worktrees")
 
     def test_reap_handle_does_not_fall_through_to_orphan_basename(self):
@@ -1438,7 +1427,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(out)["code"], "invalid_reap_path")
             self.assertTrue(orphan.exists())
 
@@ -1463,7 +1452,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertIsNone(error)
             self.assertEqual(canonical, worktree.resolve())
 
-            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+            reaped = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=alias_pool,
                 path=str(alias_worktree),
@@ -1548,7 +1537,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 os.utime(candidate, (old, old), follow_symlinks=False)
             edited.write_text("after\n", encoding="utf-8")
 
-            result = self.delegate.worktree_mgmt.reap_worktrees(
+            result = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1597,7 +1586,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self._settle(worktree)
             pool.chmod(0o755)
 
-            result = self.delegate.worktree_mgmt.reap_worktrees(
+            result = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1624,7 +1613,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             )
             self._settle(worktree)
 
-            result = self.delegate.worktree_mgmt.reap_worktrees(
+            result = worktree_gc_api.reap_worktrees(
                 None,
                 pool_data_home=pool,
                 path=str(worktree),
@@ -1785,7 +1774,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(tmp) / "pool"
             (pool / "abc123def456").mkdir(parents=True)
 
-            payload = self.delegate.worktree_mgmt.gc_worktrees(None, pool_data_home=pool)
+            payload = worktree_gc_api.gc_worktrees(None, pool_data_home=pool)
 
             self.assertNotIn("removesEmptyPoolDirs", payload["effects"])
             self.assertFalse(payload["effects"]["deletesWorktreePaths"])
@@ -1869,7 +1858,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             )
             (worktree / ".git").symlink_to(elsewhere)
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
             result = self._scan(pool)
 
             self.assertIsNone(parsed.gitdir)
@@ -1884,10 +1873,10 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
-            limit = self.delegate.worktree_mgmt.BACKLINK_MAX_BYTES
+            limit = worktree_gc_api.BACKLINK_MAX_BYTES
             (worktree / ".git").write_bytes(b"gitdir: /somewhere\n" + b"x" * limit)
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
             result = self._scan(pool)
 
             self.assertIsNone(parsed.gitdir)
@@ -1899,12 +1888,12 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
-            limit = self.delegate.worktree_mgmt.BACKLINK_MAX_BYTES
+            limit = worktree_gc_api.BACKLINK_MAX_BYTES
             line = b"gitdir: /gone/.git/worktrees/cursor-1\n"
             (worktree / ".git").write_bytes(line + b"#" * (limit - len(line)))
 
             self.assertEqual(
-                self.delegate.worktree_mgmt._parse_worktree_backlink(worktree).gitdir,
+                worktree_gc_api._parse_worktree_backlink(worktree).gitdir,
                 "/gone/.git/worktrees/cursor-1",
             )
 
@@ -1914,7 +1903,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             os.mkfifo(worktree / ".git")
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree)
             result = self._scan(pool)
 
             self.assertEqual(parsed.unverifiable, "is not a regular file")
@@ -1933,7 +1922,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             )
 
             with mock.patch.object(worktree_gc, "BACKLINK_OPEN_FLAGS", None):
-                parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+                parsed = worktree_gc_api._parse_worktree_backlink(worktree)
                 result = self._scan(pool)
 
             self.assertIsNone(parsed.gitdir)
@@ -1948,7 +1937,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             (worktree / ".git").write_bytes(b"gitdir: /gone/\xff/.git/worktrees/cursor-1\n")
             self._settle(worktree)
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree).gitdir
+            parsed = worktree_gc_api._parse_worktree_backlink(worktree).gitdir
 
             self.assertEqual(parsed, "/gone/\udcff/.git/worktrees/cursor-1")
             self.assertEqual(
@@ -2051,9 +2040,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool.chmod(0o000)
             try:
                 result = self._scan(pool)
-                with self.assertRaises(
-                    self.delegate.worktree_mgmt.WorktreeManagementError
-                ) as caught:
+                with self.assertRaises(worktree_api.WorktreeManagementError) as caught:
                     self._scan(pool, required=True)
             finally:
                 pool.chmod(0o755)
@@ -2090,7 +2077,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
 
     def test_required_pool_root_must_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as caught:
+            with self.assertRaises(worktree_api.WorktreeManagementError) as caught:
                 self._scan(Path(tmp) / "never-created", required=True)
 
             self.assertEqual(caught.exception.payload["code"], "invalid_pool_root")
@@ -2100,7 +2087,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             not_a_dir = Path(tmp) / "file-pool"
             not_a_dir.write_text("\n", encoding="utf-8")
 
-            with self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as caught:
+            with self.assertRaises(worktree_api.WorktreeManagementError) as caught:
                 self._scan(not_a_dir, required=True)
 
             self.assertEqual(caught.exception.payload["reason"], "pool_root_not_a_directory")
@@ -2126,7 +2113,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
 
             with (
                 self._scandir_failing_after_the_root_check(PermissionError(13, "Denied")),
-                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as caught,
+                self.assertRaises(worktree_api.WorktreeManagementError) as caught,
             ):
                 self._scan(pool, required=True)
 
@@ -2242,8 +2229,8 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=str(admin))
 
             with mock.patch.object(os.path, "samefile", side_effect=OSError("cannot compare")):
-                serves = self.delegate.worktree_mgmt._admin_dir_serves_worktree(admin, worktree)
-                unverifiable = self.delegate.worktree_mgmt._paths_match(other_spelling, worktree)
+                serves = worktree_gc_api._admin_dir_serves_worktree(admin, worktree)
+                unverifiable = worktree_gc_api._paths_match(other_spelling, worktree)
                 result = self._scan(pool)
 
             self.assertIsNone(unverifiable)
@@ -2256,7 +2243,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             gone = Path(tmp) / "gone"
 
-            self.assertIs(self.delegate.worktree_mgmt._paths_match(gone, Path(tmp)), False)
+            self.assertIs(worktree_gc_api._paths_match(gone, Path(tmp)), False)
 
     def test_gc_all_scans_configured_data_home(self):
         _repo, path = self._make_repo()
@@ -2370,7 +2357,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 home=fake_home,
             )
 
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(out)["error"], "invalid_option_value")
 
     def test_gc_pool_rejects_a_root_that_does_not_exist(self):

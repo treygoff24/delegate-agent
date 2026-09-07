@@ -41,6 +41,9 @@ class MailPushTests(unittest.TestCase):
                 "alias": self.alias,
                 "status": run_status.STATUS_RUNNING,
                 "pid": os.getpid(),
+                "recentEvents": [],
+                "eventsTotal": 0,
+                "warnings": [],
             },
         )
         self.env = {
@@ -368,8 +371,6 @@ class MailPushTests(unittest.TestCase):
             mail_push=True,
         )
         self.assertIsNone(runner._mail_push_failure_marker(context, reason))
-        run_path = run_registry.run_directory(self.registry_root, self.run_id)
-        runner.write_snapshot(run_path, {"recentEvents": [], "eventsTotal": 0, "warnings": []})
         runner.record_mail_push_degradation(
             self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
         )
@@ -394,11 +395,6 @@ class MailPushTests(unittest.TestCase):
         )
 
     def test_degradation_is_recorded_once_in_state_events_and_snapshot(self):
-        run_path = run_registry.run_directory(self.registry_root, self.run_id)
-        runner.write_snapshot(
-            run_path,
-            {"recentEvents": [], "eventsTotal": 0, "warnings": []},
-        )
         first = runner.record_mail_push_degradation(
             self.registry_root,
             self.run_id,

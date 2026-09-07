@@ -105,6 +105,9 @@ if TYPE_CHECKING:
     from delegate_agent.runner import RunContext
 
 
+_workflow_pinning.require_pinned_persona_resolver()
+
+
 MISSING_BINARY_PROBE_DIRS = (
     "~/.claude/local",
     "~/.grok/bin",

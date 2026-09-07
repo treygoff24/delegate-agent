@@ -7,7 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import run_registry as registry_api
+from delegate_agent import worktree_gc as worktree_gc_api
 from delegate_agent import worktree_mgmt
+from delegate_agent import worktree_mgmt as worktree_api
+from delegate_agent import worktree_remove as worktree_remove_api
 from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase
 
 
@@ -95,13 +99,13 @@ class LockedWorktreeSafetyTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, worktree)
             root = self._registry_root(path)
-            attached_run, attached_alias = self.delegate.run_registry.register_run(
+            attached_run, attached_alias = registry_api.register_run(
                 root,
                 harness="cursor",
                 metadata={"mode": "work", "cwd": path},
             )
-            attached_path = self.delegate.run_registry.run_directory(root, attached_run)
-            self.delegate.run_registry.write_json_atomic(
+            attached_path = registry_api.run_directory(root, attached_run)
+            registry_api.write_json_atomic(
                 attached_path / "manifest.json",
                 {
                     "runId": attached_run,
@@ -110,13 +114,13 @@ class LockedWorktreeSafetyTests(WorktreeMgmtTestBase):
                     "worktreeAttachment": {"path": worktree},
                 },
             )
-            self.delegate.run_registry.write_json_atomic(
+            registry_api.write_json_atomic(
                 attached_path / "state.json",
                 {"runId": attached_run, "status": "running", "pid": os.getpid()},
             )
 
             with self.assertRaises(worktree_mgmt.WorktreeManagementError) as context:
-                self.delegate.worktree_mgmt.remove_worktree(root, handle=owner_alias)
+                worktree_remove_api.remove_worktree(root, handle=owner_alias)
 
             self.assertEqual(context.exception.code, "worktree_attached")
             self.assertTrue(Path(worktree).exists())
@@ -134,16 +138,16 @@ class LockedWorktreeSafetyTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, worktree)
             root = self._registry_root(path)
-            record = self.delegate.worktree_mgmt.resolve_record(root, handle=alias)
-            clean = self.delegate.worktree_mgmt.inspect_worktree(root, record)
+            record = worktree_api.resolve_record(root, handle=alias)
+            clean = worktree_api.inspect_worktree(root, record)
             dirty = replace(clean, dirty=True, dirty_paths=("changed.txt",))
 
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "inspect_worktree",
                 side_effect=(clean, dirty),
             ):
-                result = self.delegate.worktree_mgmt.prune_worktrees(
+                result = worktree_gc_api.prune_worktrees(
                     root,
                     merged=True,
                 )
@@ -165,27 +169,26 @@ class LockedWorktreeSafetyTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, worktree)
             state_path = (
-                self.delegate.run_registry.run_directory(self._registry_root(path), run_id)
-                / "state.json"
+                registry_api.run_directory(self._registry_root(path), run_id) / "state.json"
             )
-            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            state = registry_api.load_run_state(self._registry_root(path), run_id)
             state.update({"status": "running", "pid": os.getpid()})
-            self.delegate.run_registry.write_json_atomic(state_path, state)
+            registry_api.write_json_atomic(state_path, state)
 
             with (
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "dirty_info",
                     side_effect=AssertionError("dirty probe should be skipped"),
                 ),
                 mock.patch.object(
-                    self.delegate.worktree_mgmt,
+                    worktree_api,
                     "merged_into_source",
                     side_effect=AssertionError("merge probe should be skipped"),
                 ),
-                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as context,
+                self.assertRaises(worktree_api.WorktreeManagementError) as context,
             ):
-                self.delegate.worktree_mgmt.remove_worktree(
+                worktree_remove_api.remove_worktree(
                     self._registry_root(path),
                     handle=alias,
                 )
@@ -205,13 +208,13 @@ class LockedWorktreeSafetyTests(WorktreeMgmtTestBase):
             )
             self._create_worktree_at(path, branch, worktree)
             root = self._registry_root(path)
-            record = self.delegate.worktree_mgmt.resolve_record(root, handle=alias)
+            record = worktree_api.resolve_record(root, handle=alias)
             with mock.patch.object(
-                self.delegate.worktree_mgmt,
+                worktree_api,
                 "merged_into_source",
                 side_effect=AssertionError("merge probe should be skipped"),
             ):
-                inspection = self.delegate.worktree_mgmt.inspect_worktree(
+                inspection = worktree_api.inspect_worktree(
                     root,
                     record,
                     check_merge=False,

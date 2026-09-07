@@ -85,7 +85,14 @@ class WorktreeRecordBundle:
         readers = (
             (run_registry.STATE_FILE, run_registry.load_run_state),
             (run_registry.MANIFEST_FILE, run_registry.load_run_manifest),
-            (run_registry.SNAPSHOT_FILE, run_registry.load_run_snapshot),
+            # A display view normalizes identity and can hide contradictory
+            # legacy evidence. Destructive checks must inspect the raw record.
+            (
+                run_registry.SNAPSHOT_FILE,
+                lambda root, key: run_registry.read_json_object(
+                    run_registry.run_directory(root, key) / run_registry.SNAPSHOT_FILE
+                ),
+            ),
         )
         for filename, reader in readers:
             try:

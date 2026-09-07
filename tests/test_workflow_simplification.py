@@ -54,6 +54,13 @@ class WorkflowSimplificationTests(unittest.TestCase):
         self.assertIs(state.thread_local.counters, counters)
         self.assertEqual(counters, {})
 
+    def test_dry_run_rejection_updates_the_simulated_tombstone(self) -> None:
+        state = self.state()
+        state.dry_run = True
+        state.append_event("agent_started", key="simulated-key", scope="root/seq#0", label="draft")
+        self.assertEqual(state.reject_agent("draft", "retry the preview"), "simulated-key")
+        self.assertIn("simulated-key", state.tombstoned_keys)
+
     def test_nested_workflow_reuses_state_without_replaying_journal(self) -> None:
         state = self.state()
         child = state.script_path.parent / "child.py"
