@@ -675,6 +675,24 @@ class TextParserTests(unittest.TestCase):
             {"grok-4.6": {}, "grok-4.5": {}},
         )
 
+    def test_grok_accepts_a_wholly_unbulleted_model_list(self):
+        """A build that prints plain selectors must not fail the whole probe."""
+        raw = "Default model: grok-4.6\n\nAvailable models:\n  grok-4.6 (default)\n  grok-4.5\n"
+
+        fragment = self.parse_grok(raw)
+
+        self.assertEqual(fragment["models"], {"grok-4.6": {}, "grok-4.5": {}})
+        self.assertEqual(fragment["defaultModel"], "grok-4.6")
+
+    def test_grok_accepts_each_bullet_form(self):
+        for bullet, expected in (("*", "grok-4.6"), ("-", "grok-4.6"), ("", "grok-4.6")):
+            with self.subTest(bullet=bullet or "none"):
+                prefix = f"{bullet} " if bullet else ""
+                raw = (
+                    f"Default model: grok-4.6\n\nAvailable models:\n  {prefix}grok-4.6 (default)\n"
+                )
+                self.assertEqual(self.parse_grok(raw)["models"], {expected: {}})
+
 
 class AdapterOrchestrationTests(unittest.TestCase):
     def test_claude_only_parses_expected_nonzero_sentinel_output(self):
