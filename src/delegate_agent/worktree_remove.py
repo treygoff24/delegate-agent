@@ -1,16 +1,7 @@
-"""Worktree removal pipeline.
+"""Worktree removal with locked safety checks and registry status updates.
 
-Implements ``delegate worktree remove`` end to end: option normalization, dirty
-and merged safety gates, the ``git worktree remove`` + branch-delete sequence,
-and registry status updates. ``worktree_mgmt`` re-exports this surface so callers
-and tests keep importing from ``worktree_mgmt``.
-
-Cross-cutting seams that tests monkeypatch on the ``worktree_mgmt`` module
-(``_run_git``, ``_remove_branch``, ``merged_into_source``, ``detect_worktree_status``,
-``dirty_info``, ``resolve_record``, ``_error_payload``) are read back through the
-``worktree_mgmt`` facade (the ``wm`` alias) at call time so those patches still
-take effect.
-"""
+Shared inspection and error helpers come from worktree_mgmt; removal helpers
+and branch deletion belong to this module."""
 
 from __future__ import annotations
 

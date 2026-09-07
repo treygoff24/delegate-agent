@@ -267,7 +267,7 @@ def save_index(registry_root: Path, index: JsonObject) -> None:
     _write_bounded_json(index_path(registry_root), index, record_name="index")
 
 
-def write_run_state(run_path: Path, state: JsonObject) -> None:
+def _serialize_run_state(state: JsonObject) -> str:
     serialized = json.dumps(state, indent=2, sort_keys=True) + "\n"
     size = len(serialized.encode("utf-8"))
     limit = PRIVATE_RECORD_READ_MAX_BYTES - FINALIZE_WAL_ENVELOPE_RESERVE_BYTES
@@ -276,7 +276,11 @@ def write_run_state(run_path: Path, state: JsonObject) -> None:
             f"state exceeds the {limit}-byte canonical record limit ({size} bytes); "
             "reserve is required for a single-record finalization WAL"
         )
-    write_private_text_atomic(run_path / STATE_FILE, serialized)
+    return serialized
+
+
+def write_run_state(run_path: Path, state: JsonObject) -> None:
+    write_private_text_atomic(run_path / STATE_FILE, _serialize_run_state(state))
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
@@ -365,6 +369,7 @@ def write_finalize_wal(
         raise ValueError(f"run id does not match expected format: {run_id}")
     if status not in TERMINAL_STATUSES or record.get("status") != status:
         raise ValueError("finalization WAL must contain a matching terminal record")
+    _serialize_run_state(record)
     payload: JsonObject = {
         "schema": FINALIZE_WAL_SCHEMA,
         "runId": run_id,
