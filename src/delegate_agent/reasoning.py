@@ -17,7 +17,19 @@ ReasoningDeclaration: TypeAlias = Mapping[str, object]
 # bundled data can be bypassed.
 BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
     "codex": {
+        "gpt-6-astra": {
+            "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
+            "default": "low",
+        },
         "gpt-5.6-sol": {
+            "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
+            "default": "low",
+        },
+        "gpt-5.6-terra": {
+            "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
+            "default": "medium",
+        },
+        "gpt-5.6-luna": {
             "supported": ("low", "medium", "high", "xhigh", "max"),
             "default": "medium",
         },
@@ -31,9 +43,9 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
         },
         "gpt-5.4-mini": {
             "supported": ("low", "medium", "high", "xhigh"),
-            "default": "high",
+            "default": "medium",
         },
-        "gpt-5.3-codex-spark": {
+        "gpt-5.2": {
             "supported": ("low", "medium", "high", "xhigh"),
             "default": "medium",
         },
@@ -52,7 +64,7 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
             "default": "medium",
         },
         "gemini-3.6-flash": {
-            "supported": ("minimal", "low", "medium", "high"),
+            "supported": ("low", "medium", "high"),
             "default": "high",
         },
         "glm-5.1": {"supported": ("off", "high"), "default": "high"},
@@ -72,11 +84,14 @@ TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
-GROK_NATIVE_EFFORTS = CLAUDE_NATIVE_EFFORTS
+GROK_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh")
 TRANSPORT_OPENCODE_VARIANT_FLAG = "variant-flag"
 TRANSPORT_PI_THINKING_FLAG = "pi-thinking-flag"
-PI_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-PI_THINKING_LEVELS = ("off", "minimal", *PI_NATIVE_EFFORTS)
+PI_NATIVE_EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+OMP_NATIVE_EFFORTS = (*PI_NATIVE_EFFORTS, "auto")
+# Shared alias/workflow parsing needs the family-wide superset. Config validation
+# keeps Pi aliases on PI_NATIVE_EFFORTS while OMP may additionally select auto.
+PI_THINKING_LEVELS = OMP_NATIVE_EFFORTS
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support; "
@@ -132,7 +147,7 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
     "omp": ReasoningProfile(
         TRANSPORT_PI_THINKING_FLAG,
         "static-enum",
-        static_efforts=PI_NATIVE_EFFORTS,
+        static_efforts=OMP_NATIVE_EFFORTS,
     ),
 }
 
@@ -610,22 +625,13 @@ def resolve_grok_reasoning_capability(
         return None, ()
     effort = normalize_effort(requested_effort)
     if model:
-        declaration: ReasoningDeclaration | None = None
-        source = "none"
-        for candidate_source, declarations in (
-            ("config", _config_model_declarations(config, "grok")),
-            ("discovery", _discovery_model_declarations(discovery, "grok")),
-            ("cache", _cache_model_declarations(cache, "grok")),
-            ("bundled", BUNDLED_REASONING_CAPABILITIES.get("grok", {})),
-        ):
-            candidate = declarations.get(model)
-            if candidate is None:
-                continue
-            if candidate_source == "discovery" and candidate.get("evidence") != "exact":
-                continue
-            declaration = candidate
-            source = candidate_source
-            break
+        declaration, source = _lookup_declaration(
+            harness="grok",
+            model=model,
+            config=config,
+            cache=cache,
+            discovery=discovery,
+        )
         if declaration is not None:
             return (
                 _capability_from_declaration(
@@ -1417,7 +1423,7 @@ def validate_cache_payload(cache: JsonObject) -> None:
             "reasoning cache must contain a harnesses object.",
         )
     for harness, harness_decl in harnesses.items():
-        if harness not in TRANSPORT_BY_HARNESS or not isinstance(harness_decl, dict):
+        if harness not in ("codex", "droid", "grok") or not isinstance(harness_decl, dict):
             raise ReasoningCapabilityError(
                 "invalid_reasoning_config",
                 "reasoning cache harness entries must be objects for known harnesses.",

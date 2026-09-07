@@ -84,6 +84,11 @@ _PI_BOUNDARY_TYPES = frozenset(
 
 # Harnesses whose stdout is plain text rather than a structured envelope.
 _TEXT_STREAM_HARNESSES = frozenset({"devin"})
+_SILENT_TOOL_EXECUTION_HARNESSES = frozenset({"devin", "kimi"})
+_TOOL_RUNNING_STATUSES = frozenset({"pending", "running", "in_progress", "started"})
+_TOOL_FINISHED_STATUSES = frozenset(
+    {"cancelled", "canceled", "completed", "error", "failed", "success", "succeeded"}
+)
 
 
 def stall_seconds_from_minutes(minutes: float) -> float:
@@ -91,6 +96,23 @@ def stall_seconds_from_minutes(minutes: float) -> float:
     if minutes <= 0:
         return 0.0
     return float(minutes) * SECONDS_PER_MINUTE
+
+
+def effective_stall_seconds(
+    configured_seconds: float,
+    *,
+    harness: str,
+    timeout_seconds: int | None,
+    explicitly_configured: bool,
+) -> float:
+    """Disable only the default detector when a silent harness has a deadline."""
+    if (
+        harness in _SILENT_TOOL_EXECUTION_HARNESSES
+        and timeout_seconds is not None
+        and not explicitly_configured
+    ):
+        return 0.0
+    return configured_seconds
 
 
 def normalize_delta(text: str) -> str:
@@ -224,7 +246,6 @@ def _classify_pi(payload: JsonObject, event_type: str) -> LineSignals | None:
 
 
 def _classify_opencode(payload: JsonObject, event_type: str) -> LineSignals | None:
-    """OpenCode reports tools only once they have completed, so there is no in-flight state."""
     if event_type == "error":
         return LineSignals(progress=True, label="error")
     part = payload.get("part")
@@ -235,7 +256,17 @@ def _classify_opencode(payload: JsonObject, event_type: str) -> LineSignals | No
         if isinstance(text, str):
             return LineSignals(deltas=(text,), label="text")
         return _NO_SIGNALS
-    if event_type in {"tool_use", "step_start", "step_finish"}:
+    if event_type == "tool_use":
+        state = part.get("state")
+        status = _string_field(state, "status")
+        normalized_status = status.lower() if status else ""
+        key = _tool_key(part, "callID", "callId", "id", "tool")
+        if normalized_status in _TOOL_RUNNING_STATUSES:
+            return LineSignals(tools_started=(key,), label="tool_use")
+        if normalized_status in _TOOL_FINISHED_STATUSES:
+            return LineSignals(tools_finished=(key,), label="tool_use")
+        return LineSignals(progress=True, label="tool_use")
+    if event_type in {"step_start", "step_finish"}:
         return LineSignals(progress=True, label=event_type)
     return None
 
@@ -248,6 +279,17 @@ def _classify_grok(payload: JsonObject, event_type: str) -> LineSignals | None:
         return _NO_SIGNALS
     if event_type in {"end", "error"}:
         return LineSignals(progress=True, label=event_type)
+    if event_type == "tool_call":
+        return LineSignals(
+            tools_started=(_tool_key(payload, "toolCallId", "id", "name"),),
+            label="tool_call",
+        )
+    if event_type == "tool_call_update":
+        status = _string_field(payload, "status")
+        key = _tool_key(payload, "toolCallId", "id", "name")
+        if status and status.lower() in _TOOL_FINISHED_STATUSES:
+            return LineSignals(tools_finished=(key,), label="tool_call_update")
+        return LineSignals(progress=True, label="tool_call_update")
     return None
 
 

@@ -2911,7 +2911,19 @@ class WorkflowDsl:
             return None
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
+        native_schema_reason = structured_output.native_schema_eligible(engine, schema)
         native_schema = _native_schema(engine, schema)
+        if native_schema is None and engine in structured_output.NATIVE_SCHEMA_ENGINES:
+            self.state.append_event(
+                "agent_schema_prompt_path",
+                key=key,
+                label=label,
+                engine=engine,
+                reason=(
+                    native_schema_reason
+                    or "schema is incompatible with the engine's native strict mode."
+                ),
+            )
         prior_output = ""
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
@@ -2922,13 +2934,24 @@ class WorkflowDsl:
         workspace_cleanup: JsonObject | None = None
         first_child_run_id: str | None = None
         child: _DelegateChildResult | None = None
+        demoted_schema_prompt_pending = False
         for attempt in range(attempts + 1):
             resume_session_id = (
                 prior_child.session_id
                 if prior_child is not None and engine in STRUCTURED_RESUME_ENGINES
                 else None
             )
-            if attempt == 0:
+            attempt_prompt_has_schema = False
+            if demoted_schema_prompt_pending:
+                if resume_session_id is not None:
+                    attempt_prompt = _structured_prompt(
+                        _structured_resume_prompt(prior_error), schema, "", ""
+                    )
+                else:
+                    attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
+                demoted_schema_prompt_pending = False
+                attempt_prompt_has_schema = True
+            elif attempt == 0:
                 attempt_prompt = prompt
             elif resume_session_id is not None:
                 attempt_prompt = _structured_resume_prompt(prior_error)
@@ -2978,7 +3001,7 @@ class WorkflowDsl:
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
             else:
-                if attempt == 0 or resume_session_id is None:
+                if not attempt_prompt_has_schema and (attempt == 0 or resume_session_id is None):
                     attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
                 try:
                     raw_child = self._run_delegate(
@@ -3060,6 +3083,24 @@ class WorkflowDsl:
                     if child.outcome is not None
                     else str(exc)
                 )
+                if (
+                    native_schema is not None
+                    and child.outcome is not None
+                    and child.text is None
+                    and attempt < attempts
+                ):
+                    native_schema = None
+                    demoted_schema_prompt_pending = True
+                    self.state.append_event(
+                        "agent_schema_demoted",
+                        key=key,
+                        label=label,
+                        engine=engine,
+                        attempt=attempt,
+                        retryAttempt=attempt + 1,
+                        reason=outcome.failure_reason,
+                        childAttemptOutcome=outcome.as_json(),
+                    )
                 # Same defect the timeout rows had: engine and attempt without
                 # key or label means learning which task burned its retries
                 # still costs a cross-reference against agent_started by time.
@@ -3751,9 +3792,11 @@ def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signa
 def _native_schema(engine: str, schema: JsonObject) -> JsonObject | None:
     """Schema to hand the child as --output-schema, or None for the prompt-and-parse path.
 
-    Codex only accepts strict closed objects; Claude's --json-schema takes the
-    validated subset as-is, so it is enforced natively for every workflow schema.
+    Native enforcement requires an explicit object root. Codex additionally
+    requires a strict closed object; other schemas use prompt-and-parse.
     """
+    if structured_output.native_schema_eligible(engine, schema) is not None:
+        return None
     if engine == "codex":
         return _codex_native_schema(schema)
     if engine == "claude":

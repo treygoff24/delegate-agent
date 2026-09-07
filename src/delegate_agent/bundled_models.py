@@ -12,11 +12,14 @@ class BundledModelEntry(TypedDict, total=False):
 
 BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
     "codex": (
+        {"id": "gpt-6-astra"},
         {"id": "gpt-5.6-sol"},
+        {"id": "gpt-5.6-terra"},
+        {"id": "gpt-5.6-luna"},
         {"id": "gpt-5.5"},
         {"id": "gpt-5.4"},
         {"id": "gpt-5.4-mini"},
-        {"id": "gpt-5.3-codex-spark"},
+        {"id": "gpt-5.2"},
     ),
     "droid": (
         {"id": "claude-opus-4-8"},
@@ -64,9 +67,11 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "claude-sonnet-4-6"},
         {"id": "claude-haiku-4-5"},
         {"id": "claude-fable-5"},
+        {"id": "claude-opus-5"},
+        {"id": "claude-sonnet-5"},
+        {"id": "claude-fable-5-1"},
     ),
     "grok": (
-        {"id": "swe-1.7"},
         {"id": "grok-4.6"},
         {"id": "grok-4.5"},
     ),
