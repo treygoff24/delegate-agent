@@ -369,7 +369,12 @@ def wire_work_mail_launch(
         if flags and not all(flag in updated for flag in flags):
             if engine == "kimi" and "--prompt" in updated:
                 updated[updated.index("--prompt") : updated.index("--prompt")] = flags
-            elif engine == "codex" and prompt_transport == "argv" and updated:
+            elif engine == "codex" and updated:
+                # codex ends its exec argv with a positional: the prompt on argv
+                # transport, or `-` meaning "read the prompt from stdin". Its
+                # parser does accept `-c` after either, but a flag written past
+                # the positional reads as part of the prompt, so the grant goes
+                # before it on both transports.
                 updated[-1:-1] = flags
             else:
                 updated.extend(flags)

@@ -275,6 +275,43 @@ class MailGatingTests(CommandTestBase):
                         self.assertIn(flag, argv)
                     self.assertFalse((root / "mail").exists())
 
+    def test_codex_stdin_transport_splices_the_grant_before_the_trailing_dash(self):
+        """The `-` is codex's read-prompt-from-stdin positional, not a flag slot."""
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-stdin-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            argv = mail.wire_work_mail_launch(
+                "codex",
+                ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-"],
+                None,
+                root,
+                prompt_transport="stdin",
+                isolated_workspace=True,
+            )[0]
+
+        self.assertEqual(
+            argv[-3:],
+            ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]', "-"],
+        )
+
+    def test_codex_argv_transport_still_splices_before_the_prompt(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-argv-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            argv = mail.wire_work_mail_launch(
+                "codex",
+                ["codex", "exec", "--sandbox", "workspace-write", "the prompt"],
+                None,
+                root,
+                prompt_transport="argv",
+                isolated_workspace=True,
+            )[0]
+
+        self.assertEqual(
+            argv[-3:],
+            ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]', "the prompt"],
+        )
+
     def test_cursor_default_work_argv_is_not_changed_to_enable_a_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
             argv = mail.wire_work_mail_launch(
