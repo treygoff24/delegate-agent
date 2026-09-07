@@ -1193,6 +1193,7 @@ def describe_payload(
                 "workNotes": [
                     "Kimi prompt mode auto-approves tool actions; Delegate does not pass --yolo because Kimi rejects combining it with --prompt.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
+                    "--output-format is always explicit (stream-json tracked, text pass-through) so KIMI_MODEL_OUTPUT_FORMAT cannot change it.",
                 ],
             },
             "grok": {
