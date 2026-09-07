@@ -46,6 +46,11 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - 2026-09-07 ~21:10Z herdr update killed the Claude session and with it the parent processes of codex-73 (dlg-278.2) and codex-77 (dlg-o7i) mid-gate; both marked stale with uncommitted diffs intact. Resumed via `delegate followup codex-73|77 --prompt-file briefs/resume-after-kill.md` (envelopes runs/278-2-fu.json, runs/o7i-fu.json).
 - Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
 
+## Review round 1 (Astra xhigh, safe, over batch diff 57c3796..2064fab)
+- Major: workflow_pinning rmtree onerror retries by pathname (symlink-race). Followup on codex-72 (runs/278-1-fix.json).
+- Major: runner._tracked_stream_max_bytes reloads config at execute time; carry from launch config. Followup on codex-77 (runs/o7i-fix.json).
+- Items 2,3,4,5,7 clean. Opus review still running (runs/review-opus.json).
+
 ## Rulings
 - Ruling: extended dlg-278.1's write boundary to workflow_attempts.py via followup rather than a new bead — same defect, same lane context; cost if wrong: a slightly larger diff to review in one merge.
 
