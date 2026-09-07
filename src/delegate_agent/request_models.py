@@ -97,6 +97,8 @@ class ResumeOptions:
     allow_repo_persona: bool = False
     mail_push: bool = False
     continuity_mode: str | None = None
+    # Parse-time advisories, carried to the synthetic launch like LaunchOptions.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass
@@ -106,6 +108,7 @@ class FollowupOptions:
     prompt_file: str | None = None
     timeout: int | None = None
     dry_run: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass
