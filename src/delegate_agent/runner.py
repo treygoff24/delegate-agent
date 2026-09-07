@@ -663,6 +663,7 @@ def build_run_record(
         recent_events, events_meta = accumulator.bounded_recent_events()
         record.update(assistant_meta)
         record.update(events_meta)
+        record.update(accumulator.stream_diagnostics())
         record["recentEvents"] = recent_events
         display_current = accumulator.current if current is None else current
         if display_current:

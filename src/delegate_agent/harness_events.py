@@ -1822,6 +1822,29 @@ class StreamAccumulator:
             return None
         return assistant_recovery_quality_for_text(text)
 
+    def stream_diagnostics(self) -> JsonObject:
+        """What this run's stdout contained that the parser could not use.
+
+        A malformed line and an unrecognized event type are both survivable —
+        the run keeps its text and its terminal — but both mean delegate read
+        the child's stdout with a parser the vendor has moved past, and neither
+        was visible anywhere a reader looks. They are reported together or not
+        at all, so a consumer that sees a count also sees the samples behind it,
+        and an empty block is the positive statement that the stream was clean.
+        """
+        if not (
+            self.malformed_lines
+            or self.unhandled_event_types
+            or self.unhandled_event_types_truncated
+        ):
+            return {}
+        return {
+            "malformedLines": self.malformed_lines,
+            "malformedSamples": list(self.malformed_samples),
+            "unhandledEventTypes": dict(self.unhandled_event_types),
+            "unhandledEventTypesTruncated": self.unhandled_event_types_truncated,
+        }
+
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]
         total = self.events.total
