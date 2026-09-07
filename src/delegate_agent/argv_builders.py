@@ -635,10 +635,16 @@ def build_codex_argv(
             sandbox_tokens.extend(["-c", "sandbox_workspace_write.network_access=true"])
     if bypass_hook_trust:
         sandbox_tokens.append("--dangerously-bypass-hook-trust")
+    # `--search` and `--ask-for-approval` are declared on codex's interactive TUI
+    # parser, not on the shared options the `exec` subcommand inherits, so codex
+    # parsed both and dropped them: webSearch bought nothing under the read-only
+    # and workspace-write sandboxes, and the safe-mode approval contract rested on
+    # an inert flag. The equivalent config overrides ride `-c` inside the exec
+    # scope, which exec does read.
     if policy.get("webSearch") is True:
-        argv.append("--search")
+        sandbox_tokens.extend(["-c", 'web_search="live"'])
     if not bypass_sandbox:
-        argv.extend(["--ask-for-approval", "never"])
+        sandbox_tokens.extend(["-c", 'approval_policy="never"'])
     if codex.get("profile"):
         argv.extend(["--profile", str(codex["profile"])])
     if model:

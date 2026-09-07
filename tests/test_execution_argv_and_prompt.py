@@ -535,7 +535,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             cli_parser.parse_cli(["codex", "call", "do this"]), config, io.StringIO("")
         )
         self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
-        self.assertIn("--search", default_req.argv)
+        self.assertIn('web_search="live"', default_req.argv)
         # ...but never a bypass, even at work-tier policy.
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", default_req.argv)
         ro_req = request_build.request_from_parsed(
@@ -544,7 +544,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             io.StringIO(""),
         )
         self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
-        self.assertNotIn("--search", ro_req.argv)
+        self.assertNotIn('web_search="live"', ro_req.argv)
 
     def test_read_only_flag_rejected_outside_call_mode(self):
         for mode in ("safe", "work"):
@@ -1056,8 +1056,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             policy,
             workspace_kind="git",
         )
-        self.assertIn("--ask-for-approval", argv[: argv.index("exec")])
-        self.assertIn("never", argv[: argv.index("exec")])
+        self.assertIn('approval_policy="never"', argv[argv.index("exec") :])
         self.assertIn("--sandbox", argv)
         self.assertIn("read-only", argv)
         self.assertNotIn("sandbox_workspace_write.network_access=true", argv)
@@ -1082,7 +1081,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
         self.assertNotIn("--dangerously-bypass-hook-trust", argv)
-        self.assertIn("--ask-for-approval", argv)
+        self.assertIn('approval_policy="never"', argv)
         self.assertIn("--sandbox", argv)
         self.assertIn("read-only", argv)
 
