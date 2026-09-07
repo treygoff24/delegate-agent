@@ -118,9 +118,9 @@ delegate cursor safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--pr
 delegate cursor work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate droid [MODEL_ALIAS] safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid [MODEL_ALIAS] work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
@@ -184,9 +184,9 @@ commands own them: `--group` on `runs`, `ps`, `wait`, `mail send`, and
 `--model <alias-or-model>` is optional on every engine and is parsed only before
 prompt text begins. The value is resolved against `<engine>.models` when it
 matches an alias key; otherwise it is passed through verbatim as a raw model ID
-(the harness validates unknown IDs). Droid also accepts an optional positional
-`MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
-both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
+(the harness validates unknown IDs). Droid uses this same grammar; its former
+positional alias is rejected. Without `--model`, Droid uses `droid.defaultModel`
+when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
@@ -720,7 +720,7 @@ delegate --json dry-run claude safe --reasoning-effort high "Review only."
 delegate --json dry-run grok safe --reasoning-effort high "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run codex work --mail-push "Run with opt-in stop-hook mail push."
-delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
+delegate --json dry-run droid safe --model reviewer "Investigate only."  # uses the configured 'reviewer' alias
 ```
 
 Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the throwaway copy is not materialized until a real run — and safe mode's working-tree sync (uncommitted tracked edits and untracked, non-ignored files mirrored into the isolated copy; only gitignored paths excluded) happens only on a real launch, not in dry-run.
@@ -919,7 +919,7 @@ Supported input keys:
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
 - The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
-- `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
+- `model`: optional alias-or-id for every engine, resolved exactly like `--model`. A matching `<engine>.models` alias is expanded; other values pass through as raw model IDs.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
@@ -941,28 +941,24 @@ override ambient profile detection for that run.
 
 ```bash
 delegate --json setup
-delegate --json describe --overview
-delegate --json describe --summary
-delegate --json models --summary
 delegate --json describe
+delegate --json describe --full
+delegate --json models --summary
 delegate --json models
 delegate --json models <engine>
 delegate --json models <engine> --live
 delegate --json capabilities
 delegate --json capabilities refresh
 delegate --json capabilities refresh <engine> [...]
-delegate agent-help
+delegate --json help
 ```
 
-`describe --overview` is a configuration-free command index with version,
-engines, modes, and focused `helpTopic` pointers. It omits internal commands,
-option descriptions, and config bodies. It cannot be combined with `--summary`.
-
-`describe` reports version, engines, modes, supported isolation values, prompt
-transforms, effective policy, top-level profile config metadata, representative
-argv shapes, and a command catalog. Full `describe` is a strict superset of
-`describe --summary`, so fields present in summary keep the same names in the
-full payload.
+`describe` gives a compact public command index with version, engines, modes,
+and focused help pointers. It omits internal commands, option descriptions,
+and config bodies. Use `describe --full` for supported isolation values,
+prompt transforms, effective policy, profile config metadata, representative
+argv shapes, and expanded command options. Use `help <command>` when only one
+command's contract is needed.
 
 `models` reports configured settings and cached discovery for Cursor, Droid,
 Codex, Kimi, Claude, Grok, Devin, OpenCode, Pi, and Oh My Pi. A per-engine
@@ -1209,6 +1205,10 @@ accepts the same harness, group, limit, and structural selectors (including `tot
 `truncated`, and the empty-filter workspace-scope warning).
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
+
+Command-local options belong after the command path: use `runs --group NAME`
+or `wait HANDLE --completion-report`. Their global launch spellings are not
+substitutes; for example, `--completion-report markdown wait HANDLE` is refused.
 
 Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as

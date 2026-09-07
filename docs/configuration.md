@@ -356,8 +356,8 @@ ambient pass returns immediately.
 ```
 
 - `binary`: child executable for Droid.
-- `defaultModel`: optional default model ID used when neither a positional alias nor `--model` is given.
-- `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid positional alias that is not present fails with `invalid_alias`. Alias keys must not collide with mode names (`safe`/`work`/`call`), equal the engine's own name, or start with `-`.
+- `defaultModel`: optional default model ID used when `--model` is omitted.
+- `models`: local aliases resolved by `--model`, as with other engines. The map may be empty. Alias keys must not be mode names, the engine name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch. When the model has no matching capability declaration, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
@@ -880,13 +880,11 @@ Launch responses, journal `attempt_config` events, and supervisor status expose
 response also gives `effectiveConfigPath`. Source is a provenance label, not a
 verified source-control revision. Credentials are not included in this projection.
 
-Old copied runtimes cannot implement this behavior merely by receiving a new
-environment variable. Pins without `attemptConfigVersion: 1` retain their frozen
-config and launch with an explicit operational-updates-unavailable warning and
-an `attempt_config_unavailable` journal event. They are not migrated or repinned
-implicitly. Unpinned legacy workflows retain their existing config behavior.
-Synchronous dry runs also retain their existing command-config semantics and do
-not establish an operational snapshot for a live attempt.
+Resumption requires the current workflow format: version-2 structural keys and
+a runtime pin supporting version-1 attempt configuration. Pinless workflows and
+older formats are rejected before child launch; start a new workflow rather
+than migrating old state. Synchronous dry runs use command configuration and
+do not establish an operational snapshot for a live attempt.
 
 #### Workflow defaults
 
