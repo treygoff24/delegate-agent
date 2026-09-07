@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -296,6 +297,55 @@ class WorkflowPinningTests(unittest.TestCase):
         )
         self.assertEqual(pinless.returncode, 0, pinless.stderr)
         self.assertEqual(pinless.stdout, "LIVE HOME BYTES\n")
+
+    def test_runtime_publication_keeps_source_writable_until_rename(self) -> None:
+        workflow_pinning.pin_root(self.home).mkdir()
+        replace = os.replace
+        source_modes = []
+
+        def publish(source: Path, destination: Path) -> None:
+            source_modes.append(stat.S_IMODE(source.stat().st_mode))
+            self.assertTrue(source.stat().st_mode & stat.S_IWUSR)
+            replace(source, destination)
+
+        with mock.patch.object(workflow_pinning.os, "replace", side_effect=publish):
+            digest, runtime, _, _ = workflow_pinning._write_runtime_snapshot(
+                self.workspace, home=self.home
+            )
+
+        self.assertEqual(len(source_modes), 1)
+        self.assertEqual(runtime.name, digest)
+        for path in (runtime, *runtime.rglob("*")):
+            with self.subTest(path=path.relative_to(runtime)):
+                expected = 0o500 if path.is_dir() or path == runtime / "bin/delegate.py" else 0o400
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+
+    def test_reused_runtime_is_sealed_after_interrupted_publication(self) -> None:
+        workflow_pinning.pin_root(self.home).mkdir()
+        _, runtime, _, _ = workflow_pinning._write_runtime_snapshot(self.workspace, home=self.home)
+        runtime.chmod(0o700)
+
+        workflow_pinning._write_runtime_snapshot(self.workspace, home=self.home)
+
+        self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), 0o500)
+
+    def test_readonly_runtime_temporary_directory_is_rebuilt_before_publish(self) -> None:
+        files = workflow_pinning._runtime_source_files()
+        digest = workflow_pinning._runtime_digest(files)
+        pool = self.home / workflow_pinning.PIN_ROOT_DIRNAME / workflow_pinning.RUNTIME_DIR
+        partial = pool / f"{digest}.tmp"
+        stale_file = partial / "src" / "partial.py"
+        stale_file.parent.mkdir(parents=True)
+        stale_file.write_text("partial", encoding="utf-8")
+        stale_file.chmod(0o400)
+        stale_file.parent.chmod(0o500)
+        partial.chmod(0o500)
+
+        _, runtime, _, _ = workflow_pinning._write_runtime_snapshot(self.workspace, home=self.home)
+
+        self.assertFalse(partial.exists())
+        self.assertFalse((runtime / "src" / "partial.py").exists())
+        self.assertEqual(workflow_pinning._runtime_directory_digest(runtime), digest)
 
     def test_partial_runtime_temporary_directory_is_rebuilt_before_publish(self) -> None:
         files = workflow_pinning._runtime_source_files()

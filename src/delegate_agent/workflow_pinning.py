@@ -18,7 +18,7 @@ import re
 import shutil
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +30,8 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry as workflow_registry
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from delegate_agent.workflow_attempts import WorkflowAttempt
 
 PIN_SCHEMA = "delegate.workflow-pin.v1"
@@ -403,6 +405,20 @@ def _runtime_directory_digest(root: Path) -> str:
     return _runtime_digest(files)
 
 
+def _retry_readonly_runtime_removal(
+    function: Callable[[str], object],
+    path: str,
+    exc_info: tuple[type[BaseException], BaseException, TracebackType | None],
+) -> None:
+    if not isinstance(exc_info[1], PermissionError) or function not in (os.unlink, os.rmdir):
+        raise exc_info[1]
+    # Unlink/rmdir require a writable parent, not a writable file. Never chmod
+    # the entry itself: it may be a symlink pointing outside the stale tree.
+    parent = Path(path).parent
+    parent.chmod(parent.stat().st_mode | stat.S_IWUSR)
+    function(path)
+
+
 def _write_runtime_snapshot(
     root: Path, *, home: Path | None = None
 ) -> tuple[str, Path, Path, Path]:
@@ -430,7 +446,7 @@ def _write_runtime_snapshot(
                         "runtime_snapshot_collision",
                         f"runtime snapshot temporary path is unsafe: {temporary_root}",
                     )
-                shutil.rmtree(temporary_root)
+                shutil.rmtree(temporary_root, onerror=_retry_readonly_runtime_removal)
             for relative, content in files:
                 target = temporary_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -444,8 +460,10 @@ def _write_runtime_snapshot(
             ):
                 directory.chmod(0o500)
             runtime_pool.chmod(0o700)
-            temporary_root.chmod(0o500)
+            # macOS refuses to rename a directory without owner-write permission.
             os.replace(temporary_root, runtime_root)
+        # Also seal a snapshot left by a crash between rename and chmod.
+        runtime_root.chmod(0o500)
     return digest, runtime_root, runtime_root / "src", runtime_root / "bin" / "delegate.py"
 
 
