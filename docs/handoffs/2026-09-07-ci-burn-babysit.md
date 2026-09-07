@@ -27,8 +27,11 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 5. Fix loops via `delegate followup codex-N`.
 6. Close beads with `--reason` pointing at the merge commit. Push Forgejo. GitHub push stays gated — ask Trey.
 
+## Landed
+- codex-74 = dlg-y5c (mapping confirmed by diff): merged e7c96ef, closed 730d425. Lanes commit `LANE_REPORT.md`; `git rm` it on main after each merge.
+
 ## Failure modes seen
-(none yet)
+- Full `scripts/gate.sh` inside a lane shows 1 teardown error from the linked-worktree registry-lock guard while sibling ci-burn runs are live. Not a code failure; run the full gate on main once the group is quiet.
 
 ## Rulings
 (none yet)
