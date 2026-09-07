@@ -1802,7 +1802,13 @@ class StreamAccumulator:
             return None
         if completion:
             self.completion_text = stripped
-        self.assistant_chunks.append(stripped)
+        # Claude emits the final answer once as an ``assistant`` message and
+        # again in the terminal ``result`` payload. Keep the terminal value,
+        # but do not record that replay as a second assistant chunk. Non-
+        # terminal messages intentionally remain append-only, even when their
+        # text repeats.
+        if not (completion and self.assistant_chunks and self.assistant_chunks[-1] == stripped):
+            self.assistant_chunks.append(stripped)
         self._invalidate_assistant_text_cache()
         self.current = _current_from_text(stripped)
         return stripped
