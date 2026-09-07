@@ -51,6 +51,9 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - Major: runner._tracked_stream_max_bytes reloads config at execute time; carry from launch config. Followup on codex-77 (runs/o7i-fix.json).
 - Items 2,3,4,5,7 clean. Opus review still running (runs/review-opus.json).
 
+## Gate
+- Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Re-gate after the two review fixes merge.
+
 ## Rulings
 - Ruling: extended dlg-278.1's write boundary to workflow_attempts.py via followup rather than a new bead — same defect, same lane context; cost if wrong: a slightly larger diff to review in one merge.
 
