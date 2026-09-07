@@ -130,6 +130,67 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             self.assertEqual(state["status"], "succeeded")
             self.assertTrue(state["stoppedAfterCompletion"])
 
+    def test_codex_turn_completed_does_not_put_the_child_on_the_exit_clock(self):
+        """codex flushes its rollout after turn.completed; a 1s kill truncates it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="codex")
+            message = json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed\n- done"},
+                }
+            )
+            turn = json.dumps({"type": "turn.completed"})
+            after = json.dumps({"type": "item.completed", "item": {"type": "todo_list"}})
+            script = (
+                f"import time\nprint({message!r}, flush=True)\nprint({turn!r}, flush=True)\n"
+                f"time.sleep(1.5)\nprint({after!r}, flush=True)\n"
+            )
+
+            with mock.patch.object(runner, "TERMINAL_EXIT_GRACE_SEC", 0.1):
+                code, payload = runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["status"], "succeeded")
+            self.assertNotIn("stoppedAfterCompletion", payload)
+            run_path = run_registry.run_directory(context.registry_root, context.run_id)
+            stdout_log = (run_path / run_registry.STDOUT_LOG).read_text(encoding="utf-8")
+            self.assertIn("todo_list", stdout_log)
+
+    def test_codex_error_terminal_still_stops_a_lingering_child(self):
+        """Only the success terminal is unarmed; a failure must not wait 30 seconds."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="codex")
+            failure = json.dumps({"type": "error", "message": "stream cancelled"})
+            script = f"import time\nprint({failure!r}, flush=True)\ntime.sleep(30)\n"
+
+            started = time.monotonic()
+            with mock.patch.object(runner, "TERMINAL_EXIT_GRACE_SEC", 0.1):
+                code, payload = runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["status"], "failed")
+            self.assertTrue(payload["stoppedAfterCompletion"])
+            self.assertLess(time.monotonic() - started, 5)
+
     def test_terminal_success_grace_outlives_call_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
