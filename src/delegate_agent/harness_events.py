@@ -679,7 +679,10 @@ class StreamAccumulator:
         self.terminal_status = status
         payload: JsonObject = {"event": event, "status": status}
         if reason:
-            _add_bounded_event_field(payload, "reason", reason)
+            # The reason is child-supplied text and `terminalEvent` is persisted
+            # to the run record, so it is redacted here. `recentEvents` is the
+            # deliberate raw diagnostic mirror and keeps the original.
+            _add_bounded_event_field(payload, "reason", redact_string(reason))
         self.terminal_event = payload
         self.events.append(NormalizedEvent(kind="run.completed", status=status, message=reason))
 
