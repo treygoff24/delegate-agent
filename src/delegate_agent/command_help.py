@@ -16,6 +16,11 @@ from dataclasses import dataclass, field, replace
 from delegate_agent import VERSION
 from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
+from delegate_agent.reasoning import (
+    OMP_NATIVE_EFFORTS,
+    PI_NATIVE_EFFORTS,
+    thinking_vocabulary_prose,
+)
 
 
 @dataclass(frozen=True)
@@ -624,7 +629,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only pi's read tool and disable extension, skill, prompt-template, and project-approval discovery.",
             "All modes are stateless at pi's session layer; Delegate run tracking remains available.",
-            "Reasoning effort maps directly to pi --thinking: low, medium, high, xhigh, or max.",
+            "Reasoning effort maps directly to pi --thinking: "
+            f"{thinking_vocabulary_prose(PI_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("opencode", "codex", "models", "agent-help"),
@@ -657,13 +663,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate omp call --read-only --prompt-file judge.md",
         ),
         notes=(
-            "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
+            "Uses omp -p --mode json --no-session with prompt delivered on stdin.",
             SAFE_WORKSPACE_SYNC_NOTE,
             WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Safe and call --read-only allow only omp's read tool and disable extension, skill, rules, and LSP discovery.",
             "All modes are stateless at omp's session layer; Delegate run tracking remains available.",
-            "Reasoning effort maps directly to omp --thinking: low, medium, high, xhigh, or max.",
+            "Reasoning effort maps directly to omp --thinking: "
+            f"{thinking_vocabulary_prose(OMP_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
         ),
         see_also=("pi", "opencode", "codex", "models", "agent-help"),
