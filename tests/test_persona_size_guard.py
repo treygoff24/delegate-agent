@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import config, prompt_transport, request_build, run_registry
+from delegate_agent import config, mail, prompt_transport, request_build, run_registry
 from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_build import request_from_parsed
@@ -47,6 +47,7 @@ class PersonaSizeGuardTests(unittest.TestCase):
                 mode="work",
                 completion_report_mode=config.COMPLETION_REPORT_MODE_MARKDOWN,
                 persona_text=self.persona_text,
+                mail_suffix=mail.MAIL_PROMPT_SUFFIX,
             ).encode("utf-8")
         )
 
