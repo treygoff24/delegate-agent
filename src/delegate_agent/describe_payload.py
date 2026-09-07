@@ -787,7 +787,9 @@ def _opencode_describe_argv(
     return prompt_file_display_argv(argv)
 
 
-def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:
+def _pi_family_describe_argv(
+    section: JsonObject, engine: str, *, mode: str, workspace: str
+) -> list[str]:
     model = _resolve_default_model(section)
     default_effort = section.get("defaultReasoningEffort")
     # describe rejects --auth-profile, so profile-scoped discovery is out of
@@ -800,7 +802,7 @@ def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> 
         model=model,
     )
     if engine == "omp":
-        return build_omp_argv(section, mode, model, thinking)
+        return build_omp_argv(section, mode, model, thinking, workspace)
     return build_pi_argv(section, mode, model, thinking)
 
 
@@ -876,10 +878,14 @@ def describe_payload(
         mode=MODE_WORK,
         workspace="<workspace>",
     )
-    pi_safe_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_SAFE)
-    pi_work_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_WORK)
-    omp_safe_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_SAFE)
-    omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK)
+    pi_safe_argv = _pi_family_describe_argv(
+        pi, "pi", mode=MODE_SAFE, workspace="<isolated-workspace>"
+    )
+    pi_work_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_WORK, workspace="<workspace>")
+    omp_safe_argv = _pi_family_describe_argv(
+        omp, "omp", mode=MODE_SAFE, workspace="<isolated-workspace>"
+    )
+    omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK, workspace="<workspace>")
     return {
         "ok": True,
         "summary": False,
@@ -1265,7 +1271,7 @@ def describe_payload(
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
                     "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
-                    "Oh My Pi 17.0.4 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
+                    "Oh My Pi 18.1.13 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
                 ],
                 "work": omp_work_argv,
                 "workNotes": [

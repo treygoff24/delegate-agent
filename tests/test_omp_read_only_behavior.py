@@ -2,7 +2,7 @@
 
 The argv-shape tests in test_engine_argv assert that omp safe mode *contains*
 `--tools read --approval-mode always-ask`. They cannot catch the failure this
-guards: in omp 17.0.4 the `--tools read` allowlist is NOT self-enforcing — the
+guards: in omp 18.1.13 the `--tools read` allowlist is NOT self-enforcing — the
 write/bash/python tools still execute under it. Only `--approval-mode always-ask`
 (no approver present in headless `-p` -> every write/exec tool auto-denies)
 actually binds the read-only boundary. A shape assertion stays green even if a
@@ -13,7 +13,12 @@ Gated behind DELEGATE_OMP_BEHAVIOR_TEST=1 because it spends a real omp/subscript
 call and needs omp on PATH. Run before shipping any change to
 PI_FAMILY_SAFE_LOCKDOWN["omp"]:
 
-    DELEGATE_OMP_BEHAVIOR_TEST=1 python3 -m unittest tests.test_omp_read_only_behavior
+    DELEGATE_OMP_BEHAVIOR_TEST=1 DELEGATE_OMP_BEHAVIOR_MODEL=<selector> \
+        python3 -m pytest tests/test_omp_read_only_behavior.py
+
+Last run green on omp 18.1.13 (2026-09-07, model kimi-code/k3): write denied,
+shell exec denied, a hostile project-local `approvalMode: yolo` beaten, reads
+still permitted.
 """
 
 from __future__ import annotations
@@ -111,12 +116,36 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
             self.skipTest(f"set {MODEL_ENV} to an installed OMP model")
         return model
 
-    def _run_lockdown(self, cwd: str, prompt: str) -> subprocess.CompletedProcess[str]:
-        argv = [self._omp_bin(), "--model", self._model(), "-p", "--no-session", "--mode", "json"]
+    def _lockdown_argv(self, cwd: str) -> list[str]:
+        """The argv Delegate actually launches for omp safe mode.
+
+        Prompt on stdin, `--cwd` naming the workspace, then the lockdown flags —
+        a probe that used a different invocation would prove a boundary Delegate
+        does not use.
+        """
+        argv = [
+            self._omp_bin(),
+            "--model",
+            self._model(),
+            "-p",
+            "--no-session",
+            "--mode",
+            "json",
+            "--cwd",
+            cwd,
+        ]
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
-        argv.append(prompt)
+        return argv
+
+    def _run_lockdown(self, cwd: str, prompt: str) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            argv, cwd=cwd, env=_probe_env(), capture_output=True, text=True, timeout=180
+            self._lockdown_argv(cwd),
+            cwd=cwd,
+            env=_probe_env(),
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         assert_live_turn(result.stdout)
         return result
@@ -150,19 +179,14 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
     def test_lockdown_still_permits_reads(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "target.txt").write_text("SECRET_MARKER_42\n")
-            argv = [
-                self._omp_bin(),
-                "--model",
-                self._model(),
-                "-p",
-                "--no-session",
-                "--mode",
-                "json",
-            ]
-            argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
-            argv.append("Read target.txt and print the exact marker string it contains.")
             result = subprocess.run(
-                argv, cwd=d, env=_probe_env(), capture_output=True, text=True, timeout=180
+                self._lockdown_argv(d),
+                cwd=d,
+                env=_probe_env(),
+                input="Read target.txt and print the exact marker string it contains.",
+                capture_output=True,
+                text=True,
+                timeout=180,
             )
             assert_live_turn(result.stdout)
             self.assertIn(

@@ -14,6 +14,8 @@ WORKSPACE_FLAG_BY_ENGINE: dict[str, str | None] = {
     "grok": "--cwd",
     "devin": None,
     "opencode": "--dir",
+    # pi has no --cwd flag; omp does and Delegate emits it.
+    "omp": "--cwd",
 }
 
 

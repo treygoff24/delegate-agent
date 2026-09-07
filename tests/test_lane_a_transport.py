@@ -14,11 +14,11 @@ import unittest
 from pathlib import Path
 
 from delegate_agent import argv_builders as argv_api
+from delegate_agent import argv_utils, mail_core
 from delegate_agent import (
     config as delegate_config,
 )
 from delegate_agent import describe_payload as describe_api
-from delegate_agent import mail_core
 from delegate_agent import prompt_transport as transport_api
 from tests.delegate_commands_test_base import CommandTestBase
 
@@ -120,9 +120,9 @@ class OmpStdinTransportTests(CommandTestBase):
 
     def test_omp_argv_builder_takes_no_prompt(self):
         argv = argv_api.build_omp_argv(
-            delegate_config.embedded_default_config()["omp"], "work", None, None
+            delegate_config.embedded_default_config()["omp"], "call", None, None, "/ws"
         )
-        self.assertEqual(argv, ["omp", "-p", "--no-session", "--mode", "json"])
+        self.assertEqual(argv, ["omp", "-p", "--no-session", "--mode", "json", "--cwd", "/ws"])
 
 
 class SharedTransportSurfaceTests(unittest.TestCase):
@@ -323,3 +323,98 @@ class CodexExecScopedOverrideTests(CommandTestBase):
         self.assertNotIn("--search", notes)
         self.assertNotIn("--ask-for-approval", notes)
         self.assertIn("approval_policy", notes)
+
+
+class OmpWorkspaceAndApprovalTests(CommandTestBase):
+    """A5: omp work pins its approval mode, and omp names its working directory.
+
+    omp's `tools.approvalMode` schema default is yolo, but a user-level or
+    project-level config.yml can set always-ask or write and silently downgrade a
+    work run with no Delegate-side signal. Separately, omp auto-chdirs out of the
+    home directory when the launch cwd is `$HOME` and no `--cwd`/`--allow-home` is
+    given, so a workspace that resolves to home is silently redirected to a temp
+    directory while the manifest records the home path.
+    """
+
+    def test_omp_work_pins_yolo_approval(self):
+        request = self.build_git_request(
+            "omp",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.argv[request.argv.index("--approval-mode") + 1], "yolo")
+
+    def test_omp_safe_keeps_always_ask_and_never_gets_yolo(self):
+        # The planted negative: the safe lockdown's load-bearing flag must not be
+        # replaced by the work-mode value.
+        request = self.build_git_request(
+            "omp",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.argv[request.argv.index("--approval-mode") + 1], "always-ask")
+        self.assertNotIn("yolo", request.argv)
+
+    def test_pi_work_never_gets_an_approval_flag(self):
+        # pi is the same builder but a different CLI; --approval-mode is omp's.
+        request = self.build_git_request(
+            "pi",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertNotIn("--approval-mode", request.argv)
+
+    def test_omp_names_its_working_directory(self):
+        request = self.build_git_request(
+            "omp",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.argv[request.argv.index("--cwd") + 1], "/repo")
+
+    def test_pi_gets_no_cwd_flag_because_its_parser_has_none(self):
+        request = self.build_git_request(
+            "pi",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertNotIn("--cwd", request.argv)
+
+    def test_omp_cwd_is_rewritten_when_execution_moves_to_another_workspace(self):
+        # A --cwd that is not rewritten with the rest of the argv would point the
+        # child at the source tree while the process cwd is the isolated copy.
+        argv = argv_api.build_omp_argv(
+            delegate_config.embedded_default_config()["omp"], "work", None, None, "/source"
+        )
+        rewritten = argv_utils.replace_workspace_arg_in_argv("omp", argv, "/isolated")
+        self.assertEqual(rewritten[rewritten.index("--cwd") + 1], "/isolated")
+
+    def test_describe_shows_the_omp_workspace_and_approval_mode(self):
+        payload = describe_api.describe_payload(
+            delegate_config.embedded_default_config(), "embedded default"
+        )
+        omp_work = payload["modeMapping"]["omp"]["work"]
+        self.assertEqual(omp_work[omp_work.index("--approval-mode") + 1], "yolo")
+        self.assertEqual(omp_work[omp_work.index("--cwd") + 1], "<workspace>")
+        omp_safe = payload["modeMapping"]["omp"]["safe"]
+        self.assertEqual(omp_safe[omp_safe.index("--cwd") + 1], "<isolated-workspace>")

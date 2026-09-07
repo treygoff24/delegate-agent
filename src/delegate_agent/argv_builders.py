@@ -64,6 +64,12 @@ CLAUDE_SAFE_ALLOWED_TOOLS = (
     "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
 )
 
+# omp's tools.approvalMode schema default is yolo, but a user- or project-level
+# config.yml can set always-ask or write, which silently downgrades a work run to
+# read-only with no Delegate-side signal. Work capability is a property of the
+# invocation, not of ambient config.
+OMP_WORK_APPROVAL = ("--approval-mode", "yolo")
+
 PI_FAMILY_SAFE_LOCKDOWN = {
     "pi": (
         "--tools",
@@ -74,7 +80,7 @@ PI_FAMILY_SAFE_LOCKDOWN = {
         "--no-approve",
     ),
     "omp": (
-        # --tools read is NOT self-enforcing in omp 17.0.4 (the write/bash/python
+        # --tools read is NOT self-enforcing in omp 18.1.13 (the write/bash/python
         # tools still execute under it). --approval-mode always-ask is the load-
         # bearing flag: in headless -p there is no approver, so every write/exec
         # tool call auto-denies while the read capability stays auto-allowed. It
@@ -524,6 +530,7 @@ def _build_pi_family_argv(
     model: str | None,
     thinking: str | None,
     *,
+    workspace: str | None = None,
     call_read_only: bool = False,
     pure: bool = False,
     persist_session: bool = False,
@@ -536,10 +543,18 @@ def _build_pi_family_argv(
     if not persist_session and resume_session_id is None:
         argv.append("--no-session")
     argv.extend(["--mode", "json"])
+    if workspace is not None:
+        # omp auto-chdirs to a temp directory when the launch cwd is the home
+        # directory and neither --cwd nor --allow-home is given, so the run would
+        # read and write somewhere other than the workspace the manifest records.
+        # pi's parser has no --cwd, which is why this is opt-in per engine.
+        argv.extend(["--cwd", workspace])
     if resume_session_id is not None:
         argv.append(f"--resume={resume_session_id}")
     if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN[engine])
+    elif engine == "omp" and mode == MODE_WORK:
+        argv.extend(OMP_WORK_APPROVAL)
     if model:
         argv.extend(["--model", model])
     if thinking:
@@ -576,6 +591,7 @@ def build_omp_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
+    workspace: str,
     *,
     call_read_only: bool = False,
     pure: bool = False,
@@ -588,6 +604,7 @@ def build_omp_argv(
         mode,
         model,
         thinking,
+        workspace=workspace,
         call_read_only=call_read_only,
         pure=pure,
         persist_session=persist_session,
