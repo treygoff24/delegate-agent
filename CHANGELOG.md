@@ -24,7 +24,9 @@ produce a wrong run outcome is fixed below.
   pinned run judges the served model by Claude's own naming instead of string
   equality, and `--continuity-mode pinned` refuses an alias that names no family
   (`best`, `opusplan`, `default`) at preflight.
-- Cursor: read-only runs emit `--mode ask`, tool events are parsed from the
+- Cursor: `cursor call --read-only` emits `--mode ask`, which Cursor documents as
+  read-only; safe mode deliberately does not, and keeps relying on the isolated
+  workspace copy and the safe-review prefix. Tool events are parsed from the
   shape Cursor actually emits, and a pinned run accepts the display name Cursor
   reports in place of the requested selector.
 - Grok: a response is sealed on usage rather than on `end`, so a multi-response
@@ -147,6 +149,10 @@ produce a wrong run outcome is fixed below.
   size guard; `--no-mail` avoids that overhead near the boundary.
 - Droid uses the same `--model <alias-or-model>` grammar as other engines. The
   positional model-alias form is retired.
+- Droid custom-model selectors use Factory's documented
+  `custom:<Display-Name>-<index>` form. The previous id-based selectors no longer
+  resolve: re-read `delegate models droid` and update any `droid.models` alias
+  that pinned one.
 - Workflow resume requires current-format pins, attempt configuration and
   version-2 structural keys. Legacy formats are refused before child launch;
   start a new workflow instead of migrating old state. Gate approvals require

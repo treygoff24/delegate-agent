@@ -71,6 +71,21 @@ Several agents can share one `~/.delegate/src`; when one of them installs a new 
 6. `delegate doctor` -- confirm `promotionMatchesRuntime: true`. This requires the
    executing import root to be the installed root, matching package bytes,
    present launchers, and an unchanged artifact manifest from a verified stamp.
+7. `delegate capabilities refresh` for each installed harness. The discovery cache
+   is shared state with its own shape, and the runtime that wrote it is not
+   necessarily the runtime that reads it: a cache written by a newer runtime can
+   carry fields an older reader rejects, and the reader degrades the record rather
+   than failing loudly. Observed live on 2026-09-07 -- a refresh run from branch
+   code left the installed runtime with no Codex reasoning declarations at all
+   until each harness was re-probed. Re-probing after a promotion costs one round
+   of probes and removes the whole class.
+
+Cache writes are not scoped to the checkout that issues them. `delegate setup`,
+`delegate capabilities refresh`, and `delegate models <engine> --live` write the
+selected auth profile's shared discovery cache, which the installed runtime reads
+on its next launch. Running any of them from a development checkout therefore
+changes what the live runtime sees. Use a separate auth profile for development
+probes, or re-run `capabilities refresh` from the installed command afterwards.
 
 Bulk payload installers must not traverse a versioned source alias and overwrite
 its target, or replace the paired bootstrap with an older mutable-path launcher.
