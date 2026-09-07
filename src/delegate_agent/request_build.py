@@ -83,7 +83,6 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
     ARGV_PROMPT_TRANSPORT_ENGINES,
-    KIMI_PROMPT_REDACTION,
     PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
@@ -3486,7 +3485,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         argv=argv,
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
-        display_argv=redacted_prompt_argv(argv, replacement=KIMI_PROMPT_REDACTION),
+        display_argv=redacted_prompt_argv(argv),
         **_model_context_kwargs(capability_model, capability_model_source),
     )
 

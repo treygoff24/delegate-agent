@@ -78,7 +78,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
         self.assertTrue(payload["isolatedWorkspace"])
         self.assertIn("isolation", payload)
-        self.assertNotIn("--mode=plan", payload["argv"])
+        self.assertEqual(payload["argv"][payload["argv"].index("--mode") + 1], "ask")
         self.assertNotIn("--approve-mcps", payload["argv"])
 
     def test_cleanup_refuses_target_containing_source_root(self):

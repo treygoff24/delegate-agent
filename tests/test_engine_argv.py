@@ -897,9 +897,8 @@ class EngineArgvTests(CommandTestBase):
             ],
         )
         self.assertNotIn("hello", argv)
-        self.assertNotIn("--mode=agent", argv)
-        self.assertNotIn("--mode=plan", argv)
-        self.assertNotIn("--mode=ask", argv)
+        # Work mode is write-capable and must never take a read-only mode.
+        self.assertNotIn("--mode", argv)
 
     def test_structured_retry_native_resume_argv(self):
         cursor = argv_api.build_cursor_argv(
@@ -2415,8 +2414,7 @@ class EngineArgvTests(CommandTestBase):
                 with self.subTest(engine=engine, mode=mode):
                     self.assertTrue(all(isinstance(item, str) for item in mapping[mode]))
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
-        self.assertNotIn("--mode=plan", cursor_safe)
-        self.assertNotIn("--mode=ask", cursor_safe)
+        self.assertEqual(cursor_safe[cursor_safe.index("--mode") + 1], "ask")
         self.assertNotIn("--force", cursor_safe)
         self.assertNotIn("--approve-mcps", cursor_safe)
         self.assertIn("<isolated-workspace>", cursor_safe)
