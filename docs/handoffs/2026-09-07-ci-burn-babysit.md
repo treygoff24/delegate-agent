@@ -56,6 +56,8 @@ CI evidence: GitHub run 34132106612 on main 8043bec, logs at `/var/tmp/dlg-lanes
 - #2 raw PermissionError from rmtree path → fold into pinning after Astra fix lands. #4 same as Astra major 2. #5 manifest field resume-table row, #7 AssertionError→RunnerLaunchError → after Sol fix lands (runner.py owned by codex-77).
 - #8 publication window 0o700 between rename and seal: accepted (same-uid, forced by macOS rename semantics).
 
+- Astra major 2 fixed: Sol followup 8bbbdc0 merged 431ecdf (limit pinned in Request/RunContext). Opus #5/#7 done by operator in 7fed990. Remaining in flight: Astra rmtree fix (runs/278-1-fix.json), Luna minors (runs/opus-minors.json); then Opus #2 fold-in, re-gate, Forgejo push.
+
 ## Gate
 - Quiet full gate on main at 09658a7 (code = 2064fab): 3294 passed, 15 skipped, GATE PASS ruff 0.15.15 (log runs/gate-main.log). Re-gate after the two review fixes merge.
 
