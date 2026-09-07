@@ -631,7 +631,7 @@ class StreamAccumulator:
             self._ingest_cursor_tool(payload, event_type)
             return
         if event_type == "result":
-            self._ingest_result_event(payload)
+            self._ingest_result_event(payload, terminal_recorded=terminal_recorded)
             return
         if event_type in ("turn.failed", "turn.error"):
             self._record_terminal_event(
@@ -959,7 +959,7 @@ class StreamAccumulator:
         if isinstance(final_text, str) and final_text.strip():
             self._record_successful_completion_text(final_text)
 
-    def _ingest_result_event(self, payload: JsonObject) -> None:
+    def _ingest_result_event(self, payload: JsonObject, *, terminal_recorded: bool = False) -> None:
         if self.harness == "cursor":
             usage = _normalize_reported_usage(payload.get("usage"))
             if usage is not None:
@@ -967,10 +967,22 @@ class StreamAccumulator:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             if payload.get("is_error") is True:
-                self._record_terminal_event(event="result", status="failed")
+                if not terminal_recorded:
+                    self._record_terminal_event(event="result", status="failed")
                 self._record_recoverable_assistant_text(result)
                 return
             self._record_successful_completion_text(result)
+            return
+        if payload.get("is_error") is True and not terminal_recorded:
+            # `error_during_execution`, `error_api` and any unlisted subtype
+            # arrive with no string `result`. Only `error_max_turns` is rescued
+            # upstream by the provider-terminal table, so without this the whole
+            # event -- terminal, reason and all -- was dropped.
+            self._record_terminal_event(
+                event="result",
+                status="failed",
+                reason=_string_field(payload, "subtype"),
+            )
 
     def _ingest_codex_item(self, payload: JsonObject, *, completed: bool) -> None:
         item = payload.get("item")
