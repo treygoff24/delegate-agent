@@ -674,6 +674,52 @@ class HarnessEventsTests(unittest.TestCase):
             ],
         )
 
+        # turn.completed carries the run's token accounting.
+        self.assertEqual(
+            acc.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 1597930,
+                "outputTokens": 9862,
+                "cacheReadTokens": 1404544,
+                "cacheWriteTokens": None,
+            },
+        )
+
+    def test_codex_preamble_is_cleared_by_every_non_message_item(self):
+        """codex L3: only command_execution cleared the candidate."""
+        for item_type in ("file_change", "mcp_tool_call", "web_search", "todo_list", "reasoning"):
+            with self.subTest(item_type=item_type):
+                acc = self.events.StreamAccumulator(harness="codex")
+                acc.ingest_line(
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": "I'll start by reading."},
+                        }
+                    )
+                )
+                acc.ingest_line(json.dumps({"type": "item.completed", "item": {"type": item_type}}))
+                acc.ingest_line(json.dumps({"type": "turn.completed"}))
+                self.assertIsNone(acc.completion_text)
+                self.assertIn("I'll start by reading.", acc.assistant_text)
+
+    def test_codex_message_sealed_after_the_last_item_is_still_promoted(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps({"type": "item.completed", "item": {"type": "file_change", "id": "f1"}})
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.completion_text, "Status: completed")
+
     def test_opencode_simple_text_fixture_sets_completion_from_stop_step(self):
         acc = self.ingest_opencode_fixture("simple_text.ndjson")
         expected = self.opencode_text_parts("simple_text.ndjson")[-1].strip()
