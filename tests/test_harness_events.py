@@ -1433,6 +1433,81 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.current, "Bash git status")
         self.assertIn("Running git status", acc.assistant_text)
 
+    def test_claude_terminal_result_replays_assistant_text_only_once(self):
+        text = "Final answer.\n" + ("Details that fit in the snapshot.\n" * 100)
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_01answer",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [{"type": "text", "text": text}],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 12, "output_tokens": 101},
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps({"type": "result", "subtype": "success", "result": f"  {text}\n"})
+        )
+
+        self.assertEqual(acc.assistant_text, text.strip())
+        self.assertEqual(acc.assistant_text.count("Final answer."), 1)
+        self.assertEqual(acc.completion_text, text.strip())
+        bounded, metadata = acc.bounded_assistant_text()
+        self.assertEqual(bounded, text.strip())
+        self.assertFalse(metadata["assistantTextTruncated"])
+
+    def test_claude_terminal_result_with_different_text_keeps_both_chunks(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_01draft",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [{"type": "text", "text": "Draft"}],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                    },
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "result", "subtype": "success", "result": "Final"}))
+
+        self.assertEqual(acc.assistant_text, "Draft\n\nFinal")
+        self.assertEqual(acc.completion_text, "Final")
+
+    def test_repeated_non_terminal_assistant_messages_are_not_deduplicated(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        message = {
+            "type": "assistant",
+            "message": {
+                "id": "msg_01progress",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [{"type": "text", "text": "Still working"}],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 12, "output_tokens": 2},
+            },
+        }
+        acc.ingest_line(json.dumps(message))
+        acc.ingest_line(json.dumps(message))
+
+        self.assertEqual(acc.assistant_text, "Still working\n\nStill working")
+
     def test_claude_error_result_does_not_emit_success_completion(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(
