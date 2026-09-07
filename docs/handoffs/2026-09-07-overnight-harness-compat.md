@@ -16,9 +16,9 @@ Also in scope (Trey, mid-turn): put the auto-injected skill-review preamble
 - Plan (to write): `docs/audits/2026-09-07-harness-compat/PLAN.md`.
 
 ## Phases
-1. [running] audits
-2. [ ] synthesize plan
-3. [ ] Astra medium review (`delegate codex safe --model astra --reasoning-effort medium`), patch
+1. [done] audits (11 reports)
+2. [done] plan
+3. [running] Astra medium review (run del_… see /var/tmp/astra-plan-review2.out.json); Lane P tests being fixed by sonnet agent lane-p-tests; mail recon by recon-mail (`delegate codex safe --model astra --reasoning-effort medium`), patch
 4. [ ] implement in waves (disjoint files per lane), each lane verified
 5. [ ] cross-model review + fix loop
 6. [ ] gate: `tests/acceptance.sh` / `python3 -m pytest -q` + ruff
