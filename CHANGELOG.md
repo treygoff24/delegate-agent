@@ -99,6 +99,28 @@ produce a wrong run outcome is fixed below.
 - Grok stays on its current stream format, and `validate_schema_subset` still
   rejects `$defs` and `format`.
 
+### CI and runtime hardening (2026-09-07)
+
+- Pinned runtime snapshots and workflow attempt directories are published while
+  still writable and sealed to `0o500` only after the rename. macOS `rename(2)`
+  refuses to move a directory that lacks owner write permission, which made
+  every pin-store test fail on the macOS CI runner while Linux passed. A stale
+  temporary snapshot that cannot be removed now raises a typed
+  `runtime_snapshot_collision` error, and the writable pre-pass walks the tree
+  through directory descriptors so a swapped symlink cannot redirect the chmod.
+- Test process guards read `ps -ww` and pin `COLUMNS=80`; narrow runner
+  terminals truncated the argument column and left children unreaped.
+- `trackedStreamMaxBytes` is a per-engine config value: 16 MiB by default and
+  64 MiB for Pi and Oh My Pi. The limit is resolved at request build and
+  pinned into the run context and manifest, so a config edit does not change
+  an already-launched run. Limit errors name the engine and which limit fired.
+- Harness discovery fingerprints an explicitly configured wrapper whose
+  basename is not another harness's binary name (an `estate-pi` style wrapper
+  now discovers), while still refusing ambiguous basenames and any basename
+  that names a different harness.
+- Harness event capture no longer duplicates the final assistant text when a
+  completion event repeats the last streamed chunk.
+
 ### Added
 - `describe` provides a compact command index; `describe --full` expands the
   command/config catalog. Help is generated from the same command specifications
