@@ -273,13 +273,21 @@ class WorkflowCommandTests(unittest.TestCase):
         path.write_text(textwrap.dedent(body).strip() + "\n", encoding="utf-8")
         return name
 
-    def wait_for_group_runs(self, wf_id: str, count: int = 1) -> list[dict[str, object]]:
+    def wait_for_group_runs(
+        self, wf_id: str, count: int = 1, *, with_execution_cwd: bool = False
+    ) -> list[dict[str, object]]:
+        # A child is listed as soon as its registry record exists; its
+        # ``executionCwd`` only appears once the runner has written the
+        # manifest. Callers that read the workspace path wait for that.
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             result = self.run_delegate(["--json", "runs", "--group", wf_id])
             if result.returncode == 0:
                 runs = json.loads(result.stdout)["runs"]
-                if len(runs) >= count:
+                if len(runs) >= count and (
+                    not with_execution_cwd
+                    or all(isinstance(run.get("executionCwd"), str) for run in runs)
+                ):
                     return runs
             time.sleep(0.1)
         self.fail(f"timed out waiting for {count} child runs in {wf_id}")
@@ -4012,7 +4020,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        runs = self.wait_for_group_runs(wf_id, count=2)
+        runs = self.wait_for_group_runs(wf_id, count=2, with_execution_cwd=True)
         self.assertEqual(len(runs), 2)
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
@@ -4059,7 +4067,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(launch.returncode, 0, launch.stderr)
         launched = json.loads(launch.stdout)
         wf_id = launched["wfId"]
-        runs = self.wait_for_group_runs(wf_id)
+        runs = self.wait_for_group_runs(wf_id, with_execution_cwd=True)
         old_workspace = Path(runs[0]["executionCwd"])
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         os.kill(int(status["supervisorPid"]), 9)
