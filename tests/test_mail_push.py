@@ -155,9 +155,11 @@ class MailPushTests(unittest.TestCase):
         self.assertEqual(codex_env["DELEGATE_MAIL_HOOK_HARNESS"], "codex")
         self.assertEqual(codex_env["CODEX_HOME"], codex.codex_home)
         self.assertTrue(Path(codex.codex_home or "").joinpath("auth.json").is_file())
+        # The private home is handed to the child resolved; on macOS the
+        # hermetic HOME sits under /tmp -> /private/tmp, so compare resolved.
         self.assertTrue(
             Path(codex.codex_home or "").is_relative_to(
-                mail.mail_push_scratch_root(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id).resolve()
             )
         )
         self.assertFalse(Path(codex.codex_home or "").is_relative_to(self.workspace.resolve()))
@@ -288,7 +290,7 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertTrue(
             fallback_home.is_relative_to(
-                mail.mail_push_scratch_root(self.registry_root, self.run_id)
+                mail.mail_push_scratch_root(self.registry_root, self.run_id).resolve()
             )
         )
         self.assertFalse(fallback_home.is_relative_to(self.workspace.resolve()))
