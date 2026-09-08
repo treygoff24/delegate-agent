@@ -2894,9 +2894,11 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
-        self.assertTrue(
-            any("determinism warning" in item for item in json.loads(launch.stdout)["warnings"])
-        )
+        launched = json.loads(launch.stdout)
+        # The supervisor is detached and still importing when this test
+        # returns; reap it before the temp dir cleanup races its __pycache__.
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, launched["wfId"])
+        self.assertTrue(any("determinism warning" in item for item in launched["warnings"]))
 
     def test_parallel_item_threads_bound_started_threads(self) -> None:
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
