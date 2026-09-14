@@ -63,6 +63,9 @@ PERSONA_RESOLUTION_ERRORS = frozenset(
     }
 )
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
+# Set only on the process detach_supervisor launches; the supervise entry
+# treats a supervisor as its own process only when this is present.
+WORKFLOW_SUPERVISOR_PROCESS_ENV = "DELEGATE_WORKFLOW_SUPERVISOR_PROCESS"
 WORKFLOW_WATCHDOG_INTERVAL_SECONDS = 0.25
 CHILD_WAIT_POLL_SECONDS = 0.25
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
@@ -586,9 +589,16 @@ class _SignalRelay:
     _DRAIN_MARKER = 0xF0  # never a signal number
     _STOP_MARKER = 0x00
 
-    def __init__(self, state: WorkflowState, watchdog: _SupervisorWatchdog) -> None:
+    def __init__(
+        self,
+        state: WorkflowState,
+        watchdog: _SupervisorWatchdog,
+        *,
+        lock_handle: _WorkflowLockHandle | None = None,
+    ) -> None:
         self.state = state
         self.watchdog = watchdog
+        self.lock_handle = lock_handle
         self._read_fd, self._write_fd = os.pipe()
         os.set_blocking(self._write_fd, False)
         self._previous_wakeup_fd = -1
@@ -607,6 +617,13 @@ class _SignalRelay:
         # possible however long the relay thread lingers.
         self._fence_lock = threading.Lock()
         self._fenced = False
+        # Ownership hand-off when a fence wait is abandoned (an exception
+        # unwinding through stop()): whichever of the abandoning caller and
+        # the in-flight delivery finishes second releases the workflow lock,
+        # decided under _release_lock so exactly one of them does.
+        self._release_lock = threading.Lock()
+        self._delivery_in_flight = False
+        self._release_after_delivery = False
         self._thread = threading.Thread(
             target=self._run,
             name=f"delegate-workflow-signal-relay-{state.wf_id}",
@@ -662,23 +679,50 @@ class _SignalRelay:
         with self._fence_lock:
             if self._fenced:
                 return
-            state = self.state
-            if self._delivered:
-                state.signals_repeated.append(name)
+            with self._release_lock:
+                self._delivery_in_flight = True
+            try:
+                self._deliver_unfenced(name)
+            finally:
+                with self._release_lock:
+                    self._delivery_in_flight = False
+                    if self._release_after_delivery and self.lock_handle is not None:
+                        self.lock_handle.release()
+
+    def _deliver_unfenced(self, name: str) -> None:
+        state = self.state
+        if self._delivered:
+            state.signals_repeated.append(name)
+            return
+        self._delivered = True
+        state.signal_received = name
+        # A genuine watchdog fire that started the shutdown keeps its reason;
+        # the signal is still recorded on its own field. claim_reason is the
+        # one synchronized writer for both the watchdog thread and this one.
+        self.watchdog.claim_reason(f"signal:{name}")
+        # This thread is the only writer of supervisor_signalled, so the line
+        # lands exactly once; status annotations elsewhere never journal it.
+        with contextlib.suppress(Exception):
+            state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
+        state.cancel_event.set()
+
+    def _abandon_fence_wait(self) -> None:
+        """Hand workflow-lock release to the in-flight delivery, if there is one.
+
+        Called when an exception unwinds through the fence wait. Later
+        deliveries are fenced out; the lock handle is marked deferred so the
+        supervisor's context manager leaves it open; and it is released here
+        only when no delivery is in flight, otherwise by that delivery's
+        finally block. Both decisions run under _release_lock.
+        """
+        with self._release_lock:
+            self._fenced = True
+            self._release_after_delivery = True
+            if self.lock_handle is None:
                 return
-            self._delivered = True
-            state.signal_received = name
-            # A genuine watchdog fire that started the shutdown keeps its
-            # reason; the signal is still recorded on its own field.
-            # claim_reason is the one synchronized writer for both the
-            # watchdog thread and this one.
-            self.watchdog.claim_reason(f"signal:{name}")
-            # This thread is the only writer of supervisor_signalled, so the
-            # line lands exactly once; status annotations elsewhere never
-            # journal it.
-            with contextlib.suppress(Exception):
-                state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
-            state.cancel_event.set()
+            self.lock_handle.defer()
+            if not self._delivery_in_flight:
+                self.lock_handle.release()
 
     def drain(self, timeout: float = 2.0) -> bool:
         """Block until every signal byte queued so far has been delivered.
@@ -720,7 +764,9 @@ class _SignalRelay:
         reused descriptor. fence_timeout=None waits for writer completion
         however long it takes; a bounded wait returns False when the relay
         is still inside a delivery, and the caller must then keep workflow
-        ownership or end the process while it still holds it.
+        ownership or end the process while it still holds it. An exception
+        raised out of the wait leaves the lock handle deferred: the in-flight
+        delivery releases it when it completes.
         """
         if not self._started:
             with contextlib.suppress(OSError):
@@ -739,10 +785,17 @@ class _SignalRelay:
         quiescent = self.drain(timeout=5.0)
         # Then the fence: taken only when no _deliver is in flight, so
         # holding it establishes writer completion.
-        if fence_timeout is None:
-            fenced = self._fence_lock.acquire()
-        else:
-            fenced = self._fence_lock.acquire(timeout=fence_timeout)
+        try:
+            if fence_timeout is None:
+                fenced = self._fence_lock.acquire()
+            else:
+                fenced = self._fence_lock.acquire(timeout=fence_timeout)
+        except BaseException:
+            # The wait was interrupted (an embedded caller's KeyboardInterrupt,
+            # for instance). Ownership must still outlive any delivery in
+            # flight, so it is handed to that delivery before unwinding.
+            self._abandon_fence_wait()
+            raise
         if fenced:
             self._fenced = True
             self._fence_lock.release()
@@ -3936,7 +3989,11 @@ def _run_child_command(
     # the fd is not inherited, so the number is at best EBADF and at worst an
     # unrelated file (wp-ptw, observed live 2026-08-31 as suite-wide EBADF in
     # rows entering _held_workflow_lock).
-    child_env = {key: value for key, value in os.environ.items() if key != WORKFLOW_LOCK_FD_ENV}
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in (WORKFLOW_LOCK_FD_ENV, WORKFLOW_SUPERVISOR_PROCESS_ENV)
+    }
     if environment is not None:
         child_env.update(environment)
     process = subprocess.Popen(  # nosec B603 - argv is Delegate's own validated CLI.
@@ -4552,8 +4609,30 @@ def _read_completion_report(report_path: object, workspace: Path) -> str | None:
         return None
 
 
+class _WorkflowLockHandle:
+    """The supervisor's flock descriptor, released exactly once by whoever finishes last."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._lock = threading.Lock()
+        self.released = False
+        self.deferred = False
+
+    def defer(self) -> None:
+        """Keep the descriptor open past the context manager; release() is now someone else's."""
+        self.deferred = True
+
+    def release(self) -> None:
+        with self._lock:
+            if self.released:
+                return
+            self.released = True
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+
+
 @contextlib.contextmanager
-def _held_workflow_lock(root: Path) -> Iterator[None]:
+def _held_workflow_lock(root: Path) -> Iterator[_WorkflowLockHandle]:
     fd: int | None = None
     raw_fd = os.environ.get(WORKFLOW_LOCK_FD_ENV)
     if raw_fd is not None:
@@ -4574,11 +4653,15 @@ def _held_workflow_lock(root: Path) -> Iterator[None]:
                 fd = fd_num
     if fd is None:
         fd = registry.acquire_workflow_lock(root)
+    handle = _WorkflowLockHandle(fd)
     try:
-        yield
+        yield handle
     finally:
-        with contextlib.suppress(OSError):
-            os.close(fd)
+        # A deferred handle is released by the signal relay's in-flight
+        # delivery when it completes (see _SignalRelay._abandon_fence_wait),
+        # so ownership never ends while a journal writer is live.
+        if not handle.deferred:
+            handle.release()
 
 
 class _SupervisorWatchdog:
@@ -4662,7 +4745,7 @@ def run_supervisor(
     dedicated_process: bool = False,
 ) -> int:
     root = registry.workflow_dir(workspace, wf_id)
-    with _held_workflow_lock(root):
+    with _held_workflow_lock(root) as lock_handle:
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         notify_spec = status.get("notify")
         script_path = root / registry.SCRIPT_FILE
@@ -4702,7 +4785,7 @@ def run_supervisor(
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
         )
         watchdog.start()
-        signal_relay = _SignalRelay(state, watchdog)
+        signal_relay = _SignalRelay(state, watchdog, lock_handle=lock_handle)
         signal_relay.start()
         try:
             result = execute_workflow(state)
@@ -4959,18 +5042,23 @@ def run_supervisor(
             # Journaling the event would block on the same lock, so it goes
             # to stderr.
             if not signal_relay.stop(fence_timeout=10.0 if dedicated_process else None):
-                print(
-                    f"delegate workflow {wf_id}: signal relay still delivering at exit; "
-                    "ending the supervisor while the workflow lock is held",
-                    file=sys.stderr,
-                )
-                with contextlib.suppress(Exception):
-                    sys.stderr.flush()
-                os._exit(1)
+                # Unconditional: the diagnostic must never decide whether the
+                # ownership-preserving exit happens.
+                try:
+                    with contextlib.suppress(Exception):
+                        print(
+                            f"delegate workflow {wf_id}: signal relay still delivering at "
+                            "exit; ending the supervisor while the workflow lock is held",
+                            file=sys.stderr,
+                        )
+                        sys.stderr.flush()
+                finally:
+                    os._exit(1)
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:
     env = os.environ.copy()
+    env[WORKFLOW_SUPERVISOR_PROCESS_ENV] = "1"
     pass_fds: tuple[int, ...] = ()
     if lock_fd is not None:
         os.set_inheritable(lock_fd, True)

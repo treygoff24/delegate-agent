@@ -171,10 +171,15 @@ that as a warning line in text mode and as the same field in JSON. The
 workflow lock is released only once the relay can no longer write: at exit the
 supervisor fences the relay (a fence is taken only when no delivery is in
 flight), an in-process supervisor waits for that however long a delivery
-takes, and the dedicated supervisor process waits a bounded time and then
-ends itself while it still holds the lock, so the relay dies with it (the
-journal reader tolerates an unterminated final line) and no journal writer
-ever outlives ownership. A signal that arrives after the last child has completed does not
+takes, and the dedicated supervisor process (only the one `workflow run`
+detached, marked by `DELEGATE_WORKFLOW_SUPERVISOR_PROCESS`, which child rows
+never inherit) waits a bounded time and then ends itself unconditionally
+while it still holds the lock, so the relay dies with it (the journal reader
+tolerates an unterminated final line) and no journal writer ever outlives
+ownership. If an embedded caller interrupts the in-process wait, the lock
+descriptor is handed to the delivery that was writing and closed when that
+delivery completes, so the interruption cannot release ownership early
+either. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
