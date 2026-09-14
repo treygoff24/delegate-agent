@@ -128,10 +128,12 @@ forever, and every resume that reached one of them failed its thunk with
   cancelled, retry worktrees are released, and the supervisor exits through
   its normal cleanup with `status: failed`, `signal`, `watchdogReason:
   signal:<NAME>` (a genuine watchdog reason that started the shutdown is
-  kept), and the `cancelled` list on `status.json`. A signal that lands after
-  the last child completed is recorded on the `succeeded` status as
-  `signalAfterCompletion`, re-checked after the status is published. A
-  repeated signal is recorded, not re-raised. `workflow kill` notes which
+  kept, and its error text is not replaced by the signal's), and the
+  `cancelled` list on `status.json`. Before any terminal status is chosen or
+  published the supervisor drains the relay, so a signal already delivered
+  to the process is on the record consumers read as final; one that lands
+  after the last child completed is recorded on the `succeeded` status as
+  `signalAfterCompletion`. A repeated signal is recorded, not re-raised. `workflow kill` notes which
   children were already terminal before it signals and completes its
   `cancelled` report from the whole group afterwards (`observedIn: registry`
   on entries it did not cancel itself), so a supervisor sealed by the kill's

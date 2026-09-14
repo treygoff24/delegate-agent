@@ -582,6 +582,8 @@ class _SignalRelay:
     """
 
     _SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+    _DRAIN_MARKER = 0xF0  # never a signal number
+    _STOP_MARKER = 0x00
 
     def __init__(self, state: WorkflowState, watchdog: _SupervisorWatchdog) -> None:
         self.state = state
@@ -592,6 +594,7 @@ class _SignalRelay:
         self._previous_handlers: dict[int, object] = {}
         self._started = False
         self._delivered = False
+        self._drained = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
             name=f"delegate-workflow-signal-relay-{state.wf_id}",
@@ -617,9 +620,10 @@ class _SignalRelay:
         self._thread.start()
 
     def _handle(self, signum: int, _frame: object) -> None:
-        # Append only: no locks, no I/O, no check-and-set. The relay thread is
-        # the single owner of signal_received and signals_repeated.
-        self.state.signals_seen.append(signal.Signals(signum).name)
+        # Installing a handler is what stops the default termination; the
+        # wakeup pipe, written by the C-level handler before this runs, is the
+        # authoritative record. Nothing to do here.
+        return
 
     def _run(self) -> None:
         while True:
@@ -630,9 +634,11 @@ class _SignalRelay:
             if not data:
                 return
             for value in data:
-                if value == 0:
+                if value == self._STOP_MARKER:
                     return
-                if value in self._SIGNALS:
+                if value == self._DRAIN_MARKER:
+                    self._drained.set()
+                elif value in self._SIGNALS:
                     self._deliver(signal.Signals(value).name)
 
     def _deliver(self, name: str) -> None:
@@ -651,6 +657,25 @@ class _SignalRelay:
         with contextlib.suppress(Exception):
             state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
         state.cancel_event.set()
+
+    def drain(self, timeout: float = 2.0) -> bool:
+        """Block until every signal byte written so far has been delivered.
+
+        The pipe is FIFO: a marker written now is read only after any signal
+        the C handler wrote before it, so once the relay acknowledges the
+        marker, signal_received, the journal line, and cancel_event reflect
+        everything that has reached the process. Terminal status is chosen
+        and published only behind this boundary. Returns False when the
+        relay did not answer in time (it is blocked in journal I/O).
+        """
+        if not self._started:
+            return True
+        self._drained.clear()
+        try:
+            os.write(self._write_fd, bytes([self._DRAIN_MARKER]))
+        except OSError:
+            return False
+        return self._drained.wait(timeout)
 
     def stop(self) -> bool:
         """Restore the handlers and wait for the relay thread to finish.
@@ -674,11 +699,14 @@ class _SignalRelay:
             for signum, handler in self._previous_handlers.items():
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     signal.signal(signum, handler)  # type: ignore[arg-type]
+        # Quiescence first: once the drain marker is acknowledged the relay
+        # has finished every journal write it will make for this attempt.
+        quiescent = self.drain(timeout=5.0)
         with contextlib.suppress(OSError):
-            os.write(self._write_fd, b"\x00")
+            os.write(self._write_fd, bytes([self._STOP_MARKER]))
         with contextlib.suppress(OSError):
             os.close(self._write_fd)
-        self._thread.join(timeout=5.0)
+        self._thread.join(timeout=5.0 if quiescent else 1.0)
         if self._thread.is_alive():
             return False
         with contextlib.suppress(OSError):
@@ -818,7 +846,6 @@ class WorkflowState:
     attempt_config: JsonObject | None = None
     attempt_environment: dict[str, str] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    signals_seen: list[str] = field(default_factory=list)
     signal_received: str | None = None
     signals_repeated: list[str] = field(default_factory=list)
     retry_worktree_runs: set[str] = field(default_factory=set)
@@ -4736,6 +4763,8 @@ def run_supervisor(
             return 0
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
+            # Settle the signal record before choosing the terminal outcome.
+            signal_relay.drain()
             watchdog_reason = watchdog.reason or exc.reason
             signal_name = state.signal_received
             signal_extra: JsonObject = {}
@@ -4744,7 +4773,10 @@ def run_supervisor(
                 signal_extra = {"signal": signal_name}
                 if state.signals_repeated:
                     signal_extra["signalsRepeated"] = list(state.signals_repeated)
-                error_text = f"supervisor received {signal_name}"
+                # The error names the cause that won: a genuine watchdog fire
+                # keeps its own diagnostics even when a signal followed it.
+                if isinstance(watchdog_reason, str) and watchdog_reason.startswith("signal:"):
+                    error_text = f"supervisor received {signal_name}"
             cancellation_failures: list[JsonObject] = []
             cancellation_failure_count = 0
             cancelled_children: list[JsonObject] = []
@@ -4852,14 +4884,11 @@ def run_supervisor(
             # success.
             registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
             state.append_event("workflow_finished", result=result)
+            # Settle the signal record before the terminal status consumers
+            # use as their exit condition is published; a signal arriving
+            # after this boundary has nothing left to interrupt.
+            signal_relay.drain()
             state.write_status("succeeded", **_signal_after_completion_extra(state))
-            # A signal delivered while the lines above were being written is
-            # not lost: re-annotate the published status. What arrives after
-            # this point has nothing left to interrupt.
-            late = _signal_after_completion_extra(state)
-            if late:
-                with contextlib.suppress(Exception):
-                    state.write_status("succeeded", **late)
             state.notify_event("succeeded")
             return 0
         finally:
@@ -4870,9 +4899,10 @@ def run_supervisor(
                 state.retry_worktree_runs.discard(run_id)
             # Last, so a signal during cleanup is still handled cooperatively
             # instead of terminating the process mid-release.
-            if not signal_relay.stop():
-                with contextlib.suppress(Exception):
-                    state.append_journal_only("supervisor_signal_relay_lingering")
+            # A relay that did not reach quiescence is blocked in journal
+            # I/O; journaling that fact would block on the same lock, so it
+            # is left as a daemon thread and not reported here.
+            signal_relay.stop()
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:

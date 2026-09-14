@@ -156,9 +156,13 @@ name and pid and sets the cancel event, so nothing in the handler ever waits on
 a lock. Admission closes, in-flight children are cancelled, structured-retry
 worktrees are released, and the supervisor exits through its normal cleanup
 with `status: failed`, `signal`, `watchdogReason: signal:<NAME>` (a genuine
-watchdog reason that started the shutdown is kept), and the `cancelled` list on
-`status.json`. A signal that arrives after the last child has completed does
-not interrupt anything; the workflow finishes `succeeded` with `signal` and
+watchdog reason that started the shutdown keeps both its reason and its error
+text), and the `cancelled` list on `status.json`. Before any terminal status is
+chosen or published the supervisor drains the relay — a marker byte through the
+same pipe, acknowledged once every earlier signal byte has been delivered — so
+the status `workflow wait` and `workflow watch` treat as final already carries
+the signal. A signal that arrives after the last child has completed does not
+interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
 first and escalates to `SIGKILL` after five seconds; it notes which children

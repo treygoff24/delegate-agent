@@ -3550,11 +3550,10 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertNotIn(old_id, {item["runId"] for item in merged})
 
-    def test_signal_relay_owns_signal_metadata(self) -> None:
-        """The relay, not the handler, decides first signal versus repeat."""
+    def _relay_state(self) -> workflow_runtime.WorkflowState:
         root = self.workspace / "wf_relay"
-        root.mkdir()
-        state = workflow_runtime.WorkflowState(
+        root.mkdir(exist_ok=True)
+        return workflow_runtime.WorkflowState(
             wf_id="wf_relay",
             workspace=self.workspace,
             root=root,
@@ -3564,6 +3563,16 @@ class WorkflowCommandTests(unittest.TestCase):
             args=None,
             budget=workflow_runtime.Budget(None, 0),
         )
+
+    @staticmethod
+    def _signalled_events(root: Path) -> list[str]:
+        lines = (root / workflow_registry.JOURNAL_FILE).read_text(encoding="utf-8").splitlines()
+        events = [json.loads(line) for line in lines if line.strip()]
+        return [event["signal"] for event in events if event["type"] == "supervisor_signalled"]
+
+    def test_signal_relay_owns_signal_metadata(self) -> None:
+        """The relay, not the handler, decides first signal versus repeat."""
+        state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
         self.assertTrue(watchdog.claim_reason("stalled"))
         relay = workflow_runtime._SignalRelay(state, watchdog)
@@ -3579,12 +3588,37 @@ class WorkflowCommandTests(unittest.TestCase):
         # The genuine watchdog cause set first is kept; the signal is its own field.
         self.assertEqual(watchdog.reason, "stalled")
         self.assertFalse(watchdog.claim_reason("signal:SIGTERM"))
-        lines = (root / workflow_registry.JOURNAL_FILE).read_text(encoding="utf-8").splitlines()
-        events = [json.loads(line) for line in lines if line.strip()]
-        self.assertEqual(
-            [event["signal"] for event in events if event["type"] == "supervisor_signalled"],
-            ["SIGTERM"],
-        )
+        self.assertEqual(self._signalled_events(state.root), ["SIGTERM"])
+
+    def test_signal_relay_drain_settles_a_real_signal_before_publication(self) -> None:
+        """drain() returns only once every signal byte already in the pipe is delivered.
+
+        A real SIGTERM is sent to this process while the relay is armed; the
+        installed handler is a no-op and the wakeup pipe carries the byte.
+        After drain() the metadata, the journal line, and cancel_event are
+        settled, and stop() confirms quiescence.
+        """
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        relay.start()
+        self.assertTrue(relay._started, "relay must arm in the test's main thread")
+        try:
+            self.assertTrue(relay.drain())
+            self.assertIsNone(state.signal_received)
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertTrue(relay.drain())
+            self.assertEqual(state.signal_received, "SIGTERM")
+            self.assertTrue(state.cancel_event.is_set())
+            self.assertEqual(watchdog.reason, "signal:SIGTERM")
+            self.assertEqual(self._signalled_events(state.root), ["SIGTERM"])
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertTrue(relay.drain())
+            self.assertEqual(state.signals_repeated, ["SIGTERM"])
+            self.assertEqual(self._signalled_events(state.root), ["SIGTERM"])
+        finally:
+            self.assertTrue(relay.stop())
+        self.assertFalse(relay._thread.is_alive())
 
     def test_workflow_kill_unsafe_child_returns_typed_json_error(self) -> None:
         wf_id = "wf_111122223333"
