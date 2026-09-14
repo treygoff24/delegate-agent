@@ -556,51 +556,115 @@ class SupervisorWatchdogExit(RuntimeError):
         self.reason = reason
 
 
-def _install_supervisor_signal_handlers(
-    state: WorkflowState, watchdog: _SupervisorWatchdog
-) -> dict[int, object]:
-    """SIGTERM and SIGHUP request the same cooperative cancellation the watchdog does.
+class _SignalRelay:
+    """Carry SIGTERM/SIGHUP from the signal handler into ordinary thread context.
 
-    A signal used to end the supervisor with the lock released, status.json
-    still "running", and its in-flight children left to go stale. The handler
-    records the signal and sets cancel_event; admission closes, child waits
-    raise SupervisorWatchdogExit, and run_supervisor's watchdog branch cancels
-    the children, releases retry worktrees, and writes status failed naming
-    the signal. Raising from the handler was rejected in review: it left
-    worker admission open and skipped the finally cleanup. A repeated signal
-    is recorded, never re-raised.
+    A Python signal handler runs between bytecodes on the main thread and must
+    not take locks: journal_lock may be held by a worker that is itself
+    waiting on a lock the main thread holds, and Event.set() is not
+    re-entrant, so a second signal inside the first set() deadlocks. The
+    C-level handler writes the signal number to a wakeup pipe; this thread
+    reads it and does the journaling and cancel_event.set() where blocking
+    is safe. From there the stall watchdog's own path takes over: admission
+    closes, child waits raise SupervisorWatchdogExit, and run_supervisor's
+    watchdog branch cancels the children, releases retry worktrees, and
+    writes status failed naming the signal. A repeated signal is recorded,
+    never re-raised.
     """
-    if threading.current_thread() is not threading.main_thread():
-        return {}
-    previous: dict[int, object] = {}
 
-    def _handle(signum: int, _frame: object) -> None:
+    _SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self, state: WorkflowState, watchdog: _SupervisorWatchdog) -> None:
+        self.state = state
+        self.watchdog = watchdog
+        self._read_fd, self._write_fd = os.pipe()
+        os.set_blocking(self._write_fd, False)
+        self._previous_wakeup_fd = -1
+        self._previous_handlers: dict[int, object] = {}
+        self._started = False
+        self._delivered = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"delegate-workflow-signal-relay-{state.wf_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        # Only the main thread may install handlers or a wakeup fd; a
+        # supervisor driven in-process from another thread keeps the default
+        # disposition.
+        if threading.current_thread() is not threading.main_thread():
+            return
+        try:
+            self._previous_wakeup_fd = signal.set_wakeup_fd(
+                self._write_fd, warn_on_full_buffer=False
+            )
+        except (OSError, ValueError):
+            return
+        for signum in self._SIGNALS:
+            with contextlib.suppress(OSError, ValueError):
+                self._previous_handlers[signum] = signal.signal(signum, self._handle)
+        self._started = True
+        self._thread.start()
+
+    def _handle(self, signum: int, _frame: object) -> None:
+        # Record only. No locks, no I/O; the relay thread does the rest.
         name = signal.Signals(signum).name
+        if self.state.signal_received is None:
+            self.state.signal_received = name
+        else:
+            self.state.signals_repeated.append(name)
+
+    def _run(self) -> None:
+        while True:
+            try:
+                data = os.read(self._read_fd, 64)
+            except OSError:
+                return
+            if not data:
+                return
+            for value in data:
+                if value == 0:
+                    return
+                if value in self._SIGNALS:
+                    self._deliver(signal.Signals(value).name)
+
+    def _deliver(self, name: str) -> None:
+        state = self.state
+        if self._delivered:
+            return
+        self._delivered = True
         if state.signal_received is None:
             state.signal_received = name
-            watchdog.reason = f"signal:{name}"
-        else:
-            state.signals_repeated.append(name)
-        # The main thread may already hold journal_lock; a handler must never
-        # block on it. When it is free, journal now; otherwise the watchdog
-        # branch journals the signal after unwinding.
-        if state.journal_lock.acquire(blocking=False):
-            state.journal_lock.release()
-            with contextlib.suppress(Exception):
-                state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
-                state.signal_journaled = True
+        # A genuine watchdog fire that started the shutdown keeps its reason;
+        # the signal is still recorded on its own field.
+        if self.watchdog.reason is None:
+            self.watchdog.reason = f"signal:{name}"
+        with contextlib.suppress(Exception):
+            state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
+            state.signal_journaled = True
         state.cancel_event.set()
 
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        with contextlib.suppress(OSError, ValueError):
-            previous[signum] = signal.signal(signum, _handle)
-    return previous
-
-
-def _restore_signal_handlers(previous: dict[int, object]) -> None:
-    for signum, handler in previous.items():
-        with contextlib.suppress(OSError, ValueError, TypeError):
-            signal.signal(signum, handler)  # type: ignore[arg-type]
+    def stop(self) -> None:
+        if not self._started:
+            with contextlib.suppress(OSError):
+                os.close(self._read_fd)
+            with contextlib.suppress(OSError):
+                os.close(self._write_fd)
+            return
+        if threading.current_thread() is threading.main_thread():
+            with contextlib.suppress(OSError, ValueError):
+                signal.set_wakeup_fd(self._previous_wakeup_fd)
+            for signum, handler in self._previous_handlers.items():
+                with contextlib.suppress(OSError, ValueError, TypeError):
+                    signal.signal(signum, handler)  # type: ignore[arg-type]
+        with contextlib.suppress(OSError):
+            os.write(self._write_fd, b"\x00")
+        self._thread.join(timeout=1.0)
+        with contextlib.suppress(OSError):
+            os.close(self._read_fd)
+        with contextlib.suppress(OSError):
+            os.close(self._write_fd)
 
 
 class WorkflowChildCancellationError(wait_cancel_commands.WaitCancelError):
@@ -4021,6 +4085,61 @@ def cancel_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
     return _cancel_workflow_runs(workspace, wf_id, workflow_agent_key=None)
 
 
+def workflow_nonterminal_child_run_ids(workspace: Path, wf_id: str) -> list[str]:
+    """Run ids of the workflow's children that are not terminal right now."""
+    root = run_registry.registry_root_if_exists(workspace)
+    if root is None or not root.exists():
+        return []
+    index = run_registry.load_index(root)
+    handles: list[str] = []
+    for run_id, entry in index.get("runs", {}).items():
+        if not isinstance(run_id, str) or not isinstance(entry, dict):
+            continue
+        if entry.get("group") != wf_id:
+            continue
+        state = run_registry.load_run_state_or_none(root, run_id)
+        if (
+            run_registry.status_fields(state).get("effectiveStatus")
+            not in run_registry.TERMINAL_STATUSES
+        ):
+            handles.append(run_id)
+    return handles
+
+
+def reconcile_cancelled_children(
+    workspace: Path, candidates: list[str], reported: list[JsonObject]
+) -> list[JsonObject]:
+    """Complete a kill's cancelled list from the registry.
+
+    A supervisor handling the kill's SIGTERM seals children on its own, and a
+    forced escalation can end it before its aggregate list reaches
+    status.json. Every child that was live before the signal and is
+    cancelled now was stopped by this kill, whoever wrote the record.
+    """
+    merged = list(reported)
+    seen = {item.get("runId") for item in merged if isinstance(item, dict)}
+    root = run_registry.registry_root_if_exists(workspace)
+    if root is None:
+        return merged
+    for run_id in candidates:
+        if run_id in seen:
+            continue
+        state = run_registry.load_run_state_or_none(root, run_id)
+        fields = run_registry.status_fields(state)
+        if fields.get("effectiveStatus") != run_registry.STATUS_CANCELLED:
+            continue
+        merged.append(
+            {
+                "runId": run_id,
+                "alias": state.get("alias") if isinstance(state, dict) else None,
+                "status": run_registry.STATUS_CANCELLED,
+                "sealedBy": "supervisor",
+            }
+        )
+        seen.add(run_id)
+    return merged
+
+
 def cancel_workflow_agent_child(
     workspace: Path, wf_id: str, workflow_agent_key: str
 ) -> list[JsonObject]:
@@ -4477,7 +4596,8 @@ def run_supervisor(
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
         )
         watchdog.start()
-        previous_handlers = _install_supervisor_signal_handlers(state, watchdog)
+        signal_relay = _SignalRelay(state, watchdog)
+        signal_relay.start()
         try:
             result = execute_workflow(state)
         except GateExit as exc:
@@ -4696,18 +4816,40 @@ def run_supervisor(
             state.notify_event("failed", detail=str(exc)[:160])
             return 1
         else:
+            # A signal that landed while the last child was completing did
+            # not interrupt anything: the work finished. Record it on the
+            # terminal status rather than letting it read as an ordinary
+            # success.
+            completion_extra: JsonObject = {}
+            if state.signal_received is not None:
+                completion_extra = {
+                    "signal": state.signal_received,
+                    "signalAfterCompletion": True,
+                }
+                if state.signals_repeated:
+                    completion_extra["signalsRepeated"] = list(state.signals_repeated)
+                if not state.signal_journaled:
+                    with contextlib.suppress(Exception):
+                        state.append_journal_only(
+                            "supervisor_signalled",
+                            signal=state.signal_received,
+                            pid=os.getpid(),
+                            afterCompletion=True,
+                        )
             registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
             state.append_event("workflow_finished", result=result)
-            state.write_status("succeeded")
+            state.write_status("succeeded", **completion_extra)
             state.notify_event("succeeded")
             return 0
         finally:
-            _restore_signal_handlers(previous_handlers)
             watchdog.stop()
             for run_id in tuple(state.retry_worktree_runs):
                 with contextlib.suppress(Exception):
                     _release_structured_retry_worktree_for_state(state, run_id)
                 state.retry_worktree_runs.discard(run_id)
+            # Last, so a signal during cleanup is still handled cooperatively
+            # instead of terminating the process mid-release.
+            signal_relay.stop()
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:

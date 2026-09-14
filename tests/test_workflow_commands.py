@@ -2991,6 +2991,17 @@ class WorkflowCommandTests(unittest.TestCase):
         self.fail(f"child of {wf_id} never published a live process group")
 
     @staticmethod
+    def _wait_for_group_gone(pgid: int) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        raise AssertionError(f"process group {pgid} still has members")
+
+    @staticmethod
     def _wait_for_pid_exit(pid: int) -> None:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -3016,10 +3027,13 @@ class WorkflowCommandTests(unittest.TestCase):
         script = self.write_workflow(
             """
             meta = {"name": "orphan", "defaults": {"engine": "codex", "mode": "safe"}}
-            return agent("very slow")
+            return agent("hold")
             """
         )
-        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
+        )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
         self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
@@ -3033,6 +3047,9 @@ class WorkflowCommandTests(unittest.TestCase):
 
         killed = proc_harness.kill_process_tree_uncleanly(supervisor_pid, supervisor_pgid)
         self.assertIn(child["pgid"], killed)
+        # Sealing refuses a dead leader whose group still has members, so the
+        # orphan is only ready once its whole recorded group is gone.
+        self._wait_for_group_gone(child["pgid"])
         stale = self._wait_for_child_status(wf_id, child["runId"], "stale")
         self.assertEqual(stale["staleReason"], "dead_pid")
         return wf_id, root, child, supervisor_pid
@@ -3105,10 +3122,13 @@ class WorkflowCommandTests(unittest.TestCase):
         script = self.write_workflow(
             """
             meta = {"name": "signalled", "defaults": {"engine": "codex", "mode": "safe"}}
-            return agent("very slow")
+            return agent("hold")
             """
         )
-        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
+        )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
         self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
@@ -3122,6 +3142,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(final["signal"], "SIGTERM")
         self.assertEqual(final["error"], "supervisor received SIGTERM")
         self.assertEqual(final["watchdogReason"], "signal:SIGTERM")
+        self.assertEqual([item["runId"] for item in final["cancelled"]], [child["runId"]])
         (signalled,) = self._journal_events(root, "supervisor_signalled")
         self.assertEqual(signalled["signal"], "SIGTERM")
         self.assertEqual(signalled["pid"], supervisor_pid)
@@ -3438,6 +3459,81 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(status["budget"]["total"], 3)
         self.assertIn("scriptPath", status)
         self.assertIn("journalPath", status)
+
+    def test_workflow_kill_reports_children_the_supervisor_sealed(self) -> None:
+        """Kill's cancelled list is complete even when the supervisor did the sealing.
+
+        The supervisor handles kill's SIGTERM and cancels its own children
+        before emit_kill reaches them; a forced escalation can cut it off
+        before its aggregate list is published. The report is completed from
+        the registry, and the killed status carries none of the failure
+        fields the supervisor wrote for the signal.
+        """
+        script = self.write_workflow(
+            """
+            meta = {"name": "kill-report", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("hold")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        (child,) = self._wait_for_live_child(wf_id)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        payload = json.loads(killed.stdout)
+        self.assertEqual([item["runId"] for item in payload["cancelled"]], [child["runId"]])
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        final = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(final["status"], "killed")
+        for key in ("error", "traceback", "signal", "signalsRepeated"):
+            self.assertNotIn(key, final, final)
+        self.assertIsNone(final.get("watchdogReason"), final)
+        self.assertEqual([item["runId"] for item in final["cancelled"]], [child["runId"]])
+
+    def test_reconcile_cancelled_children_completes_from_registry(self) -> None:
+        root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
+        sealed_id, sealed_alias = run_registry.register_run(
+            root, harness="codex", metadata={"group": "wf-kill", "workflowAgentKey": "a"}
+        )
+        live_id, _ = run_registry.register_run(
+            root, harness="codex", metadata={"group": "wf-kill", "workflowAgentKey": "b"}
+        )
+        for run_id, alias, status in (
+            (sealed_id, sealed_alias, "cancelled"),
+            (live_id, "x", "running"),
+        ):
+            run_registry.write_json_atomic(
+                run_registry.run_directory(root, run_id) / run_registry.STATE_FILE,
+                {
+                    "schema": run_registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": status,
+                    "pid": os.getpid(),
+                    "lastActivityAt": run_registry.utc_now_iso(),
+                },
+            )
+        reported = [{"runId": "del_already_reported", "status": "cancelled"}]
+        merged = workflow_runtime.reconcile_cancelled_children(
+            self.workspace, [sealed_id, live_id, "del_already_reported"], reported
+        )
+        self.assertEqual(
+            merged,
+            [
+                {"runId": "del_already_reported", "status": "cancelled"},
+                {
+                    "runId": sealed_id,
+                    "alias": sealed_alias,
+                    "status": "cancelled",
+                    "sealedBy": "supervisor",
+                },
+            ],
+        )
 
     def test_workflow_kill_unsafe_child_returns_typed_json_error(self) -> None:
         wf_id = "wf_111122223333"
