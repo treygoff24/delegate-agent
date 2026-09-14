@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import io
 import json
@@ -3716,7 +3717,7 @@ class WorkflowCommandTests(unittest.TestCase):
         state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
         wf_root = workflow_registry.ensure_workflow_dir(self.workspace, "wf_0c0c0c0c0c01")
-        late = threading.Thread()
+        late: threading.Thread | None = None
         with (
             self.assertRaises(KeyboardInterrupt),
             workflow_runtime._held_workflow_lock(wf_root) as handle,
@@ -3732,8 +3733,10 @@ class WorkflowCommandTests(unittest.TestCase):
         finally:
             finish.set()
             writer.join(5.0)
-            late.join(5.0)
+            if late is not None:
+                late.join(5.0)
         self.assertFalse(writer.is_alive())
+        assert late is not None
         self.assertFalse(late.is_alive())
         self.assertEqual(waited, [True])
         self.assertTrue(handle.released)
@@ -3759,26 +3762,38 @@ class WorkflowCommandTests(unittest.TestCase):
 
         The unwind's fence is applied while the test holds the release lock,
         with a delivery already blocked on it; the delivery must re-read the
-        fence under that lock and step back.
+        fence under that lock and step back. The rendezvous is the admission
+        lock itself: the test's lock reports the moment the delivery tries
+        to take it, so the fence is applied only once the delivery is past
+        every check it could have made outside that lock.
         """
         state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
         wf_root, handle = self._locked_workflow("wf_0c0c0c0c0c03")
         relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
-        relay._release_lock.acquire()
+        inner = threading.Lock()
+        attempted = threading.Event()
+
+        class ReportingLock:
+            def __enter__(self) -> None:
+                attempted.set()
+                inner.acquire()
+
+            def __exit__(self, *_exc: object) -> None:
+                inner.release()
+
+        relay._release_lock = ReportingLock()  # type: ignore[assignment]
+        inner.acquire()
         delivery = threading.Thread(target=relay._deliver, args=("SIGTERM",))
         try:
             delivery.start()
-            deadline = time.monotonic() + 5.0
-            while not relay._fence_lock.locked() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue(relay._fence_lock.locked(), "delivery never reached admission")
+            self.assertTrue(attempted.wait(5.0), "delivery never reached admission")
             relay._fenced = True
             relay._release_when_idle = True
             self.assertFalse(relay._delivery_in_flight)
             handle.release()
         finally:
-            relay._release_lock.release()
+            inner.release()
             delivery.join(5.0)
         self.assertFalse(delivery.is_alive())
         self.assertIsNone(state.signal_received, "delivery was admitted after the unwind")
@@ -3803,6 +3818,77 @@ class WorkflowCommandTests(unittest.TestCase):
         relay._thread.join(5.0)
         self.assertFalse(relay._thread.is_alive(), "relay thread did not exit on the stop marker")
         self.assertTrue(relay.stop())
+
+    def _assert_relay_unarmed(
+        self, relay: workflow_runtime._SignalRelay, fds: list[int], before: object
+    ) -> None:
+        self.assertFalse(relay._started)
+        self.assertIsNone(relay._thread)
+        self.assertEqual((relay._read_fd, relay._write_fd), (-1, -1))
+        self.assertEqual(relay._previous_handlers, {})
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        self.assertIs(signal.getsignal(signal.SIGHUP), before)
+        self.assertEqual(signal.set_wakeup_fd(-1), -1, "wakeup fd was not put back")
+        self.assertEqual(len(fds), 2, "start() opened no pipe")
+        for fd in fds:
+            with self.assertRaises(OSError, msg=f"fd {fd} leaked"):
+                os.fstat(fd)
+
+    def _relay_start_failure(self, patch: contextlib.AbstractContextManager[object]) -> None:
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        before = signal.getsignal(signal.SIGTERM)
+        self.assertIs(signal.getsignal(signal.SIGHUP), before)
+        self.assertEqual(signal.set_wakeup_fd(-1), -1, "test needs a bare wakeup fd")
+        real_pipe = os.pipe
+        fds: list[int] = []
+
+        def recording_pipe() -> tuple[int, int]:
+            read_fd, write_fd = real_pipe()
+            fds.extend((read_fd, write_fd))
+            return read_fd, write_fd
+
+        with (
+            mock.patch.object(workflow_runtime.os, "pipe", recording_pipe),
+            patch,
+            self.assertRaises(RuntimeError),
+        ):
+            relay.start()
+        self._assert_relay_unarmed(relay, fds, before)
+        self.assertTrue(relay.stop())
+
+    def test_relay_start_rolls_back_when_the_thread_cannot_start(self) -> None:
+        """A reader that never ran cannot own the read end: start() closes both descriptors."""
+        self._relay_start_failure(
+            mock.patch.object(
+                threading.Thread, "start", side_effect=RuntimeError("can't start new thread")
+            )
+        )
+
+    def test_relay_start_rolls_back_when_a_handler_install_is_interrupted(self) -> None:
+        """An unsuppressed error mid-installation restores the handlers already installed and the wakeup fd."""
+        real_signal = signal.signal
+        calls: list[int] = []
+
+        def failing_second(signum: int, handler: object) -> object:
+            calls.append(signum)
+            if len(calls) == 2:
+                raise RuntimeError("interrupted")
+            return real_signal(signum, handler)  # type: ignore[arg-type]
+
+        self._relay_start_failure(
+            mock.patch.object(workflow_runtime.signal, "signal", failing_second)
+        )
+        # Installed the first, failed on the second, restored exactly the first.
+        self.assertEqual(calls, [signal.SIGTERM, signal.SIGHUP, signal.SIGTERM])
+
+    def test_relay_start_rolls_back_when_the_pipe_cannot_be_made_nonblocking(self) -> None:
+        self._relay_start_failure(
+            mock.patch.object(
+                workflow_runtime.os, "set_blocking", side_effect=RuntimeError("bad descriptor")
+            )
+        )
 
     def test_detached_supervisor_is_marked_as_its_own_process(self) -> None:
         with (
