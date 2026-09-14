@@ -136,8 +136,11 @@ forever, and every resume that reached one of them failed its thunk with
   `signalAfterCompletion`. Each drain is answered only by its own marker,
   and a drain the relay did not acknowledge in time is published as
   `signalDrainIncomplete: true` on the terminal status instead of as a
-  settled record; at exit the relay is fenced before the workflow lock is
-  released so it cannot append to the journal late. A repeated signal is recorded, not re-raised. `workflow kill` notes which
+  settled record, which `workflow wait` and `workflow watch` repeat in every
+  output mode; the workflow lock is released only once the relay can no
+  longer write (the supervisor fences it at exit, waiting without bound
+  in-process and, as the dedicated process, ending itself while it still
+  holds the lock rather than letting a writer outlive ownership). A repeated signal is recorded, not re-raised. `workflow kill` notes which
   children were already terminal before it signals and completes its
   `cancelled` report from the whole group afterwards (`observedIn: registry`
   on entries it did not cancel itself), so a supervisor sealed by the kill's

@@ -691,7 +691,14 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def _run(self, execute_side_effect: object) -> dict[str, object]:
+    def _run(
+        self,
+        execute_side_effect: object,
+        *,
+        drain: object = False,
+        stop: object = True,
+        dedicated_process: bool = False,
+    ) -> tuple[dict[str, object], mock.MagicMock, mock.MagicMock]:
         wf_id = f"wf_{time.time_ns() & ((1 << 48) - 1):012x}"
         root = registry.ensure_workflow_dir(self.root, wf_id)
         (root / registry.SCRIPT_FILE).write_text("return True\n", encoding="utf-8")
@@ -710,26 +717,73 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
             ),
             mock.patch.object(workflow_runtime._SupervisorWatchdog, "start", autospec=True),
             mock.patch.object(workflow_runtime._SupervisorWatchdog, "stop", autospec=True),
-            mock.patch.object(workflow_runtime._SignalRelay, "drain", return_value=False),
+            mock.patch.object(
+                workflow_runtime._SignalRelay, "drain", autospec=True, side_effect=drain
+            )
+            if callable(drain)
+            else mock.patch.object(workflow_runtime._SignalRelay, "drain", return_value=drain),
+            mock.patch.object(
+                workflow_runtime._SignalRelay, "stop", autospec=True, return_value=stop
+            ) as stop_mock,
+            mock.patch.object(workflow_runtime.os, "_exit") as exit_mock,
             mock.patch.object(workflow_runtime, "cancel_workflow_children", return_value=[]),
             mock.patch.object(WorkflowState, "notify_event", new=lambda *a, **k: None),
         ):
             workflow_runtime.run_supervisor(
-                workspace=self.root, wf_id=wf_id, cli_argv=[], config={}
+                workspace=self.root,
+                wf_id=wf_id,
+                cli_argv=[],
+                config={},
+                dedicated_process=dedicated_process,
             )
-        return registry.read_json(root / registry.STATUS_FILE) or {}
+        return registry.read_json(root / registry.STATUS_FILE) or {}, stop_mock, exit_mock
 
     def test_success_records_incomplete_drain(self) -> None:
-        status = self._run(lambda state: {"done": True})
+        status, _, _ = self._run(lambda state: {"done": True})
         self.assertEqual(status.get("status"), "succeeded")
         self.assertIs(status.get("signalDrainIncomplete"), True)
+
+    def test_signal_delivered_during_a_successful_drain_is_published(self) -> None:
+        """The success status reads the signal fields after the drain, not before it."""
+
+        def deliver_then_ack(relay: object, timeout: float = 2.0) -> bool:
+            relay.state.signal_received = "SIGTERM"  # type: ignore[attr-defined]
+            return True
+
+        status, _, _ = self._run(lambda state: {"done": True}, drain=deliver_then_ack)
+        self.assertEqual(status.get("status"), "succeeded")
+        self.assertEqual(status.get("signal"), "SIGTERM")
+        self.assertIs(status.get("signalAfterCompletion"), True)
+        self.assertNotIn("signalDrainIncomplete", status)
+
+    def test_signal_delivered_during_a_failed_drain_is_published_with_the_flag(self) -> None:
+        def deliver_then_time_out(relay: object, timeout: float = 2.0) -> bool:
+            relay.state.signal_received = "SIGHUP"  # type: ignore[attr-defined]
+            return False
+
+        status, _, _ = self._run(lambda state: {"done": True}, drain=deliver_then_time_out)
+        self.assertEqual(status.get("signal"), "SIGHUP")
+        self.assertIs(status.get("signalDrainIncomplete"), True)
+
+    def test_in_process_supervisor_waits_for_the_fence_without_bound(self) -> None:
+        _, stop_mock, exit_mock = self._run(lambda state: {"done": True}, drain=True)
+        self.assertEqual(stop_mock.call_args.kwargs, {"fence_timeout": None})
+        exit_mock.assert_not_called()
+
+    def test_dedicated_supervisor_ends_itself_holding_the_lock_when_unfenced(self) -> None:
+        """A relay still delivering at exit must not outlive workflow ownership."""
+        _, stop_mock, exit_mock = self._run(
+            lambda state: {"done": True}, drain=True, stop=False, dedicated_process=True
+        )
+        self.assertEqual(stop_mock.call_args.kwargs, {"fence_timeout": 10.0})
+        exit_mock.assert_called_once_with(1)
 
     def test_watchdog_exit_records_incomplete_drain(self) -> None:
         def unwind(state: WorkflowState) -> None:
             state.cancel_event.set()
             raise workflow_runtime.SupervisorWatchdogExit("stalled")
 
-        status = self._run(unwind)
+        status, _, _ = self._run(unwind)
         self.assertEqual(status.get("status"), "failed")
         self.assertIs(status.get("signalDrainIncomplete"), True)
         self.assertEqual(status.get("error"), "workflow supervisor watchdog: stalled")

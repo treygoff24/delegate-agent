@@ -6427,6 +6427,32 @@ class WorkflowCommandTests(unittest.TestCase):
             workflow_registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
         return root
 
+    def test_wait_and_watch_surface_an_incomplete_signal_drain(self) -> None:
+        """Every terminal consumer says when the signal audit on the record is incomplete."""
+        wf_id = "wf_d0a1ad0a1a01"
+        root = self._seed_completed_workflow(wf_id, created_at="2026-09-14T00:00:00Z")
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        workflow_registry.write_status(root, {**status, "signalDrainIncomplete": True})
+        workflow_registry.append_jsonl(
+            root / workflow_registry.JOURNAL_FILE,
+            {"seq": 1, "type": "workflow_finished", "at": "2026-09-14T00:00:01Z"},
+        )
+        waited = self.run_delegate(["workflow", "wait", wf_id, "--timeout", "5"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertIn(workflow_commands.SIGNAL_DRAIN_INCOMPLETE_WARNING, waited.stdout)
+        waited_json = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "5"])
+        self.assertIs(json.loads(waited_json.stdout)["workflow"]["signalDrainIncomplete"], True)
+        watched = self.run_delegate(["workflow", "watch", wf_id])
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        self.assertIn(workflow_commands.SIGNAL_DRAIN_INCOMPLETE_WARNING, watched.stdout)
+        watched_json = self.run_delegate(["--json", "workflow", "watch", wf_id])
+        payload = json.loads(watched_json.stdout)
+        self.assertIs(payload["signalDrainIncomplete"], True)
+        self.assertTrue(payload["ok"])
+        workflow_registry.write_status(root, status)
+        clean = self.run_delegate(["--json", "workflow", "watch", wf_id])
+        self.assertNotIn("signalDrainIncomplete", json.loads(clean.stdout))
+
     def test_creation_ordinals_ignore_same_second_ids_and_survive_status_writes(self) -> None:
         first_id = "wf_ffffffffffff"
         second_id = "wf_000000000000"

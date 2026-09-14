@@ -166,11 +166,15 @@ earlier drain that timed out cannot answer a later one. When the relay does
 not acknowledge the drain before publication (it is inside a journal write
 that has not returned), the terminal status carries
 `signalDrainIncomplete: true` — the signal fields may be missing — rather
-than reading as a settled record. At exit the supervisor fences the relay
-before releasing the workflow lock, so a lingering relay thread can no longer
-append to the journal; if the fence cannot be taken the supervisor reports
-that on stderr and exits, and the journal reader tolerates an unterminated
-final line. A signal that arrives after the last child has completed does not
+than reading as a settled record; `workflow wait` and `workflow watch` repeat
+that as a warning line in text mode and as the same field in JSON. The
+workflow lock is released only once the relay can no longer write: at exit the
+supervisor fences the relay (a fence is taken only when no delivery is in
+flight), an in-process supervisor waits for that however long a delivery
+takes, and the dedicated supervisor process waits a bounded time and then
+ends itself while it still holds the lock, so the relay dies with it (the
+journal reader tolerates an unterminated final line) and no journal writer
+ever outlives ownership. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
