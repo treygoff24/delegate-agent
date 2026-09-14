@@ -41,5 +41,10 @@ Updated: 2026-09-14 (0.31.0 published to PyPI; stale-cluster fix and supervisor 
   the installed runtime stays at `27174af` until the next real code change.
   The `e06d04efc0d7` worktree directory is gone; the `delegate-worktrees`
   entries on disk today belong to agent-memory and dwp-portals sessions.
+- Parked idea (Trey, 2026-09-14): `dlg-dct` resident delegate lanes that stay
+  alive between turns and wake on mail; `bd list --label idea`. Not to be
+  built until Trey reopens it. The `delegate-agent` skill (skill-library
+  `main` `7e366ee`) now documents the pattern that exists today:
+  `--resumable` + `followup` for persistent context, workspace mail both ways.
 - Working rule adopted this run: never edit the checkout while a gate runs
   (gate 7 on `e7a1acc` failed on a mid-mutation import).
