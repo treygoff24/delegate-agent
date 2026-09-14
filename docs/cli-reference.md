@@ -107,8 +107,9 @@ reports a served model that does not match the request or switches model
 mid-session. The check depends on the harness reporting a model at all: a
 pinned run that completes with `modelProvenance.servedModelSource:
 "unavailable"` carries a `pinned_continuity_unverified` warning naming the
-harness, because nothing was observed to check. Codex and Grok streams carry no
-model field today.
+harness, because nothing was observed to check; an ungrouped `call` carries
+the same warning on its payload. Codex and Grok streams carry no model field
+today.
 
 `delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
 containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.
@@ -211,10 +212,11 @@ and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
 Each engine row carries `binaryMissing`, true when the configured binary does
-not resolve from the Delegate process (a bare name absent from `PATH`, or a
-path that is not an executable file); the text view prints `(missing)` after
-the binary. It is the same resolution a launch performs before failing with
-`missing_binary`.
+not resolve from the Delegate process; the text view prints `(missing)` after
+the binary. It is exactly the resolution a launch performs before failing with
+`missing_binary` (`shutil.which` on the configured value, no `~` expansion), so
+a `~/bin/x` that exists on disk still reads as missing because launch would
+refuse it too.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins.
 Engines with exact capability metadata reject unsupported model/effort pairs
@@ -1430,7 +1432,10 @@ cancel seals it as `cancelled` with `staleReason: dead_pid` and a warning that
 nothing was signalled, so the row stops listing as `stale` and a workflow that
 resumes over it relaunches instead of failing. A `stale` run with no recorded
 pid is still refused, because under the registry lock that can be a launch that
-has not published its pid yet. It never signals pid/pgid `<= 1`. Legacy runs without a
+has not published its pid yet, and a dead leader whose recorded process group
+still has members is refused with `run_group_alive` naming the group: a dead
+pid is not proof the work stopped, and the group id may already belong to
+another process. It never signals pid/pgid `<= 1`. Legacy runs without a
 recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 `cancelled` with `failureReason: cancelled_by_user` and records current captured
 stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are

@@ -1212,6 +1212,28 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertIn("run_already_terminal", err or out)
         self.assertIn("(cancelled)", err or out)
 
+    def test_cancel_refuses_dead_leader_with_live_process_group(self):
+        """A dead tracked pid is not proof the run's process group is empty.
+
+        The leader may have died while a subprocess it started keeps running
+        in the recorded group. Sealing would let a resume relaunch work on top
+        of it; signalling would risk a reused group id. Cancel refuses, names
+        the group, and changes nothing.
+        """
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=999999999, pgid=proc.pid)
+        code, out, err = self.run_cli(["cancel", alias])
+        self.assertEqual(code, errors_api.EXIT_USAGE)
+        self.assertIn("run_group_alive", err or out)
+        self.assertIn(str(proc.pid), err or out)
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "running")
+        self.assertNotIn("staleReason", state)
+        self.assertIsNone(proc.poll())
+
     def test_cancel_refuses_stale_missing_pid_run(self):
         """A running run with no pid is stale (missing_pid) and cancel refuses."""
         _run_id, alias = self.write_run(status="running")

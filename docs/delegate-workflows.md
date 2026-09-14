@@ -136,20 +136,30 @@ python3 bin/delegate.py workflow run --resume wf_0123abcdef45
 resume against the first and fails with `workflow_locked`. Pick one.
 
 A resume can only take the workflow lock because the previous supervisor is
-gone. Before the new supervisor starts, the resume cancels every child the
-previous attempt still had in flight — the same sealing `workflow kill` does —
-and journals `attempt_superseded` with the previous supervisor's pid, its last
-recorded status, `supervisorLost: true` when that status was still live, and
-the sealed children. A child whose process is already dead is sealed as
-`cancelled` with `staleReason: dead_pid` rather than left `stale`, so the replay
-relaunches it instead of failing the thunk with "already terminal (stale)".
+gone. After gate validation and before the new supervisor starts, a live (not
+`--dry-run`) resume cancels every child the previous attempt still had in
+flight — the same sealing `workflow kill` does — and journals
+`attempt_superseded` with the previous supervisor's pid, its last recorded
+status, `supervisorLost: true` when that status was still live, and the sealed
+children. The event is written before the launch; a launch failure leaves it
+without a following `attempt_config`. A child whose process is already dead is
+sealed as `cancelled` with `staleReason: dead_pid` rather than left `stale`, so
+the replay relaunches it instead of failing the thunk with "already terminal
+(stale)". A dead child whose process group still has members is not sealed:
+the resume fails with `workflow_children_unsealed` naming the group, and the
+operator decides what those survivors are.
 
-The supervisor handles `SIGTERM` and `SIGHUP` itself: it journals
-`supervisor_signalled` with the signal name and pid, cancels its children,
-writes `status: failed` with `signal` set, and exits. `workflow kill` still
-sends `SIGTERM` first and overwrites that status with `killed` once the lock is
-released. `SIGKILL` cannot be handled; the next resume records it as
-`supervisorLost` and seals whatever was left behind.
+The supervisor handles `SIGTERM` and `SIGHUP` the way it handles a stall
+watchdog fire: the handler journals `supervisor_signalled` with the signal name
+and pid, then requests cooperative cancellation. Admission closes, in-flight
+children are cancelled, structured-retry worktrees are released, and the
+supervisor exits through its normal cleanup with `status: failed`, `signal`,
+`watchdogReason: signal:<NAME>`, and the `cancelled` list on `status.json`. A
+repeated signal is recorded in `signalsRepeated`, never re-raised. `workflow
+kill` still sends `SIGTERM` first; once the lock is released it folds the
+supervisor's `cancelled` list into its own report and writes `killed` without
+the signal-induced failure fields. `SIGKILL` cannot be handled; the next resume
+records it as `supervisorLost` and seals whatever was left behind.
 
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.

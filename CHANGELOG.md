@@ -110,24 +110,35 @@ forever, and every resume that reached one of them failed its thunk with
   `cancelled`, with `staleReason: dead_pid` on the record and a warning that
   nothing was signalled, instead of refusing it with `run_already_terminal`.
   A `stale` run with no pid at all is still refused: under the registry lock
-  that can be a launch that has not published its pid yet.
+  that can be a launch that has not published its pid yet. A dead leader
+  whose recorded process group still has members is refused with
+  `run_group_alive`, naming the group, because a dead pid is not proof the
+  run's work stopped and the group id may already belong to someone else.
 - `workflow run --resume` and `workflow approve` seal the prior attempt's
   in-flight children before the new supervisor starts, the same way `workflow
   kill` does, and journal `attempt_superseded` with the lost supervisor's pid,
   its last status, and the sealed children. The replay then relaunches the
-  agent instead of tripping over the orphan.
-- The workflow supervisor handles `SIGTERM` and `SIGHUP`: it journals
-  `supervisor_signalled`, cancels its children, writes `status: failed` naming
-  the signal, and exits. A signal used to end the supervisor with the lock
+  agent instead of tripping over the orphan. The seal runs after gate
+  validation and never on `--dry-run`, which launches no replacement.
+- The workflow supervisor handles `SIGTERM` and `SIGHUP` by requesting the
+  same cooperative cancellation the stall watchdog uses: admission closes,
+  in-flight children are cancelled, retry worktrees are released, and the
+  supervisor exits through its normal cleanup with `status: failed`, `signal`,
+  `watchdogReason: signal:<NAME>`, and the `cancelled` list on `status.json`
+  plus a `supervisor_signalled` journal event. A repeated signal is recorded,
+  not re-raised. `workflow kill` folds the supervisor's `cancelled` list into
+  its own report and does not carry the signal-induced failure fields into
+  the `killed` status. A signal used to end the supervisor with the lock
   released, `status.json` still `running`, and no record of why.
 - A `--continuity-mode pinned` run that completes without any harness model
   observation carries a `pinned_continuity_unverified` warning naming the
-  harness. Claude and Oh My Pi were observed reporting the served model in
+  harness, on tracked runs and on ungrouped `call` payloads alike. Claude and Oh My Pi were observed reporting the served model in
   the dogfood window; Codex and Grok streams carry no model field, so on those
   engines a pinned run is pinned in name only and now says so.
 - `delegate models` marks a configured binary that does not resolve from the
   Delegate process (`binaryMissing: true`, `(missing)` in text) instead of
-  printing the configured path as if it were installed.
+  printing the configured path as if it were installed. The check is the
+  launch check: `shutil.which` on the configured value, no `~` expansion.
 
 ### CI and runtime hardening (2026-09-07)
 

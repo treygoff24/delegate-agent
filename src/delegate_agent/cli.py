@@ -1200,6 +1200,22 @@ def execute_request(
                             seen.add(warning)
                             merged.append(warning)
                     payload["warnings"] = merged
+                if (
+                    request.continuity_mode == "pinned"
+                    and result.error is None
+                    and result.exit_code == 0
+                    and not (request.engine == "claude" and result.model_resolved)
+                ):
+                    # An ungrouped call never builds a run record, so the
+                    # tracked-path warning does not reach it; only Claude's call
+                    # result carries a served model.
+                    from delegate_agent import runner as delegate_runner
+
+                    payload.setdefault("warnings", []).append(
+                        delegate_runner.pinned_continuity_unverified_text(
+                            request.engine, request.model_requested or request.model
+                        )
+                    )
                 # resultQuality is unconditional: emitting it only when a retry
                 # ran made a skipped-retry empty invisible to JSON consumers.
                 payload["resultQuality"] = result.result_quality

@@ -236,17 +236,15 @@ def _nonempty_engine_models(section: JsonObject) -> JsonObject | None:
 def binary_missing(binary: object) -> bool:
     """True when a configured harness binary does not resolve from this process.
 
-    A configured path is tested as a file; a bare name goes through PATH the
-    way launch does. ``models`` prints the configured value either way, so a
-    path copied from another machine used to read as installed until a launch
-    failed with missing_binary.
+    This is the launch check (``cli.ensure_binary``): ``shutil.which`` on the
+    configured value, PATH of the Delegate process, no ``~`` expansion. A path
+    that only resolves after expansion reads as missing here because launch
+    would refuse it too; ``models`` used to print such a path as if it were
+    installed until a launch failed with missing_binary.
     """
     if not isinstance(binary, str) or not binary.strip():
         return False
-    candidate = os.path.expanduser(binary)
-    if os.sep in candidate:
-        return not (os.path.isfile(candidate) and os.access(candidate, os.X_OK))
-    return shutil.which(candidate) is None
+    return shutil.which(binary) is None
 
 
 def _binary_label(section: JsonObject) -> str:
