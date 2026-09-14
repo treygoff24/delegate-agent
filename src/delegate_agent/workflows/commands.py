@@ -25,6 +25,10 @@ workflow_pinning.require_pinned_persona_resolver()
 WORKFLOW_COMMAND_SCHEMA = "delegate.workflow-command.v1"
 TERMINAL_WORKFLOW_STATUSES = {"succeeded", "failed", "killed"}
 WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"dry_run", "paused", "stalled"}
+SIGNAL_DRAIN_INCOMPLETE_WARNING = (
+    "signal audit incomplete: the supervisor's signal relay did not settle before the "
+    "terminal status was published; signal fields may be missing"
+)
 LIVE_WORKFLOW_STATUSES = {"created", "running", "starting"}
 DRY_RUN_WRITE_WARNING = (
     "dry-run only stubs agent calls; script filesystem writes are live. "
@@ -113,6 +117,7 @@ def emit(
                 config=attempt.config,
                 attempt_config=attempt.metadata,
                 attempt_environment={**pin.environment, **attempt.environment},
+                dedicated_process=True,
             )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -752,6 +757,7 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
             stalled = status.get("status") == "stalled"
             break
         time.sleep(1)
+    drain_incomplete = status.get("signalDrainIncomplete") is True
     if command.jsonl:
         print(
             json.dumps(
@@ -774,14 +780,18 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
                 "events": collected,
                 "lastSeq": since,
                 **({"status": "stalled"} if stalled else {}),
+                **({"signalDrainIncomplete": True} if drain_incomplete else {}),
             },
             stdout,
         )
-    elif stalled:
-        print(
-            f"stalled: supervisor dead; resume with: workflow run --resume {command.wf_id}",
-            file=stdout,
-        )
+    else:
+        if stalled:
+            print(
+                f"stalled: supervisor dead; resume with: workflow run --resume {command.wf_id}",
+                file=stdout,
+            )
+        if drain_incomplete:
+            print(SIGNAL_DRAIN_INCOMPLETE_WARNING, file=stdout)
     return 1 if stalled else EXIT_OK
 
 
@@ -863,6 +873,8 @@ def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
                 f"supervisor dead; resume with: workflow run --resume {wf_id}",
                 file=stdout,
             )
+        if isinstance(payload, dict) and payload.get("signalDrainIncomplete") is True:
+            print(SIGNAL_DRAIN_INCOMPLETE_WARNING, file=stdout)
     if timed_out:
         return 124
     return 0 if result["ok"] else 1

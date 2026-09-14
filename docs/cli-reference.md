@@ -626,6 +626,11 @@ delegate [--json] workflow save <script.py> --name NAME
 - `wait` returns at completion or an attention-required pause/stall. An explicit
   ID can select a completed dry-run; implicit latest selection excludes dry-runs.
   Returning from wait does not by itself prove that the requested work completed.
+  When the terminal status carries `signalDrainIncomplete: true` (the
+  supervisor's signal relay did not settle before the status was published, so
+  `signal` and `signalsRepeated` may be missing), `wait` and `watch` print a
+  `signal audit incomplete` warning line in text mode and carry the same field
+  in JSON; the flag is never cleared, so do not poll for it to go away.
 - `result --field KEY` extracts a top-level field from an object result. Text
   mode prints strings directly and JSON-encodes other values; JSON mode returns
   a field/value envelope.

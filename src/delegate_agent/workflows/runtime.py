@@ -708,19 +708,19 @@ class _SignalRelay:
                 lambda: self._drains_acked >= generation, timeout=timeout
             )
 
-    def stop(self) -> bool:
+    def stop(self, *, fence_timeout: float | None = 10.0) -> bool:
         """Restore the handlers, fence the relay, and wait for its thread.
 
         Returns True when no further journal write from this relay is
-        possible: the fence was taken (so a lingering thread can only read
-        and discard) and the thread has exited. The write end is closed
-        after the sentinel so the reader sees EOF even when the pipe was
-        full; the read end is closed only once the thread is gone, so a
-        relay still finishing a read never sees a closed or reused
-        descriptor. A False return means the fence could not be taken
-        within the wait, that is, the relay is still inside a journal
-        append; the supervisor exits regardless and the journal reader
-        tolerates an unterminated final line.
+        possible: the fence was taken, so every delivery that had begun has
+        completed and a lingering thread can only read and discard. The
+        write end is closed after the sentinel so the reader sees EOF even
+        when the pipe was full; the read end is closed only once the thread
+        is gone, so a relay still finishing a read never sees a closed or
+        reused descriptor. fence_timeout=None waits for writer completion
+        however long it takes; a bounded wait returns False when the relay
+        is still inside a delivery, and the caller must then keep workflow
+        ownership or end the process while it still holds it.
         """
         if not self._started:
             with contextlib.suppress(OSError):
@@ -739,7 +739,10 @@ class _SignalRelay:
         quiescent = self.drain(timeout=5.0)
         # Then the fence: taken only when no _deliver is in flight, so
         # holding it establishes writer completion.
-        fenced = self._fence_lock.acquire(timeout=10.0)
+        if fence_timeout is None:
+            fenced = self._fence_lock.acquire()
+        else:
+            fenced = self._fence_lock.acquire(timeout=fence_timeout)
         if fenced:
             self._fenced = True
             self._fence_lock.release()
@@ -748,10 +751,9 @@ class _SignalRelay:
         with contextlib.suppress(OSError):
             os.close(self._write_fd)
         self._thread.join(timeout=5.0 if quiescent else 1.0)
-        if self._thread.is_alive():
-            return False
-        with contextlib.suppress(OSError):
-            os.close(self._read_fd)
+        if not self._thread.is_alive():
+            with contextlib.suppress(OSError):
+                os.close(self._read_fd)
         return fenced
 
 
@@ -4657,6 +4659,7 @@ def run_supervisor(
     config: JsonObject,
     attempt_config: JsonObject | None = None,
     attempt_environment: dict[str, str] | None = None,
+    dedicated_process: bool = False,
 ) -> int:
     root = registry.workflow_dir(workspace, wf_id)
     with _held_workflow_lock(root):
@@ -4932,10 +4935,10 @@ def run_supervisor(
             # Settle the signal record before the terminal status consumers
             # use as their exit condition is published; a signal arriving
             # after this boundary has nothing left to interrupt.
+            signal_drained = signal_relay.drain()
             success_extra = _signal_after_completion_extra(state)
-            if not signal_relay.drain():
+            if not signal_drained:
                 success_extra["signalDrainIncomplete"] = True
-                success_extra.update(_signal_after_completion_extra(state))
             state.write_status("succeeded", **success_extra)
             state.notify_event("succeeded")
             return 0
@@ -4946,17 +4949,24 @@ def run_supervisor(
                     _release_structured_retry_worktree_for_state(state, run_id)
                 state.retry_worktree_runs.discard(run_id)
             # Last, so a signal during cleanup is still handled cooperatively
-            # instead of terminating the process mid-release. A relay that
-            # could not be fenced is still inside a journal append;
-            # journaling that would block on the same lock, so it goes to
-            # stderr and the process exits (the journal reader tolerates an
-            # unterminated final line).
-            if not signal_relay.stop():
+            # instead of terminating the process mid-release. The workflow
+            # lock is released only after the relay can no longer write: an
+            # in-process supervisor waits for the fence however long a
+            # delivery takes; the dedicated supervisor process waits a
+            # bounded time and then ends itself while it still holds the
+            # lock, so the relay dies with it (the journal reader tolerates
+            # an unterminated final line) and no writer outlives ownership.
+            # Journaling the event would block on the same lock, so it goes
+            # to stderr.
+            if not signal_relay.stop(fence_timeout=10.0 if dedicated_process else None):
                 print(
-                    f"delegate workflow {wf_id}: signal relay not fenced at exit; "
-                    "a journal append may be unterminated",
+                    f"delegate workflow {wf_id}: signal relay still delivering at exit; "
+                    "ending the supervisor while the workflow lock is held",
                     file=sys.stderr,
                 )
+                with contextlib.suppress(Exception):
+                    sys.stderr.flush()
+                os._exit(1)
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:
