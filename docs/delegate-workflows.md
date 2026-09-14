@@ -183,9 +183,9 @@ and hands the lock descriptor to any delivery still writing, which closes it
 when it completes — so no interruption can release ownership early. Arming
 the relay is transactional too: a failure before its reader thread exists
 puts the handlers and wakeup fd back and closes both descriptors, and the
-reader owns the read end from the moment it exists, so an interruption that
-escapes the thread start hands the descriptor to the reader rather than
-closing it underneath. A signal that arrives after the last child has completed does not
+read end is owned by whichever of the reader and the rollback claims it
+first, so an exception escaping the thread start never closes it underneath
+a reader. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`

@@ -144,8 +144,8 @@ forever, and every resume that reached one of them failed its thunk with
   outlive ownership; every exit from the lock context, exceptional or not,
   fences the relay and hands the lock to a delivery in flight, which closes
   it when it completes; arming the relay rolls back handlers, wakeup fd, and
-  descriptors when it fails before the reader thread exists, and the reader
-  owns the read end from the moment it exists). A repeated signal is recorded, not re-raised. `workflow kill` notes which
+  descriptors when it fails before the reader thread exists, and the read
+  end is owned by whichever of the reader and the rollback claims it first). A repeated signal is recorded, not re-raised. `workflow kill` notes which
   children were already terminal before it signals and completes its
   `cancelled` report from the whole group afterwards (`observedIn: registry`
   on entries it did not cancel itself), so a supervisor sealed by the kill's
