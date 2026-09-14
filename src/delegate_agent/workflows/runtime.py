@@ -632,23 +632,44 @@ class _SignalRelay:
             lock_handle.release_guard = self.unwind
 
     def start(self) -> None:
-        """Arm the relay, or leave the process exactly as it was.
+        """Arm the relay, or leave the process as it was.
 
         Only the main thread may install handlers or a wakeup fd; a
         supervisor driven in-process from another thread keeps the default
-        disposition. Arming is transactional: the pipe, the wakeup fd, and
-        the handlers are committed to the relay only once the reader thread
-        is running and owns the read end. Any failure before that point
-        (an unusable descriptor, an interruption while installing handlers,
-        a thread that cannot be started) puts back whatever was installed,
-        closes both descriptors, and propagates, so no exit path is left with
-        an ownerless descriptor or a wakeup fd nothing will read.
+        disposition. Arming is transactional against ordinary failure: the
+        pipe, the wakeup fd, and the handlers are committed to the relay
+        only once the reader thread has been started and owns the read end,
+        and a failure before that point (an unusable descriptor, an error
+        while installing handlers, a thread that cannot be created) puts
+        back what was installed, closes both descriptors, and propagates.
+
+        The reader owns the read end from the instant the thread exists: it
+        is handed the descriptor as an argument and is the only code that
+        closes it. CPython's Thread.start() waits for the new thread to
+        report that it has begun, and that wait can be interrupted, so an
+        exception that is not an ordinary Exception escaping start() means
+        a reader may exist; rollback then closes only the write end, which
+        ends any reader on EOF, and leaves the read end to it. Each
+        handler's previous disposition is recorded before it is replaced,
+        so there is no window in which a handler is installed but
+        unrecorded. When the previous wakeup fd could not be recorded (the
+        exception landed between the install returning and the store),
+        rollback probes it and restores anything that is not this pipe.
+
+        Outside the transaction is what Python cannot make atomic: an
+        asynchronous exception on the bytecode after os.pipe() returns
+        leaks two descriptors, and one raised before the thread was created
+        leaves the read end unclosed. Both are bounded to a process already
+        unwinding from that exception, and workflow-lock ownership never
+        depends on arming because the lock guard is installed at
+        construction.
         """
         if threading.current_thread() is not threading.main_thread():
             return
         read_fd, write_fd = os.pipe()
         previous_wakeup_fd: int | None = None
         installed: dict[int, object] = {}
+        reader_may_exist = False
         try:
             os.set_blocking(write_fd, False)
             try:
@@ -660,20 +681,29 @@ class _SignalRelay:
                 return
             for signum in self._SIGNALS:
                 with contextlib.suppress(OSError, ValueError):
-                    installed[signum] = signal.signal(signum, self._handle)
+                    # Record first: restoring a disposition that was never
+                    # replaced is a no-op, an unrecorded replacement is not.
+                    installed[signum] = signal.getsignal(signum)
+                    signal.signal(signum, self._handle)
             thread = threading.Thread(
                 target=self._run,
+                args=(read_fd,),
                 name=f"delegate-workflow-signal-relay-{self.state.wf_id}",
                 daemon=True,
             )
-            # Commit. _run reads _read_fd, so the descriptors become the
-            # relay's only here; a start() that raises never began the thread.
             self._read_fd, self._write_fd = read_fd, write_fd
             self._previous_wakeup_fd = previous_wakeup_fd
             self._previous_handlers = installed
             self._started = True
             self._thread = thread
-            thread.start()
+            reader_may_exist = True
+            try:
+                thread.start()
+            except Exception:
+                # CPython raises an ordinary exception only when no thread
+                # was created; the read end is still ours to close.
+                reader_may_exist = False
+                raise
         except BaseException:
             self._started = False
             self._thread = None
@@ -683,12 +713,19 @@ class _SignalRelay:
             for signum, handler in installed.items():
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     signal.signal(signum, handler)  # type: ignore[arg-type]
-            if previous_wakeup_fd is not None:
-                with contextlib.suppress(OSError, ValueError):
+            with contextlib.suppress(OSError, ValueError):
+                if previous_wakeup_fd is not None:
                     signal.set_wakeup_fd(previous_wakeup_fd)
-            for fd in (read_fd, write_fd):
+                else:
+                    current = signal.set_wakeup_fd(-1)
+                    if current not in (-1, write_fd):
+                        signal.set_wakeup_fd(current)
+            # EOF ends a reader that exists; it closes the read end itself.
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
+            if not reader_may_exist:
                 with contextlib.suppress(OSError):
-                    os.close(fd)
+                    os.close(read_fd)
             raise
 
     def _handle(self, signum: int, _frame: object) -> None:
@@ -697,13 +734,14 @@ class _SignalRelay:
         # authoritative record. Nothing to do here.
         return
 
-    def _run(self) -> None:
-        # The relay thread owns the read end: nobody else closes it, so a
-        # read never sees a closed or reused descriptor.
+    def _run(self, read_fd: int) -> None:
+        # The reader owns its descriptor from the moment the thread exists:
+        # it is passed in rather than read from the relay, and nothing else
+        # closes it, so a read never sees a closed or reused descriptor.
         try:
             while True:
                 try:
-                    data = os.read(self._read_fd, 64)
+                    data = os.read(read_fd, 64)
                 except OSError:
                     return
                 if not data:
@@ -717,7 +755,7 @@ class _SignalRelay:
                         self._deliver(signal.Signals(value).name)
         finally:
             with contextlib.suppress(OSError):
-                os.close(self._read_fd)
+                os.close(read_fd)
 
     def _acknowledge_drain(self) -> None:
         with self._drain_cond:
