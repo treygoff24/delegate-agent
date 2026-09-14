@@ -556,6 +556,29 @@ class SupervisorWatchdogExit(RuntimeError):
         self.reason = reason
 
 
+class SupervisorSignalled(BaseException):
+    """Raised in the supervisor's main thread when SIGTERM or SIGHUP arrives."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        self.signal_name = signal.Signals(signum).name
+        super().__init__(self.signal_name)
+
+
+def _install_supervisor_signal_handlers() -> None:
+    # Only the main thread may install handlers; a supervisor driven
+    # in-process from another thread keeps the default disposition.
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _raise(signum: int, _frame: object) -> None:
+        raise SupervisorSignalled(signum)
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(OSError, ValueError):
+            signal.signal(signum, _raise)
+
+
 class WorkflowChildCancellationError(wait_cancel_commands.WaitCancelError):
     """One or more workflow-owned children could not be safely cancelled."""
 
@@ -4427,8 +4450,31 @@ def run_supervisor(
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
         )
         watchdog.start()
+        _install_supervisor_signal_handlers()
         try:
             result = execute_workflow(state)
+        except SupervisorSignalled as exc:
+            # A signal that reaches the supervisor used to end it with no
+            # record at all: the lock released, the status stayed "running",
+            # and the children it had in flight were left to go stale. Record
+            # the signal, seal the children, and exit without joining worker
+            # threads that may still be waiting on those children.
+            with contextlib.suppress(Exception):
+                state.append_event("supervisor_signalled", signal=exc.signal_name, pid=os.getpid())
+            cancelled: list[JsonObject] = []
+            with contextlib.suppress(Exception):
+                cancelled = cancel_workflow_children(workspace, wf_id)
+            with contextlib.suppress(Exception):
+                state.write_status(
+                    "failed",
+                    error=f"supervisor received {exc.signal_name}",
+                    signal=exc.signal_name,
+                    cancelled=cancelled,
+                )
+            with contextlib.suppress(Exception):
+                state.notify_event("failed", detail=f"supervisor received {exc.signal_name}")
+            watchdog.stop()
+            os._exit(128 + exc.signum)
         except GateExit as exc:
             # A gate must carry metadata all the way to the supervisor.  A
             # metadata-less unwind is an execution failure, not a successful

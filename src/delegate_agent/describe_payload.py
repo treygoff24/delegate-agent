@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -232,6 +233,27 @@ def _nonempty_engine_models(section: JsonObject) -> JsonObject | None:
     return None
 
 
+def binary_missing(binary: object) -> bool:
+    """True when a configured harness binary does not resolve from this process.
+
+    A configured path is tested as a file; a bare name goes through PATH the
+    way launch does. ``models`` prints the configured value either way, so a
+    path copied from another machine used to read as installed until a launch
+    failed with missing_binary.
+    """
+    if not isinstance(binary, str) or not binary.strip():
+        return False
+    candidate = os.path.expanduser(binary)
+    if os.sep in candidate:
+        return not (os.path.isfile(candidate) and os.access(candidate, os.X_OK))
+    return shutil.which(candidate) is None
+
+
+def _binary_label(section: JsonObject) -> str:
+    label = _text_or_none(section.get("binary"))
+    return f"{label} (missing)" if section.get("binaryMissing") is True else label
+
+
 def models_payload(
     config: JsonObject,
     config_source: str,
@@ -311,6 +333,8 @@ def models_payload(
         models = _nonempty_engine_models(config[engine])
         if models is not None:
             section["models"] = models
+        if "binary" in section:
+            section["binaryMissing"] = binary_missing(section["binary"])
     return {
         "ok": True,
         "configSource": config_source,
@@ -1412,7 +1436,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
         profile_label = _text_or_none(profile)
         print(
             "codex: "
-            f"binary={_text_or_none(codex.get('binary'))} "
+            f"binary={_binary_label(codex)} "
             f"defaultModel={_text_or_none(codex.get('defaultModel'))} "
             f"profile={profile_label}",
             file=stdout,
@@ -1422,7 +1446,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(claude, dict):
         print(
             "claude: "
-            f"binary={_text_or_none(claude.get('binary'))} "
+            f"binary={_binary_label(claude)} "
             f"defaultModel={_text_or_none(claude.get('defaultModel'))} "
             f"workPermissionMode={claude.get('workPermissionMode')}",
             file=stdout,
@@ -1432,7 +1456,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(grok, dict):
         print(
             "grok: "
-            f"binary={_text_or_none(grok.get('binary'))} "
+            f"binary={_binary_label(grok)} "
             f"defaultModel={_text_or_none(grok.get('defaultModel'))} "
             f"workPermissionMode={grok.get('workPermissionMode')}",
             file=stdout,
@@ -1442,7 +1466,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(devin, dict):
         print(
             "devin: "
-            f"binary={_text_or_none(devin.get('binary'))} "
+            f"binary={_binary_label(devin)} "
             f"defaultModel={_text_or_none(devin.get('defaultModel'))}",
             file=stdout,
         )
@@ -1451,7 +1475,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(opencode, dict):
         print(
             "opencode: "
-            f"binary={_text_or_none(opencode.get('binary'))} "
+            f"binary={_binary_label(opencode)} "
             f"defaultModel={_text_or_none(opencode.get('defaultModel'))} "
             f"defaultAgent={_text_or_none(opencode.get('defaultAgent'))}",
             file=stdout,
@@ -1460,9 +1484,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     pi = payload.get("pi")
     if isinstance(pi, dict):
         print(
-            "pi: "
-            f"binary={_text_or_none(pi.get('binary'))} "
-            f"defaultModel={_text_or_none(pi.get('defaultModel'))}",
+            f"pi: binary={_binary_label(pi)} defaultModel={_text_or_none(pi.get('defaultModel'))}",
             file=stdout,
         )
         _print_engine_aliases(pi, stdout)
@@ -1470,7 +1492,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(omp, dict):
         print(
             "omp: "
-            f"binary={_text_or_none(omp.get('binary'))} "
+            f"binary={_binary_label(omp)} "
             f"defaultModel={_text_or_none(omp.get('defaultModel'))}",
             file=stdout,
         )
@@ -1479,7 +1501,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(kimi, dict):
         print(
             "kimi: "
-            f"binary={_text_or_none(kimi.get('binary'))} "
+            f"binary={_binary_label(kimi)} "
             f"defaultModel={_text_or_none(kimi.get('defaultModel'))}",
             file=stdout,
         )

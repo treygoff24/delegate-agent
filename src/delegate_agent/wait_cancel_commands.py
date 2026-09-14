@@ -456,11 +456,19 @@ def _cancel_signal_generation(
     return pid, pgid, signal_value, process_group
 
 
+STALE_SEAL_WARNING = (
+    "stale run sealed as cancelled: the tracked process was already dead (dead_pid); "
+    "nothing was signalled"
+)
+
+
 def _persist_cancelled_terminal_locked(
     registry_root: Path,
     target: run_registry.RunTarget,
     state: JsonObject | None,
     warnings: list[str],
+    *,
+    stale_reason: str | None = None,
 ) -> None:
     """Persist the canonical cancelled outcome while registry_lock is held."""
     stdout_bytes, stderr_bytes = run_registry.effective_log_byte_sizes(
@@ -513,6 +521,8 @@ def _persist_cancelled_terminal_locked(
             "stderrBytes": stderr_bytes,
         }
     )
+    if stale_reason is not None:
+        updated["staleReason"] = stale_reason
     terminal_states.apply_operator_cancel_override(updated)
     run_registry.publish_terminal_record_locked(registry_root, target.run_id, updated)
 
@@ -526,6 +536,23 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         state = run_registry.load_run_state_or_none(registry_root, target.run_id)
         fields = run_registry.status_fields(state)
         effective = fields.get("effectiveStatus")
+        if effective == run_registry.STATUS_STALE and fields.get("staleReason") == "dead_pid":
+            # The tracked leader is dead, so there is nothing to signal, but a
+            # row left at rawStatus=running never becomes terminal on its own:
+            # it lists as stale forever, and a workflow that resumes over it
+            # fails the thunk that reaches it with "already terminal (stale)"
+            # instead of relaunching. Seal it as the operator outcome so cancel
+            # is idempotent over a dead run the way it is over a live one.
+            # missing_pid is deliberately left alone: under this lock it can
+            # still be a launch that has not published its pid.
+            _persist_cancelled_terminal_locked(
+                registry_root,
+                target,
+                state,
+                [STALE_SEAL_WARNING],
+                stale_reason="dead_pid",
+            )
+            return _terminal_payload(registry_root, target)
         if effective in run_registry.TERMINAL_STATUSES or effective == run_registry.STATUS_STALE:
             raise WaitCancelError(
                 "run_already_terminal",
