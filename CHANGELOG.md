@@ -99,6 +99,36 @@ produce a wrong run outcome is fixed below.
 - Grok stays on its current stream format, and `validate_schema_subset` still
   rejects `$defs` and `format`.
 
+### Workflow resume and stale runs (2026-09-14)
+
+Found in the dogfood window after the 0.31.0 candidate was promoted: one
+workflow that lost its supervisor 28 times left 10 children listed as `stale`
+forever, and every resume that reached one of them failed its thunk with
+"already terminal (stale)" instead of relaunching.
+
+- `delegate cancel` seals a `stale` run whose tracked pid is dead as
+  `cancelled`, with `staleReason: dead_pid` on the record and a warning that
+  nothing was signalled, instead of refusing it with `run_already_terminal`.
+  A `stale` run with no pid at all is still refused: under the registry lock
+  that can be a launch that has not published its pid yet.
+- `workflow run --resume` and `workflow approve` seal the prior attempt's
+  in-flight children before the new supervisor starts, the same way `workflow
+  kill` does, and journal `attempt_superseded` with the lost supervisor's pid,
+  its last status, and the sealed children. The replay then relaunches the
+  agent instead of tripping over the orphan.
+- The workflow supervisor handles `SIGTERM` and `SIGHUP`: it journals
+  `supervisor_signalled`, cancels its children, writes `status: failed` naming
+  the signal, and exits. A signal used to end the supervisor with the lock
+  released, `status.json` still `running`, and no record of why.
+- A `--continuity-mode pinned` run that completes without any harness model
+  observation carries a `pinned_continuity_unverified` warning naming the
+  harness. Claude and Oh My Pi were observed reporting the served model in
+  the dogfood window; Codex and Grok streams carry no model field, so on those
+  engines a pinned run is pinned in name only and now says so.
+- `delegate models` marks a configured binary that does not resolve from the
+  Delegate process (`binaryMissing: true`, `(missing)` in text) instead of
+  printing the configured path as if it were installed.
+
 ### CI and runtime hardening (2026-09-07)
 
 - Pinned runtime snapshots and workflow attempt directories are published while

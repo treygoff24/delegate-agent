@@ -101,6 +101,15 @@ are not accepted for call, read-only call, `--pass-through`, or slash-passthroug
 prompts. Input JSON uses `persona` (string or null) and `allowRepoPersona`
 (boolean).
 
+`--continuity-mode pinned|fungible|panel` is a shared launch option (default
+`fungible`). A pinned run is paused with a typed terminal when the harness
+reports a served model that does not match the request or switches model
+mid-session. The check depends on the harness reporting a model at all: a
+pinned run that completes with `modelProvenance.servedModelSource:
+"unavailable"` carries a `pinned_continuity_unverified` warning naming the
+harness, because nothing was observed to check. Codex and Grok streams carry no
+model field today.
+
 `delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
 containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.
 Invalid files remain visible with an `invalid` reason; a workspace row that
@@ -201,6 +210,11 @@ and update any `droid.models` alias that pinned one. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
+Each engine row carries `binaryMissing`, true when the configured binary does
+not resolve from the Delegate process (a bare name absent from `PATH`, or a
+path that is not an executable file); the text view prints `(missing)` after
+the binary. It is the same resolution a launch performs before failing with
+`missing_binary`.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins.
 Engines with exact capability metadata reject unsupported model/effort pairs
@@ -1411,7 +1425,12 @@ testing the deadline. `--group NAME` waits for all runs tagged with that group.
 
 `delegate cancel` resolves the same run handles, refuses already-terminal runs,
 signals the recorded process group with SIGTERM, waits a 5s grace period, then
-uses SIGKILL if needed. It never signals pid/pgid `<= 1`. Legacy runs without a
+uses SIGKILL if needed. A `stale` run whose tracked pid is dead is not refused:
+cancel seals it as `cancelled` with `staleReason: dead_pid` and a warning that
+nothing was signalled, so the row stops listing as `stale` and a workflow that
+resumes over it relaunches instead of failing. A `stale` run with no recorded
+pid is still refused, because under the registry lock that can be a launch that
+has not published its pid yet. It never signals pid/pgid `<= 1`. Legacy runs without a
 recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 `cancelled` with `failureReason: cancelled_by_user` and records current captured
 stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are
