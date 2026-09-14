@@ -117,7 +117,10 @@ def emit(
                 config=attempt.config,
                 attempt_config=attempt.metadata,
                 attempt_environment={**pin.environment, **attempt.environment},
-                dedicated_process=True,
+                # Only the process detach_supervisor launched may end itself
+                # to preserve ownership; an embedded caller of this entry
+                # gets the in-process (unbounded fence wait) semantics.
+                dedicated_process=os.environ.get(runtime.WORKFLOW_SUPERVISOR_PROCESS_ENV) == "1",
             )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc

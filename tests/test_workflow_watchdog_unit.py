@@ -698,6 +698,7 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
         drain: object = False,
         stop: object = True,
         dedicated_process: bool = False,
+        on_exit: object = None,
     ) -> tuple[dict[str, object], mock.MagicMock, mock.MagicMock]:
         wf_id = f"wf_{time.time_ns() & ((1 << 48) - 1):012x}"
         root = registry.ensure_workflow_dir(self.root, wf_id)
@@ -722,10 +723,18 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
             )
             if callable(drain)
             else mock.patch.object(workflow_runtime._SignalRelay, "drain", return_value=drain),
+            # The relay is never armed here: these are wiring tests, and a
+            # real start() with a mocked stop() would leave handlers, the
+            # wakeup fd, and a daemon thread behind in the test process.
+            mock.patch.object(workflow_runtime._SignalRelay, "start", autospec=True),
             mock.patch.object(
                 workflow_runtime._SignalRelay, "stop", autospec=True, return_value=stop
             ) as stop_mock,
-            mock.patch.object(workflow_runtime.os, "_exit") as exit_mock,
+            mock.patch.object(
+                workflow_runtime.os,
+                "_exit",
+                side_effect=(lambda code: on_exit(root, code)) if callable(on_exit) else None,
+            ) as exit_mock,
             mock.patch.object(workflow_runtime, "cancel_workflow_children", return_value=[]),
             mock.patch.object(WorkflowState, "notify_event", new=lambda *a, **k: None),
         ):
@@ -772,10 +781,40 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
 
     def test_dedicated_supervisor_ends_itself_holding_the_lock_when_unfenced(self) -> None:
         """A relay still delivering at exit must not outlive workflow ownership."""
+        contended_at_exit: list[bool] = []
+
+        def lock_is_still_held(root: Path, code: int) -> None:
+            try:
+                fd = registry.acquire_workflow_lock(root)
+            except BlockingIOError:
+                contended_at_exit.append(True)
+            else:
+                os.close(fd)
+                contended_at_exit.append(False)
+
         _, stop_mock, exit_mock = self._run(
-            lambda state: {"done": True}, drain=True, stop=False, dedicated_process=True
+            lambda state: {"done": True},
+            drain=True,
+            stop=False,
+            dedicated_process=True,
+            on_exit=lock_is_still_held,
         )
         self.assertEqual(stop_mock.call_args.kwargs, {"fence_timeout": 10.0})
+        exit_mock.assert_called_once_with(1)
+        self.assertEqual(contended_at_exit, [True], "the workflow lock was not held at _exit")
+
+    def test_dedicated_exit_survives_a_failing_diagnostic(self) -> None:
+        class BrokenStderr:
+            def write(self, text: str) -> int:
+                raise BrokenPipeError("stderr closed")
+
+            def flush(self) -> None:
+                raise BrokenPipeError("stderr closed")
+
+        with mock.patch.object(workflow_runtime.sys, "stderr", new=BrokenStderr()):
+            _, _, exit_mock = self._run(
+                lambda state: {"done": True}, drain=True, stop=False, dedicated_process=True
+            )
         exit_mock.assert_called_once_with(1)
 
     def test_watchdog_exit_records_incomplete_drain(self) -> None:
