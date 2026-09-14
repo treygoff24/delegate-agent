@@ -3852,9 +3852,13 @@ class WorkflowCommandTests(unittest.TestCase):
         os.set_blocking(wake_write, False)
         expected_wakeup = -1 if bare_wakeup else wake_write
         self.assertEqual(signal.set_wakeup_fd(expected_wakeup), -1, "test needs a bare wakeup fd")
-        real_pipe, real_close = os.pipe, os.close
+        real_pipe, real_close, real_read = os.pipe, os.close, os.read
         fds: list[int] = []
         closes: list[tuple[int, str]] = []
+        self.relay_reads: list[int] = []
+        # Set on the reader's first read of the relay's read end, which it
+        # reaches only after winning the claim.
+        self.reader_reading = threading.Event()
 
         def recording_pipe() -> tuple[int, int]:
             read_fd, write_fd = real_pipe()
@@ -3865,10 +3869,17 @@ class WorkflowCommandTests(unittest.TestCase):
             closes.append((fd, threading.current_thread().name))
             real_close(fd)
 
+        def recording_read(fd: int, size: int) -> bytes:
+            if fds and fd == fds[0]:
+                self.relay_reads.append(fd)
+                self.reader_reading.set()
+            return real_read(fd, size)
+
         try:
             with (
                 mock.patch.object(workflow_runtime.os, "pipe", recording_pipe),
                 mock.patch.object(workflow_runtime.os, "close", recording_close),
+                mock.patch.object(workflow_runtime.os, "read", recording_read),
             ):
                 with patch, self.assertRaises(raises):
                     relay.start()
@@ -3911,12 +3922,15 @@ class WorkflowCommandTests(unittest.TestCase):
             )
         )
 
-    def test_relay_start_hands_the_read_end_to_a_reader_that_exists(self) -> None:
-        """Any exception escaping Thread.start() after the thread exists leaves the read end to it.
+    def test_relay_start_hands_the_read_end_to_a_reader_that_won_the_claim(self) -> None:
+        """Any exception escaping Thread.start() after the reader claimed leaves the read end to it.
 
         Thread.start() waits for the new thread after creating it, and that
         wait can raise an ordinary exception as well as an interruption, so
         the class of the exception must not decide who closes the read end.
+        The exception is raised only once the reader is inside its first
+        read (so it has won the claim); the rollback-first schedule is the
+        next test.
         """
         real_start = threading.Thread.start
 
@@ -3926,6 +3940,7 @@ class WorkflowCommandTests(unittest.TestCase):
             def failing_after_start(thread: threading.Thread) -> None:
                 real_start(thread)
                 started.append(thread)
+                self.assertTrue(self.reader_reading.wait(5.0), "reader never reached its read")
                 raise exc
 
             def settle() -> None:
@@ -3943,6 +3958,35 @@ class WorkflowCommandTests(unittest.TestCase):
         for exc in (KeyboardInterrupt(), RuntimeError("handler raised during the start wait")):
             with self.subTest(exc=type(exc).__name__):
                 case(exc)
+
+    def test_relay_start_closes_the_read_end_when_rollback_wins_the_claim(self) -> None:
+        """A reader that exists but has not claimed yet loses to the rollback and never touches the descriptor."""
+        real_start = threading.Thread.start
+        release = threading.Event()
+        started: list[threading.Thread] = []
+
+        def held_start(thread: threading.Thread) -> None:
+            original_run = thread.run
+
+            def delayed_run() -> None:
+                release.wait(5.0)
+                original_run()
+
+            thread.run = delayed_run  # type: ignore[method-assign]
+            real_start(thread)
+            started.append(thread)
+            raise RuntimeError("raised before the reader could claim")
+
+        def settle() -> None:
+            self.assertEqual(len(started), 1)
+            release.set()
+            started[0].join(5.0)
+            self.assertFalse(started[0].is_alive(), "reader did not return after losing the claim")
+            self.assertEqual(self.relay_reads, [], "a reader that lost the claim read the pipe")
+
+        self._relay_start_failure(
+            mock.patch.object(threading.Thread, "start", held_start), settle=settle
+        )
 
     def test_relay_start_rolls_back_when_a_handler_install_is_interrupted(self) -> None:
         """An interruption landing after a handler took effect still restores it: the previous disposition is recorded first."""
