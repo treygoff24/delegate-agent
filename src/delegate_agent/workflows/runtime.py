@@ -643,33 +643,40 @@ class _SignalRelay:
         while installing handlers, a thread that cannot be created) puts
         back what was installed, closes both descriptors, and propagates.
 
-        The reader owns the read end from the instant the thread exists: it
-        is handed the descriptor as an argument and is the only code that
-        closes it. CPython's Thread.start() waits for the new thread to
-        report that it has begun, and that wait can be interrupted, so an
-        exception that is not an ordinary Exception escaping start() means
-        a reader may exist; rollback then closes only the write end, which
-        ends any reader on EOF, and leaves the read end to it. Each
-        handler's previous disposition is recorded before it is replaced,
-        so there is no window in which a handler is installed but
+        The read end belongs to whichever side claims it first. The reader
+        is handed the descriptor and a one-shot claim as arguments; its
+        first act is to take the claim, and it touches the descriptor only
+        if it won. Rollback takes the same claim, and closes the read end
+        only if it won. CPython's Thread.start() waits for the new thread
+        to report that it has begun, and that wait can raise (an
+        interruption, a handler raising, an allocation failure) after the
+        thread exists, so no exception class proves whether a reader
+        exists; the claim settles it for every ordering without asking.
+        Rollback always closes the write end, which ends a reader on EOF.
+        Each handler's previous disposition is recorded before it is
+        replaced, so there is no window in which a handler is installed but
         unrecorded. When the previous wakeup fd could not be recorded (the
         exception landed between the install returning and the store),
-        rollback probes it and restores anything that is not this pipe.
+        rollback probes it, disables this pipe, and puts back any other fd.
 
-        Outside the transaction is what Python cannot make atomic: an
-        asynchronous exception on the bytecode after os.pipe() returns
-        leaks two descriptors, and one raised before the thread was created
-        leaves the read end unclosed. Both are bounded to a process already
-        unwinding from that exception, and workflow-lock ownership never
-        depends on arming because the lock guard is installed at
-        construction.
+        Outside the transaction is what Python cannot make atomic, and the
+        residue is stated rather than hidden: an asynchronous exception on
+        the bytecode after os.pipe() returns leaks two descriptors; one
+        landing between set_wakeup_fd taking effect and the store of its
+        return value loses the predecessor, so rollback can only disable
+        wakeups and a wakeup fd another component had installed stays
+        disabled; and the rollback is itself interruptible. Unwinding from
+        such an exception does not by itself end the process (an embedding
+        caller may catch it), so these are residues, not resources the
+        exit will reclaim. Workflow-lock ownership never depends on arming:
+        the lock guard is installed at construction.
         """
         if threading.current_thread() is not threading.main_thread():
             return
         read_fd, write_fd = os.pipe()
         previous_wakeup_fd: int | None = None
         installed: dict[int, object] = {}
-        reader_may_exist = False
+        claim: threading.Lock | None = None
         try:
             os.set_blocking(write_fd, False)
             try:
@@ -685,9 +692,10 @@ class _SignalRelay:
                     # replaced is a no-op, an unrecorded replacement is not.
                     installed[signum] = signal.getsignal(signum)
                     signal.signal(signum, self._handle)
+            claim = threading.Lock()
             thread = threading.Thread(
                 target=self._run,
-                args=(read_fd,),
+                args=(read_fd, claim),
                 name=f"delegate-workflow-signal-relay-{self.state.wf_id}",
                 daemon=True,
             )
@@ -696,14 +704,7 @@ class _SignalRelay:
             self._previous_handlers = installed
             self._started = True
             self._thread = thread
-            reader_may_exist = True
-            try:
-                thread.start()
-            except Exception:
-                # CPython raises an ordinary exception only when no thread
-                # was created; the read end is still ours to close.
-                reader_may_exist = False
-                raise
+            thread.start()
         except BaseException:
             self._started = False
             self._thread = None
@@ -720,10 +721,12 @@ class _SignalRelay:
                     current = signal.set_wakeup_fd(-1)
                     if current not in (-1, write_fd):
                         signal.set_wakeup_fd(current)
-            # EOF ends a reader that exists; it closes the read end itself.
+            # EOF ends a reader that exists. The read end is closed here only
+            # if this rollback wins the claim; a reader that won it closes
+            # the descriptor itself, and one that loses never touches it.
             with contextlib.suppress(OSError):
                 os.close(write_fd)
-            if not reader_may_exist:
+            if claim is None or claim.acquire(blocking=False):
                 with contextlib.suppress(OSError):
                     os.close(read_fd)
             raise
@@ -734,10 +737,13 @@ class _SignalRelay:
         # authoritative record. Nothing to do here.
         return
 
-    def _run(self, read_fd: int) -> None:
-        # The reader owns its descriptor from the moment the thread exists:
-        # it is passed in rather than read from the relay, and nothing else
-        # closes it, so a read never sees a closed or reused descriptor.
+    def _run(self, read_fd: int, claim: threading.Lock) -> None:
+        # The read end is owned by whoever takes the claim first. Losing it
+        # means a failed start() already closed the descriptor; winning it
+        # means nothing else will, so a read never sees a closed or reused
+        # descriptor and the finally below is the only close.
+        if not claim.acquire(blocking=False):
+            return
         try:
             while True:
                 try:

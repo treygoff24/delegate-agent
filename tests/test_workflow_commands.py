@@ -3911,27 +3911,38 @@ class WorkflowCommandTests(unittest.TestCase):
             )
         )
 
-    def test_relay_start_hands_the_read_end_to_a_reader_that_may_exist(self) -> None:
-        """An interruption escaping Thread.start() after the thread exists leaves the read end to it."""
+    def test_relay_start_hands_the_read_end_to_a_reader_that_exists(self) -> None:
+        """Any exception escaping Thread.start() after the thread exists leaves the read end to it.
+
+        Thread.start() waits for the new thread after creating it, and that
+        wait can raise an ordinary exception as well as an interruption, so
+        the class of the exception must not decide who closes the read end.
+        """
         real_start = threading.Thread.start
-        started: list[threading.Thread] = []
 
-        def interrupted_start(thread: threading.Thread) -> None:
-            real_start(thread)
-            started.append(thread)
-            raise KeyboardInterrupt
+        def case(exc: BaseException) -> None:
+            started: list[threading.Thread] = []
 
-        def settle() -> None:
-            self.assertEqual(len(started), 1)
-            started[0].join(5.0)
-            self.assertFalse(started[0].is_alive(), "reader did not exit on EOF")
+            def failing_after_start(thread: threading.Thread) -> None:
+                real_start(thread)
+                started.append(thread)
+                raise exc
 
-        self._relay_start_failure(
-            mock.patch.object(threading.Thread, "start", interrupted_start),
-            raises=KeyboardInterrupt,
-            reader_owns_read_end=True,
-            settle=settle,
-        )
+            def settle() -> None:
+                self.assertEqual(len(started), 1)
+                started[0].join(5.0)
+                self.assertFalse(started[0].is_alive(), "reader did not exit on EOF")
+
+            self._relay_start_failure(
+                mock.patch.object(threading.Thread, "start", failing_after_start),
+                raises=type(exc),
+                reader_owns_read_end=True,
+                settle=settle,
+            )
+
+        for exc in (KeyboardInterrupt(), RuntimeError("handler raised during the start wait")):
+            with self.subTest(exc=type(exc).__name__):
+                case(exc)
 
     def test_relay_start_rolls_back_when_a_handler_install_is_interrupted(self) -> None:
         """An interruption landing after a handler took effect still restores it: the previous disposition is recorded first."""
