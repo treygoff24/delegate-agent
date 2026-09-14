@@ -632,30 +632,64 @@ class _SignalRelay:
             lock_handle.release_guard = self.unwind
 
     def start(self) -> None:
-        # Only the main thread may install handlers or a wakeup fd; a
-        # supervisor driven in-process from another thread keeps the default
-        # disposition.
+        """Arm the relay, or leave the process exactly as it was.
+
+        Only the main thread may install handlers or a wakeup fd; a
+        supervisor driven in-process from another thread keeps the default
+        disposition. Arming is transactional: the pipe, the wakeup fd, and
+        the handlers are committed to the relay only once the reader thread
+        is running and owns the read end. Any failure before that point
+        (an unusable descriptor, an interruption while installing handlers,
+        a thread that cannot be started) puts back whatever was installed,
+        closes both descriptors, and propagates, so no exit path is left with
+        an ownerless descriptor or a wakeup fd nothing will read.
+        """
         if threading.current_thread() is not threading.main_thread():
             return
         read_fd, write_fd = os.pipe()
-        os.set_blocking(write_fd, False)
+        previous_wakeup_fd: int | None = None
+        installed: dict[int, object] = {}
         try:
-            self._previous_wakeup_fd = signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
-        except (OSError, ValueError):
-            os.close(read_fd)
-            os.close(write_fd)
-            return
-        self._read_fd, self._write_fd = read_fd, write_fd
-        for signum in self._SIGNALS:
-            with contextlib.suppress(OSError, ValueError):
-                self._previous_handlers[signum] = signal.signal(signum, self._handle)
-        self._started = True
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"delegate-workflow-signal-relay-{self.state.wf_id}",
-            daemon=True,
-        )
-        self._thread.start()
+            os.set_blocking(write_fd, False)
+            try:
+                previous_wakeup_fd = signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+            except (OSError, ValueError):
+                # A wakeup fd cannot be installed here; run without a relay.
+                os.close(read_fd)
+                os.close(write_fd)
+                return
+            for signum in self._SIGNALS:
+                with contextlib.suppress(OSError, ValueError):
+                    installed[signum] = signal.signal(signum, self._handle)
+            thread = threading.Thread(
+                target=self._run,
+                name=f"delegate-workflow-signal-relay-{self.state.wf_id}",
+                daemon=True,
+            )
+            # Commit. _run reads _read_fd, so the descriptors become the
+            # relay's only here; a start() that raises never began the thread.
+            self._read_fd, self._write_fd = read_fd, write_fd
+            self._previous_wakeup_fd = previous_wakeup_fd
+            self._previous_handlers = installed
+            self._started = True
+            self._thread = thread
+            thread.start()
+        except BaseException:
+            self._started = False
+            self._thread = None
+            self._read_fd = self._write_fd = -1
+            self._previous_wakeup_fd = -1
+            self._previous_handlers = {}
+            for signum, handler in installed.items():
+                with contextlib.suppress(OSError, ValueError, TypeError):
+                    signal.signal(signum, handler)  # type: ignore[arg-type]
+            if previous_wakeup_fd is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    signal.set_wakeup_fd(previous_wakeup_fd)
+            for fd in (read_fd, write_fd):
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            raise
 
     def _handle(self, signum: int, _frame: object) -> None:
         # Installing a handler is what stops the default termination; the

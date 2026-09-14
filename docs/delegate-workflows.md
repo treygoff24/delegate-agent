@@ -180,7 +180,9 @@ ownership. Every exit from the supervisor's lock context, exceptional or
 not and wherever the exception struck, passes through the relay: it fences
 later deliveries (admission and fencing are atomic), restores the handlers,
 and hands the lock descriptor to any delivery still writing, which closes it
-when it completes — so no interruption can release ownership early. A signal that arrives after the last child has completed does not
+when it completes — so no interruption can release ownership early. Arming
+the relay is transactional too: a failure before its reader thread owns the
+pipe puts the handlers and wakeup fd back and closes both descriptors. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
