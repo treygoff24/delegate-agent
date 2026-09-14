@@ -1738,9 +1738,15 @@ class WorkflowCommandTests(unittest.TestCase):
             event["key"] for event in final_events if event.get("type") == "agent_cache_hit"
         }
         self.assertEqual(replay_keys, first_keys)
+        child_rows = [
+            event
+            for event in final_events
+            if event.get("type") in {"agent_child", "agent_started", "agent_finished"}
+        ]
         self.assertEqual(
-            len([event for event in final_events if event.get("type") == "agent_child"]),
+            len([event for event in child_rows if event.get("type") == "agent_child"]),
             2,
+            json.dumps(child_rows, indent=1),
         )
         self.assertEqual(prompt_log.read_text(encoding="utf-8").count("\n---\n"), 2)
 
@@ -2901,10 +2907,22 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
         launched = json.loads(launch.stdout)
-        # The supervisor is detached and still importing when this test
-        # returns; reap it before the temp dir cleanup races its __pycache__.
-        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, launched["wfId"])
+        wf_id = launched["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
         self.assertTrue(any("determinism warning" in item for item in launched["warnings"]))
+        # The supervisor is detached and still importing when the launch
+        # returns, and it keeps writing into this test's temp dir (the pinned
+        # snapshot's __pycache__, its own delegate-temp dir) until it exits.
+        # The reap above cannot see a supervisor that has not published its
+        # pid yet, so wait for the run to finish and the process to be gone
+        # before tearDown removes the tree (dlg-278.5: CI 3.11, three runs).
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self._wait_for_pid_exit(int(status["supervisorPid"]))
 
     def test_parallel_item_threads_bound_started_threads(self) -> None:
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -2997,12 +3015,16 @@ class WorkflowCommandTests(unittest.TestCase):
 
     @staticmethod
     def _wait_for_group_gone(pgid: int) -> None:
+        # macOS answers EPERM, not ESRCH, for a group whose members are still
+        # being torn down after SIGKILL; only ESRCH means the group is gone.
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             try:
                 os.killpg(pgid, 0)
             except ProcessLookupError:
                 return
+            except PermissionError:
+                pass
             time.sleep(0.1)
         raise AssertionError(f"process group {pgid} still has members")
 
@@ -3014,6 +3036,8 @@ class WorkflowCommandTests(unittest.TestCase):
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return
+            except PermissionError:
+                pass
             time.sleep(0.1)
         raise AssertionError(f"pid {pid} is still alive")
 
