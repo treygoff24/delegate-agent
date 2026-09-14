@@ -33,9 +33,13 @@ Updated: 2026-09-14 (0.31.0 published to PyPI; stale-cluster fix and supervisor 
   drain-before-publish ordering has no binding test. Relay arming's residue
   against asynchronous exceptions is documented in `_SignalRelay.start()` and
   accepted (Trey, 2026-09-14: stop the review loop after round 12).
-- Open for Trey: `dlg-507` burst-capacity decision; `dlg-swn` GitHub OSS push
-  gate; Devin behavioral probe; dirty `delegate/*` worktrees under
-  `~/Code/delegate-worktrees/e06d04efc0d7/` and merged `lane/*` branches await a
-  deletion ruling. `dlg-87d` stays blocked on hq-q34.3 Phase 1.
+- Open for Trey: the Devin behavioral probe (`DELEGATE_DEVIN_BEHAVIOR_TEST`
+  against his Devin login; parked 2026-09-14, "we'll come back to it").
+  `dlg-87d` stays blocked on hq-q34.3 Phase 1. Trey rulings 2026-09-14:
+  `dlg-swn` (GitHub OSS push gate) and `dlg-507` (burst-capacity soft cap)
+  closed; the nine merged `lane/*` branches deleted (they were local only);
+  the installed runtime stays at `27174af` until the next real code change.
+  The `e06d04efc0d7` worktree directory is gone; the `delegate-worktrees`
+  entries on disk today belong to agent-memory and dwp-portals sessions.
 - Working rule adopted this run: never edit the checkout while a gate runs
   (gate 7 on `e7a1acc` failed on a mid-mutation import).
