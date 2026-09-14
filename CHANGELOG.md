@@ -133,7 +133,11 @@ forever, and every resume that reached one of them failed its thunk with
   published the supervisor drains the relay, so a signal already delivered
   to the process is on the record consumers read as final; one that lands
   after the last child completed is recorded on the `succeeded` status as
-  `signalAfterCompletion`. A repeated signal is recorded, not re-raised. `workflow kill` notes which
+  `signalAfterCompletion`. Each drain is answered only by its own marker,
+  and a drain the relay did not acknowledge in time is published as
+  `signalDrainIncomplete: true` on the terminal status instead of as a
+  settled record; at exit the relay is fenced before the workflow lock is
+  released so it cannot append to the journal late. A repeated signal is recorded, not re-raised. `workflow kill` notes which
   children were already terminal before it signals and completes its
   `cancelled` report from the whole group afterwards (`observedIn: registry`
   on entries it did not cancel itself), so a supervisor sealed by the kill's
