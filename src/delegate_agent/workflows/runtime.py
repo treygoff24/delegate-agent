@@ -10,6 +10,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -594,7 +595,18 @@ class _SignalRelay:
         self._previous_handlers: dict[int, object] = {}
         self._started = False
         self._delivered = False
-        self._drained = threading.Event()
+        # Drain generations: every drain() writes exactly one marker and is
+        # satisfied only by its own acknowledgement count, so a marker left
+        # over from a timed-out drain cannot answer a later one.
+        self._drain_cond = threading.Condition()
+        self._drains_requested = 0
+        self._drains_acked = 0
+        # The fence: _deliver mutates state and appends to the journal only
+        # while holding it and unfenced, and stop() fences under the same
+        # lock, so once stop() holds the fence no late journal write is
+        # possible however long the relay thread lingers.
+        self._fence_lock = threading.Lock()
+        self._fenced = False
         self._thread = threading.Thread(
             target=self._run,
             name=f"delegate-workflow-signal-relay-{state.wf_id}",
@@ -637,55 +649,78 @@ class _SignalRelay:
                 if value == self._STOP_MARKER:
                     return
                 if value == self._DRAIN_MARKER:
-                    self._drained.set()
+                    self._acknowledge_drain()
                 elif value in self._SIGNALS:
                     self._deliver(signal.Signals(value).name)
 
+    def _acknowledge_drain(self) -> None:
+        with self._drain_cond:
+            self._drains_acked += 1
+            self._drain_cond.notify_all()
+
     def _deliver(self, name: str) -> None:
-        state = self.state
-        if self._delivered:
-            state.signals_repeated.append(name)
-            return
-        self._delivered = True
-        state.signal_received = name
-        # A genuine watchdog fire that started the shutdown keeps its reason;
-        # the signal is still recorded on its own field. claim_reason is the
-        # one synchronized writer for both the watchdog thread and this one.
-        self.watchdog.claim_reason(f"signal:{name}")
-        # This thread is the only writer of supervisor_signalled, so the line
-        # lands exactly once; status annotations elsewhere never journal it.
-        with contextlib.suppress(Exception):
-            state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
-        state.cancel_event.set()
+        with self._fence_lock:
+            if self._fenced:
+                return
+            state = self.state
+            if self._delivered:
+                state.signals_repeated.append(name)
+                return
+            self._delivered = True
+            state.signal_received = name
+            # A genuine watchdog fire that started the shutdown keeps its
+            # reason; the signal is still recorded on its own field.
+            # claim_reason is the one synchronized writer for both the
+            # watchdog thread and this one.
+            self.watchdog.claim_reason(f"signal:{name}")
+            # This thread is the only writer of supervisor_signalled, so the
+            # line lands exactly once; status annotations elsewhere never
+            # journal it.
+            with contextlib.suppress(Exception):
+                state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
+            state.cancel_event.set()
 
     def drain(self, timeout: float = 2.0) -> bool:
-        """Block until every signal byte written so far has been delivered.
+        """Block until every signal byte queued so far has been delivered.
 
         The pipe is FIFO: a marker written now is read only after any signal
-        the C handler wrote before it, so once the relay acknowledges the
-        marker, signal_received, the journal line, and cancel_event reflect
-        everything that has reached the process. Terminal status is chosen
-        and published only behind this boundary. Returns False when the
-        relay did not answer in time (it is blocked in journal I/O).
+        the C handler queued before it, so once the relay acknowledges this
+        call's own marker, signal_received, the journal line, and
+        cancel_event reflect everything queued. Terminal status is chosen
+        and published only behind this boundary; a False return means the
+        boundary was not reached (the marker could not be queued, or the
+        relay did not answer in time) and the caller records that on the
+        status instead of publishing as if reconciliation succeeded. What a
+        marker cannot settle is a signal the wakeup pipe already dropped
+        because it was full; CPython documents that loss and the pipe holds
+        tens of thousands of one-byte signals before it happens.
         """
         if not self._started:
             return True
-        self._drained.clear()
-        try:
-            os.write(self._write_fd, bytes([self._DRAIN_MARKER]))
-        except OSError:
-            return False
-        return self._drained.wait(timeout)
+        with self._drain_cond:
+            try:
+                os.write(self._write_fd, bytes([self._DRAIN_MARKER]))
+            except OSError:
+                return False
+            self._drains_requested += 1
+            generation = self._drains_requested
+            return self._drain_cond.wait_for(
+                lambda: self._drains_acked >= generation, timeout=timeout
+            )
 
     def stop(self) -> bool:
-        """Restore the handlers and wait for the relay thread to finish.
+        """Restore the handlers, fence the relay, and wait for its thread.
 
-        Returns True when the relay is known to have exited. The write end is
-        closed after the sentinel so the reader sees EOF even when the pipe
-        was full; the read end is closed only once the thread is gone, so a
-        relay still finishing a journal write never reads a closed or reused
-        descriptor. A relay that outlives the join is reported, not assumed
-        gone.
+        Returns True when no further journal write from this relay is
+        possible: the fence was taken (so a lingering thread can only read
+        and discard) and the thread has exited. The write end is closed
+        after the sentinel so the reader sees EOF even when the pipe was
+        full; the read end is closed only once the thread is gone, so a
+        relay still finishing a read never sees a closed or reused
+        descriptor. A False return means the fence could not be taken
+        within the wait, that is, the relay is still inside a journal
+        append; the supervisor exits regardless and the journal reader
+        tolerates an unterminated final line.
         """
         if not self._started:
             with contextlib.suppress(OSError):
@@ -699,9 +734,15 @@ class _SignalRelay:
             for signum, handler in self._previous_handlers.items():
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     signal.signal(signum, handler)  # type: ignore[arg-type]
-        # Quiescence first: once the drain marker is acknowledged the relay
-        # has finished every journal write it will make for this attempt.
+        # Quiescence first: once this drain is acknowledged the relay has
+        # finished every journal write for a signal queued before it.
         quiescent = self.drain(timeout=5.0)
+        # Then the fence: taken only when no _deliver is in flight, so
+        # holding it establishes writer completion.
+        fenced = self._fence_lock.acquire(timeout=10.0)
+        if fenced:
+            self._fenced = True
+            self._fence_lock.release()
         with contextlib.suppress(OSError):
             os.write(self._write_fd, bytes([self._STOP_MARKER]))
         with contextlib.suppress(OSError):
@@ -711,7 +752,7 @@ class _SignalRelay:
             return False
         with contextlib.suppress(OSError):
             os.close(self._read_fd)
-        return True
+        return fenced
 
 
 class WorkflowChildCancellationError(wait_cancel_commands.WaitCancelError):
@@ -4764,13 +4805,17 @@ def run_supervisor(
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
             # Settle the signal record before choosing the terminal outcome.
-            signal_relay.drain()
+            # An unsettled drain is published as such rather than as a
+            # complete record.
+            signal_drained = signal_relay.drain()
             watchdog_reason = watchdog.reason or exc.reason
             signal_name = state.signal_received
             signal_extra: JsonObject = {}
+            if not signal_drained:
+                signal_extra["signalDrainIncomplete"] = True
             error_text = str(exc)
             if signal_name is not None:
-                signal_extra = {"signal": signal_name}
+                signal_extra["signal"] = signal_name
                 if state.signals_repeated:
                     signal_extra["signalsRepeated"] = list(state.signals_repeated)
                 # The error names the cause that won: a genuine watchdog fire
@@ -4887,8 +4932,11 @@ def run_supervisor(
             # Settle the signal record before the terminal status consumers
             # use as their exit condition is published; a signal arriving
             # after this boundary has nothing left to interrupt.
-            signal_relay.drain()
-            state.write_status("succeeded", **_signal_after_completion_extra(state))
+            success_extra = _signal_after_completion_extra(state)
+            if not signal_relay.drain():
+                success_extra["signalDrainIncomplete"] = True
+                success_extra.update(_signal_after_completion_extra(state))
+            state.write_status("succeeded", **success_extra)
             state.notify_event("succeeded")
             return 0
         finally:
@@ -4898,11 +4946,17 @@ def run_supervisor(
                     _release_structured_retry_worktree_for_state(state, run_id)
                 state.retry_worktree_runs.discard(run_id)
             # Last, so a signal during cleanup is still handled cooperatively
-            # instead of terminating the process mid-release.
-            # A relay that did not reach quiescence is blocked in journal
-            # I/O; journaling that fact would block on the same lock, so it
-            # is left as a daemon thread and not reported here.
-            signal_relay.stop()
+            # instead of terminating the process mid-release. A relay that
+            # could not be fenced is still inside a journal append;
+            # journaling that would block on the same lock, so it goes to
+            # stderr and the process exits (the journal reader tolerates an
+            # unterminated final line).
+            if not signal_relay.stop():
+                print(
+                    f"delegate workflow {wf_id}: signal relay not fenced at exit; "
+                    "a journal append may be unterminated",
+                    file=sys.stderr,
+                )
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:

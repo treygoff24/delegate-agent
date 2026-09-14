@@ -683,5 +683,57 @@ class WorkflowWatchdogUnitTests(unittest.TestCase):
         self.assertFalse(root.exists())
 
 
+class IncompleteDrainPublicationTests(unittest.TestCase):
+    """A drain the relay did not acknowledge is published as such, never as settled."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _run(self, execute_side_effect: object) -> dict[str, object]:
+        wf_id = f"wf_{time.time_ns() & ((1 << 48) - 1):012x}"
+        root = registry.ensure_workflow_dir(self.root, wf_id)
+        (root / registry.SCRIPT_FILE).write_text("return True\n", encoding="utf-8")
+        registry.write_status(
+            root,
+            {
+                "wfId": wf_id,
+                "workflowKeyVersion": 2,
+                "status": "running",
+                "budget": {"total": None, "spent": 0},
+            },
+        )
+        with (
+            mock.patch.object(
+                workflow_runtime, "execute_workflow", side_effect=execute_side_effect
+            ),
+            mock.patch.object(workflow_runtime._SupervisorWatchdog, "start", autospec=True),
+            mock.patch.object(workflow_runtime._SupervisorWatchdog, "stop", autospec=True),
+            mock.patch.object(workflow_runtime._SignalRelay, "drain", return_value=False),
+            mock.patch.object(workflow_runtime, "cancel_workflow_children", return_value=[]),
+            mock.patch.object(WorkflowState, "notify_event", new=lambda *a, **k: None),
+        ):
+            workflow_runtime.run_supervisor(
+                workspace=self.root, wf_id=wf_id, cli_argv=[], config={}
+            )
+        return registry.read_json(root / registry.STATUS_FILE) or {}
+
+    def test_success_records_incomplete_drain(self) -> None:
+        status = self._run(lambda state: {"done": True})
+        self.assertEqual(status.get("status"), "succeeded")
+        self.assertIs(status.get("signalDrainIncomplete"), True)
+
+    def test_watchdog_exit_records_incomplete_drain(self) -> None:
+        def unwind(state: WorkflowState) -> None:
+            state.cancel_event.set()
+            raise workflow_runtime.SupervisorWatchdogExit("stalled")
+
+        status = self._run(unwind)
+        self.assertEqual(status.get("status"), "failed")
+        self.assertIs(status.get("signalDrainIncomplete"), True)
+        self.assertEqual(status.get("error"), "workflow supervisor watchdog: stalled")
+
+
 if __name__ == "__main__":
     unittest.main()

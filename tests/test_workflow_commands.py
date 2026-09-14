@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -3619,6 +3620,50 @@ class WorkflowCommandTests(unittest.TestCase):
         finally:
             self.assertTrue(relay.stop())
         self.assertFalse(relay._thread.is_alive())
+
+    def test_signal_relay_drain_is_not_answered_by_a_stale_acknowledgement(self) -> None:
+        """A marker left over from a timed-out drain cannot satisfy a later drain.
+
+        The relay thread is not started, so the first drain times out with
+        its marker unacknowledged. The second drain then receives that stale
+        acknowledgement first and must keep waiting for its own.
+        """
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        relay._started = True  # armed, but no reader thread
+        try:
+            self.assertFalse(relay.drain(timeout=0.01))
+            stale = threading.Timer(0.05, relay._acknowledge_drain)
+            own = threading.Timer(0.4, relay._acknowledge_drain)
+            started = time.monotonic()
+            stale.start()
+            own.start()
+            try:
+                self.assertTrue(relay.drain(timeout=2.0))
+            finally:
+                stale.cancel()
+                own.cancel()
+            elapsed = time.monotonic() - started
+            self.assertGreaterEqual(elapsed, 0.3, "drain returned on the stale acknowledgement")
+        finally:
+            relay._started = False
+            self.assertTrue(relay.stop())
+
+    def test_signal_relay_fence_discards_late_deliveries(self) -> None:
+        """Once stop() has fenced the relay, a late byte mutates nothing and journals nothing."""
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        relay.start()
+        self.assertTrue(relay._started, "relay must arm in the test's main thread")
+        self.assertTrue(relay.stop())
+        self.assertTrue(relay._fenced)
+        relay._deliver("SIGTERM")
+        self.assertIsNone(state.signal_received)
+        self.assertFalse(state.cancel_event.is_set())
+        self.assertIsNone(watchdog.reason)
+        self.assertFalse((state.root / workflow_registry.JOURNAL_FILE).exists())
 
     def test_workflow_kill_unsafe_child_returns_typed_json_error(self) -> None:
         wf_id = "wf_111122223333"

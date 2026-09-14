@@ -161,7 +161,16 @@ text), and the `cancelled` list on `status.json`. Before any terminal status is
 chosen or published the supervisor drains the relay — a marker byte through the
 same pipe, acknowledged once every earlier signal byte has been delivered — so
 the status `workflow wait` and `workflow watch` treat as final already carries
-the signal. A signal that arrives after the last child has completed does not
+the signal. Each drain waits for its own marker, so a marker left behind by an
+earlier drain that timed out cannot answer a later one. When the relay does
+not acknowledge the drain before publication (it is inside a journal write
+that has not returned), the terminal status carries
+`signalDrainIncomplete: true` — the signal fields may be missing — rather
+than reading as a settled record. At exit the supervisor fences the relay
+before releasing the workflow lock, so a lingering relay thread can no longer
+append to the journal; if the fence cannot be taken the supervisor reports
+that on stderr and exits, and the journal reader tolerates an unterminated
+final line. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
