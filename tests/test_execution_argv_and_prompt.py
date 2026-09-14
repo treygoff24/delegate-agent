@@ -245,6 +245,46 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("snapshotCommand", payload)
         self.assertFalse(call_workspace.exists())
 
+    def test_ungrouped_pinned_call_without_a_model_observation_warns(self):
+        """An ungrouped call builds no run record, so the warning lands on its payload."""
+        fake_bin = self.make_fake_bin()
+        env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+
+        def call(argv: list[str]) -> dict:
+            parsed = cli_parser.parse_cli(argv)
+            request = request_build.request_from_parsed(parsed, config, io.StringIO(""))
+            with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
+                code, payload = cli.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=request_models.ResolvedWorkspace(
+                        "<call-temp-cwd>", "directory"
+                    ),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ok"])
+            return payload
+
+        pinned = call(
+            ["droid", "call", "--continuity-mode", "pinned", "--model", "reviewer", "hello"]
+        )
+        warnings = [w for w in pinned.get("warnings", []) if "pinned_continuity_unverified" in w]
+        self.assertEqual(len(warnings), 1, pinned.get("warnings"))
+        self.assertIn("droid reported no model event", warnings[0])
+        self.assertIn("reviewer", warnings[0])
+
+        fungible = call(["droid", "call", "--model", "reviewer", "hello"])
+        self.assertFalse(
+            [w for w in fungible.get("warnings", []) if "pinned_continuity_unverified" in w]
+        )
+
     def test_call_with_repo_local_tmpdir_cleans_its_workspace(self):
         fake_bin = self.make_fake_bin()
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")

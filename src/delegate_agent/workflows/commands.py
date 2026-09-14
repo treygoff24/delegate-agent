@@ -283,30 +283,6 @@ def emit_run(
             status = registry.read_json(root / registry.STATUS_FILE) or {}
             _require_current_workflow(status)
             previous_status = dict(status)
-            # This lock is only available because the prior attempt's
-            # supervisor is gone. Any child it still had in flight is an
-            # orphan: its row sits at rawStatus=running with a dead pid, lists
-            # as stale forever, and the replay fails the thunk that reaches it
-            # with "already terminal (stale)" instead of relaunching. Seal
-            # those rows before the new attempt starts, the same way kill
-            # does, and leave the lost supervisor in the journal.
-            try:
-                superseded = runtime.cancel_workflow_children(workspace, wf_id)
-            except runtime.WorkflowChildCancellationError as exc:
-                raise DelegateError(
-                    "workflow_children_unsealed",
-                    f"resume could not seal the prior attempt's children: {exc}",
-                ) from exc
-            prior_status = status.get("status")
-            supervisor_lost = prior_status in LIVE_WORKFLOW_STATUSES
-            if superseded or supervisor_lost:
-                append_run_event(
-                    "attempt_superseded",
-                    priorStatus=prior_status,
-                    priorSupervisorPid=status.get("supervisorPid"),
-                    supervisorLost=supervisor_lost,
-                    cancelled=superseded,
-                )
             if approve_gate:
                 # Recover gate evidence only after acquiring the supervisor
                 # lock; an approval racing a draining supervisor must not
@@ -339,6 +315,33 @@ def emit_run(
                     # below must not restore the clobbered projection.
                     registry.write_status(root, status)
                     previous_status = registry.read_json(root / registry.STATUS_FILE) or {}
+            # This lock is only available because the prior attempt's
+            # supervisor is gone. Any child it still had in flight is an
+            # orphan: its row sits at rawStatus=running with a dead pid, lists
+            # as stale forever, and the replay fails the thunk that reaches it
+            # with "already terminal (stale)" instead of relaunching. Seal
+            # those rows before the new attempt starts, the same way kill
+            # does, and leave the lost supervisor in the journal. Runs after
+            # gate validation so an invalid approve never reaches it, and
+            # never on a dry run, which launches no replacement supervisor.
+            if not command.dry_run:
+                try:
+                    superseded = runtime.cancel_workflow_children(workspace, wf_id)
+                except runtime.WorkflowChildCancellationError as exc:
+                    raise DelegateError(
+                        "workflow_children_unsealed",
+                        f"resume could not seal the prior attempt's children: {exc}",
+                    ) from exc
+                prior_status = status.get("status")
+                supervisor_lost = prior_status in LIVE_WORKFLOW_STATUSES
+                if superseded or supervisor_lost:
+                    append_run_event(
+                        "attempt_superseded",
+                        priorStatus=prior_status,
+                        priorSupervisorPid=status.get("supervisorPid"),
+                        supervisorLost=supervisor_lost,
+                        cancelled=superseded,
+                    )
             result_path = root / registry.RESULT_FILE
             try:
                 previous_result = result_path.read_bytes()
@@ -1015,6 +1018,18 @@ def _latest_unapproved_gate_event(
     return latest
 
 
+def _merge_cancelled(primary: list[JsonObject], extra: object) -> list[JsonObject]:
+    """Union two cancelled-child lists by runId, primary order first."""
+    merged = list(primary)
+    seen = {item.get("runId") for item in merged if isinstance(item, dict)}
+    if isinstance(extra, list):
+        for item in extra:
+            if isinstance(item, dict) and item.get("runId") not in seen:
+                merged.append(item)
+                seen.add(item.get("runId"))
+    return merged
+
+
 def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
     root = _workflow_dir_for_command(command, workspace)
     status = registry.read_json(root / registry.STATUS_FILE) or {}
@@ -1038,10 +1053,18 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
         supervisor_exited = runtime.wait_for_workflow_lock(
             root, timeout_seconds=runtime.KILL_SUPERVISOR_FORCE_WAIT_SECONDS
         )
-    _append_command_event(root, "workflow_killed", cancelled=cancelled)
     # Re-read after supervisor exit so we merge against the final snapshot.
     status = registry.read_json(root / registry.STATUS_FILE) or status
+    # A supervisor that handled the SIGTERM above cancelled its own children
+    # before this command reached them. Fold its list in so the kill reports
+    # every child that was stopped, and do not let the signal-induced failure
+    # fields it wrote turn a kill into a failure.
+    cancelled = _merge_cancelled(cancelled, status.get("cancelled"))
     merged = dict(status)
+    if supervisor_signalled and status.get("signal") == "SIGTERM":
+        for key in ("error", "traceback", "signal", "signalsRepeated", "watchdogReason"):
+            merged.pop(key, None)
+    _append_command_event(root, "workflow_killed", cancelled=cancelled)
     merged.update(
         {
             "ok": False,

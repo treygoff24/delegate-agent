@@ -2,6 +2,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -277,8 +278,12 @@ class CapabilityCommandTests(unittest.TestCase):
             "deep": {"model": "anthropic/claude-sonnet-4-5", "variant": "xhigh"}
         }
         models = models_payload(config, "test-config")
+        opencode_row = dict(models["opencode"])
+        # Resolution depends on the machine running the suite; the row must
+        # report it either way, matching what a launch would find.
+        self.assertIs(opencode_row.pop("binaryMissing"), shutil.which("opencode") is None)
         self.assertEqual(
-            models["opencode"],
+            opencode_row,
             {
                 "binary": "opencode",
                 "defaultModel": "openai/gpt-5",

@@ -537,14 +537,30 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         fields = run_registry.status_fields(state)
         effective = fields.get("effectiveStatus")
         if effective == run_registry.STATUS_STALE and fields.get("staleReason") == "dead_pid":
-            # The tracked leader is dead, so there is nothing to signal, but a
-            # row left at rawStatus=running never becomes terminal on its own:
-            # it lists as stale forever, and a workflow that resumes over it
-            # fails the thunk that reaches it with "already terminal (stale)"
-            # instead of relaunching. Seal it as the operator outcome so cancel
-            # is idempotent over a dead run the way it is over a live one.
-            # missing_pid is deliberately left alone: under this lock it can
-            # still be a launch that has not published its pid.
+            # The tracked leader is dead, but a row left at rawStatus=running
+            # never becomes terminal on its own: it lists as stale forever, and
+            # a workflow that resumes over it fails the thunk that reaches it
+            # with "already terminal (stale)" instead of relaunching. Seal it
+            # as the operator outcome so cancel is idempotent over a dead run
+            # the way it is over a live one. missing_pid is deliberately left
+            # alone: under this lock it can still be a launch that has not
+            # published its pid. A dead leader is not an empty process group:
+            # when the recorded group still has members, nothing is sealed and
+            # nothing is signalled, because the group id may already belong to
+            # someone else.
+            pgid = state.get("pgid") if isinstance(state, dict) else None
+            if (
+                isinstance(pgid, int)
+                and not isinstance(pgid, bool)
+                and pgid > 1
+                and _signal_target_alive(pgid, process_group=True)
+            ):
+                raise WaitCancelError(
+                    "run_group_alive",
+                    f"Run {target.alias or target.run_id} has a dead tracked pid but process "
+                    f"group {pgid} still has members; nothing was sealed or signalled. "
+                    f"Inspect with: ps -o pid,ppid,etime,cmd -g {pgid}",
+                )
             _persist_cancelled_terminal_locked(
                 registry_root,
                 target,

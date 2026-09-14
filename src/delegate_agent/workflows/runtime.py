@@ -556,27 +556,51 @@ class SupervisorWatchdogExit(RuntimeError):
         self.reason = reason
 
 
-class SupervisorSignalled(BaseException):
-    """Raised in the supervisor's main thread when SIGTERM or SIGHUP arrives."""
+def _install_supervisor_signal_handlers(
+    state: WorkflowState, watchdog: _SupervisorWatchdog
+) -> dict[int, object]:
+    """SIGTERM and SIGHUP request the same cooperative cancellation the watchdog does.
 
-    def __init__(self, signum: int) -> None:
-        self.signum = signum
-        self.signal_name = signal.Signals(signum).name
-        super().__init__(self.signal_name)
-
-
-def _install_supervisor_signal_handlers() -> None:
-    # Only the main thread may install handlers; a supervisor driven
-    # in-process from another thread keeps the default disposition.
+    A signal used to end the supervisor with the lock released, status.json
+    still "running", and its in-flight children left to go stale. The handler
+    records the signal and sets cancel_event; admission closes, child waits
+    raise SupervisorWatchdogExit, and run_supervisor's watchdog branch cancels
+    the children, releases retry worktrees, and writes status failed naming
+    the signal. Raising from the handler was rejected in review: it left
+    worker admission open and skipped the finally cleanup. A repeated signal
+    is recorded, never re-raised.
+    """
     if threading.current_thread() is not threading.main_thread():
-        return
+        return {}
+    previous: dict[int, object] = {}
 
-    def _raise(signum: int, _frame: object) -> None:
-        raise SupervisorSignalled(signum)
+    def _handle(signum: int, _frame: object) -> None:
+        name = signal.Signals(signum).name
+        if state.signal_received is None:
+            state.signal_received = name
+            watchdog.reason = f"signal:{name}"
+        else:
+            state.signals_repeated.append(name)
+        # The main thread may already hold journal_lock; a handler must never
+        # block on it. When it is free, journal now; otherwise the watchdog
+        # branch journals the signal after unwinding.
+        if state.journal_lock.acquire(blocking=False):
+            state.journal_lock.release()
+            with contextlib.suppress(Exception):
+                state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
+                state.signal_journaled = True
+        state.cancel_event.set()
 
     for signum in (signal.SIGTERM, signal.SIGHUP):
         with contextlib.suppress(OSError, ValueError):
-            signal.signal(signum, _raise)
+            previous[signum] = signal.signal(signum, _handle)
+    return previous
+
+
+def _restore_signal_handlers(previous: dict[int, object]) -> None:
+    for signum, handler in previous.items():
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            signal.signal(signum, handler)  # type: ignore[arg-type]
 
 
 class WorkflowChildCancellationError(wait_cancel_commands.WaitCancelError):
@@ -711,6 +735,9 @@ class WorkflowState:
     attempt_config: JsonObject | None = None
     attempt_environment: dict[str, str] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    signal_received: str | None = None
+    signals_repeated: list[str] = field(default_factory=list)
+    signal_journaled: bool = False
     retry_worktree_runs: set[str] = field(default_factory=set)
     pending_gate: list[tuple[str, str | None, JsonValue, str]] = field(default_factory=list)
     soft_parked_items: dict[str, JsonObject] = field(default_factory=dict)
@@ -4450,31 +4477,9 @@ def run_supervisor(
             interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
         )
         watchdog.start()
-        _install_supervisor_signal_handlers()
+        previous_handlers = _install_supervisor_signal_handlers(state, watchdog)
         try:
             result = execute_workflow(state)
-        except SupervisorSignalled as exc:
-            # A signal that reaches the supervisor used to end it with no
-            # record at all: the lock released, the status stayed "running",
-            # and the children it had in flight were left to go stale. Record
-            # the signal, seal the children, and exit without joining worker
-            # threads that may still be waiting on those children.
-            with contextlib.suppress(Exception):
-                state.append_event("supervisor_signalled", signal=exc.signal_name, pid=os.getpid())
-            cancelled: list[JsonObject] = []
-            with contextlib.suppress(Exception):
-                cancelled = cancel_workflow_children(workspace, wf_id)
-            with contextlib.suppress(Exception):
-                state.write_status(
-                    "failed",
-                    error=f"supervisor received {exc.signal_name}",
-                    signal=exc.signal_name,
-                    cancelled=cancelled,
-                )
-            with contextlib.suppress(Exception):
-                state.notify_event("failed", detail=f"supervisor received {exc.signal_name}")
-            watchdog.stop()
-            os._exit(128 + exc.signum)
         except GateExit as exc:
             # A gate must carry metadata all the way to the supervisor.  A
             # metadata-less unwind is an execution failure, not a successful
@@ -4577,10 +4582,24 @@ def run_supervisor(
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
             watchdog_reason = watchdog.reason or exc.reason
+            signal_name = state.signal_received
+            signal_extra: JsonObject = {}
+            error_text = str(exc)
+            if signal_name is not None:
+                signal_extra = {"signal": signal_name}
+                if state.signals_repeated:
+                    signal_extra["signalsRepeated"] = list(state.signals_repeated)
+                error_text = f"supervisor received {signal_name}"
+                if not state.signal_journaled and root.exists():
+                    with contextlib.suppress(Exception):
+                        state.append_journal_only(
+                            "supervisor_signalled", signal=signal_name, pid=os.getpid()
+                        )
             cancellation_failures: list[JsonObject] = []
             cancellation_failure_count = 0
+            cancelled_children: list[JsonObject] = []
             try:
-                cancel_workflow_children(workspace, wf_id)
+                cancelled_children = cancel_workflow_children(workspace, wf_id)
             except WorkflowChildCancellationError as cancel_exc:
                 cancellation_failures = list(cancel_exc.failures)
                 cancellation_failure_count = cancel_exc.failure_count
@@ -4594,7 +4613,7 @@ def run_supervisor(
                 ]
                 cancellation_failure_count = 1
             if cancellation_failures:
-                failure_message = f"{exc}; child cancellation incomplete"
+                failure_message = f"{error_text}; child cancellation incomplete"
                 if root.exists():
                     with contextlib.suppress(Exception):
                         state.append_journal_only(
@@ -4625,6 +4644,8 @@ def run_supervisor(
                                 watchdogReason=watchdog_reason,
                                 watchdogChildCancellationFailureCount=cancellation_failure_count,
                                 watchdogChildCancellationFailures=cancellation_failures,
+                                cancelled=cancelled_children,
+                                **signal_extra,
                             )
                 with contextlib.suppress(Exception):
                     state.notify_event("failed", detail=failure_message[:160])
@@ -4650,15 +4671,20 @@ def run_supervisor(
                         {
                             "ok": False,
                             "wfId": wf_id,
-                            "error": str(exc),
+                            "error": error_text,
                             "traceback": tb,
                         },
                     )
                 with contextlib.suppress(Exception):
                     state.write_status(
-                        "failed", error=str(exc), traceback=tb, watchdogReason=watchdog_reason
+                        "failed",
+                        error=error_text,
+                        traceback=tb,
+                        watchdogReason=watchdog_reason,
+                        cancelled=cancelled_children,
+                        **signal_extra,
                     )
-                state.notify_event("failed", detail=str(exc)[:160])
+                state.notify_event("failed", detail=error_text[:160])
             return 1
         except BaseException as exc:
             tb = traceback.format_exc()[-4000:]
@@ -4676,6 +4702,7 @@ def run_supervisor(
             state.notify_event("succeeded")
             return 0
         finally:
+            _restore_signal_handlers(previous_handlers)
             watchdog.stop()
             for run_id in tuple(state.retry_worktree_runs):
                 with contextlib.suppress(Exception):

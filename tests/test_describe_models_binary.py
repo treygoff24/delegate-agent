@@ -5,7 +5,10 @@ from __future__ import annotations
 import io
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from delegate_agent import describe_payload
 from delegate_agent.config import embedded_default_config
@@ -46,6 +49,17 @@ class ModelsBinaryMissingTests(unittest.TestCase):
         self.assertFalse(describe_payload.binary_missing(sys.executable))
         self.assertTrue(describe_payload.binary_missing(os.path.dirname(sys.executable)))
         self.assertTrue(describe_payload.binary_missing("delegate-test-missing-binary-xyz"))
+
+    def test_tilde_path_reads_as_missing_because_launch_does_not_expand_it(self):
+        """A `~/bin/x` that exists on disk still fails at launch; say so here too."""
+        with tempfile.TemporaryDirectory() as home:
+            exe = Path(home) / "bin" / "delegate-test-tilde-binary"
+            exe.parent.mkdir()
+            exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            exe.chmod(0o755)
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                self.assertTrue(describe_payload.binary_missing("~/bin/delegate-test-tilde-binary"))
+                self.assertFalse(describe_payload.binary_missing(str(exe)))
 
 
 if __name__ == "__main__":

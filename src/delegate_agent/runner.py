@@ -352,19 +352,23 @@ def _requested_model(ctx: RunContext) -> str | None:
 PINNED_UNVERIFIED_WARNING_PREFIX = "pinned_continuity_unverified"
 
 
-def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
+def pinned_continuity_unverified_text(harness: str, requested: str | None) -> str:
     """A pinned run only pauses on a model switch the harness reports.
 
     Codex and Grok streams carry no model field, so a pinned run on them
     completes with servedModelSource=unavailable and nothing was checked. Say
     so on the record rather than letting the mode read as verified.
     """
-    requested = _requested_model(ctx) or "the requested model"
+    target = requested or "the requested model"
     return (
-        f"{PINNED_UNVERIFIED_WARNING_PREFIX}: {ctx.harness} reported no model event, so the "
-        f"served model could not be checked against {requested}; this run is pinned in name "
+        f"{PINNED_UNVERIFIED_WARNING_PREFIX}: {harness} reported no model event, so the "
+        f"served model could not be checked against {target}; this run is pinned in name "
         "only, and only harness-observed switches pause a pinned run"
     )
+
+
+def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
+    return pinned_continuity_unverified_text(ctx.harness, _requested_model(ctx))
 
 
 def _acceptance_slice(ctx: RunContext) -> JsonObject:
