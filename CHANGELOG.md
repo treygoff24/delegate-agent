@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.31.0] - Unreleased
+## [0.31.0] - 2026-09-14
 
 ### Harness compatibility audit (2026-09-07)
 
@@ -1387,7 +1387,8 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.31.0
 [0.30.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.30.0
 [0.29.1]: https://github.com/treygoff24/delegate-agent/compare/v0.29.0...v0.29.1
 [0.29.0]: https://github.com/treygoff24/delegate-agent/compare/v0.28.0...v0.29.0
