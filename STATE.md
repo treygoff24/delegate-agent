@@ -1,33 +1,33 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-08 (ci-burn landed, published, promoted; one CI confirmation pending)
+Updated: 2026-09-14 (stale-cluster fix and supervisor signal relay hardening released as 0.31.0)
 
-- `main` = `80dd9ed` (last code change `8b79949`), pushed to Forgejo. The
-  ci-burn batch (macOS pinned-runtime publication, `ps -ww`, per-engine
-  `trackedStreamMaxBytes` pinned at build, discovery basename rule, assistant-text
-  dedupe) is merged after two review rounds; story, rulings, and CI rounds:
-  [handoff](docs/handoffs/2026-09-07-ci-burn-babysit.md). CHANGELOG carries
-  `0.31.0 - Unreleased` with a "CI and runtime hardening" subsection; no version
-  bump, tag, or release.
-- CI: run 34177243555 on GitHub `c905335` (= source `a1ebd33`) is green on
-  macOS, 3.12, 3.13, 3.14; 3.11 hit one flake (`test_run_surfaces_check_warnings_at_launch`
-  teardown vs detached supervisor). Fix is `8b79949` (test-only), on Forgejo,
-  **not yet on GitHub** — needs Trey's per-push authorization. Then close
-  `dlg-278.5` and parent `dlg-278`.
-- Installed runtime: `~/.delegate/releases/4b03b67e375ba6ae-6d2bad0f500840cd`,
-  `promotionMatchesRuntime: true`, previous payload retained. Config keeps
-  `mail.enabled: true`, `tracking.skillReviewPreamble.enabled: false`. Discovery
-  re-probed both profiles; cursor is unauthenticated in the personal realm only
-  (expected). Ritual: [live runtime](docs/live-runtime.md).
-- GitHub `main` is the *filtered* history (raw audit artifacts stripped after
-  `8e2b0d2`), mirrored as Forgejo `publish/main`; direct push is non-fast-forward
-  by design. Procedure: [publishing checklist](docs/publishing-checklist.md).
-  Filter on a fresh clone before fetching github refs.
-- Skill: `~/.agents/skill-library/delegate-agent` split into core +
-  `references/fleet.md` + `references/runtime.md`; reviewer ranking per Trey
-  2026-09-08 (Astra top; Sol/Opus/Cursor Grok 4.6 xhigh close seconds).
+- `main` = the 0.31.0 release commit (code through `2915e00`; version bump,
+  CHANGELOG date, this file, handoff, and bead closes on top). Story, rulings,
+  verification record, and the live dogfood results:
+  [handoff](docs/handoffs/2026-09-14-stale-cluster-relay-hardening.md). Beads
+  `dlg-m5w` and `dlg-cbz` are closed.
+- Installed runtime: `~/.delegate/releases/27174af5269284df-1428ff3827b708eb`
+  (= `27174af`, the last reviewed code commit; `2915e00` is test-only),
+  `promotionMatchesRuntime: true`, previous payload
+  `4b03b67e375ba6ae-6d2bad0f500840cd` retained. Discovery refreshed for work
+  and personal from the installed command. Ritual: [live runtime](docs/live-runtime.md).
+- Release 0.31.0: Forgejo `main` pushed; GitHub `main` (filtered history, see
+  the [publishing checklist](docs/publishing-checklist.md)) and Forgejo
+  `publish/main` receive the same filtered commits; tag `v0.31.0` and the
+  GitHub release publish to PyPI through `publish.yml`. `v0.30.0` was never
+  tagged (CHANGELOG 0.30.0 dated 2026-08-22; its compare link dangles), so the
+  0.31.0 compare link spans `v0.29.1...v0.31.0`.
+- CI: `dlg-278.5` (3.11 teardown flake, fix `8b79949`) and parent `dlg-278`
+  close once the 0.31.0 publish's CI run is green on 3.11.
+- Deferred from Astra review (nonblocking): the gate-preservation branch's
+  aggregate `cancelled` list; summarized multi-child refusal details; the
+  drain-before-publish ordering has no binding test. Relay arming's residue
+  against asynchronous exceptions is documented in `_SignalRelay.start()` and
+  accepted (Trey, 2026-09-14: stop the review loop after round 12).
 - Open for Trey: `dlg-507` burst-capacity decision; `dlg-swn` GitHub OSS push
   gate; Devin behavioral probe; dirty `delegate/*` worktrees under
   `~/Code/delegate-worktrees/e06d04efc0d7/` and merged `lane/*` branches await a
-  deletion ruling. Follow-up if the 3.11 flake class recurs: sweep the other
-  launch-and-return sites in `tests/test_workflow_commands.py`.
+  deletion ruling. `dlg-87d` stays blocked on hq-q34.3 Phase 1.
+- Working rule adopted this run: never edit the checkout while a gate runs
+  (gate 7 on `e7a1acc` failed on a mid-mutation import).
