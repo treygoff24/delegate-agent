@@ -2160,6 +2160,66 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(record["modelProvenance"]["resolvedModel"], "effective-model")
         self.assertEqual(record["sessionId"], "thread-123")
 
+    def _pinned_context(self, harness: str):
+        return self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-pinned",
+            alias="alias-pinned",
+            harness=harness,
+            engine=harness,
+            mode="call",
+            model="sol",
+            model_resolved="gpt-5.6-sol",
+            source_cwd="/tmp",
+            execution_cwd="/tmp",
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-14T16:00:00Z",
+            continuity_mode="pinned",
+        )
+
+    def test_pinned_run_without_a_model_observation_warns_on_success(self):
+        """A pinned run the harness never described is pinned in name only.
+
+        Codex and Grok streams carry no model field, so servedModelSource is
+        "unavailable" and nothing was checked; the record says so instead of
+        reading as a verified pin (dlg-cbz).
+        """
+        ctx = self._pinned_context("codex")
+        record = self.runner.build_run_record(
+            ctx,
+            status="succeeded",
+            accumulator=self.runner.harness_events.StreamAccumulator(harness="codex"),
+            exit_code=0,
+        )
+        self.assertEqual(record["modelProvenance"]["servedModelSource"], "unavailable")
+        (warning,) = record["warnings"]
+        self.assertTrue(warning.startswith(self.runner.PINNED_UNVERIFIED_WARNING_PREFIX))
+        self.assertIn("codex reported no model event", warning)
+        self.assertIn("sol", warning)
+
+    def test_pinned_run_with_an_observed_model_does_not_warn(self):
+        ctx = self._pinned_context("claude")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+        accumulator.served_model = "claude-opus-5"
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+        self.assertEqual(record["modelProvenance"]["servedModelSource"], "harness_event")
+        self.assertNotIn("warnings", record)
+
+    def test_pinned_warning_is_only_for_a_completed_run(self):
+        ctx = self._pinned_context("codex")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+        running = self.runner.build_run_record(ctx, status="running", accumulator=accumulator)
+        failed = self.runner.build_run_record(ctx, status="failed", accumulator=accumulator)
+        self.assertNotIn("warnings", running)
+        self.assertNotIn("warnings", failed)
+        fungible = self.runner.build_run_record(
+            self.runner.replace(ctx, continuity_mode="fungible"),
+            status="succeeded",
+            accumulator=accumulator,
+        )
+        self.assertNotIn("warnings", fungible)
+
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
             {

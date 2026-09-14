@@ -349,6 +349,24 @@ def _requested_model(ctx: RunContext) -> str | None:
     return ctx.model_requested or ctx.model_alias or ctx.model_resolved or ctx.model
 
 
+PINNED_UNVERIFIED_WARNING_PREFIX = "pinned_continuity_unverified"
+
+
+def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
+    """A pinned run only pauses on a model switch the harness reports.
+
+    Codex and Grok streams carry no model field, so a pinned run on them
+    completes with servedModelSource=unavailable and nothing was checked. Say
+    so on the record rather than letting the mode read as verified.
+    """
+    requested = _requested_model(ctx) or "the requested model"
+    return (
+        f"{PINNED_UNVERIFIED_WARNING_PREFIX}: {ctx.harness} reported no model event, so the "
+        f"served model could not be checked against {requested}; this run is pinned in name "
+        "only, and only harness-observed switches pause a pinned run"
+    )
+
+
 def _acceptance_slice(ctx: RunContext) -> JsonObject:
     if ctx.source_prompt is None:
         return {"promptPath": None, "sha256": None}
@@ -677,8 +695,15 @@ def build_run_record(
         "completionReportSource": None,
         "resultQuality": RESULT_QUALITY_OK,
     }
-    if ctx.warnings:
-        record["warnings"] = list(ctx.warnings)
+    warnings = list(ctx.warnings)
+    if (
+        status == run_registry.STATUS_SUCCEEDED
+        and ctx.continuity_mode == "pinned"
+        and (accumulator is None or accumulator.served_model is None)
+    ):
+        warnings.append(pinned_continuity_unverified_warning(ctx))
+    if warnings:
+        record["warnings"] = warnings
     if accumulator is not None:
         _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
         recent_events, events_meta = accumulator.bounded_recent_events()

@@ -4,6 +4,7 @@ import fcntl
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2948,6 +2949,129 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotEqual(resumed.returncode, 0)
         self.assertEqual(json.loads(resumed.stdout)["error"], "workflow_locked")
         self.run_delegate(["--json", "workflow", "kill", wf_id])
+
+    def _wait_for_child_status(self, wf_id: str, run_id: str, status: str) -> dict[str, object]:
+        deadline = time.monotonic() + 10
+        last: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            result = self.run_delegate(["--json", "runs", "--group", wf_id])
+            if result.returncode == 0:
+                for run in json.loads(result.stdout)["runs"]:
+                    if run["runId"] == run_id:
+                        last = run
+                        if run["effectiveStatus"] == status:
+                            return run
+            time.sleep(0.1)
+        self.fail(f"child {run_id} never reached {status}: {last}")
+
+    def _wait_for_workflow_status(self, root: Path, status: str) -> dict[str, object]:
+        deadline = time.monotonic() + 10
+        last: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            last = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+            if last.get("status") == status:
+                return last
+            time.sleep(0.1)
+        self.fail(f"workflow never reached {status}: {last}")
+
+    @staticmethod
+    def _journal_events(root: Path, event_type: str) -> list[dict[str, object]]:
+        lines = (root / workflow_registry.JOURNAL_FILE).read_text(encoding="utf-8").splitlines()
+        events = [json.loads(line) for line in lines if line.strip()]
+        return [event for event in events if event.get("type") == event_type]
+
+    def test_resume_seals_prior_attempt_stale_children_and_relaunches(self) -> None:
+        """A resume over a dead supervisor seals its orphaned children.
+
+        The supervisor dies uncleanly (SIGKILL, so no handler can run) and its
+        in-flight child dies the same way, leaving the child's row at
+        rawStatus=running with a dead pid. Before the fix that row stayed
+        stale forever and the replay failed its thunk with "already terminal
+        (stale)" instead of relaunching (atlas wf_eb25a11a985f, 2026-09-12).
+        The resume now seals the row as cancelled, journals the lost
+        supervisor, and the replay launches a fresh child.
+        """
+        script = self.write_workflow(
+            """
+            meta = {"name": "orphan", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("very slow")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        (child,) = self.wait_for_group_runs(wf_id)
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        supervisor_pid = status["supervisorPid"]
+        supervisor_pgid = status["supervisorPgid"]
+        self.assertIsInstance(supervisor_pid, int)
+        self.assertNotEqual(child["pgid"], supervisor_pgid)
+
+        killed = proc_harness.kill_process_tree_uncleanly(supervisor_pid, supervisor_pgid)
+        self.assertIn(child["pgid"], killed)
+        stale = self._wait_for_child_status(wf_id, child["runId"], "stale")
+        self.assertEqual(stale["staleReason"], "dead_pid")
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        (superseded,) = self._journal_events(root, "attempt_superseded")
+        self.assertEqual(superseded["priorStatus"], "running")
+        self.assertEqual(superseded["priorSupervisorPid"], supervisor_pid)
+        self.assertIs(superseded["supervisorLost"], True)
+        self.assertEqual([item["runId"] for item in superseded["cancelled"]], [child["runId"]])
+        sealed = self._wait_for_child_status(wf_id, child["runId"], "cancelled")
+        self.assertTrue(
+            any("stale run sealed as cancelled" in warning for warning in sealed["warnings"]),
+            sealed["warnings"],
+        )
+        registry_root = run_registry.registry_root_if_exists(self.workspace)
+        self.assertIsNotNone(registry_root)
+        state = run_registry.load_run_state_or_none(registry_root, child["runId"]) or {}
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["staleReason"], "dead_pid")
+        # The replay relaunches the agent instead of failing the thunk on the
+        # sealed row: a second child appears for the same workflow.
+        runs = self.wait_for_group_runs(wf_id, count=2)
+        self.assertEqual(len({run["runId"] for run in runs}), 2)
+        self.assertEqual(self._journal_events(root, "thunk_failed"), [])
+        self.run_delegate(["--json", "workflow", "kill", wf_id])
+
+    def test_supervisor_records_sigterm_and_seals_children(self) -> None:
+        """A SIGTERM at the supervisor leaves evidence and no orphans.
+
+        Before the handler, the signal ended the process with the lock
+        released, status.json still "running", and the child's row left to
+        go stale. The supervisor now journals the signal, cancels its
+        children, and exits with status failed naming the signal.
+        """
+        script = self.write_workflow(
+            """
+            meta = {"name": "signalled", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("very slow")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        (child,) = self.wait_for_group_runs(wf_id)
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        supervisor_pid = status["supervisorPid"]
+
+        os.kill(supervisor_pid, signal.SIGTERM)
+        final = self._wait_for_workflow_status(root, "failed")
+        self.assertEqual(final["signal"], "SIGTERM")
+        self.assertEqual(final["error"], "supervisor received SIGTERM")
+        self.assertEqual([item["runId"] for item in final["cancelled"]], [child["runId"]])
+        (signalled,) = self._journal_events(root, "supervisor_signalled")
+        self.assertEqual(signalled["signal"], "SIGTERM")
+        self.assertEqual(signalled["pid"], supervisor_pid)
+        cancelled = self._wait_for_child_status(wf_id, child["runId"], "cancelled")
+        self.assertNotIn("staleReason", cancelled)
+        self.assertFalse(workflow_registry.supervisor_alive(root))
 
     def test_resume_hides_prior_terminal_status_and_result_before_supervisor_finishes(
         self,

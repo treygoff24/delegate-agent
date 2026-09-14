@@ -162,6 +162,21 @@ def register_process_tree(supervisor_pid: int, supervisor_pgid: int) -> set[int]
     return pgids
 
 
+def kill_process_tree_uncleanly(supervisor_pid: int, supervisor_pgid: int) -> set[int]:
+    """SIGKILL an identity-checked supervisor and every descendant group at once.
+
+    Nothing in the tree gets to run a handler or finalize a record. This is
+    the shape of an OOM kill or a hard host reboot, and it leaves any tracked
+    child row at rawStatus=running with a dead pid, which is the orphan a
+    resume must seal. The groups are recorded so cleanup still reaps them.
+    """
+    pgids = register_process_tree(supervisor_pid, supervisor_pgid)
+    for pgid in sorted(pgids):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+    return pgids
+
+
 def _reap_process_tree(supervisor_pid: int, supervisor_pgid: int) -> None:
     """Reap an identity-checked supervisor and every descendant group."""
     try:

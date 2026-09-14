@@ -283,6 +283,30 @@ def emit_run(
             status = registry.read_json(root / registry.STATUS_FILE) or {}
             _require_current_workflow(status)
             previous_status = dict(status)
+            # This lock is only available because the prior attempt's
+            # supervisor is gone. Any child it still had in flight is an
+            # orphan: its row sits at rawStatus=running with a dead pid, lists
+            # as stale forever, and the replay fails the thunk that reaches it
+            # with "already terminal (stale)" instead of relaunching. Seal
+            # those rows before the new attempt starts, the same way kill
+            # does, and leave the lost supervisor in the journal.
+            try:
+                superseded = runtime.cancel_workflow_children(workspace, wf_id)
+            except runtime.WorkflowChildCancellationError as exc:
+                raise DelegateError(
+                    "workflow_children_unsealed",
+                    f"resume could not seal the prior attempt's children: {exc}",
+                ) from exc
+            prior_status = status.get("status")
+            supervisor_lost = prior_status in LIVE_WORKFLOW_STATUSES
+            if superseded or supervisor_lost:
+                append_run_event(
+                    "attempt_superseded",
+                    priorStatus=prior_status,
+                    priorSupervisorPid=status.get("supervisorPid"),
+                    supervisorLost=supervisor_lost,
+                    cancelled=superseded,
+                )
             if approve_gate:
                 # Recover gate evidence only after acquiring the supervisor
                 # lock; an approval racing a draining supervisor must not

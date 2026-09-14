@@ -1189,12 +1189,28 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["exitCode"], 1)
         self.assertTrue(any("before SIGTERM" in warning for warning in payload["warnings"]))
 
-    def test_cancel_refuses_stale_dead_pid_run(self):
-        """A running run with a dead pid is stale and cancel refuses it."""
-        _run_id, alias = self.write_run(status="running", pid=999999999)
+    def test_cancel_seals_stale_dead_pid_run(self):
+        """A running row whose pid is dead is sealed as cancelled, not refused.
+
+        Refusing left the row at rawStatus=running forever; a workflow that
+        resumed over it failed its thunk with "already terminal (stale)"
+        instead of relaunching (dlg-m5w). Nothing is signalled, the seal is
+        recorded on the row, and a second cancel sees an ordinary terminal.
+        """
+        run_id, alias = self.write_run(status="running", pid=999999999)
+        code, out, _err = self.run_cli(["--json", "cancel", alias])
+        self.assertEqual(code, 0, out)
+        payload = json.loads(out)
+        run = payload["runs"][0] if "runs" in payload else payload
+        self.assertEqual(run["status"], "cancelled")
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["staleReason"], "dead_pid")
+        self.assertIn(wait_cancel_commands.STALE_SEAL_WARNING, state["warnings"])
         code, out, err = self.run_cli(["cancel", alias])
         self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
+        self.assertIn("(cancelled)", err or out)
 
     def test_cancel_refuses_stale_missing_pid_run(self):
         """A running run with no pid is stale (missing_pid) and cancel refuses."""
