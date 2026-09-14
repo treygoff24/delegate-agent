@@ -1,25 +1,33 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-14 (stale-cluster fix and supervisor signal relay hardening released as 0.31.0)
+Updated: 2026-09-14 (0.31.0 published to PyPI; stale-cluster fix and supervisor signal relay hardening)
 
-- `main` = the 0.31.0 release commit (code through `2915e00`; version bump,
-  CHANGELOG date, this file, handoff, and bead closes on top). Story, rulings,
-  verification record, and the live dogfood results:
+- `main` = the 0.31.0 release (runtime code through `27174af`; `2915e00` and
+  `e9d8a4e` are test-only; version bump, CHANGELOG date, this file, handoff,
+  and bead closes on top). Story, rulings, verification record, live dogfood,
+  and the GitHub CI story:
   [handoff](docs/handoffs/2026-09-14-stale-cluster-relay-hardening.md). Beads
-  `dlg-m5w` and `dlg-cbz` are closed.
+  `dlg-m5w`, `dlg-cbz`, `dlg-278.5`, and `dlg-278` are closed.
 - Installed runtime: `~/.delegate/releases/27174af5269284df-1428ff3827b708eb`
   (= `27174af`, the last reviewed code commit; `2915e00` is test-only),
   `promotionMatchesRuntime: true`, previous payload
   `4b03b67e375ba6ae-6d2bad0f500840cd` retained. Discovery refreshed for work
   and personal from the installed command. Ritual: [live runtime](docs/live-runtime.md).
-- Release 0.31.0: Forgejo `main` pushed; GitHub `main` (filtered history, see
-  the [publishing checklist](docs/publishing-checklist.md)) and Forgejo
-  `publish/main` receive the same filtered commits; tag `v0.31.0` and the
-  GitHub release publish to PyPI through `publish.yml`. `v0.30.0` was never
-  tagged (CHANGELOG 0.30.0 dated 2026-08-22; its compare link dangles), so the
-  0.31.0 compare link spans `v0.29.1...v0.31.0`.
-- CI: `dlg-278.5` (3.11 teardown flake, fix `8b79949`) and parent `dlg-278`
-  close once the 0.31.0 publish's CI run is green on 3.11.
+- Release 0.31.0 is published: GitHub `main` = `0d95555` (filtered history,
+  see the [publishing checklist](docs/publishing-checklist.md); = source
+  `e9d8a4e`), Forgejo `publish/main` the same; tag `v0.31.0` (`788b7d5`,
+  annotated) and the GitHub release published 2026-09-14T21:27:36Z;
+  `publish.yml` run 34898927518 uploaded `delegate_agent_cli-0.31.0` wheel and
+  sdist to PyPI (upload 21:28Z, `latest=0.31.0`). CI run 34897626226 is green
+  on macOS and 3.11–3.14. `v0.30.0` was never tagged (CHANGELOG 0.30.0 dated
+  2026-08-22; its compare link dangles), so the 0.31.0 compare link spans
+  `v0.29.1...v0.31.0`.
+- CI: the first 0.31.0 run (34893537423) failed on macOS (EPERM from
+  `os.killpg` in two new test helpers; one unexplained single occurrence in
+  the nested-resume test) and on 3.11 (`dlg-278.5`, three runs in a row);
+  `e9d8a4e` fixed the helpers and the 3.11 teardown wait. Watch the next
+  macOS run for `test_parallel_nested_resume_keeps_child_replay_keys_byte_identical`;
+  its failure message now prints the agent rows.
 - Deferred from Astra review (nonblocking): the gate-preservation branch's
   aggregate `cancelled` list; summarized multi-child refusal details; the
   drain-before-publish ordering has no binding test. Relay arming's residue
