@@ -150,16 +150,23 @@ the resume fails with `workflow_children_unsealed` naming the group, and the
 operator decides what those survivors are.
 
 The supervisor handles `SIGTERM` and `SIGHUP` the way it handles a stall
-watchdog fire: the handler journals `supervisor_signalled` with the signal name
-and pid, then requests cooperative cancellation. Admission closes, in-flight
-children are cancelled, structured-retry worktrees are released, and the
-supervisor exits through its normal cleanup with `status: failed`, `signal`,
-`watchdogReason: signal:<NAME>`, and the `cancelled` list on `status.json`. A
-repeated signal is recorded in `signalsRepeated`, never re-raised. `workflow
-kill` still sends `SIGTERM` first; once the lock is released it folds the
-supervisor's `cancelled` list into its own report and writes `killed` without
-the signal-induced failure fields. `SIGKILL` cannot be handled; the next resume
-records it as `supervisorLost` and seals whatever was left behind.
+watchdog fire. The signal handler only records the signal; a relay thread fed
+by the process's wakeup pipe journals `supervisor_signalled` with the signal
+name and pid and sets the cancel event, so nothing in the handler ever waits on
+a lock. Admission closes, in-flight children are cancelled, structured-retry
+worktrees are released, and the supervisor exits through its normal cleanup
+with `status: failed`, `signal`, `watchdogReason: signal:<NAME>` (a genuine
+watchdog reason that started the shutdown is kept), and the `cancelled` list on
+`status.json`. A signal that arrives after the last child has completed does
+not interrupt anything; the workflow finishes `succeeded` with `signal` and
+`signalAfterCompletion: true` recorded. A repeated signal is recorded in
+`signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
+first and escalates to `SIGKILL` after five seconds; it snapshots the live
+children before signalling and completes its `cancelled` report from the
+registry afterwards (`sealedBy: supervisor` on entries the supervisor sealed),
+then writes `killed` without the signal-induced failure fields. `SIGKILL`
+cannot be handled; the next resume records it as `supervisorLost` and seals
+whatever was left behind.
 
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.

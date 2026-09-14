@@ -121,15 +121,22 @@ forever, and every resume that reached one of them failed its thunk with
   agent instead of tripping over the orphan. The seal runs after gate
   validation and never on `--dry-run`, which launches no replacement.
 - The workflow supervisor handles `SIGTERM` and `SIGHUP` by requesting the
-  same cooperative cancellation the stall watchdog uses: admission closes,
-  in-flight children are cancelled, retry worktrees are released, and the
-  supervisor exits through its normal cleanup with `status: failed`, `signal`,
-  `watchdogReason: signal:<NAME>`, and the `cancelled` list on `status.json`
-  plus a `supervisor_signalled` journal event. A repeated signal is recorded,
-  not re-raised. `workflow kill` folds the supervisor's `cancelled` list into
-  its own report and does not carry the signal-induced failure fields into
-  the `killed` status. A signal used to end the supervisor with the lock
-  released, `status.json` still `running`, and no record of why.
+  same cooperative cancellation the stall watchdog uses. The signal handler
+  itself only records; a wakeup-pipe relay thread journals
+  `supervisor_signalled` and sets the cancel event in ordinary thread context,
+  so the handler never takes a lock. Admission closes, in-flight children are
+  cancelled, retry worktrees are released, and the supervisor exits through
+  its normal cleanup with `status: failed`, `signal`, `watchdogReason:
+  signal:<NAME>` (a genuine watchdog reason that started the shutdown is
+  kept), and the `cancelled` list on `status.json`. A signal that lands after
+  the last child completed is recorded on the `succeeded` status as
+  `signalAfterCompletion`. A repeated signal is recorded, not re-raised.
+  `workflow kill` snapshots the live children before signalling and completes
+  its `cancelled` report from the registry, so a supervisor sealed by the
+  kill's own SIGTERM or cut short by the SIGKILL escalation still yields a
+  full list; the `killed` status does not carry the signal-induced failure
+  fields. A signal used to end the supervisor with the lock released,
+  `status.json` still `running`, and no record of why.
 - A `--continuity-mode pinned` run that completes without any harness model
   observation carries a `pinned_continuity_unverified` warning naming the
   harness, on tracked runs and on ungrouped `call` payloads alike. Claude and Oh My Pi were observed reporting the served model in
