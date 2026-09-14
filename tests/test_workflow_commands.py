@@ -3490,23 +3490,25 @@ class WorkflowCommandTests(unittest.TestCase):
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
         final = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
         self.assertEqual(final["status"], "killed")
-        for key in ("error", "traceback", "signal", "signalsRepeated"):
+        for key in ("error", "traceback", "signal", "signalsRepeated", "signalAfterCompletion"):
             self.assertNotIn(key, final, final)
         self.assertIsNone(final.get("watchdogReason"), final)
         self.assertEqual([item["runId"] for item in final["cancelled"]], [child["runId"]])
 
     def test_reconcile_cancelled_children_completes_from_registry(self) -> None:
+        """Every group child cancelled during the kill is reported, from wherever.
+
+        A child registered after the kill's snapshot (admitted before
+        cancellation closed the gate) is covered because the group is
+        re-listed; a child that was already terminal before the kill is not
+        claimed; a child still running is not.
+        """
         root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
-        sealed_id, sealed_alias = run_registry.register_run(
-            root, harness="codex", metadata={"group": "wf-kill", "workflowAgentKey": "a"}
-        )
-        live_id, _ = run_registry.register_run(
-            root, harness="codex", metadata={"group": "wf-kill", "workflowAgentKey": "b"}
-        )
-        for run_id, alias, status in (
-            (sealed_id, sealed_alias, "cancelled"),
-            (live_id, "x", "running"),
-        ):
+
+        def seed(key: str, status: str) -> tuple[str, str]:
+            run_id, alias = run_registry.register_run(
+                root, harness="codex", metadata={"group": "wf-kill", "workflowAgentKey": key}
+            )
             run_registry.write_json_atomic(
                 run_registry.run_directory(root, run_id) / run_registry.STATE_FILE,
                 {
@@ -3518,21 +3520,70 @@ class WorkflowCommandTests(unittest.TestCase):
                     "lastActivityAt": run_registry.utc_now_iso(),
                 },
             )
-        reported = [{"runId": "del_already_reported", "status": "cancelled"}]
-        merged = workflow_runtime.reconcile_cancelled_children(
-            self.workspace, [sealed_id, live_id, "del_already_reported"], reported
+            return run_id, alias
+
+        old_id, _ = seed("old", "cancelled")
+        already_terminal = workflow_runtime.workflow_terminal_child_run_ids(
+            self.workspace, "wf-kill"
         )
+        self.assertEqual(already_terminal, {old_id})
+        reported_id, _ = seed("reported", "cancelled")
+        sealed_id, sealed_alias = seed("sealed", "cancelled")
+        late_id, late_alias = seed("late", "cancelled")
+        seed("live", "running")
+        reported = [{"runId": reported_id, "status": "cancelled"}]
+        merged = workflow_runtime.reconcile_cancelled_children(
+            self.workspace, "wf-kill", already_terminal, reported
+        )
+        self.assertEqual(merged[0], {"runId": reported_id, "status": "cancelled"})
         self.assertEqual(
-            merged,
-            [
-                {"runId": "del_already_reported", "status": "cancelled"},
-                {
-                    "runId": sealed_id,
-                    "alias": sealed_alias,
-                    "status": "cancelled",
-                    "sealedBy": "supervisor",
-                },
-            ],
+            sorted(
+                (item["runId"], item["alias"], item["status"], item["observedIn"])
+                for item in merged[1:]
+            ),
+            sorted(
+                [
+                    (sealed_id, sealed_alias, "cancelled", "registry"),
+                    (late_id, late_alias, "cancelled", "registry"),
+                ]
+            ),
+        )
+        self.assertNotIn(old_id, {item["runId"] for item in merged})
+
+    def test_signal_relay_owns_signal_metadata(self) -> None:
+        """The relay, not the handler, decides first signal versus repeat."""
+        root = self.workspace / "wf_relay"
+        root.mkdir()
+        state = workflow_runtime.WorkflowState(
+            wf_id="wf_relay",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / "script.py",
+            config={},
+            cli_argv=[sys.executable],
+            args=None,
+            budget=workflow_runtime.Budget(None, 0),
+        )
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        self.assertTrue(watchdog.claim_reason("stalled"))
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        try:
+            relay._deliver("SIGTERM")
+            relay._deliver("SIGHUP")
+            relay._deliver("SIGTERM")
+        finally:
+            self.assertTrue(relay.stop())
+        self.assertEqual(state.signal_received, "SIGTERM")
+        self.assertEqual(state.signals_repeated, ["SIGHUP", "SIGTERM"])
+        self.assertTrue(state.cancel_event.is_set())
+        # The genuine watchdog cause set first is kept; the signal is its own field.
+        self.assertEqual(watchdog.reason, "stalled")
+        self.assertFalse(watchdog.claim_reason("signal:SIGTERM"))
+        lines = (root / workflow_registry.JOURNAL_FILE).read_text(encoding="utf-8").splitlines()
+        events = [json.loads(line) for line in lines if line.strip()]
+        self.assertEqual(
+            [event["signal"] for event in events if event["type"] == "supervisor_signalled"],
+            ["SIGTERM"],
         )
 
     def test_workflow_kill_unsafe_child_returns_typed_json_error(self) -> None:

@@ -1039,7 +1039,7 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     # list is completed from the registry afterwards because the supervisor
     # seals children on its own once signalled, and a forced escalation can
     # end it before its aggregate list reaches status.json.
-    candidates = runtime.workflow_nonterminal_child_run_ids(workspace, command.wf_id or "")
+    already_terminal = runtime.workflow_terminal_child_run_ids(workspace, command.wf_id or "")
     supervisor_signalled = False
     if isinstance(pid, int):
         supervisor_signalled = runtime.kill_supervisor(pid, pgid if isinstance(pgid, int) else None)
@@ -1065,14 +1065,20 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     # every child that was stopped, and do not let the signal-induced failure
     # fields it wrote turn a kill into a failure.
     cancelled = _merge_cancelled(cancelled, status.get("cancelled"))
-    cancelled = runtime.reconcile_cancelled_children(workspace, candidates, cancelled)
+    cancelled = runtime.reconcile_cancelled_children(
+        workspace, command.wf_id or "", already_terminal, cancelled
+    )
     merged = dict(status)
     if supervisor_signalled and status.get("signal") == "SIGTERM":
-        for key in ("error", "traceback", "signal", "signalsRepeated", "signalAfterCompletion"):
+        for key in ("signal", "signalsRepeated", "signalAfterCompletion"):
             merged.pop(key, None)
-        # write_status restores an absent watchdogReason from disk, so the
-        # signal-induced one is cleared explicitly; a genuine watchdog fire
-        # that preceded the kill keeps its reason.
+        # Only diagnostics the signal itself produced are cleared: a genuine
+        # watchdog fire that preceded the kill keeps its error text and
+        # reason. write_status restores an absent watchdogReason from disk,
+        # so the signal-induced one is cleared with an explicit None.
+        if status.get("error") == "supervisor received SIGTERM":
+            merged.pop("error", None)
+            merged.pop("traceback", None)
         reason = status.get("watchdogReason")
         if isinstance(reason, str) and reason.startswith("signal:"):
             merged["watchdogReason"] = None

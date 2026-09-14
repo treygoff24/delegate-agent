@@ -161,10 +161,12 @@ watchdog reason that started the shutdown is kept), and the `cancelled` list on
 not interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`
-first and escalates to `SIGKILL` after five seconds; it snapshots the live
-children before signalling and completes its `cancelled` report from the
-registry afterwards (`sealedBy: supervisor` on entries the supervisor sealed),
-then writes `killed` without the signal-induced failure fields. `SIGKILL`
+first and escalates to `SIGKILL` after five seconds; it notes which children
+were already terminal before signalling and completes its `cancelled` report
+from the whole group afterwards (`observedIn: registry` on entries it did not
+cancel itself — the registry says the child was cancelled during the kill,
+not who did it), then writes `killed` with only the signal's own diagnostics
+removed. `SIGKILL`
 cannot be handled; the next resume records it as `supervisorLost` and seals
 whatever was left behind.
 
