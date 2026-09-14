@@ -176,10 +176,11 @@ detached, marked by `DELEGATE_WORKFLOW_SUPERVISOR_PROCESS`, which child rows
 never inherit) waits a bounded time and then ends itself unconditionally
 while it still holds the lock, so the relay dies with it (the journal reader
 tolerates an unterminated final line) and no journal writer ever outlives
-ownership. If an embedded caller interrupts the in-process wait, the lock
-descriptor is handed to the delivery that was writing and closed when that
-delivery completes, so the interruption cannot release ownership early
-either. A signal that arrives after the last child has completed does not
+ownership. Every exit from the supervisor's lock context, exceptional or
+not and wherever the exception struck, passes through the relay: it fences
+later deliveries (admission and fencing are atomic), restores the handlers,
+and hands the lock descriptor to any delivery still writing, which closes it
+when it completes — so no interruption can release ownership early. A signal that arrives after the last child has completed does not
 interrupt anything; the workflow finishes `succeeded` with `signal` and
 `signalAfterCompletion: true` recorded. A repeated signal is recorded in
 `signalsRepeated`, never re-raised. `workflow kill` still sends `SIGTERM`

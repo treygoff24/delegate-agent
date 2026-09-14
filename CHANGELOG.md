@@ -141,8 +141,9 @@ forever, and every resume that reached one of them failed its thunk with
   longer write (the supervisor fences it at exit, waiting without bound
   in-process and, as the detached supervisor process, ending itself
   unconditionally while it still holds the lock rather than letting a writer
-  outlive ownership; an interrupted in-process wait hands the lock to the
-  delivery in flight, which closes it when it completes). A repeated signal is recorded, not re-raised. `workflow kill` notes which
+  outlive ownership; every exit from the lock context, exceptional or not,
+  fences the relay and hands the lock to a delivery in flight, which closes
+  it when it completes). A repeated signal is recorded, not re-raised. `workflow kill` notes which
   children were already terminal before it signals and completes its
   `cancelled` report from the whole group afterwards (`observedIn: registry`
   on entries it did not cancel itself), so a supervisor sealed by the kill's

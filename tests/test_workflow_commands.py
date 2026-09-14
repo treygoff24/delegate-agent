@@ -3633,7 +3633,10 @@ class WorkflowCommandTests(unittest.TestCase):
         state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
         relay = workflow_runtime._SignalRelay(state, watchdog)
-        relay._started = True  # armed, but no reader thread
+        # Armed with a pipe, but no reader thread: markers queue unanswered.
+        relay._read_fd, relay._write_fd = os.pipe()
+        os.set_blocking(relay._write_fd, False)
+        relay._started = True
         try:
             self.assertFalse(relay.drain(timeout=0.01))
             stale = threading.Timer(0.05, relay._acknowledge_drain)
@@ -3650,6 +3653,8 @@ class WorkflowCommandTests(unittest.TestCase):
             self.assertGreaterEqual(elapsed, 0.3, "drain returned on the stale acknowledgement")
         finally:
             relay._started = False
+            os.close(relay._read_fd)
+            os.close(relay._write_fd)
             self.assertTrue(relay.stop())
 
     def test_signal_relay_fence_discards_late_deliveries(self) -> None:
@@ -3667,91 +3672,137 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIsNone(watchdog.reason)
         self.assertFalse((state.root / workflow_registry.JOURNAL_FILE).exists())
 
-    def _lock_handle(self) -> workflow_runtime._WorkflowLockHandle:
-        fd = os.open(str(self.workspace / "relay.lock"), os.O_CREAT | os.O_RDWR, 0o600)
-        return workflow_runtime._WorkflowLockHandle(fd)
+    def _locked_workflow(self, wf_id: str) -> tuple[Path, workflow_runtime._WorkflowLockHandle]:
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        return root, workflow_runtime._WorkflowLockHandle(
+            workflow_registry.acquire_workflow_lock(root)
+        )
 
-    def test_abandoned_fence_wait_hands_the_lock_to_the_in_flight_delivery(self) -> None:
-        """Ownership ends only when the delivery that was writing completes."""
-        state = self._relay_state()
-        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
-        handle = self._lock_handle()
-        relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
+    @staticmethod
+    def _lock_is_held(root: Path) -> bool:
+        try:
+            fd = workflow_registry.acquire_workflow_lock(root)
+        except BlockingIOError:
+            return True
+        os.close(fd)
+        return False
+
+    def _blocked_writer(
+        self, relay: workflow_runtime._SignalRelay, state: workflow_runtime.WorkflowState
+    ) -> tuple[threading.Thread, threading.Event, threading.Event, list[bool]]:
+        """A real delivery thread parked inside append_journal_only until released."""
         writing = threading.Event()
         finish = threading.Event()
+        waited: list[bool] = []
 
         def slow_append(event_type: str, **fields: object) -> None:
             writing.set()
-            self.assertTrue(finish.wait(5.0))
+            waited.append(finish.wait(10.0))
 
         state.append_journal_only = slow_append  # type: ignore[method-assign]
         writer = threading.Thread(target=relay._deliver, args=("SIGTERM",))
         writer.start()
+        self.assertTrue(writing.wait(5.0), "writer never entered the journal append")
+        return writer, writing, finish, waited
+
+    def test_unwinding_the_lock_hands_it_to_the_in_flight_delivery(self) -> None:
+        """Ownership ends only when the delivery that was writing completes.
+
+        The supervisor's lock context is left by an exception while a real
+        delivery thread is inside its journal append; the flock must stay
+        contended until that thread finishes, and a delivery that arrives
+        after the unwind must be fenced out.
+        """
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        wf_root = workflow_registry.ensure_workflow_dir(self.workspace, "wf_0c0c0c0c0c01")
+        late = threading.Thread()
+        with (
+            self.assertRaises(KeyboardInterrupt),
+            workflow_runtime._held_workflow_lock(wf_root) as handle,
+        ):
+            relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
+            writer, _, finish, waited = self._blocked_writer(relay, state)
+            raise KeyboardInterrupt
         try:
-            self.assertTrue(writing.wait(5.0))
-            relay._abandon_fence_wait()
-            self.assertTrue(handle.deferred)
             self.assertFalse(handle.released, "released while the delivery was still writing")
-            # A delivery that begins after the abandonment is fenced out.
-            relay._deliver("SIGHUP")
-            self.assertEqual(state.signals_repeated, [])
+            self.assertTrue(self._lock_is_held(wf_root))
+            late = threading.Thread(target=relay._deliver, args=("SIGHUP",))
+            late.start()
         finally:
             finish.set()
             writer.join(5.0)
+            late.join(5.0)
         self.assertFalse(writer.is_alive())
+        self.assertFalse(late.is_alive())
+        self.assertEqual(waited, [True])
         self.assertTrue(handle.released)
+        self.assertFalse(self._lock_is_held(wf_root))
         self.assertEqual(state.signal_received, "SIGTERM")
+        self.assertEqual(state.signals_repeated, [], "a delivery after the unwind got through")
         self.assertTrue(relay.stop())
 
-    def test_abandoned_fence_wait_with_no_delivery_releases_at_once(self) -> None:
+    def test_unwinding_the_lock_with_no_delivery_releases_at_once(self) -> None:
         state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
-        handle = self._lock_handle()
+        wf_root, handle = self._locked_workflow("wf_0c0c0c0c0c02")
         relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
-        relay._abandon_fence_wait()
-        self.assertTrue(handle.deferred)
+        self.assertTrue(self._lock_is_held(wf_root))
+        handle.close()
         self.assertTrue(handle.released)
+        self.assertFalse(self._lock_is_held(wf_root))
+        self.assertTrue(relay._fenced)
         self.assertTrue(relay.stop())
 
-    def test_stop_abandons_the_fence_when_the_wait_is_interrupted(self) -> None:
-        """An exception out of the fence wait defers the lock and still propagates."""
+    def test_admission_is_atomic_with_the_unwind(self) -> None:
+        """A delivery cannot pass the fence check and then register after an unwind.
+
+        The unwind's fence is applied while the test holds the release lock,
+        with a delivery already blocked on it; the delivery must re-read the
+        fence under that lock and step back.
+        """
         state = self._relay_state()
         watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
-        handle = self._lock_handle()
+        wf_root, handle = self._locked_workflow("wf_0c0c0c0c0c03")
         relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
+        relay._release_lock.acquire()
+        delivery = threading.Thread(target=relay._deliver, args=("SIGTERM",))
+        try:
+            delivery.start()
+            deadline = time.monotonic() + 5.0
+            while not relay._fence_lock.locked() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(relay._fence_lock.locked(), "delivery never reached admission")
+            relay._fenced = True
+            relay._release_when_idle = True
+            self.assertFalse(relay._delivery_in_flight)
+            handle.release()
+        finally:
+            relay._release_lock.release()
+            delivery.join(5.0)
+        self.assertFalse(delivery.is_alive())
+        self.assertIsNone(state.signal_received, "delivery was admitted after the unwind")
+        self.assertFalse((state.root / workflow_registry.JOURNAL_FILE).exists())
+        self.assertFalse(self._lock_is_held(wf_root))
+        self.assertTrue(relay.stop())
+
+    def test_started_relay_unwinds_without_blocking_and_restores_handlers(self) -> None:
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        wf_root, handle = self._locked_workflow("wf_0c0c0c0c0c04")
+        relay = workflow_runtime._SignalRelay(state, watchdog, lock_handle=handle)
+        before = signal.getsignal(signal.SIGTERM)
         relay.start()
         self.assertTrue(relay._started, "relay must arm in the test's main thread")
-
-        class InterruptedLock:
-            def acquire(self, timeout: float | None = None) -> bool:
-                raise KeyboardInterrupt
-
-            def release(self) -> None:
-                return None
-
-        real_lock = relay._fence_lock
-        relay._fence_lock = InterruptedLock()  # type: ignore[assignment]
-        try:
-            with self.assertRaises(KeyboardInterrupt):
-                relay.stop(fence_timeout=None)
-        finally:
-            relay._fence_lock = real_lock
-        self.assertTrue(handle.deferred)
+        self.assertIsNot(signal.getsignal(signal.SIGTERM), before)
+        handle.close()
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
         self.assertTrue(handle.released)
-        self.assertTrue(relay._fenced)
-        # Handlers were restored before the wait; finish the thread cleanly.
+        self.assertFalse(self._lock_is_held(wf_root))
+        assert relay._thread is not None
+        relay._thread.join(5.0)
+        self.assertFalse(relay._thread.is_alive(), "relay thread did not exit on the stop marker")
         self.assertTrue(relay.stop())
-
-    def test_held_workflow_lock_leaves_a_deferred_handle_open(self) -> None:
-        wf_id = "wf_0c0c0c0c0c0c"
-        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
-        with workflow_runtime._held_workflow_lock(root) as handle:
-            handle.defer()
-        self.assertFalse(handle.released)
-        with self.assertRaises(BlockingIOError):
-            workflow_registry.acquire_workflow_lock(root)
-        handle.release()
-        os.close(workflow_registry.acquire_workflow_lock(root))
 
     def test_detached_supervisor_is_marked_as_its_own_process(self) -> None:
         with (

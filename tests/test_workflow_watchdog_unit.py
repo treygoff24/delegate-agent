@@ -805,17 +805,74 @@ class IncompleteDrainPublicationTests(unittest.TestCase):
 
     def test_dedicated_exit_survives_a_failing_diagnostic(self) -> None:
         class BrokenStderr:
+            def __init__(self, *, write_raises: bool) -> None:
+                self.write_raises = write_raises
+
             def write(self, text: str) -> int:
-                raise BrokenPipeError("stderr closed")
+                if self.write_raises:
+                    raise BrokenPipeError("stderr closed")
+                return len(text)
 
             def flush(self) -> None:
                 raise BrokenPipeError("stderr closed")
 
-        with mock.patch.object(workflow_runtime.sys, "stderr", new=BrokenStderr()):
-            _, _, exit_mock = self._run(
-                lambda state: {"done": True}, drain=True, stop=False, dedicated_process=True
+        for write_raises in (True, False):
+            with self.subTest(write_raises=write_raises):
+                stderr = BrokenStderr(write_raises=write_raises)
+                with mock.patch.object(workflow_runtime.sys, "stderr", new=stderr):
+                    _, _, exit_mock = self._run(
+                        lambda state: {"done": True},
+                        drain=True,
+                        stop=False,
+                        dedicated_process=True,
+                    )
+                exit_mock.assert_called_once_with(1)
+
+    def test_exception_in_teardown_routes_ownership_through_the_relay(self) -> None:
+        """Any unwind of the supervisor fences the relay before the lock is released."""
+        wf_id = f"wf_{time.time_ns() & ((1 << 48) - 1):012x}"
+        root = registry.ensure_workflow_dir(self.root, wf_id)
+        (root / registry.SCRIPT_FILE).write_text("return True\n", encoding="utf-8")
+        registry.write_status(
+            root,
+            {
+                "wfId": wf_id,
+                "workflowKeyVersion": 2,
+                "status": "running",
+                "budget": {"total": None, "spent": 0},
+            },
+        )
+        real_relay = workflow_runtime._SignalRelay
+        relays: list[workflow_runtime._SignalRelay] = []
+
+        def capture(*args: object, **kwargs: object) -> workflow_runtime._SignalRelay:
+            relay = real_relay(*args, **kwargs)  # type: ignore[arg-type]
+            relays.append(relay)
+            return relay
+
+        with (
+            mock.patch.object(
+                workflow_runtime, "execute_workflow", side_effect=lambda state: {"done": True}
+            ),
+            mock.patch.object(workflow_runtime._SupervisorWatchdog, "start", autospec=True),
+            mock.patch.object(
+                workflow_runtime._SupervisorWatchdog,
+                "stop",
+                autospec=True,
+                side_effect=KeyboardInterrupt,
+            ),
+            mock.patch.object(workflow_runtime, "_SignalRelay", side_effect=capture),
+            mock.patch.object(WorkflowState, "notify_event", new=lambda *a, **k: None),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            workflow_runtime.run_supervisor(
+                workspace=self.root, wf_id=wf_id, cli_argv=[], config={}
             )
-        exit_mock.assert_called_once_with(1)
+        self.assertEqual(len(relays), 1)
+        self.assertTrue(relays[0]._fenced, "the unwind did not fence the relay")
+        assert relays[0].lock_handle is not None
+        self.assertTrue(relays[0].lock_handle.released)
+        os.close(registry.acquire_workflow_lock(root))
 
     def test_watchdog_exit_records_incomplete_drain(self) -> None:
         def unwind(state: WorkflowState) -> None:
