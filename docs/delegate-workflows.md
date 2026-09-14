@@ -135,6 +135,22 @@ python3 bin/delegate.py workflow run --resume wf_0123abcdef45
 `emit_run(resume=...)`). Running approve and then `run --resume` races a second
 resume against the first and fails with `workflow_locked`. Pick one.
 
+A resume can only take the workflow lock because the previous supervisor is
+gone. Before the new supervisor starts, the resume cancels every child the
+previous attempt still had in flight — the same sealing `workflow kill` does —
+and journals `attempt_superseded` with the previous supervisor's pid, its last
+recorded status, `supervisorLost: true` when that status was still live, and
+the sealed children. A child whose process is already dead is sealed as
+`cancelled` with `staleReason: dead_pid` rather than left `stale`, so the replay
+relaunches it instead of failing the thunk with "already terminal (stale)".
+
+The supervisor handles `SIGTERM` and `SIGHUP` itself: it journals
+`supervisor_signalled` with the signal name and pid, cancels its children,
+writes `status: failed` with `signal` set, and exits. `workflow kill` still
+sends `SIGTERM` first and overwrites that status with `killed` once the lock is
+released. `SIGKILL` cannot be handled; the next resume records it as
+`supervisorLost` and seals whatever was left behind.
+
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.
 
