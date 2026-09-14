@@ -599,10 +599,12 @@ class _SignalRelay:
         self.state = state
         self.watchdog = watchdog
         self.lock_handle = lock_handle
-        self._read_fd, self._write_fd = os.pipe()
-        os.set_blocking(self._write_fd, False)
+        # The pipe is opened by start(); an unstarted relay owns no descriptors.
+        self._read_fd = -1
+        self._write_fd = -1
         self._previous_wakeup_fd = -1
         self._previous_handlers: dict[int, object] = {}
+        self._handlers_restored = False
         self._started = False
         self._delivered = False
         # Drain generations: every drain() writes exactly one marker and is
@@ -617,18 +619,17 @@ class _SignalRelay:
         # possible however long the relay thread lingers.
         self._fence_lock = threading.Lock()
         self._fenced = False
-        # Ownership hand-off when a fence wait is abandoned (an exception
-        # unwinding through stop()): whichever of the abandoning caller and
-        # the in-flight delivery finishes second releases the workflow lock,
-        # decided under _release_lock so exactly one of them does.
+        # Ownership hand-off. Admission (the fence check plus the in-flight
+        # mark) and unwind (fence plus the release decision) are each atomic
+        # under _release_lock, so whichever of the unwinding supervisor and
+        # an in-flight delivery finishes second releases the workflow lock,
+        # and a delivery can never be admitted between the two.
         self._release_lock = threading.Lock()
         self._delivery_in_flight = False
-        self._release_after_delivery = False
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"delegate-workflow-signal-relay-{state.wf_id}",
-            daemon=True,
-        )
+        self._release_when_idle = False
+        self._thread: threading.Thread | None = None
+        if lock_handle is not None:
+            lock_handle.release_guard = self.unwind
 
     def start(self) -> None:
         # Only the main thread may install handlers or a wakeup fd; a
@@ -636,16 +637,24 @@ class _SignalRelay:
         # disposition.
         if threading.current_thread() is not threading.main_thread():
             return
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(write_fd, False)
         try:
-            self._previous_wakeup_fd = signal.set_wakeup_fd(
-                self._write_fd, warn_on_full_buffer=False
-            )
+            self._previous_wakeup_fd = signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
         except (OSError, ValueError):
+            os.close(read_fd)
+            os.close(write_fd)
             return
+        self._read_fd, self._write_fd = read_fd, write_fd
         for signum in self._SIGNALS:
             with contextlib.suppress(OSError, ValueError):
                 self._previous_handlers[signum] = signal.signal(signum, self._handle)
         self._started = True
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"delegate-workflow-signal-relay-{self.state.wf_id}",
+            daemon=True,
+        )
         self._thread.start()
 
     def _handle(self, signum: int, _frame: object) -> None:
@@ -655,20 +664,26 @@ class _SignalRelay:
         return
 
     def _run(self) -> None:
-        while True:
-            try:
-                data = os.read(self._read_fd, 64)
-            except OSError:
-                return
-            if not data:
-                return
-            for value in data:
-                if value == self._STOP_MARKER:
+        # The relay thread owns the read end: nobody else closes it, so a
+        # read never sees a closed or reused descriptor.
+        try:
+            while True:
+                try:
+                    data = os.read(self._read_fd, 64)
+                except OSError:
                     return
-                if value == self._DRAIN_MARKER:
-                    self._acknowledge_drain()
-                elif value in self._SIGNALS:
-                    self._deliver(signal.Signals(value).name)
+                if not data:
+                    return
+                for value in data:
+                    if value == self._STOP_MARKER:
+                        return
+                    if value == self._DRAIN_MARKER:
+                        self._acknowledge_drain()
+                    elif value in self._SIGNALS:
+                        self._deliver(signal.Signals(value).name)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(self._read_fd)
 
     def _acknowledge_drain(self) -> None:
         with self._drain_cond:
@@ -677,16 +692,18 @@ class _SignalRelay:
 
     def _deliver(self, name: str) -> None:
         with self._fence_lock:
-            if self._fenced:
-                return
+            # Admission is atomic with unwind(): both take _release_lock, so
+            # a delivery is either seen in flight by the unwind or fenced out.
             with self._release_lock:
+                if self._fenced:
+                    return
                 self._delivery_in_flight = True
             try:
                 self._deliver_unfenced(name)
             finally:
                 with self._release_lock:
                     self._delivery_in_flight = False
-                    if self._release_after_delivery and self.lock_handle is not None:
+                    if self._release_when_idle and self.lock_handle is not None:
                         self.lock_handle.release()
 
     def _deliver_unfenced(self, name: str) -> None:
@@ -706,23 +723,47 @@ class _SignalRelay:
             state.append_journal_only("supervisor_signalled", signal=name, pid=os.getpid())
         state.cancel_event.set()
 
-    def _abandon_fence_wait(self) -> None:
-        """Hand workflow-lock release to the in-flight delivery, if there is one.
+    def unwind(self) -> None:
+        """Fence the relay without waiting and hand the workflow lock to any delivery in flight.
 
-        Called when an exception unwinds through the fence wait. Later
-        deliveries are fenced out; the lock handle is marked deferred so the
-        supervisor's context manager leaves it open; and it is released here
-        only when no delivery is in flight, otherwise by that delivery's
-        finally block. Both decisions run under _release_lock.
+        Installed as the lock handle's release guard, so it runs on every
+        exit from _held_workflow_lock, whatever unwound the supervisor and
+        wherever it was interrupted. Later deliveries are fenced out; the
+        handlers and the write end are put back so the process can be
+        terminated normally; and the lock is released here only when no
+        delivery is in flight, otherwise by that delivery's finally block.
+        Nothing here blocks on the fence or the journal.
         """
+        self._restore_handlers()
+        self._close_write_end()
         with self._release_lock:
             self._fenced = True
-            self._release_after_delivery = True
-            if self.lock_handle is None:
-                return
-            self.lock_handle.defer()
-            if not self._delivery_in_flight:
+            self._release_when_idle = True
+            if self.lock_handle is not None and not self._delivery_in_flight:
                 self.lock_handle.release()
+
+    def _restore_handlers(self) -> None:
+        if not self._started or self._handlers_restored:
+            return
+        if threading.current_thread() is not threading.main_thread():
+            return
+        self._handlers_restored = True
+        with contextlib.suppress(OSError, ValueError):
+            signal.set_wakeup_fd(self._previous_wakeup_fd)
+        for signum, handler in self._previous_handlers.items():
+            with contextlib.suppress(OSError, ValueError, TypeError):
+                signal.signal(signum, handler)  # type: ignore[arg-type]
+
+    def _close_write_end(self) -> None:
+        # The stop marker first, so the reader returns even when the pipe is
+        # full; then EOF. Idempotent.
+        if self._write_fd < 0:
+            return
+        write_fd, self._write_fd = self._write_fd, -1
+        with contextlib.suppress(OSError):
+            os.write(write_fd, bytes([self._STOP_MARKER]))
+        with contextlib.suppress(OSError):
+            os.close(write_fd)
 
     def drain(self, timeout: float = 2.0) -> bool:
         """Block until every signal byte queued so far has been delivered.
@@ -742,6 +783,8 @@ class _SignalRelay:
         if not self._started:
             return True
         with self._drain_cond:
+            if self._write_fd < 0:
+                return False
             try:
                 os.write(self._write_fd, bytes([self._DRAIN_MARKER]))
             except OSError:
@@ -757,56 +800,33 @@ class _SignalRelay:
 
         Returns True when no further journal write from this relay is
         possible: the fence was taken, so every delivery that had begun has
-        completed and a lingering thread can only read and discard. The
-        write end is closed after the sentinel so the reader sees EOF even
-        when the pipe was full; the read end is closed only once the thread
-        is gone, so a relay still finishing a read never sees a closed or
-        reused descriptor. fence_timeout=None waits for writer completion
-        however long it takes; a bounded wait returns False when the relay
-        is still inside a delivery, and the caller must then keep workflow
-        ownership or end the process while it still holds it. An exception
-        raised out of the wait leaves the lock handle deferred: the in-flight
-        delivery releases it when it completes.
+        completed and a lingering thread can only read and discard.
+        fence_timeout=None waits for writer completion however long it
+        takes; a bounded wait returns False when the relay is still inside a
+        delivery, and the caller must then keep workflow ownership or end
+        the process while it still holds it. An exception raised out of any
+        step here unwinds to the lock handle's guard (unwind), which hands
+        the lock to the delivery in flight.
         """
         if not self._started:
-            with contextlib.suppress(OSError):
-                os.close(self._read_fd)
-            with contextlib.suppress(OSError):
-                os.close(self._write_fd)
             return True
-        if threading.current_thread() is threading.main_thread():
-            with contextlib.suppress(OSError, ValueError):
-                signal.set_wakeup_fd(self._previous_wakeup_fd)
-            for signum, handler in self._previous_handlers.items():
-                with contextlib.suppress(OSError, ValueError, TypeError):
-                    signal.signal(signum, handler)  # type: ignore[arg-type]
+        self._restore_handlers()
         # Quiescence first: once this drain is acknowledged the relay has
         # finished every journal write for a signal queued before it.
         quiescent = self.drain(timeout=5.0)
         # Then the fence: taken only when no _deliver is in flight, so
         # holding it establishes writer completion.
-        try:
-            if fence_timeout is None:
-                fenced = self._fence_lock.acquire()
-            else:
-                fenced = self._fence_lock.acquire(timeout=fence_timeout)
-        except BaseException:
-            # The wait was interrupted (an embedded caller's KeyboardInterrupt,
-            # for instance). Ownership must still outlive any delivery in
-            # flight, so it is handed to that delivery before unwinding.
-            self._abandon_fence_wait()
-            raise
+        if fence_timeout is None:
+            fenced = self._fence_lock.acquire()
+        else:
+            fenced = self._fence_lock.acquire(timeout=fence_timeout)
         if fenced:
-            self._fenced = True
+            with self._release_lock:
+                self._fenced = True
             self._fence_lock.release()
-        with contextlib.suppress(OSError):
-            os.write(self._write_fd, bytes([self._STOP_MARKER]))
-        with contextlib.suppress(OSError):
-            os.close(self._write_fd)
-        self._thread.join(timeout=5.0 if quiescent else 1.0)
-        if not self._thread.is_alive():
-            with contextlib.suppress(OSError):
-                os.close(self._read_fd)
+        self._close_write_end()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0 if quiescent else 1.0)
         return fenced
 
 
@@ -4610,17 +4630,26 @@ def _read_completion_report(report_path: object, workspace: Path) -> str | None:
 
 
 class _WorkflowLockHandle:
-    """The supervisor's flock descriptor, released exactly once by whoever finishes last."""
+    """The supervisor's flock descriptor, released exactly once by whoever finishes last.
+
+    release_guard, when set (the signal relay installs its unwind), decides
+    when the descriptor is actually closed: close() defers to it on every
+    exit from _held_workflow_lock, so no unwinding path can end ownership
+    while a journal writer is live.
+    """
 
     def __init__(self, fd: int) -> None:
         self._fd = fd
         self._lock = threading.Lock()
         self.released = False
-        self.deferred = False
+        self.release_guard: Callable[[], None] | None = None
 
-    def defer(self) -> None:
-        """Keep the descriptor open past the context manager; release() is now someone else's."""
-        self.deferred = True
+    def close(self) -> None:
+        guard = self.release_guard
+        if guard is None:
+            self.release()
+        else:
+            guard()
 
     def release(self) -> None:
         with self._lock:
@@ -4657,11 +4686,10 @@ def _held_workflow_lock(root: Path) -> Iterator[_WorkflowLockHandle]:
     try:
         yield handle
     finally:
-        # A deferred handle is released by the signal relay's in-flight
-        # delivery when it completes (see _SignalRelay._abandon_fence_wait),
-        # so ownership never ends while a journal writer is live.
-        if not handle.deferred:
-            handle.release()
+        # Every exit path, exceptional or not, goes through the guard: with
+        # a relay installed, the lock is released by whichever of this
+        # unwind and an in-flight delivery finishes second.
+        handle.close()
 
 
 class _SupervisorWatchdog:
@@ -5039,8 +5067,10 @@ def run_supervisor(
             # bounded time and then ends itself while it still holds the
             # lock, so the relay dies with it (the journal reader tolerates
             # an unterminated final line) and no writer outlives ownership.
-            # Journaling the event would block on the same lock, so it goes
-            # to stderr.
+            # An exception out of anything above, or out of stop() itself,
+            # reaches the lock handle's guard (the relay's unwind), which
+            # hands the lock to a delivery in flight. Journaling the event
+            # would block on the same lock, so it goes to stderr.
             if not signal_relay.stop(fence_timeout=10.0 if dedicated_process else None):
                 # Unconditional: the diagnostic must never decide whether the
                 # ownership-preserving exit happens.
