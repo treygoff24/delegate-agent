@@ -1,6 +1,32 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-14 (0.31.0 published to PyPI; stale-cluster fix and supervisor signal relay hardening)
+Updated: 2026-09-17 (local OMP identity repair; no new public release)
+
+- Source repair: `3b4fffb` (bead `dlg-nqv`). Pinned OMP comparison now uses
+  the event's separate provider/model fields without collapsing repeated
+  namespace segments. Exact slash-free bare pins remain supported; ambiguous
+  slash-bearing bare IDs require full provider qualification. Genuine provider
+  and model switches still pause. Catalog warnings now recommend the persistent
+  `capabilities refresh`, not the non-persistent `models --live` projection.
+- Final gate at that source revision: 3,343 passed, 15 skipped, 2,574 subtests;
+  compileall, pinned Ruff check, and Ruff format check passed. Native and
+  cross-family review completed. Run subprocess-bearing tests with the project
+  venv before mise shims on PATH: one intermediate gate failed when mise's
+  automatic interpreter-install output polluted a launcher's stderr assertion.
+  The assertion was retained; the concrete-interpreter rerun passed.
+- Installed on the devbox with Trey's explicit approval:
+  `~/.delegate/releases/3b4fffb5c8956e7a-6fe90b0d718e7bcc`.
+  Doctor confirms `promotionMatchesRuntime: true`. The previous immutable
+  `8cada28b3c4e6db6-35c4d931e9adf486` payload is retained; no active run was
+  killed or overwritten. Outer launcher and config hashes are unchanged.
+  Both profile discovery caches were refreshed through the installed command.
+- A live configured OMP alias returned the exact smoke token under pinned
+  continuity, with zero fallback hops, no violation, and no warnings. Honor
+  the alias's supported thinking setting; do not override it with an effort
+  that fresh discovery says the model does not support.
+- This is a local source/runtime repair, not a PyPI or GitHub publication.
+
+## Previous release record (2026-09-14)
 
 - `main` = the 0.31.0 release (runtime code through `27174af`; `2915e00` and
   `e9d8a4e` are test-only; version bump, CHANGELOG date, this file, handoff,
