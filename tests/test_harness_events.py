@@ -392,6 +392,94 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "turn.started", "model": "gpt-5.6-sol-preview"}))
         self.assertIsNotNone(acc.continuity_violation)
 
+    def test_pinned_omp_accepts_its_provider_qualified_model_identity(self):
+        for requested, served in (
+            ("model-pro", "model-pro"),
+            ("gateway/acme/model-pro", "acme/model-pro"),
+            ("gateway/gateway/acme/model-pro", "gateway/acme/model-pro"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="omp",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(
+                    json.dumps(
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "role": "assistant",
+                                "provider": "gateway",
+                                "model": served,
+                                "content": [],
+                            },
+                        }
+                    )
+                )
+
+                self.assertIsNone(acc.continuity_violation)
+                self.assertEqual(acc.served_model, served)
+                self.assertEqual(acc.model_fallback_hops, [])
+
+    def test_pinned_omp_requires_the_exact_provider_and_model_identity(self):
+        for requested, provider, served in (
+            ("gateway/acme/model-pro", "other-gateway", "acme/model-pro"),
+            ("gateway/acme/model-pro", "gateway", "acme/model-pro-v2"),
+            ("gateway/acme/model-pro", "gateway", "gateway/acme/model-pro"),
+            ("gateway/acme/model-pro", None, "acme/model-pro"),
+            ("acme/model-pro", "gateway", "acme/model-pro"),
+        ):
+            with self.subTest(requested=requested, provider=provider, served=served):
+                message = {"role": "assistant", "model": served, "content": []}
+                if provider is not None:
+                    message["provider"] = provider
+                acc = self.events.StreamAccumulator(
+                    harness="omp",
+                    requested_model=requested,
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "message_start", "message": message}))
+
+                self.assertEqual(
+                    (acc.continuity_violation or {}).get("reason"), "served_model_mismatch"
+                )
+                self.assertEqual(acc.terminal_status, "failed")
+
+    def test_pinned_omp_still_pauses_for_a_genuine_mid_run_model_switch(self):
+        for second_provider, second_model in (
+            ("other-gateway", "acme/model-pro"),
+            ("gateway", "acme/model-pro-v2"),
+        ):
+            with self.subTest(provider=second_provider, model=second_model):
+                acc = self.events.StreamAccumulator(
+                    harness="omp",
+                    requested_model="gateway/acme/model-pro",
+                    continuity_mode="pinned",
+                )
+                for provider, model in (
+                    ("gateway", "acme/model-pro"),
+                    (second_provider, second_model),
+                ):
+                    acc.ingest_line(
+                        json.dumps(
+                            {
+                                "type": "message_start",
+                                "message": {
+                                    "role": "assistant",
+                                    "provider": provider,
+                                    "model": model,
+                                    "content": [],
+                                },
+                            }
+                        )
+                    )
+
+                self.assertEqual(
+                    (acc.continuity_violation or {}).get("reason"), "mid_session_model_switch"
+                )
+                self.assertEqual(acc.model_fallback_hops_total, 1)
+
     def test_mid_run_model_switch_check_is_unchanged_for_cursor(self):
         acc = self.events.StreamAccumulator(
             harness="cursor",

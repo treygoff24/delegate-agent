@@ -447,7 +447,7 @@ def append_bounded_model_event(events: list[JsonObject], event: JsonObject) -> N
     events[:] = [*events[:MODEL_PROVENANCE_EVENT_HEAD], *events[-tail_size:], event]
 
 
-def _served_model(payload: JsonObject) -> str | None:
+def _served_model_observation(payload: JsonObject) -> tuple[str, str | None] | None:
     def clean(value: object) -> str | None:
         if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
             return None
@@ -455,14 +455,13 @@ def _served_model(payload: JsonObject) -> str | None:
             return None
         return value
 
-    for key in ("servedModel", "served_model", "model", "modelName", "model_name"):
-        if (value := clean(payload.get(key))) is not None:
-            return value
-    message = payload.get("message")
-    if isinstance(message, dict):
-        for key in ("model", "modelName", "model_name"):
-            if (value := clean(message.get(key))) is not None:
-                return value
+    containers = [payload]
+    if isinstance(message := payload.get("message"), dict):
+        containers.append(message)
+    for container in containers:
+        for key in ("servedModel", "served_model", "model", "modelName", "model_name"):
+            if (value := clean(container.get(key))) is not None:
+                return value, clean(container.get("provider"))
     return None
 
 
@@ -524,12 +523,20 @@ def _claude_pin_matches(requested: str, served: str) -> bool:
     return re.fullmatch(rf"{re.escape(base)}-\d{{8}}", served) is not None
 
 
+def _omp_model_identity(served: str, provider: str | None) -> str:
+    """Rebuild OMP's provider-qualified identity from its split message fields."""
+    if not provider:
+        return served
+    return f"{provider}/{served}"
+
+
 def served_model_matches_requested(
     harness: str | None,
     requested: str,
     served: str,
     *,
     display_name: str | None = None,
+    served_provider: str | None = None,
 ) -> bool:
     """Is a served model id the pinned one, under this engine's own naming?
 
@@ -538,6 +545,10 @@ def served_model_matches_requested(
     containment rule, which would accept a genuinely different model whose name
     happens to embed the requested one.
     """
+    if harness == "omp":
+        if "/" not in requested and served == requested:
+            return True
+        return _omp_model_identity(served, served_provider) == requested
     if served == requested:
         return True
     if harness == "cursor":
@@ -654,6 +665,7 @@ class StreamAccumulator:
     provider_terminal_state: str | None = None
     provider_terminal_reason: str | None = None
     served_model: str | None = None
+    _served_model_identity: str | None = field(default=None, repr=False)
     model_observations: list[JsonObject] = field(default_factory=list)
     model_fallback_hops: list[JsonObject] = field(default_factory=list)
     model_observations_total: int = 0
@@ -941,13 +953,16 @@ class StreamAccumulator:
         self.unhandled_event_types[name] = 1
 
     def _observe_model(self, payload: JsonObject, event_type: str) -> None:
-        model = _served_model(payload)
-        if model is None:
+        observed = _served_model_observation(payload)
+        if observed is None:
             return
+        model, provider = observed
+        identity = _omp_model_identity(model, provider) if self.harness == "omp" else model
         turn = max(self.turn_number, 1)
         observed_at = _event_timestamp(payload)
         prior = self.served_model
-        if model == prior:
+        prior_identity = self._served_model_identity
+        if model == prior and identity == prior_identity:
             return
         observation: JsonObject = {
             "model": model,
@@ -959,6 +974,7 @@ class StreamAccumulator:
         append_bounded_model_event(self.model_observations, observation)
         if prior is None:
             self.served_model = model
+            self._served_model_identity = identity
             requested = self.requested_model
             if (
                 self.continuity_mode == "pinned"
@@ -969,6 +985,7 @@ class StreamAccumulator:
                     requested,
                     model,
                     display_name=self.requested_model_display_name,
+                    served_provider=provider,
                 )
             ):
                 self.continuity_violation = {
@@ -995,6 +1012,7 @@ class StreamAccumulator:
         self.model_fallback_hops_total += 1
         append_bounded_model_event(self.model_fallback_hops, hop)
         self.served_model = model
+        self._served_model_identity = identity
         self.sticky_model_turn = turn
         if self.continuity_mode == "pinned":
             self.continuity_violation = {

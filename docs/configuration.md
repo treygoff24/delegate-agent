@@ -673,6 +673,12 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
 - `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
+- Under `--continuity-mode pinned`, use the full `provider/model-id` selector,
+  including the provider even when the model ID itself contains `/`. OMP reports
+  provider and model separately; Delegate compares their exact combined identity.
+  A slash-free bare model ID pins the exact model name, then binds the first
+  observed provider for subsequent switch detection. Ambiguous slash-bearing
+  bare IDs are not accepted as equivalent to provider-qualified selectors.
 
 ### `reasoning`
 

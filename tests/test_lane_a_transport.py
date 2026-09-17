@@ -514,6 +514,12 @@ class OmpCatalogWarningTests(CommandTestBase):
             request.warnings,
         )
 
+    def test_absent_selector_recommends_persisted_catalog_refresh(self):
+        request = self._request("gateway/acme/model-pro", self._catalog("gateway/acme/old"))
+        warnings = [warning for warning in request.warnings if "catalog" in warning]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("delegate capabilities refresh", warnings[0])
+
     def test_present_selector_does_not_warn(self):
         # The planted negative: a selector that is in the catalog must stay quiet,
         # or the warning is noise on every run.

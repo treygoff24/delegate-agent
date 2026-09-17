@@ -3372,7 +3372,8 @@ def _omp_catalog_absence_warning(
     return (
         f"omp model {model!r} is absent from the discovered catalog; omp resolves an "
         "unknown selector by fuzzy match, so the run may be served by a different "
-        "model. Check `delegate models omp --live`.",
+        "model. Run `delegate capabilities refresh` to update the cached catalog; "
+        "`delegate models omp --live` only shows a fresh catalog without saving it.",
     )
 
 
