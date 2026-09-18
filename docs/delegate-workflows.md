@@ -248,6 +248,22 @@ The top-level `workflows` config block controls concurrency and schema retries:
 - `itemThreads`: maximum concurrent workflow item worker threads across `pipeline()` and `parallel()`. Positive integers override the default; `0` or a missing value falls back to the default.
 - `structuredOutputRetries`: retry count for `agent(schema=...)` validation failures. Retries include the previous invalid output and validation error as correction context.
 
+Failed child output is diagnostic only, even when its partial text or completion
+report validates against the schema. `agent()` and `followup()` return `None`
+after a terminal failure or an exhausted retry budget. The child run retains its
+partial output; `agent_attempt_failed` journal entries retain the child's exact
+`failureReason` and run identity.
+
+Only `timeout`, `agent_timeout`, `call_timeout`, `stall`, and `stalled` are
+transient at the workflow layer. Provider errors, refusal, max-turns, usage/auth
+failures, cancellation, output caps, and unknown failures stop without relaunch:
+provider retries and credential rotation already belong to the child harness.
+Successful children with invalid structured output still receive correction
+retries. Each permitted retry waits `min(30, 2**retry_index)` seconds multiplied
+by a fresh uniform factor in `[0.75, 1]`, with the first index zero; workflow
+cancellation interrupts the wait. `retries=N` is an upper bound of `N+1` child
+attempts, not a promise to repeat terminal failures.
+
 The supported schema subset includes `minLength` for strings and `minItems` for
 arrays. Both take non-negative integers and are enforced recursively. `required`
 only requires a property to exist, so use `minLength: 1` or `minItems: 1` when

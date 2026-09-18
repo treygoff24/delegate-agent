@@ -8,6 +8,7 @@ import json
 import math
 import os
 import queue
+import random
 import signal
 import subprocess
 import sys
@@ -99,7 +100,15 @@ class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
 
 
-CHILD_FAILURE_REASONS = frozenset({"timeout", "output_cap", "stall", "nonzero_exit", "structured"})
+# Provider recovery and credential rotation belong to the child harness. Only
+# workflow watchdog interruptions are transient here; unknown failures stop.
+WORKFLOW_TRANSIENT_FAILURES = frozenset(
+    {"timeout", "agent_timeout", "call_timeout", "stall", "stalled"}
+)
+
+
+def _workflow_retry_delay(attempt: int) -> float:
+    return min(30.0, 2.0 ** min(attempt, 5)) * (0.75 + random.uniform(0.0, 1.0) * 0.25)
 
 
 @dataclass(frozen=True)
@@ -171,26 +180,8 @@ def _delegate_child_result(value: object) -> _DelegateChildResult:
 
 
 def _normalize_child_failure_reason(value: object, *, default: str) -> str:
-    if isinstance(value, str):
-        raw = value.strip().lower()
-        aliases = {
-            "agent_timeout": "timeout",
-            "call_timeout": "timeout",
-            "timeout": "timeout",
-            "output_limit_exceeded": "output_cap",
-            "output_cap": "output_cap",
-            "stalled": "stall",
-            "stall": "stall",
-            "harness_cancelled": "stall",
-            "provider_cancelled": "stall",
-            "provider_refusal": "nonzero_exit",
-            "provider_max_turns": "nonzero_exit",
-            "nonzero_exit": "nonzero_exit",
-            "structured": "structured",
-        }
-        normalized = aliases.get(raw)
-        if normalized is not None:
-            return normalized
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return default
 
 
@@ -3161,27 +3152,7 @@ class WorkflowDsl:
             # Retry attachment is a child-run concern, not a structured-output
             # concern.  A work-lane timeout with no schema still has a dirty
             # worktree worth preserving for its retry.
-            attempts = retries if retries is not None else 0
-            if attempts <= 0:
-                return self._run_delegate(
-                    engine,
-                    prompt,
-                    mode=mode,
-                    model=model,
-                    effort=effort,
-                    fast=fast,
-                    isolation=isolation,
-                    passthrough=passthrough,
-                    timeout=timeout,
-                    output_schema=None,
-                    prefer_assistant=False,
-                    workflow_agent_key=key,
-                    label=label,
-                    persona=persona,
-                    allow_repo_persona=allow_repo_persona,
-                    expected_persona_digest=persona.digest if persona is not None else None,
-                    resumable=resumable,
-                )
+            attempts = max(0, retries or 0)
             retry_workspace_run_id: str | None = None
             retry_backend: str | None = None
             workspace_cleanup: JsonObject | None = None
@@ -3207,7 +3178,7 @@ class WorkflowDsl:
                         expected_persona_digest=persona.digest if persona is not None else None,
                         return_metadata=True,
                         structured_retry_run_id=retry_workspace_run_id,
-                        preserve_retry_workspace=True,
+                        preserve_retry_workspace=attempts > 0,
                         structured_retry_backend=retry_backend,
                         resumable=resumable,
                     )
@@ -3234,7 +3205,7 @@ class WorkflowDsl:
                     workspace_cleanup = child.workspace_cleanup
                 if child.isolation_backend == "bwrap":
                     retry_backend = "bwrap"
-                if child.text is not None:
+                if child.outcome is None and child.text is not None:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
                     if first_child_run_id is not None:
                         self._release_structured_retry_worktree(first_child_run_id)
@@ -3246,7 +3217,15 @@ class WorkflowDsl:
                     cleanup_ownership=child.workspace_cleanup,
                     execution_cwd=child.execution_cwd,
                 )
-                if attempt >= attempts or outcome.failure_reason not in CHILD_FAILURE_REASONS:
+                self.state.append_event(
+                    "agent_attempt_failed",
+                    key=key,
+                    label=label,
+                    engine=engine,
+                    attempt=attempt,
+                    childAttemptOutcome=outcome.as_json(),
+                )
+                if attempt >= attempts or outcome.failure_reason not in WORKFLOW_TRANSIENT_FAILURES:
                     break
                 self.state.append_event(
                     "agent_retry",
@@ -3259,6 +3238,13 @@ class WorkflowDsl:
                 )
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
+                try:
+                    self._wait_retry_backoff(attempt)
+                except BaseException:
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
+                    raise
             _cleanup_structured_retry_workspace(workspace_cleanup)
             if first_child_run_id is not None:
                 self._release_structured_retry_worktree(first_child_run_id)
@@ -3407,6 +3393,10 @@ class WorkflowDsl:
                 structured_retry_backend = "bwrap"
             text = child.text
             try:
+                if child.outcome is not None:
+                    last_parsed_candidate = None
+                    candidate_present = False
+                    raise ValueError("child failed; partial output is diagnostic only")
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 last_parsed_candidate = value
                 candidate_present = True
@@ -3437,6 +3427,20 @@ class WorkflowDsl:
                     if child.outcome is not None
                     else str(exc)
                 )
+                if child.outcome is not None:
+                    self.state.append_event(
+                        "agent_attempt_failed",
+                        key=key,
+                        label=label,
+                        engine=engine,
+                        attempt=attempt,
+                        childAttemptOutcome=outcome.as_json(),
+                    )
+                if attempt >= attempts or (
+                    child.outcome is not None
+                    and outcome.failure_reason not in WORKFLOW_TRANSIENT_FAILURES
+                ):
+                    break
                 if (
                     native_schema is not None
                     and child.outcome is not None
@@ -3478,6 +3482,13 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
+                try:
+                    self._wait_retry_backoff(attempt)
+                except BaseException:
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
+                    raise
         fallback: JsonValue | _MissingType | _StructuredNullType = _MISSING
         if child is not None:
             fallback = _structured_completion_report_fallback(child, self.state.workspace, schema)
@@ -3499,13 +3510,17 @@ class WorkflowDsl:
             scope=self.state.current_scope(),
             label=label,
             engine=engine,
-            attempts=attempts + 1,
+            attempts=attempt + 1 if child is not None else 0,
             **outcome.as_json(),
         )
         _cleanup_structured_retry_workspace(workspace_cleanup)
         if first_child_run_id is not None:
             self._release_structured_retry_worktree(first_child_run_id)
         return None
+
+    def _wait_retry_backoff(self, attempt: int) -> None:
+        if self.state.cancel_event.wait(_workflow_retry_delay(attempt)):
+            raise SupervisorWatchdogExit("cancellation requested during retry backoff")
 
     def _release_structured_retry_worktree(self, run_id: str) -> None:
         """Release a completed structured retry's completion-time worktree hold."""
@@ -3678,6 +3693,8 @@ class WorkflowDsl:
                 "workflow child could not resolve the parent-pinned persona"
             )
         if completed.returncode != 0:
+            if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
+                raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
             failure_reason = (
                 result.get("failureReason") or result.get("error")
                 if isinstance(result, dict)
@@ -3711,8 +3728,6 @@ class WorkflowDsl:
                 cleanup = recovered.workspace_cleanup if recovered is not None else None
             _cleanup_structured_retry_workspace(cleanup)
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
-            if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
-                raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
             # The child's JSON error is the real diagnosis; stderr alone is
             # often just the persona preface and pool warnings.
             parts = [f"delegate child exited {completed.returncode}"]
@@ -3923,33 +3938,54 @@ class WorkflowDsl:
         key: str,
         label: str | None = None,
     ) -> JsonValue | _StructuredNullType:
-        if schema is None:
-            return self._run_delegate_followup(
-                prior_child.run_id,
-                prompt,
-                engine=prior_child.engine,
-                timeout=timeout,
-                prefer_assistant=False,
-                workflow_agent_key=key,
-                label=label,
-            )
-        workflow_schema.validate_schema_subset(schema)
-        attempts = retries if retries is not None else _structured_retries(self.state.config)
+        if schema is not None:
+            workflow_schema.validate_schema_subset(schema)
+        attempts = (
+            retries
+            if retries is not None
+            else (_structured_retries(self.state.config) if schema is not None else 0)
+        )
         prior_output = ""
         prior_error = ""
         last_parsed_candidate: JsonValue | None = None
         candidate_present = False
         for attempt in range(attempts + 1):
-            attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
-            text = self._run_delegate_followup(
+            attempt_prompt = (
+                _structured_prompt(prompt, schema, prior_output, prior_error)
+                if schema is not None
+                else prompt
+            )
+            child = self._run_delegate_followup(
                 prior_child.run_id,
                 attempt_prompt,
                 engine=prior_child.engine,
                 timeout=timeout,
-                prefer_assistant=True,
+                prefer_assistant=schema is not None,
                 workflow_agent_key=key,
                 label=label,
             )
+            text = child.text
+            if child.outcome is not None:
+                prior_error = "child attempt " + child.outcome.failure_reason
+                last_parsed_candidate = None
+                candidate_present = False
+                self.state.append_event(
+                    "agent_attempt_failed",
+                    key=key,
+                    label=label,
+                    engine=prior_child.engine,
+                    attempt=attempt,
+                    childAttemptOutcome=child.outcome.as_json(),
+                )
+                if (
+                    attempt >= attempts
+                    or child.outcome.failure_reason not in WORKFLOW_TRANSIENT_FAILURES
+                ):
+                    break
+                self._wait_retry_backoff(attempt)
+                continue
+            if schema is None:
+                return text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 last_parsed_candidate = value
@@ -3960,6 +3996,8 @@ class WorkflowDsl:
             except Exception as exc:
                 prior_output = text or ""
                 prior_error = str(exc)
+                if attempt >= attempts:
+                    break
                 self.state.append_event(
                     "agent_structured_retry",
                     engine=prior_child.engine,
@@ -3968,6 +4006,9 @@ class WorkflowDsl:
                     key=key,
                     label=label,
                 )
+                self._wait_retry_backoff(attempt)
+        if schema is None:
+            return None
         outcome = StructuredAttemptOutcome(
             last_parsed_candidate=last_parsed_candidate,
             validation_error=prior_error,
@@ -3980,7 +4021,7 @@ class WorkflowDsl:
             scope=self.state.current_scope(),
             label=label,
             engine=prior_child.engine,
-            attempts=attempts + 1,
+            attempts=attempt + 1 if attempts >= 0 else 0,
             **outcome.as_json(),
         )
         return None
@@ -3995,7 +4036,7 @@ class WorkflowDsl:
         prefer_assistant: bool,
         workflow_agent_key: str,
         label: str | None = None,
-    ) -> str | None:
+    ) -> _DelegateChildResult:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle_file:
             handle_file.write(prompt)
             prompt_path = handle_file.name
@@ -4014,7 +4055,7 @@ class WorkflowDsl:
         except subprocess.TimeoutExpired:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
-            return None
+            return _failed_child_result(None, reason="timeout")
         finally:
             Path(prompt_path).unlink(missing_ok=True)
         text = completed.stdout.decode("utf-8", errors="replace")
@@ -4036,27 +4077,30 @@ class WorkflowDsl:
                 if label is not None:
                     event["label"] = label
                 self.state.append_event("agent_child", **event)
-        if completed.returncode != 0:
-            stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
-            raise RuntimeError(
-                stderr or text or f"delegate followup child failed with {completed.returncode}"
+        if (
+            completed.returncode != 0
+            or not isinstance(result, dict)
+            or result.get("ok") is not True
+        ):
+            child = (
+                _child_result_from_payload(result, text=None) if isinstance(result, dict) else None
             )
-        if result is None:
-            raise RuntimeError(f"delegate followup child returned invalid JSON: {text[:500]}")
-        if not isinstance(result, dict) or not result.get("ok", False):
-            return None
+            return _failed_child_result(
+                child,
+                reason=child.outcome.failure_reason if child and child.outcome else "nonzero_exit",
+            )
         if isinstance(result.get("text"), str):
-            return result["text"]
+            return _child_result_from_payload(result, text=result["text"])
         assistant = result.get("assistantText")
         if prefer_assistant and isinstance(assistant, str) and assistant.strip():
-            return assistant
+            return _child_result_from_payload(result, text=assistant)
         report_path = result.get("completionReportPath")
         report = _read_completion_report(report_path, self.state.workspace)
         if report is not None:
-            return report
+            return _child_result_from_payload(result, text=report)
         if isinstance(assistant, str):
-            return assistant
-        return ""
+            return _child_result_from_payload(result, text=assistant)
+        return _child_result_from_payload(result, text="")
 
 
 def _run_child_command_for_state(
@@ -4678,6 +4722,8 @@ def _last_fenced_json_block(report: str) -> str | None:
 def _structured_completion_report_fallback(
     child: _DelegateChildResult, workspace: Path, schema: JsonObject
 ) -> JsonValue | _MissingType | _StructuredNullType:
+    if child.outcome is not None:
+        return _MISSING
     try:
         report = _final_child_completion_report(child, workspace)
     except Exception:

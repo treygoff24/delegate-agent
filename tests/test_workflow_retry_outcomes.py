@@ -13,11 +13,11 @@ from delegate_agent.workflows import schema as workflow_schema
 
 
 class ChildAttemptOutcomeTests(unittest.TestCase):
-    def test_provider_terminal_reasons_keep_explicit_workflow_retry_aliases(self) -> None:
+    def test_provider_terminal_reasons_keep_their_names(self) -> None:
         expected = {
-            "provider_cancelled": "stall",
-            "provider_refusal": "nonzero_exit",
-            "provider_max_turns": "nonzero_exit",
+            "provider_cancelled": "provider_cancelled",
+            "provider_refusal": "provider_refusal",
+            "provider_max_turns": "provider_max_turns",
         }
         for reason, normalized in expected.items():
             with self.subTest(reason=reason):
@@ -202,7 +202,7 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
                 )
         self.assertEqual({"paused", "failed", "succeeded"}, set(observed))
 
-    def test_output_cap_outcome_links_retry_to_failed_run(self) -> None:
+    def test_output_cap_outcome_stops_and_preserves_failed_run_identity(self) -> None:
         first = runtime._DelegateChildResult(
             text=None,
             run_id="del_20260827T040000Z_output1",
@@ -217,12 +217,12 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             ),
         )
         value, calls = self._retry_value(first)
-        self.assertEqual(value, {"ok": True})
-        self.assertEqual(calls[1].kwargs["structured_retry_run_id"], first.run_id)
+        self.assertIsNone(value)
+        self.assertEqual(len(calls), 1)
         event = next(
             event
             for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
-            if event.get("type") == "agent_structured_retry"
+            if event.get("type") == "agent_attempt_failed"
         )
         self.assertEqual(event["childAttemptOutcome"]["failureReason"], "output_cap")
         self.assertEqual(

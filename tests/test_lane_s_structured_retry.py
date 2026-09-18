@@ -70,7 +70,7 @@ class StructuredSchemaFallbackTests(unittest.TestCase):
         self.assertEqual(event["key"], "array-root")
         self.assertIn("object", str(event["reason"]))
 
-    def test_failed_native_attempt_demotes_and_embeds_schema_on_resume(self) -> None:
+    def test_timed_out_native_attempt_demotes_and_embeds_schema_on_resume(self) -> None:
         schema = {
             "type": "object",
             "properties": {"ok": {"type": "boolean"}},
@@ -84,7 +84,7 @@ class StructuredSchemaFallbackTests(unittest.TestCase):
             session_id="session-1",
             outcome=runtime.ChildAttemptOutcome(
                 run_id="child-1",
-                failure_reason="nonzero_exit",
+                failure_reason="timeout",
                 session_id="session-1",
             ),
         )
@@ -118,4 +118,4 @@ class StructuredSchemaFallbackTests(unittest.TestCase):
         self.assertIn(json.dumps(schema, sort_keys=True), retry_prompt)
         demotion = next(row for row in self._journal() if row["type"] == "agent_schema_demoted")
         self.assertEqual(demotion["key"], "native-failure")
-        self.assertEqual(demotion["reason"], "nonzero_exit")
+        self.assertEqual(demotion["reason"], "timeout")
