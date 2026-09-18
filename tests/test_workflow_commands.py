@@ -5816,7 +5816,7 @@ class WorkflowCommandTests(unittest.TestCase):
         ]
         self.assertNotIn("agent_timeout", {event["type"] for event in events})
 
-    def test_schema_output_recursion_error_degrades_to_rejection_and_retry_events(self) -> None:
+    def test_schema_output_recursion_error_degrades_to_rejection_and_exhaustion(self) -> None:
         """Child parse failures outside schema errors stay inside the supervisor boundary."""
         from delegate_agent.workflows import runtime as workflow_runtime
 
@@ -5882,7 +5882,7 @@ class WorkflowCommandTests(unittest.TestCase):
                 for line in state.journal_path.read_text(encoding="utf-8").splitlines()
             )
         }
-        self.assertTrue({"agent_adopt_rejected", "agent_structured_retry"} <= event_types)
+        self.assertTrue({"agent_adopt_rejected", "agent_structured_exhausted"} <= event_types)
 
     def test_structured_retry_resumes_same_native_session(self) -> None:
         root = self.workspace / "workflow-native-resume"
