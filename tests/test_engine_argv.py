@@ -1263,6 +1263,8 @@ class EngineArgvTests(CommandTestBase):
 
     def test_cursor_fixed_effort_default_has_typed_outcome(self):
         fixed_efforts = {
+            "grok-4.7-xhigh-fast": "xhigh",
+            "grok-4.7-xhigh": "xhigh",
             "cursor-grok-4.6-xhigh-fast": "xhigh",
             "cursor-grok-4.6-xhigh": "xhigh",
             "gpt-5.5-high": "high",
@@ -1289,7 +1291,7 @@ class EngineArgvTests(CommandTestBase):
                 self.assertIn("omit --reasoning-effort", matching.exception.message)
                 self.assertIn("cursor.reasoningEffortModels", matching.exception.message)
 
-        fixed_model = "cursor-grok-4.6-xhigh-fast"
+        fixed_model = "grok-4.7-xhigh-fast"
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["cursor"]["defaultModel"] = fixed_model
         with self.assertRaises(error_types.DelegateError) as mismatched:
@@ -1337,7 +1339,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_cursor_fixed_effort_capability_helper_has_same_typed_outcome(self):
         cursor = json.loads(json.dumps(delegate_config.embedded_default_config()["cursor"]))
-        cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
+        cursor["defaultModel"] = "grok-4.7-xhigh-fast"
         with self.assertRaises(error_types.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
@@ -1345,7 +1347,7 @@ class EngineArgvTests(CommandTestBase):
     def test_cursor_fixed_effort_capability_helper_without_mapping_has_typed_outcome(self):
         cursor = json.loads(json.dumps(delegate_config.embedded_default_config()["cursor"]))
         cursor.pop("reasoningEffortModels")
-        cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
+        cursor["defaultModel"] = "grok-4.7-xhigh-fast"
         with self.assertRaises(error_types.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")

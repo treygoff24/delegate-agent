@@ -680,12 +680,12 @@ class TextParserTests(unittest.TestCase):
             ["low", "medium", "high", "xhigh", "max"],
         )
         grok = self.parse_grok((FIXTURES / "grok_models.txt").read_text())
-        self.assertEqual(grok["defaultModel"], "grok-4.6")
+        self.assertEqual(grok["defaultModel"], "grok-4.7")
         self.assertIsNone(grok["harnessReasoning"])
         bad_default = self.parse_grok(
             (FIXTURES / "grok_models.txt")
             .read_text()
-            .replace("Default model: grok-4.6", "Default model: missing-model")
+            .replace("Default model: grok-4.7", "Default model: missing-model")
         )
         self.assertEqual(bad_default["probeStatus"], "partial")
         self.assertIsNone(bad_default["defaultModel"])
@@ -728,30 +728,32 @@ class TextParserTests(unittest.TestCase):
     def test_grok_stops_before_trailing_help_sections(self):
         raw = (FIXTURES / "grok_models.txt").read_text() + "Options:\n  --help\n"
         models = self.parse_grok(raw)["models"]
-        self.assertEqual(models, {"grok-4.6": {}, "grok-4.5": {}})
+        self.assertEqual(
+            models, {"grok-4.7": {}, "grok-4.7-build-fast": {}, "grok-4.6": {}, "grok-4.5": {}}
+        )
 
     def test_grok_does_not_parse_unbulleted_trailing_prose_as_a_model(self):
         raw = (FIXTURES / "grok_models.txt").read_text() + "  Experimental\n"
         self.assertEqual(
             self.parse_grok(raw)["models"],
-            {"grok-4.6": {}, "grok-4.5": {}},
+            {"grok-4.7": {}, "grok-4.7-build-fast": {}, "grok-4.6": {}, "grok-4.5": {}},
         )
 
     def test_grok_accepts_a_wholly_unbulleted_model_list(self):
         """A build that prints plain selectors must not fail the whole probe."""
-        raw = "Default model: grok-4.6\n\nAvailable models:\n  grok-4.6 (default)\n  grok-4.5\n"
+        raw = "Default model: grok-4.7\n\nAvailable models:\n  grok-4.7 (default)\n  grok-4.6\n"
 
         fragment = self.parse_grok(raw)
 
-        self.assertEqual(fragment["models"], {"grok-4.6": {}, "grok-4.5": {}})
-        self.assertEqual(fragment["defaultModel"], "grok-4.6")
+        self.assertEqual(fragment["models"], {"grok-4.7": {}, "grok-4.6": {}})
+        self.assertEqual(fragment["defaultModel"], "grok-4.7")
 
     def test_grok_accepts_each_bullet_form(self):
-        for bullet, expected in (("*", "grok-4.6"), ("-", "grok-4.6"), ("", "grok-4.6")):
+        for bullet, expected in (("*", "grok-4.7"), ("-", "grok-4.7"), ("", "grok-4.7")):
             with self.subTest(bullet=bullet or "none"):
                 prefix = f"{bullet} " if bullet else ""
                 raw = (
-                    f"Default model: grok-4.6\n\nAvailable models:\n  {prefix}grok-4.6 (default)\n"
+                    f"Default model: grok-4.7\n\nAvailable models:\n  {prefix}grok-4.7 (default)\n"
                 )
                 self.assertEqual(self.parse_grok(raw)["models"], {expected: {}})
 

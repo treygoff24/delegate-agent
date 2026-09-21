@@ -310,16 +310,16 @@ class HarnessEventsTests(unittest.TestCase):
     def test_pinned_cursor_accepts_the_effort_suffixed_catalog_label(self):
         acc = self.events.StreamAccumulator(
             harness="cursor",
-            requested_model="cursor-grok-4.6-xhigh",
+            requested_model="grok-4.7-xhigh",
             continuity_mode="pinned",
         )
         acc.ingest_line(
-            json.dumps({"type": "system", "subtype": "init", "model": "Cursor Grok 4.6 Extra High"})
+            json.dumps({"type": "system", "subtype": "init", "model": "Grok 4.7  Extra High"})
         )
         self.assertIsNone(acc.continuity_violation)
 
     def test_pinned_cursor_still_rejects_a_different_model(self):
-        for served in ("Composer 2.6", "Cursor Grok 4.6 Extra High"):
+        for served in ("Composer 2.6", "Grok 4.7  Extra High"):
             with self.subTest(served=served):
                 acc = self.events.StreamAccumulator(
                     harness="cursor",

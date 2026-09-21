@@ -2654,6 +2654,8 @@ def build_request(
 
 
 _CURSOR_FIXED_REASONING_EFFORTS = {
+    "grok-4.7-xhigh-fast": "xhigh",
+    "grok-4.7-xhigh": "xhigh",
     "cursor-grok-4.6-xhigh-fast": "xhigh",
     "cursor-grok-4.6-xhigh": "xhigh",
     "gpt-5.5-high": "high",
