@@ -700,7 +700,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "codex": {"models": {"gpt-5.5": {"supported": ["low"], "default": "low"}}},
                 "droid": {"models": {"glm-5.1": {"supported": ["off", "high"], "default": "high"}}},
                 "grok": {
-                    "models": {"grok-4.6": {"supported": ["high", "xhigh"], "default": "high"}}
+                    "models": {"grok-4.7": {"supported": ["high", "xhigh"], "default": "high"}}
                 },
             }
         }
@@ -714,12 +714,12 @@ class ReasoningCapabilityTests(unittest.TestCase):
         assert loaded is not None
         declaration, source = _lookup_declaration(
             harness="grok",
-            model="grok-4.6",
+            model="grok-4.7",
             config={},
             cache=loaded,
         )
         self.assertEqual(source, "cache")
-        self.assertEqual(declaration, cache["harnesses"]["grok"]["models"]["grok-4.6"])
+        self.assertEqual(declaration, cache["harnesses"]["grok"]["models"]["grok-4.7"])
         self.assertNotIn("grok", TRANSPORT_BY_HARNESS)
 
     def test_cache_validation_accepts_a_cursor_row_beside_codex_and_grok(self):
@@ -729,7 +729,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "cursor": {"models": {"composer-2.5": {"supported": ["high"]}}},
                 "codex": {"models": {"gpt-5.5": {"supported": ["high"]}}},
                 "droid": {"models": {"droid-1": {"supported": ["high"]}}},
-                "grok": {"models": {"grok-4.6": {"supported": ["high"]}}},
+                "grok": {"models": {"grok-4.7": {"supported": ["high"]}}},
             }
         }
 

@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Bundled Grok declarations bumped to 4.7. The Grok CLI now ships `grok-4.7` as
+  its upstream default (bundled rows: `grok-4.7`, `grok-4.6`). Cursor's 4.7
+  ladder drops the `cursor-` prefix the 4.5/4.6 rows carried, so the bundled
+  Cursor rows and the fixed-effort selector table now name `grok-4.7-xhigh` and
+  `grok-4.7-xhigh-fast`; the still-served `cursor-grok-4.6-xhigh*` selectors
+  stay in the fixed-effort table. The Grok discovery fixture mirrors the live
+  `grok models` output, including `grok-4.7-build-fast`.
+
 ## [0.31.0] - 2026-09-14
 
 ### Harness compatibility audit (2026-09-07)
