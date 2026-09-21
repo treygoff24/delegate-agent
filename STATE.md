@@ -14,16 +14,16 @@ Updated: 2026-09-21 (Grok 4.7 bump; no new public release)
   `promotionMatchesRuntime: true`, Grok discovery refreshed. Mac Cursor
   discovery is empty because the Cursor seat was logged out earlier that day
   (`cursorw login` re-seats it; then `delegate capabilities refresh`).
-- **Open: devbox runtime switch deferred.** `delegate-promote-checkout` staged
-  the same payload on `trey-agent` but exited 75 under the live warrant
-  supervisor `wf_7816dc6fd0b9` (up since 09-20) and atlas `wf_7b3ed1ff49af`.
-  estate-sync will not retry while that checkout carries dirty `.beads`
-  files. Re-run `delegate-promote-checkout` there once the supervisors drain,
-  then `delegate doctor`. Pre-existing on that box: doctor reports
-  `promotionMatchesRuntime: false` because `__pycache__` pycs regenerated
-  inside the 02d30c44 release dir after the 09-17 stamp; a fresh promotion
-  re-stamps it. The beads DB there and here refuses writes pending a v53→v66
-  schema migration (designated-migrator decision), so this note is the ledger.
+- Devbox runtime promoted the same evening after Trey ruled the warrant
+  `wf_7816dc6fd0b9` and atlas `wf_7b3ed1ff49af` supervisors stale; both were
+  ended with `delegate workflow kill` (no in-flight children), then
+  `delegate-promote-checkout` installed
+  `~/.delegate/releases/1955e0e21f315de5-81e4fb5efaa28bc1` (same runtime
+  digest as the Mac's; only STATE.md differs). `promotionMatchesRuntime:
+  true`, no active supervisors, work-profile discovery carries the full
+  Cursor 4.7 ladder and both Grok 4.7 rows. The beads DB on both machines
+  refuses writes pending a v53→v66 schema migration (designated-migrator
+  decision for Trey), so this note is the ledger.
 
 ## Previous record (2026-09-17)
 
