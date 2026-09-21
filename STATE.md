@@ -1,6 +1,31 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-17 (local OMP identity repair; no new public release)
+Updated: 2026-09-21 (Grok 4.7 bump; no new public release)
+
+- `642b9d6` bumps the bundled Grok declarations to 4.7. Cursor's 4.7 ladder
+  drops the `cursor-` prefix (`grok-4.7-xhigh`, `grok-4.7-xhigh-fast`); the
+  Grok CLI defaults to `grok-4.7`. Gate at that revision: 3,395 passed, 18
+  skipped, compileall and pinned Ruff clean. Live config on the Mac and the
+  devbox (`trey-agent`) now defaults cursor to `grok-4.7-xhigh-fast` and grok
+  to `grok-4.7` (backups `config.json.bak-20260921-grok47`); smokes served
+  `grok-4.7-build` (Mac Grok Build) and `Grok 4.7 256K Extra High Fast`
+  (devbox Cursor).
+- Mac runtime promoted to `~/.delegate/releases/642b9d642bd44240-81e4fb5efaa28bc1`,
+  `promotionMatchesRuntime: true`, Grok discovery refreshed. Mac Cursor
+  discovery is empty because the Cursor seat was logged out earlier that day
+  (`cursorw login` re-seats it; then `delegate capabilities refresh`).
+- **Open: devbox runtime switch deferred.** `delegate-promote-checkout` staged
+  the same payload on `trey-agent` but exited 75 under the live warrant
+  supervisor `wf_7816dc6fd0b9` (up since 09-20) and atlas `wf_7b3ed1ff49af`.
+  estate-sync will not retry while that checkout carries dirty `.beads`
+  files. Re-run `delegate-promote-checkout` there once the supervisors drain,
+  then `delegate doctor`. Pre-existing on that box: doctor reports
+  `promotionMatchesRuntime: false` because `__pycache__` pycs regenerated
+  inside the 02d30c44 release dir after the 09-17 stamp; a fresh promotion
+  re-stamps it. The beads DB there and here refuses writes pending a v53→v66
+  schema migration (designated-migrator decision), so this note is the ledger.
+
+## Previous record (2026-09-17)
 
 - Source repair: `3b4fffb` (bead `dlg-nqv`). Pinned OMP comparison now uses
   the event's separate provider/model fields without collapsing repeated
