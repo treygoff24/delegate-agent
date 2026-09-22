@@ -306,6 +306,187 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("age:", text)
         self.assertIn("bare_handle_stale", text)
 
+    def test_run_output_json_projects_the_persisted_usage(self):
+        """Usage reached state-backed views but not the run-output readback."""
+        run_id, alias = self.write_run(harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["usage"] = {"basis": "reported", "inputTokens": 29957, "outputTokens": 12}
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["usage"], state["usage"])
+
+    def test_run_output_text_renders_the_persisted_usage(self):
+        run_id, alias = self.write_run(harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["usage"] = {"basis": "reported", "inputTokens": 29957, "outputTokens": 12}
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias], stdout=stdout
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("usage: basis=reported inputTokens=29957 outputTokens=12", stdout.getvalue())
+
+    def test_run_output_constructs_usage_from_the_allowlisted_shape(self):
+        """A record rewritten after the run cannot inject unnormalized fields.
+
+        `state.json` sits in the run registry and a non-isolated child shares the
+        workspace, so the stored object is not proof of the runner's
+        normalization. The readback rebuilds the allowlisted shape: one of the
+        bases the producer emits, known non-negative integer counters, and a
+        finite non-negative `costUsd`.
+        """
+        secret = "sk-tamperedusage1234567890"
+        tampered = {
+            "basis": "reported",
+            "inputTokens": 12,
+            "outputTokens": "not a counter",
+            "cacheReadTokens": -4,
+            "cache_write_tokens": 99,
+            "costUsd": 0.25,
+            "note": f"token {secret}",
+            "stderrTail": secret,
+        }
+        expected = {"basis": "reported", "inputTokens": 12, "costUsd": 0.25}
+        bad_basis = (
+            {"basis": "guessed", "inputTokens": 5},
+            {"basis": f"reported\n{secret}", "inputTokens": 5},
+            {"basis": "", "inputTokens": 5},
+            {"inputTokens": 5},
+        )
+        for case in (tampered, *bad_basis):
+            with self.subTest(usage=case.get("basis")):
+                run_id, alias = self.write_run(harness="cursor")
+                run_path = self.registry.run_directory(self.registry_root, run_id)
+                state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+                state["usage"] = case
+                self.registry.write_json_atomic(run_path / "state.json", state)
+                stdout = io.StringIO()
+
+                code = self.delegate.main(
+                    ["--json", "--cwd", str(self.workspace), "run-output", alias],
+                    stdout=stdout,
+                )
+
+                self.assertEqual(code, 0)
+                output = stdout.getvalue()
+                self.assertNotIn(secret, output)
+                payload = json.loads(output)
+                if case is tampered:
+                    self.assertEqual(payload["usage"], expected)
+                else:
+                    # An unknown basis is not a normalized record: the readback
+                    # omits usage instead of echoing a value no harness reported.
+                    self.assertNotIn("usage", payload)
+
+    def test_run_output_text_renders_a_redacted_tampered_usage(self):
+        secret = "sk-tamperedtext1234567890"
+        run_id, alias = self.write_run(harness="cursor")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["usage"] = {
+            "basis": "reported",
+            "inputTokens": 7,
+            "note": secret,
+            "costUsd": float("nan"),
+        }
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias], stdout=stdout
+        )
+
+        self.assertEqual(code, 0)
+        text = stdout.getvalue()
+        self.assertIn("usage: basis=reported inputTokens=7", text)
+        self.assertNotIn("note", text)
+        self.assertNotIn("costUsd", text)
+        self.assertNotIn(secret, text)
+
+    def test_snapshot_constructs_usage_from_the_allowlisted_shape(self):
+        """The snapshot readback allowlists the persisted usage too.
+
+        `snapshot` projects the same `state.json` run-output reads, and that
+        record is rewritten by whichever process shares the workspace, so the
+        view must carry the normalized shape: unknown keys, alternate
+        spellings, a newline-bearing or credential-shaped basis, and
+        bool/non-finite/negative counters never reach the projected record.
+        """
+        secret = "sk-tampersnapshot1234567890"
+        tampered = {
+            "basis": "reported",
+            "inputTokens": 21,
+            "outputTokens": True,
+            "cacheReadTokens": float("inf"),
+            "cacheWriteTokens": -1,
+            "cache_read_tokens": 99,
+            "costUsd": 0.5,
+            "note": secret,
+        }
+        expected = {"basis": "reported", "inputTokens": 21, "costUsd": 0.5}
+        cases = (
+            (tampered, expected),
+            ({"basis": f"reported\n{secret}", "inputTokens": 4}, None),
+            ({"basis": "guessed", "inputTokens": 4}, None),
+        )
+        for case, expected_usage in cases:
+            with self.subTest(usage=case.get("basis")):
+                run_id, alias = self.write_run(harness="cursor")
+                run_path = self.registry.run_directory(self.registry_root, run_id)
+                state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+                state["usage"] = case
+                self.registry.write_json_atomic(run_path / "state.json", state)
+
+                json_stdout = io.StringIO()
+                code = self.delegate.main(
+                    ["--json", "--cwd", str(self.workspace), "snapshot", alias],
+                    stdout=json_stdout,
+                )
+                text_stdout = io.StringIO()
+                text_code = self.delegate.main(
+                    ["--cwd", str(self.workspace), "snapshot", alias],
+                    stdout=text_stdout,
+                )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(text_code, 0)
+                output = json_stdout.getvalue()
+                self.assertNotIn(secret, output)
+                self.assertNotIn(secret, text_stdout.getvalue())
+                payload = json.loads(output)
+                if expected_usage is None:
+                    # A record whose basis is not one a producer emits is not a
+                    # normalized record: the view omits usage instead of
+                    # echoing it.
+                    self.assertNotIn("usage", payload)
+                else:
+                    self.assertEqual(payload["usage"], expected_usage)
+
+    def test_run_output_omits_usage_a_run_never_reported(self):
+        _, alias = self.write_run(harness="cursor")
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("usage", json.loads(stdout.getvalue()))
+
     def test_run_output_defaults_to_completion_report(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

@@ -414,6 +414,13 @@ class ParserTests(unittest.TestCase):
                 parsed = parser_api.parse_cli([subcommand, "--summary"])
                 self.assertTrue(parsed.payload.summary)
 
+    def test_models_summary_with_engine_points_at_focused_help(self):
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["models", "codex", "--summary"])
+
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("delegate help models", ctx.exception.next_actions or [])
+
     def test_models_unknown_option_fails_clearly(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
             parser_api.parse_cli(["models", "--verbose"])

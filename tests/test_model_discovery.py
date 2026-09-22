@@ -1033,6 +1033,199 @@ class CommandHelpModelsTests(unittest.TestCase):
         self.assertIn("advisory", notes)
         self.assertIn("does not update the cache", notes)
 
+    def test_models_help_states_summary_takes_no_engine(self):
+        from delegate_agent import command_help
+
+        spec = command_help.COMMAND_SPECS["models"]
+        notes = " ".join(spec.notes)
+
+        self.assertIn("--summary takes no <engine> argument", notes)
+        self.assertIn("delegate models <engine>", notes)
+
+
+class ConfiguredModelCatalogTests(unittest.TestCase):
+    """A configured default the catalog no longer lists must be visible."""
+
+    def _snapshot(self, engine: str, selectors: tuple[str, ...]):
+        from delegate_agent import harness_discovery
+
+        snapshot = harness_discovery.empty_snapshot(profile="default")
+        snapshot["harnesses"] = {
+            engine: {
+                "installed": True,
+                "probeStatus": "ok",
+                "models": {selector: {} for selector in selectors},
+            }
+        }
+        return snapshot
+
+    def test_an_absent_selector_warns_with_nearest_matches(self):
+        from delegate_agent import model_discovery
+
+        (warning,) = model_discovery.configured_model_absence_warning(
+            "cursor",
+            "grok-4.5-fast-xhigh",
+            self._snapshot("cursor", ("grok-4.7-xhigh-fast", "composer-2.5")),
+        )
+
+        self.assertIn("'grok-4.5-fast-xhigh'", warning)
+        self.assertIn("grok-4.7-xhigh-fast", warning)
+        self.assertIn("capabilities refresh", warning)
+
+    def test_a_listed_selector_and_an_empty_catalog_stay_silent(self):
+        from delegate_agent import model_discovery
+
+        self.assertEqual(
+            model_discovery.configured_model_absence_warning(
+                "cursor", "composer-2.5", self._snapshot("cursor", ("composer-2.5",))
+            ),
+            (),
+        )
+        self.assertEqual(
+            model_discovery.configured_model_absence_warning(
+                "cursor", "composer-2.5", self._snapshot("codex", ("gpt-5.6-sol",))
+            ),
+            (),
+        )
+        self.assertEqual(
+            model_discovery.configured_model_absence_warning("cursor", None, None),
+            (),
+        )
+
+    def test_doctor_reports_configured_defaults_missing_from_the_catalog(self):
+        from delegate_agent import cli, harness_discovery
+
+        config = {
+            "cursor": {"defaultModel": "grok-4.5-fast-xhigh"},
+            "codex": {"defaultModel": "gpt-5.6-sol"},
+        }
+        snapshot = self._snapshot("cursor", ("grok-4.7-xhigh-fast",))
+        snapshot["harnesses"]["codex"] = {
+            "installed": True,
+            "probeStatus": "ok",
+            "models": {"gpt-5.6-sol": {}},
+        }
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=snapshot):
+            warnings = cli._configured_model_warnings(config, profile_name="default")
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("cursor model 'grok-4.5-fast-xhigh'", warnings[0])
+
+    def test_doctor_resolves_a_configured_alias_before_comparing(self):
+        from delegate_agent import cli, harness_discovery
+
+        config = {
+            "cursor": {
+                "defaultModel": "fast",
+                "models": {"fast": "grok-4.7-xhigh-fast"},
+            }
+        }
+        snapshot = self._snapshot("cursor", ("grok-4.7-xhigh-fast",))
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=snapshot):
+            warnings = cli._configured_model_warnings(config, profile_name="default")
+
+        self.assertEqual(warnings, ())
+
+    def test_a_credential_shaped_selector_is_redacted_in_the_warning(self):
+        from delegate_agent import model_discovery
+
+        secret = "sk-livesecret1234567890"
+        (warning,) = model_discovery.configured_model_absence_warning(
+            "cursor",
+            secret,
+            self._snapshot("cursor", (f"{secret}-v2", "composer-2.5")),
+        )
+
+        self.assertNotIn(secret, warning)
+        self.assertIn("composer-2.5", warning)
+
+    def test_alias_targets_are_checked_with_their_alias_named(self):
+        from delegate_agent import model_discovery
+
+        (warning,) = model_discovery.configured_alias_absence_warnings(
+            "cursor",
+            {"fast": "grok-9-retired", "other": "grok-9-retired", "ok": "composer-2.5"},
+            self._snapshot("cursor", ("composer-2.5",)),
+        )
+
+        self.assertIn("alias 'fast'", warning)
+        self.assertIn("'grok-9-retired'", warning)
+        # One dead target named by two aliases is one finding, and a listed
+        # target stays silent.
+        self.assertEqual(
+            model_discovery.configured_alias_absence_warnings(
+                "cursor", {"ok": "composer-2.5"}, self._snapshot("cursor", ("composer-2.5",))
+            ),
+            (),
+        )
+
+    def test_alias_targets_stay_silent_without_a_catalog(self):
+        from delegate_agent import model_discovery
+
+        self.assertEqual(
+            model_discovery.configured_alias_absence_warnings(
+                "cursor", {"fast": "grok-9-retired"}, None
+            ),
+            (),
+        )
+        self.assertEqual(
+            model_discovery.configured_alias_absence_warnings(
+                "cursor", {"fast": "grok-9-retired"}, self._snapshot("codex", ("gpt-5.6-sol",))
+            ),
+            (),
+        )
+        self.assertEqual(
+            model_discovery.configured_alias_absence_warnings("cursor", "not-a-mapping", None), ()
+        )
+
+    def test_doctor_warns_about_a_configured_alias_target_missing_from_the_catalog(self):
+        from delegate_agent import cli, harness_discovery
+
+        config = {
+            "cursor": {
+                "defaultModel": "composer-2.5",
+                "models": {"fast": "grok-9-retired"},
+            }
+        }
+        snapshot = self._snapshot("cursor", ("composer-2.5",))
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=snapshot):
+            warnings = cli._configured_model_warnings(config, profile_name="default")
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("alias 'fast'", warnings[0])
+        self.assertIn("grok-9-retired", warnings[0])
+
+    def test_doctor_does_not_repeat_one_dead_target(self):
+        from delegate_agent import cli, harness_discovery
+
+        config = {
+            "cursor": {
+                "defaultModel": "fast",
+                "models": {"fast": "grok-9-retired"},
+            }
+        }
+        snapshot = self._snapshot("cursor", ("composer-2.5",))
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=snapshot):
+            warnings = cli._configured_model_warnings(config, profile_name="default")
+
+        # The default resolves to the same dead target its alias names, so the
+        # finding must not be reported twice; whether it arrives as one message
+        # or two is the producer's choice.
+        self.assertEqual(len(warnings), len(set(warnings)))
+        self.assertTrue(any("alias 'fast'" in warning for warning in warnings))
+
+    def test_doctor_redacts_a_credential_shaped_alias_target(self):
+        from delegate_agent import cli, harness_discovery
+
+        secret = "sk-livesecret1234567890"
+        config = {"cursor": {"models": {"fast": secret}}}
+        snapshot = self._snapshot("cursor", ("composer-2.5",))
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=snapshot):
+            warnings = cli._configured_model_warnings(config, profile_name="default")
+
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn(secret, warnings[0])
+
 
 if __name__ == "__main__":
     unittest.main()

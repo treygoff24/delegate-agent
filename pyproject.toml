@@ -43,6 +43,11 @@ delegate = "delegate_agent.cli:main"
 dev = [
   "ruff==0.15.15",
   "build>=1.0",
+  # The build frontend needs its backend present for an explicit
+  # `python -m build --no-isolation` run; the isolated path installs these
+  # itself, so this only makes the documented non-isolated form work.
+  "setuptools>=69",
+  "wheel",
   "twine>=5.0",
   "pytest>=8",
   "pytest-xdist>=3",

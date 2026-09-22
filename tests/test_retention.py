@@ -191,6 +191,74 @@ class RetentionTests(unittest.TestCase):
             self.assertFalse(scratch.exists())
             self.assertFalse(run_path.exists())
 
+    def test_run_prune_removes_recorded_compact_temp_with_the_scratch(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+            tempfile.TemporaryDirectory() as probe_root,
+            mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", Path(probe_root)),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            temp_dir = run_scratch.allocate_compact_temp(self.registry_root, run_id)
+            (temp_dir / "child-artifact.txt").write_text("remove\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "runId": run_id,
+                    "scratchPath": str(scratch),
+                    "tempPath": str(temp_dir),
+                },
+            )
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertTrue(result["ok"], result["errors"])
+            self.assertFalse(scratch.exists())
+            self.assertFalse(temp_dir.exists())
+            self.assertFalse(run_path.exists())
+
+    def test_run_prune_refuses_conflicting_recorded_temp_path(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+            tempfile.TemporaryDirectory() as probe_root,
+            mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", Path(probe_root)),
+        ):
+            run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+            scratch = run_scratch.allocate(self.registry_root, run_id)
+            temp_dir = run_scratch.allocate_compact_temp(self.registry_root, run_id)
+            (temp_dir / "forensic.txt").write_text("retain\n", encoding="utf-8")
+            outside = Path(probe_root) / "not-this-run"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "runId": run_id,
+                    "scratchPath": str(scratch),
+                    "tempPath": str(outside),
+                },
+            )
+
+            result = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("temp path", result["errors"][0]["message"])
+            self.assertEqual((temp_dir / "forensic.txt").read_text(encoding="utf-8"), "retain\n")
+            self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep\n")
+            self.assertTrue(run_path.exists())
+
     def test_run_prune_refuses_corrupt_manifest_with_external_scratch(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

@@ -119,6 +119,11 @@ except config.ConfigError as exc:
                 stdout=io.StringIO(),
             )
         self.assertEqual(raised.exception.error, "workflow_profile_drift")
+        # The refusal has to name which binding drifted: an operator who cannot
+        # see it only knows to relaunch.
+        self.assertIn("profile", raised.exception.message)
+        self.assertIn("pin=", raised.exception.message)
+        self.assertIn("current=", raised.exception.message)
         self.assertEqual((root / registry.STATUS_FILE).read_bytes(), before)
         self.assertFalse((root / registry.APPROVAL_FILE).exists())
 

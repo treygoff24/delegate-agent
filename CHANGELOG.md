@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tracked runs persist the harness-reported token `usage` on the run record, so
+  `snapshot`, `run-output`, and `runs --json` expose it without re-reading the
+  child's stream (previously it reached only call mode's launch response).
+- A fungible or panel run whose harness reports a served model other than the
+  resolved one now carries a `model_substitution` warning naming requested,
+  resolved, and served models. Pinned runs already pause on a switch; the
+  warning closes the silent case for the default continuity mode.
+- `delegate doctor` warns when a configured `<engine>.defaultModel` (resolved
+  through `<engine>.models` aliases first) is absent from the selected profile's
+  discovery catalog, naming the nearest discovered selectors. It checks the
+  unique targets of configured `<engine>.models` aliases the same way, naming the
+  alias key, since a selector an operator wrote down is worth knowing about even
+  when no current launch selects it. A cursor launch
+  adds the same warning for its selected selector, because cursor-agent resolves
+  an unknown selector inside the child. All of them are warnings: an empty or
+  missing catalog stays silent, and no configured value is rewritten or refused.
+- `workflow run` warns when it detects it is running inside a systemd unit whose
+  `KillMode` will reap the detached supervisor (`control-group`/`mixed`), naming
+  the unit and the required `-p KillMode=process`. Previously the unit reported
+  success while the workflow was already dead.
+
+### Fixed
+- Codex work runs recover the last substantive agent message as the completion
+  report when the stream never sealed `turn.completed`, instead of classifying a
+  complete report as `resultQuality=empty`. A progress preamble is still not
+  adopted.
+- `run-output` no longer claims no recoverable final message exists while the
+  child wrote stdout; the diagnostic states the byte count and names the command
+  that reads it.
+- Workflow child launches that fail before publishing a run record record the
+  exit code and a bounded, redacted stderr tail on the attempt outcome and on a
+  new `child_stdout_unparsed` event (previously only the JSON decode error of
+  empty stdout was kept). `agent_structured_retry` carries the tail too. This
+  covers a child that exits `0` after writing empty or non-JSON stdout, on both
+  the initial `agent()` launch and `followup`.
+- An empty `runs`/`ps` listing now adds the workspace-scope warning without
+  requiring `--group`/`--harness`, so a bare `runs --running` in a directory
+  with no Registry no longer prints an empty table that reads as dead lanes.
+  `wait --group` on a group stored in another workspace reports the same hint
+  and names the searched Registry.
+- `workflow_not_found` errors for `status`, `run --resume`, and id-based verbs
+  name the searched workflow root and the `--cwd` form, so "stored elsewhere"
+  is distinguishable from "gone". The workflow profile-drift refusal names the
+  differing identity keys with their pinned and current values.
+- `models <engine> --summary` points at `delegate help models`, and the focused
+  help states that `--summary` takes no engine argument.
+- The linked-worktree registry-lock guard verifies suite ancestry before
+  reporting a violation, so a concurrent unrelated Delegate launcher holding the
+  same file is no longer reported as a suite escape.
+- Test bootstrap pins `MISE_DATA_DIR`/`MISE_CACHE_DIR` suite-wide, so a
+  subprocess-bearing test no longer makes the mise python shim download an
+  interpreter into a temporary HOME and pollute stderr.
+- The suite removes the compact child temp directory each tracked run manifest
+  records before it tears that temporary registry down, and asserts no test
+  leaves a net directory under the production owner root. Previously any test
+  that launched a real Delegate subprocess created `/var/tmp/dlg-<uid>/<token>`
+  that only `runs prune` could ever remove, and the temporary registry those
+  paths were derived from was deleted first. The run's own recorded child is
+  settled first: a live child whose command line carries one of the paths its
+  manifest names gets a bounded grace to reach its own exit (so a fixture child
+  writing through `$TMPDIR` finishes), and only then, or after being reaped, is
+  the exact recorded directory removed.
+- `run-output`, `runs`/`ps`, and `snapshot` reconstruct a persisted run's
+  `usage` from one allowlisted normalized shape instead of copying the stored
+  object, so a record rewritten after the run (a non-isolated child shares the
+  workspace) cannot inject unknown keys, an unknown basis, or credential-shaped
+  text into a payload or the `usage:` line. A record whose basis is not one a
+  producer emits contributes no usage at all.
+- The served-model comparison behind the `model_substitution` warning uses the
+  same harness-aware identity rules as the pinned check: OMP's provider-qualified
+  `provider/model` observation, a Cursor display name, and a Claude family alias
+  are the requested model, not substitutions. A clean OMP lane is no longer
+  labelled as substituted.
+- Model warnings redact their model values: `model_substitution`,
+  `pinned_continuity_unverified`, and the configured-model/alias catalog warnings
+  can carry an operator- or provider-supplied selector, and all of them reach
+  `state.json`, `delegate.doctor.v1`, or the completion report. A
+  credential-shaped selector is masked instead of persisted.
+- Workflow child launches that fail before publishing JSON carry the same
+  evidence on the *initial* `agent()` attempt as on followups: the outcome
+  records the exit code and a bounded, redacted stderr tail, and stdout that
+  never parsed emits `child_stdout_unparsed`. An exit-zero child whose envelope
+  is unusable is now reported as `invalid_envelope` rather than `nonzero_exit`.
+- `workflow run` detects the systemd unit from the cgroup component that owns
+  the current process instead of any ancestor `.service` in the path, so an
+  ordinary interactive session under `user@<uid>.service` no longer receives the
+  severe `KillMode` warning. A unit under the per-user manager is queried through
+  `systemctl --user` rather than read as a system-manager lookup failure.
+- The track's child `TMPDIR`/`TMP`/`TEMP` now points at a separate per-run
+  short-path directory (`/var/tmp/dlg-<uid>/<token>`, recorded as
+  `manifest.tempPath`) instead of the run scratch. The scratch path carries the
+  registry hash and run id, so a child binding a Unix socket under it overran
+  `sun_path`; the new root is short by construction, stays owner-only, is granted
+  as a second writable root in the Codex read-only permissions profile, is bound
+  read-write inside the optional bwrap boundary, survives failure and
+  cancellation like the scratch, and is removed only by the same run-owned prune
+  path. Runs recorded without a `tempPath` prune as before.
+- The completion report carries a `model_substitution` warning and the run's
+  normalized token usage in a labelled delegate-authored block above the child's
+  text, and `run-output` (JSON and text) projects the persisted usage. A
+  substituted lane no longer reads as the requested model's clean work in the
+  report artifact, while the child's report text and its
+  `completionReportSource` attribution are unchanged.
+- The `dev` extra ships `setuptools` and `wheel`, making the documented
+  `python -m build --no-isolation` form work instead of failing with
+  `BackendUnavailable`. The isolated build path is unchanged.
+
 ### Changed
 - Bundled Codex declarations move to the GPT-6 line. `gpt-6-sol` and
   `gpt-6-luna` replace the `gpt-5.6-sol`/`gpt-5.6-luna` rows and `gpt-5.6-terra`
@@ -27,6 +135,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `grok-4.7-xhigh-fast`; the still-served `cursor-grok-4.6-xhigh*` selectors
   stay in the fixed-effort table. The Grok discovery fixture mirrors the live
   `grok models` output, including `grok-4.7-build-fast`.
+- The skill-review preamble is explicitly bounded: read the served skill index
+  once, read only the skills judged relevant, and do not run discovery CLIs to
+  enumerate skills. The requirement stays mandatory; it no longer reads as an
+  open-ended discovery task.
+- `workflow reject`'s `agent_rejected` event records `rejectedBy: "coordinator"`,
+  and the workflow DSL `reject(key, reason, by=...)` accepts `seat`,
+  `merge-gate`, or `coordinator`. Emitters that declare nothing keep the legacy
+  event shape, so a missing `rejectedBy` means unknown, not seat failure.
+- A structured-output resume retry re-renders the target schema into the
+  correction prompt instead of asking the model to recall the shape; both GLM
+  review retries had rebuilt a root-array schema as an object wrapper and failed
+  again.
+
 
 ## [0.31.0] - 2026-09-14
 

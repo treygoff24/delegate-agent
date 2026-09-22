@@ -109,7 +109,10 @@ pinned run that completes with `modelProvenance.servedModelSource:
 "unavailable"` carries a `pinned_continuity_unverified` warning naming the
 harness, because nothing was observed to check; an ungrouped `call` carries
 the same warning on its payload. Codex and Grok streams carry no model field
-today.
+today. Fungible (the default) and panel runs never pause on a switch; when the
+harness reports a served model that differs from the resolved one, the record
+carries a `model_substitution` warning naming requested, resolved, and served
+models, so a substituted lane is not read as the requested model's work.
 
 `delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
 containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.
@@ -287,6 +290,13 @@ A few boundaries are worth stating explicitly:
 - **Dirty submodules fail preflight.** Delegate auto-syncs ordinary tracked and
   untracked non-ignored source changes, but cannot safely reproduce dirty
   submodule state, so it refuses the launch until that submodule is clean.
+- **Writes outside a non-isolated workspace are not reported.** `work` mode
+  defaults to `--isolation none`: the child runs in the resolved workspace with
+  no write boundary, and launch-versus-exit drift is recorded only for
+  persistent-worktree runs. Delegate neither refuses nor flags a write to an
+  absolute path outside that workspace, so `git status` a checkout a
+  non-isolated lane was not supposed to touch. See the
+  [security model](security-model.md#non-isolated-work-mode---isolation-none).
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file and will sync by
   content; `--include-dirty` trusts every non-ignored path. Path-based exclusion
@@ -606,7 +616,18 @@ delegate [--json] workflow save <script.py> --name NAME
   the existing single envelope. A successful watch observes the workflow; inspect
   its final workflow status to distinguish successful work from failed work.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
-  without launching child agents or consuming real budget. Each entry in
+  without launching child agents or consuming real budget. Because the supervisor
+  is detached, the invoking process exits immediately: under a systemd unit the
+  unit's `KillMode` must be `process` (`systemd-run -p KillMode=process ...`).
+  The default `control-group` reaps the supervisor with the rest of the cgroup
+  about half a second after that exit while the unit still reports
+  `Result=success`, `ExecMainStatus=0`, so `journalctl` shows nothing wrong and
+  only `workflow status` reports the stalled supervisor. A launch detected inside
+  such a unit adds a warning naming the unit and the required setting; the check
+  reads only the cgroup component that owns the current process, so an ordinary
+  interactive session under the per-user manager stays silent, as does a host
+  without `systemctl` or a unit already using `KillMode=process` or `none`. A unit
+  under the per-user manager is queried through `systemctl --user`. Each entry in
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
   and UTF-8 `promptBytes`; Kimi prompts over 102400 bytes add a warning before its
   argv transport limit can fail a real run. Kimi is the only engine still on argv.
@@ -620,6 +641,13 @@ delegate [--json] workflow save <script.py> --name NAME
   an `agent_child` event binds `runId` to the structural `key` (also emitted as
   `workflowAgentKey`) and includes `label` when the `agent()` call supplied one;
   consumers can then inspect terminal child identity through `snapshot <runId>`.
+  An `agent_rejected` event carries `rejectedBy` when the emitter declared who
+  refused the result: `seat` (the agent's own output failed validation),
+  `merge-gate` (integration refused an accepted result), or `coordinator` (a
+  cached result was invalidated). Emitters declare it with `reject(key, reason,
+  by=...)`; the `workflow reject` command always records `coordinator`. Events
+  without a declared source omit the field, so treat a missing `rejectedBy` as
+  unknown rather than as a seat failure.
 - `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
   the latest eligible workflow. JSON output for implicit selection includes the
   selected `wfId` and `resolutionKind: "latest"`.
@@ -640,7 +668,8 @@ delegate [--json] workflow save <script.py> --name NAME
   child fan-out cancellation.
 - `reject` records an agent-result rejection by structural key or unambiguous
   label, with a non-empty reason. It refuses a live supervisor; use the script's
-  `reject()` in that case. It does not relaunch the workflow automatically.
+  `reject()` in that case. It does not relaunch the workflow automatically. The
+  recorded event always carries `rejectedBy: "coordinator"`.
 - JSON-capable workflow commands return the normal `{ok: ...}` envelope. Invalid
   scripts fail with `invalid_workflow_script`.
 
@@ -925,6 +954,21 @@ the same thing. JSON (`delegate.doctor.v1`) fields:
 `runtimeDigest`, `entrypoint`, `entrypointDigest`, `promotion`,
 `promotionMatchesRuntime`, `activeSupervisors`, `warnings`.
 
+Doctor's config-derived warnings, resolved best effort (an unreadable or invalid
+config produces none of them rather than an error):
+
+- `codex.profile` layering a `<CODEX_HOME>/<profile>.config.toml` that does not
+  exist, because Codex accepts an unknown profile name silently.
+- A configured `<engine>.defaultModel` (resolved through `<engine>.models`
+  aliases first) that the selected profile's discovery catalog does not list.
+  The warning names the nearest discovered selectors and points at
+  `delegate capabilities refresh` / `delegate models <engine> --live`. It is
+  advisory only: an engine with no catalog, or an empty cache, stays silent, and
+  a configured selector is never rewritten or refused. A tracked launch adds the
+  same `cursor` warning when its selected selector is absent from the catalog,
+  because cursor-agent resolves an unknown selector inside the child and fails
+  there.
+
 `delegate promote` records who installed the runtime, from what source, and
 its digest (`delegate.promotion.v1`). It copies no code. Run it through the
 installed command *after* installing, so the default digest is the live one;
@@ -1022,6 +1066,10 @@ advisory IDs. `models <engine> --live` runs one fresh probe in the selected
 profile environment, but does not update Delegate config or cache. Use setup or
 `capabilities refresh` when ordinary launches should consume the new record.
 Claude is the only harness without a non-interactive live model catalog.
+
+`--summary` takes no `<engine>` argument: it emits the compact alias-centered
+inventory across engines. Use `delegate models <engine>` for a per-engine
+catalog, optionally with `--live`.
 
 Automatic setup and refresh use these evidence sources:
 
@@ -1178,19 +1226,24 @@ fails closed instead of selecting the fallback. Delegate preserves the existing
 mode of the shared `~/.delegate` directory and hardens only scratch-owned
 descendants to `0700`.
 
-Delegate exports `TMPDIR`, `TMP`, and `TEMP` to the exact manifest-recorded path
-after applying profile env overrides. Scratch survives failure and cancellation.
-`delegate runs prune` removes it with the terminal run record only when the
-recorded path still equals the deterministic current owned path; moving the
-registry or changing `HOME` causes a refusal rather than deletion through an
-untrusted pointer. Legacy run-local scratch remains part of its run record.
+Delegate exports `TMPDIR`, `TMP`, and `TEMP` to a second per-run owned directory
+`/var/tmp/dlg-<uid>/<token>` (recorded as `manifest.tempPath`), after applying
+profile env overrides. The scratch path carries the registry hash and run id, and
+a child that binds a Unix socket under it overruns `sun_path` (108 bytes) once its
+own socket name is appended; the child's temp root keeps the path short while the
+scratch keeps its documented location. Both directories are owner-only `0700`,
+both survive failure and cancellation, and `delegate runs prune` removes them
+together only when the recorded path still equals the deterministic current owned
+path; moving the registry or changing `HOME` causes a refusal rather than deletion
+through an untrusted pointer. Legacy run-local scratch remains part of its run
+record, and a legacy run that recorded no `tempPath` prunes as before.
 
 For Codex read-only runs, Delegate selects a high-entropy named permissions
-profile extending `:read-only` with exactly the neutral scratch path writable.
-Isolated work-mode Codex keeps its configured workspace sandbox and receives the
-same temp environment. Other engines receive the neutral scratch path through the
-temp environment only; repo-copy and persistent-worktree isolation semantics
-are unchanged.
+profile extending `:read-only` with exactly the neutral scratch path and the
+child's temp root writable. Isolated work-mode Codex keeps its configured
+workspace sandbox and receives the same temp environment. Other engines receive
+the per-run temp root through `TMPDIR`, `TMP`, and `TEMP` only; repo-copy and
+persistent-worktree isolation semantics are unchanged.
 
 ### Run registry inspection
 
@@ -1250,11 +1303,13 @@ creating a Run or writing a prompt record.
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
 and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
-`showing N of M runs (raise --limit to see more)` when truncated. A zero-row result with
-`--group` or `--harness` adds a `warnings` entry (and a matching text `warning:` line): when
-the scope filters match Runs that `--active`/`--running`/`--stale` then excluded, it names
-the status flag to drop; otherwise it notes the Registry is workspace-scoped and `--cwd PATH`
-targets another workspace's Registry — it does not claim the filter matches elsewhere.
+`showing N of M runs (raise --limit to see more)` when truncated. An empty result adds a
+`warnings` entry (and a matching text `warning:` line): when status filters match Runs
+that `--active`/`--running`/`--stale` then excluded, it names the status flag to drop;
+otherwise it notes the Registry is workspace-scoped and `--cwd PATH` targets another
+workspace's Registry — it does not claim the filter matches elsewhere. The
+workspace-scope note applies to a bare empty listing too, not only to `--group`/
+`--harness` filters.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
 accepts the same harness, group, limit, and structural selectors (including `total`,
 `truncated`, and the empty-filter workspace-scope warning).
@@ -1362,6 +1417,15 @@ Work-mode attempts are never replayed after tool activity or a workspace change.
 `codexThreadFallback` and an event/warning disclose when that fallback engaged.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
+
+A tracked Run persists the harness-reported token `usage` (same shape call mode
+returns: `basis`, token counters, and `costUsd` when the harness reports one)
+on its record, so `snapshot`, `run-output`, and `runs --json` expose it without
+re-reading the child's stream. Harnesses that report no usage omit the field. A
+run that reported usage also states it, together with any `model_substitution`
+warning, in a labelled delegate-authored block above the child's text in the
+completion report; the child's own words and `completionReportSource` are
+unchanged.
 
 Tracked stdout and stderr logs are capped independently. Pi and OMP default to
 64 MiB per stream; other engines default to 16 MiB. Set

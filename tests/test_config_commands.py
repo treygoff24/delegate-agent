@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest import mock
 
 from delegate_agent import errors as errors_api
-from tests import ORIGINAL_HOME
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -213,24 +212,20 @@ class LauncherShimTests(unittest.TestCase):
         return probe
 
     def shim_env(self, home: str, probe: Path, profile: str) -> dict[str, str]:
-        # `python3` resolves through mise on the agent image.  The shim runs
-        # with a temporary HOME, so point mise back at the real user's
-        # existing cache and installs instead of making each test download a
-        # fresh interpreter (and emit install progress on stderr).
-        real_home = Path(ORIGINAL_HOME or Path.home())
-        mise_data_dir = os.environ.get("MISE_DATA_DIR") or str(
-            Path(os.environ.get("XDG_DATA_HOME", real_home / ".local/share")) / "mise"
-        )
-        mise_cache_dir = os.environ.get("MISE_CACHE_DIR") or str(
-            Path(os.environ.get("XDG_CACHE_HOME", real_home / ".cache")) / "mise"
-        )
+        # `python3` resolves through mise on the agent image.  MISE_DATA_DIR/
+        # MISE_CACHE_DIR are pinned suite-wide by tests/__init__.py so the shim
+        # reuses the real user's existing installs instead of making each test
+        # download a fresh interpreter (and emit install progress on stderr).
         return {
             "HOME": home,
             "PATH": os.environ.get("PATH", ""),
             "AI_PROFILE": profile,
             "DELEGATE_SHIM_PY": str(probe),
-            "MISE_DATA_DIR": mise_data_dir,
-            "MISE_CACHE_DIR": mise_cache_dir,
+            **{
+                name: os.environ[name]
+                for name in ("MISE_DATA_DIR", "MISE_CACHE_DIR")
+                if name in os.environ
+            },
         }
 
     def test_missing_work_profile_launch_and_mutation_commands_are_blocked(self):

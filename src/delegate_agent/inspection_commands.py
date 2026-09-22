@@ -153,7 +153,10 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
     else:
         summaries = [redaction.redact_value(summary) for summary in summaries]
     warnings: list[str] = []
-    if not summaries and (command.group is not None or command.harness is not None):
+    if not summaries:
+        # An empty table reads as "every lane died" unless the listing says why.
+        # The workspace-scope hint is not a property of --group/--harness: a bare
+        # status-filtered listing against an empty Registry needs it just as much.
         status_filter_present = command.running or command.stale or command.active
         if status_filter_present and scope_total > 0:
             if command.running:
@@ -162,7 +165,7 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
                 warnings.append("No stale runs matched. Drop --stale to include terminal runs.")
             else:
                 warnings.append("No active runs matched. Drop --active to include terminal runs.")
-        else:
+        elif scope_total == 0:
             warnings.append(
                 "No matching runs in this workspace Registry. "
                 "The run Registry is workspace-scoped; use --cwd PATH to target another "

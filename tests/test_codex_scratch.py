@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -216,27 +217,36 @@ class CodexScratchTests(unittest.TestCase):
                 (work_manifest, work_observed, work_registry),
                 (safe_manifest, safe_observed, safe_registry),
             ):
-                scratch = Path(observed["TMPDIR"])
-                self.assertEqual(observed["TMP"], str(scratch))
-                self.assertEqual(observed["TEMP"], str(scratch))
-                self.assertEqual(manifest["scratchPath"], str(scratch))
+                temp = Path(observed["TMPDIR"])
+                self.assertEqual(observed["TMP"], str(temp))
+                self.assertEqual(observed["TEMP"], str(temp))
+                # The child's TMPDIR is the compact run temp, not the run
+                # scratch: the scratch path carries the registry hash and run
+                # id, and a child's Unix socket does not fit under it.
+                self.assertEqual(manifest["tempPath"], str(temp))
+                scratch = Path(manifest["scratchPath"])
+                self.assertNotEqual(temp, scratch)
+                self.assertLess(len(str(temp)), 60, str(temp))
                 self.assertNotEqual(
                     scratch, run_registry.run_directory(registry, manifest["runId"]) / "scratch"
                 )
-                probe_env = {
-                    key: value for key, value in os.environ.items() if not key.startswith("GIT_")
-                }
-                probe = subprocess.run(
-                    ["git", "-C", str(scratch), "rev-parse", "--show-toplevel"],
-                    env=probe_env,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertNotEqual(probe.returncode, 0, probe.stdout)
-                info = scratch.stat()
-                self.assertEqual(info.st_uid, os.geteuid())
-                self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+                for directory in (temp, scratch):
+                    probe_env = {
+                        key: value
+                        for key, value in os.environ.items()
+                        if not key.startswith("GIT_")
+                    }
+                    probe = subprocess.run(
+                        ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+                        env=probe_env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(probe.returncode, 0, probe.stdout)
+                    info = directory.stat()
+                    self.assertEqual(info.st_uid, os.geteuid())
+                    self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
 
             self.assertTrue(work_observed["workspaceWrite"])
             self.assertIn("--sandbox", work_observed["argv"])
@@ -248,7 +258,7 @@ class CodexScratchTests(unittest.TestCase):
             self.assertEqual(safe_manifest["scratchPermissions"]["base"], ":read-only")
             self.assertEqual(
                 safe_manifest["scratchPermissions"]["writableRoots"],
-                [safe_observed["TMPDIR"]],
+                [safe_manifest["scratchPath"], safe_observed["TMPDIR"]],
             )
 
     def test_failed_and_cancelled_runs_retain_recoverable_scratch(self):
@@ -302,10 +312,16 @@ class CodexScratchTests(unittest.TestCase):
                         )
                     manifest = run_registry.load_run_manifest(registry, run_id)
                     scratch = Path(manifest["scratchPath"])
+                    temp = Path(manifest["tempPath"])
                     self.assertEqual(payload["status"], expected_status)
                     self.assertEqual(code, 1)
+                    # Both run-owned directories survive a failed or cancelled
+                    # run: the child wrote its artifact under its own TMPDIR,
+                    # and retaining the scratch while dropping the temp would
+                    # silently lose exactly what an operator comes back for.
+                    self.assertTrue(scratch.is_dir())
                     self.assertEqual(
-                        (scratch / "recoverable.txt").read_text(encoding="utf-8"),
+                        (temp / "recoverable.txt").read_text(encoding="utf-8"),
                         "artifact\n",
                     )
 
@@ -555,3 +571,181 @@ class CodexScratchTests(unittest.TestCase):
             self.assertEqual(payload["error"], "codex_scratch_permissions_unavailable")
             self.assertIn("no permissive fallback", payload["message"])
             self.assertEqual(payload["scratchPermissions"]["base"], ":read-only")
+
+
+class CompactChildTempTests(unittest.TestCase):
+    """The child's TMPDIR is a short run-owned temp, not the run scratch.
+
+    The run scratch path carries the registry identity hash and the run id, so a
+    child that binds an AF_UNIX socket under it overruns `sun_path` (108 bytes
+    including the terminating NUL) once its own socket name is appended.
+    """
+
+    RUN_ID = "del_20260922T000000Z_aaaaaa"
+    RUN_ID_OTHER = "del_20260922T000000Z_bbbbbb"
+    # sun_path is 108 bytes; the kernel needs the trailing NUL, so a usable
+    # socket path is at most 107 characters.
+    SUN_PATH_LIMIT = 107
+
+    def _roots(self, temp: str) -> tuple[Path, Path, Path]:
+        root = Path(temp)
+        home = root / "home"
+        home.mkdir(mode=0o700)
+        persistent = root / "persistent-temp"
+        persistent.mkdir()
+        registry = root / "registry"
+        registry.mkdir()
+        return home, persistent, registry
+
+    SYSTEM_TEMP = Path("/tmp")
+
+    def _short_probe_root(self) -> Path:
+        """A unique short root under the system temp directory.
+
+        The suite pins the persistent temp root under its own (deep) test root,
+        and the compact temp exists only to keep paths short, so a probe pinned
+        under the suite root could not bind a socket at all. The directory is
+        removed best-effort and deletion is never retried.
+        """
+        return Path(tempfile.mkdtemp(prefix="dlg-probe-", dir=self.SYSTEM_TEMP))
+
+    @unittest.skipUnless(Path("/tmp").is_dir(), "short system temp root unavailable")
+    def test_child_binds_unix_socket_under_its_compact_tmpdir(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, _persistent, registry = self._roots(temp)
+            registry = run_registry.ensure_registry(Path(temp), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(registry, harness="codex")
+            child = Path(temp) / "socket-child"
+            child.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, socket\n"
+                "host = os.environ['TMPDIR']\n"
+                "path = os.path.join(host, 'delegate-probe.sock')\n"
+                "server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "server.bind(path)\n"
+                "payload = {'tmpdir': host, 'socketChars': len(path),"
+                " 'tmp': os.environ.get('TMP'), 'temp': os.environ.get('TEMP')}\n"
+                "print(json.dumps({'type': 'item.completed', 'item':"
+                " {'type': 'agent_message', 'text': json.dumps(payload)}}), flush=True)\n"
+                "print(json.dumps({'type': 'turn.completed'}), flush=True)\n",
+                encoding="utf-8",
+            )
+            child.chmod(0o700)
+            ctx = runner.RunContext(
+                registry,
+                run_id,
+                alias,
+                "codex",
+                "codex",
+                "safe",
+                None,
+                temp,
+                temp,
+                "directory",
+                False,
+                run_registry.utc_now_iso(),
+            )
+            probe_root = self._short_probe_root()
+            try:
+                with (
+                    mock.patch.dict(os.environ, {"HOME": str(home)}),
+                    mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", probe_root),
+                ):
+                    code, payload = runner.execute_tracked(
+                        [str(child), "exec", "task"],
+                        temp,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+                    manifest = run_registry.load_run_manifest(registry, run_id)
+                    observed = json.loads(payload["assistantText"])
+                    temp_dir = Path(observed["tmpdir"])
+                    self.assertEqual(code, 0, observed)
+                    self.assertEqual(manifest["tempPath"], str(temp_dir))
+                    self.assertNotEqual(manifest["scratchPath"], str(temp_dir))
+                    self.assertEqual(observed["tmp"], str(temp_dir))
+                    self.assertEqual(observed["temp"], str(temp_dir))
+                    # The bind above is the real proof; the length assertion
+                    # states why the compact temp exists at all, so a later
+                    # path change that breaks a child's socket fails here.
+                    self.assertLessEqual(observed["socketChars"], self.SUN_PATH_LIMIT)
+                    info = temp_dir.stat()
+                    self.assertEqual(info.st_uid, os.geteuid())
+                    self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+            finally:
+                shutil.rmtree(probe_root, ignore_errors=True)
+
+    def test_cleanup_removes_only_this_runs_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, persistent, registry = self._roots(temp)
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(home)}),
+                mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", persistent),
+            ):
+                scratch = run_scratch.allocate(registry, self.RUN_ID)
+                target = run_scratch.allocate_compact_temp(registry, self.RUN_ID)
+                other = run_scratch.allocate_compact_temp(registry, self.RUN_ID_OTHER)
+                (scratch / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+                (target / "socket.sock").write_text("temp\n", encoding="utf-8")
+                (other / "keep.txt").write_text("other run\n", encoding="utf-8")
+                # A token directory of the same owner root that this run never
+                # allocated: no broad prefix deletion may reach it.
+                unrelated = other.parent / "deadbeefdeadbeefdeadbeef"
+                unrelated.mkdir(mode=0o700)
+                (unrelated / "keep.txt").write_text("unrelated\n", encoding="utf-8")
+
+                run_scratch.remove_owned(registry, self.RUN_ID)
+
+                self.assertFalse(scratch.exists())
+                self.assertFalse(target.exists())
+                self.assertEqual((other / "keep.txt").read_text(encoding="utf-8"), "other run\n")
+                self.assertEqual(
+                    (unrelated / "keep.txt").read_text(encoding="utf-8"), "unrelated\n"
+                )
+
+    def test_legacy_run_without_a_compact_temp_prunes_cleanly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, persistent, registry = self._roots(temp)
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(home)}),
+                mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", persistent),
+            ):
+                # Only the run scratch exists: a run recorded before the
+                # compact temp existed must still prune, and must not fail on
+                # the absent deterministic path.
+                scratch = run_scratch.allocate(registry, self.RUN_ID)
+                self.assertFalse(
+                    run_scratch.expected_compact_temp_path(registry, self.RUN_ID).exists()
+                )
+
+                run_scratch.remove_owned(registry, self.RUN_ID)
+
+                self.assertFalse(scratch.exists())
+
+    def test_conflicting_compact_temp_paths_are_refused_not_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, persistent, registry = self._roots(temp)
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(home)}),
+                mock.patch.object(run_scratch, "PERSISTENT_TEMP_ROOT", persistent),
+            ):
+                planned = run_scratch.expected_compact_temp_path(registry, self.RUN_ID)
+                planned.parent.mkdir(mode=0o700)
+                planned.symlink_to(persistent, target_is_directory=True)
+                with self.assertRaisesRegex(run_scratch.ScratchSafetyError, "symlink"):
+                    run_scratch.allocate_compact_temp(registry, self.RUN_ID)
+                planned.unlink()
+
+                planned.write_text("not a directory\n", encoding="utf-8")
+                with self.assertRaisesRegex(run_scratch.ScratchSafetyError, "not a directory"):
+                    run_scratch.allocate_compact_temp(registry, self.RUN_ID)
+                planned.unlink()
+
+                with (
+                    mock.patch.object(run_scratch.os, "geteuid", return_value=os.geteuid() + 1),
+                    self.assertRaisesRegex(run_scratch.ScratchSafetyError, "foreign owner"),
+                ):
+                    run_scratch.allocate_compact_temp(registry, self.RUN_ID)
+                self.assertFalse(planned.exists())

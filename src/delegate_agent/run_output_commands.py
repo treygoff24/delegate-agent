@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from delegate_agent import command_errors, harness_events, log_output, redaction, run_registry
+from delegate_agent import (
+    command_errors,
+    harness_events,
+    log_output,
+    redaction,
+    run_registry,
+    usage_record,
+)
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent.constants import RUN_OUTPUT_DEFAULT_TAIL_LINES
@@ -400,8 +407,22 @@ def _format_run_output_diagnostics(diagnostics: JsonObject, next_actions: list[s
     stdout_info = diagnostics.get("stdout") if isinstance(diagnostics.get("stdout"), dict) else {}
     stderr_info = diagnostics.get("stderr") if isinstance(diagnostics.get("stderr"), dict) else {}
     recovery = diagnostics.get("recovery") if isinstance(diagnostics.get("recovery"), dict) else {}
+    stdout_bytes = stdout_info.get("bytes", 0)
+    stdout_bytes = stdout_bytes if isinstance(stdout_bytes, int) else 0
+    # "Nothing recoverable exists" and "the child wrote output this reader did
+    # not adopt" are different facts. Asserting the first while stdout is
+    # non-empty sent a coordinator looking for a run that did nothing.
+    header = (
+        "No completion report or recoverable final message found."
+        if stdout_bytes <= 0
+        else (
+            f"No completion report or recoverable final message was adopted, but the "
+            f"child wrote {stdout_bytes} bytes of stdout; read it with "
+            "`delegate run-output <alias> --stdout`."
+        )
+    )
     lines = [
-        "No completion report or recoverable final message found.",
+        header,
         f"status: {diagnostics.get('status', 'unknown')}",
         f"stdout: present={stdout_info.get('present', False)} bytes={stdout_info.get('bytes', 0)}",
         f"stderr: present={stderr_info.get('present', False)} bytes={stderr_info.get('bytes', 0)}",
@@ -627,6 +648,7 @@ def _emit_run_output_sections(
     text_sections: dict[str, str],
     resolution: JsonObject | None,
     warnings: list[str],
+    usage: JsonObject | None,
     stdout: TextIO,
 ) -> None:
     if command.json_mode:
@@ -636,6 +658,7 @@ def _emit_run_output_sections(
             sections=_merge_json_sections(sections, text_sections),
             resolution=resolution,
             warnings=warnings,
+            usage=usage,
         )
         delegate_rendering.print_json(payload, stdout)
         return
@@ -645,6 +668,7 @@ def _emit_run_output_sections(
         section_meta=sections,
         resolution=resolution,
         warnings=warnings,
+        usage=usage,
     )
 
 
@@ -673,12 +697,18 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
     if isinstance(resolution_warnings, list):
         warnings.extend(warning for warning in resolution_warnings if isinstance(warning, str))
     state = run_registry.load_run_state(registry_root, run_id)
+    usage: JsonObject | None = None
     if isinstance(state, dict):
         state_warnings = state.get("warnings")
         if isinstance(state_warnings, list):
             for warning in state_warnings:
                 if isinstance(warning, str) and warning not in warnings:
                     warnings.append(warning)
+        # The runner persists a normalized record, but a later writer shares
+        # this workspace, so the readback re-establishes that shape through the
+        # shared allowlist rather than trusting the stored object; a run that
+        # reported nothing has no key and this stays None.
+        usage = usage_record.normalized_usage(state.get("usage"))
     _add_completion_report_section(
         command,
         registry_root=registry_root,
@@ -733,6 +763,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         text_sections=text_sections,
         resolution=resolution or None,
         warnings=warnings,
+        usage=usage,
         stdout=stdout,
     )
     return 0

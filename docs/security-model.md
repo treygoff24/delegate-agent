@@ -134,17 +134,24 @@ A successful process exit does not prove that the requested inspection ran.
 
 Tracked Codex read-only launches grant writes only to
 the private neutral path recorded as `manifest.scratchPath`, normally
-`~/.delegate/run-scratch/<registry-hash>/<runId>`. If a valid user home is
-inside a Git worktree, the path uses `/var/tmp/delegate-<uid>/run-scratch/`
-instead. `TMPDIR`, `TMP`, and `TEMP` all point there. The review workspace,
-source files, registry metadata, sibling-run scratch, and symlink targets outside
-the current scratch remain read-only. Cwd, session arguments, AGENTS discovery,
-and Delegate's safe prompt framing are unchanged.
+`~/.delegate/run-scratch/<registry-hash>/<runId>`, plus the separate per-run
+child temp root recorded as `manifest.tempPath`
+(`/var/tmp/dlg-<uid>/<token>`). If a valid user home is inside a Git worktree,
+the scratch path uses `/var/tmp/delegate-<uid>/run-scratch/` instead. `TMPDIR`,
+`TMP`, and `TEMP` point at the temp root, which exists because a child that binds
+a Unix socket under the scratch path overruns `sun_path` once its own socket name
+is appended; both directories stay owner-only `0700`, and both are removed
+together by `delegate runs prune`. The review workspace,
+source files, registry metadata, sibling-run scratch and sibling-run temp roots,
+and symlink targets outside those two directories remain read-only. Cwd, session
+arguments, AGENTS discovery, and Delegate's safe prompt framing are unchanged.
 Tool-network access remains restricted, even when an ambient default profile
 allows it; the offline probe verifies this against a local loopback listener.
 
-The native permissions profile extends `:read-only` and adds one filesystem
-write root. Its high-entropy per-launch name prevents a pre-existing profile
+The native permissions profile extends `:read-only` and adds exactly two
+run-owned filesystem write roots: the scratch directory recorded as
+`manifest.scratchPath` and the child temp root recorded as `manifest.tempPath`.
+Its high-entropy per-launch name prevents a pre-existing profile
 from merging in unrelated write grants. Manifest and result `scratchPermissions`
 record the exact profile, base, and writable roots. See the official
 [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
@@ -374,6 +381,20 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Network access allowed by the child runtime and host environment.
 - Writes to absolute paths outside the worktree.
 - Actions taken through authenticated tools, MCP servers, browser sessions, or external CLIs.
+
+### Non-isolated work mode (`--isolation none`)
+
+Work mode defaults to `--isolation none` (`isolation.work` in config): the child
+runs directly in the resolved workspace with **no write boundary**. Delegate
+records no launch-versus-exit drift for these runs — `worktreeStatus`, the dirty
+work summary, and the worktree cleanup commands exist only for
+persistent-worktree runs — and it neither refuses nor reports a write the child
+makes to an absolute path outside that workspace, including the source checkout
+when the lane was launched with `--cwd` pointing at another directory. The
+harness is not confined by Delegate here; only each engine's own sandbox flags
+(such as Codex `--sandbox`) apply. After a non-isolated lane whose task was
+supposed to be confined elsewhere, `git status` the checkout yourself: nothing
+in the Delegate envelope flags that drift.
 
 `delegate resume` reads the initial manifest and `prompt.txt` outside the Registry
 lock with bounded, no-follow, single-link readers. It re-checks status and reads

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +19,7 @@ from delegate_agent import (
     describe_payload,
     errors,
     prompt_transport,
+    record_io,
     request_build,
     request_models,
     run_registry,
@@ -35,12 +37,633 @@ from tests.execution_test_base import (
     safe_temp_dirs,
 )
 
+# A recorded run child that reports its own TMPDIR integrity: it writes once,
+# sleeps, and writes again, exiting 3 when the second write fails because its
+# directory was removed underneath it. `sys.argv[1]` is the sleep.
+_RECORDED_CHILD_SCRIPT = """\
+import os
+import pathlib
+import sys
+import time
+
+temp = pathlib.Path(os.environ["TMPDIR"])
+temp.joinpath("child-write-1.txt").write_text("first", encoding="utf-8")
+time.sleep(float(sys.argv[1]))
+try:
+    temp.joinpath("child-write-2.txt").write_text("second", encoding="utf-8")
+except OSError:
+    raise SystemExit(3)
+"""
+
+_RECORDED_CHILD_RUN_ID = "del_20260922T175330Z_abcdef"
+
+# The fixture's producer stands in for the test-owned Delegate process that
+# drives a run: it waits on its stdin, so the test's own `communicate()` is
+# positive evidence that the producer process exited, the same evidence a test
+# holds after the Delegate subprocess it spawned returns.
+_RECORDED_PRODUCER_SCRIPT = """\
+import sys
+
+sys.stdin.read()
+"""
+
+
+@dataclasses.dataclass
+class RecordedChild:
+    """A real attempt child in its own session, the record that names it, and the
+    producer process that owns both.
+
+    The producer is deliberately a different process from the attempt child: the
+    deletion boundary under test is the producer's exit, because `runner` reuses
+    one run's compact temp for every attempt of that run and only the producer
+    decides whether another attempt follows.
+    """
+
+    registry_root: Path
+    temp_path: Path
+    pgid: int
+    process: subprocess.Popen
+    producer: subprocess.Popen
+    script: Path
+
+    def wait_for_first_write(self, timeout: float = 10.0) -> None:
+        """Block until the attempt child has written once inside its TMPDIR."""
+        marker = self.temp_path / "child-write-1.txt"
+        deadline = time.monotonic() + timeout
+        while not marker.is_file():
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the recorded child never wrote inside {self.temp_path}")
+            time.sleep(0.02)
+
+    def producers(self) -> list[object]:
+        """The producer evidence containment is handed for this fixture's record."""
+        return [self.producer]
+
+    def finish_producer(self) -> None:
+        """Close the producer's stdin and reap it: positive completion evidence.
+
+        Only a producer whose own process has exited can no longer launch an
+        attempt into this run's temp.
+        """
+        self.producer.communicate(timeout=15)
+        if self.producer.poll() is None:
+            raise AssertionError("the fixture producer did not exit")
+
 
 class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def _announcement_config(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["droid"]["models"] = {"reviewer": "model-id"}
         return config
+
+    def test_subprocess_tracked_runs_leave_no_production_compact_temp(self):
+        """A real CLI child must not orphan the compact temp it allocated.
+
+        The suite pins `run_scratch.PERSISTENT_TEMP_ROOT` in-process, but a
+        child is a fresh interpreter that resolves the production
+        `/var/tmp/dlg-<uid>` root, and only `runs prune` removes what it
+        allocated: before this containment existed, every subprocess tracked run
+        retained one directory there forever (observed 2026-09-22: 235 retained
+        directories from previous gates). Both outcomes allocate before the
+        child reports anything, so success and failure are both checked.
+        """
+        from tests import (
+            assert_compact_temps_contained,
+            compact_temp_names,
+            derived_production_compact_temp,
+            recorded_compact_temps,
+        )
+
+        for fake_exit in ("0", "1"):
+            with self.subTest(fake_exit=fake_exit):
+                repo = make_git_repo()
+                self.addCleanup(repo.cleanup)
+                fake_bin = self.make_cursor_safe_fake_agent()
+                config = Path(repo.name) / "config.json"
+                config.write_text(json.dumps(delegate_config.embedded_default_config()))
+                env = os.environ.copy()
+                env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+                env["DELEGATE_CONFIG"] = str(config)
+                env["FAKE_EXIT"] = fake_exit
+                base = self.private_tmp_env(env)
+
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT_PATH),
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "cursor",
+                        "safe",
+                        "review",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, int(fake_exit), completed.stderr)
+                registry_root = Path(repo.name) / ".delegate"
+                recorded = recorded_compact_temps(registry_root)
+                self.assertEqual(len(recorded), 1, completed.stderr)
+                run_id, temp_path = recorded[0]
+                # The record and an independent derivation of the same run must
+                # agree on the directory, which is also what `runs prune` checks
+                # before deleting one.
+                self.assertEqual(temp_path, derived_production_compact_temp(registry_root, run_id))
+                self.assertTrue(temp_path.is_dir(), temp_path)
+
+                assert_compact_temps_contained(registry_root, producers=[completed])
+
+                self.assertFalse(temp_path.exists(), temp_path)
+                self.assertNotIn(temp_path.name, compact_temp_names())
+                self.assertEqual(safe_temp_dirs(base), set())
+
+    def _spawn_recorded_child(
+        self, *, delay: float, marker_in_argv: bool, publish_group: bool = True
+    ) -> RecordedChild:
+        """A real attempt child in its own session plus the record that names it.
+
+        The manifest is the shape `runner._prepare_tracked_run` writes: the run's
+        execution cwd, its compact child temp, and the pgid of the child it
+        launched in a new session. The compact temp is named by the same
+        deterministic derivation production uses, independently of the record.
+        `marker_in_argv` decides whether the child's command line carries the
+        recorded cwd, which is the only thing that authorizes a signal; without
+        it the manifest names a live child that no command line proves, the
+        shape a Pi launch has. `publish_group` decides whether the manifest
+        carries the group at all: the producer records `tempPath` before the
+        launch and adds pid/pgid only after `Popen` returns, so ``False`` is that
+        prepublication record -- a live child no field of the record names.
+
+        The fixture also spawns the producer that owns this record, so callers
+        can hand containment a live producer (retention) or its reap (the
+        boundary that permits deletion); see `publish_retry_child` for the
+        attempt that producer would publish after a retry.
+        """
+        from tests import (
+            PRODUCTION_COMPACT_TEMP_ROOT,
+            derived_production_compact_temp,
+            proc_harness,
+        )
+
+        registry_root = Path(tempfile.mkdtemp(prefix="delegate-recorded-registry-"))
+        self.addCleanup(shutil.rmtree, registry_root, True)
+        temp_path = derived_production_compact_temp(registry_root, _RECORDED_CHILD_RUN_ID)
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, temp_path, True)
+        child_dir = Path(tempfile.mkdtemp(prefix="delegate-recorded-child-"))
+        self.addCleanup(shutil.rmtree, child_dir, True)
+        script = child_dir / "child.py"
+        script.write_text(_RECORDED_CHILD_SCRIPT, encoding="utf-8")
+        producer_script = child_dir / "producer.py"
+        producer_script.write_text(_RECORDED_PRODUCER_SCRIPT, encoding="utf-8")
+        producer = subprocess.Popen(
+            [sys.executable, str(producer_script)],
+            stdin=subprocess.PIPE,
+            text=True,
+        )
+
+        def finish_producer() -> None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                producer.communicate(timeout=15)
+            if producer.poll() is None:
+                producer.kill()
+                producer.communicate()
+
+        self.addCleanup(finish_producer)
+
+        argv = [sys.executable, str(script), str(delay)]
+        if marker_in_argv:
+            argv.append(str(registry_root))
+        env = os.environ.copy()
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            env[name] = str(temp_path)
+        process = subprocess.Popen(argv, env=env, start_new_session=True)
+        pgid = os.getpgid(process.pid)
+
+        def reap() -> None:
+            with contextlib.suppress(OSError):
+                proc_harness.reap_process_group(pgid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=15)
+
+        self.addCleanup(reap)
+        run_dir = registry_root / record_io.RUNS_DIR_NAME / _RECORDED_CHILD_RUN_ID
+        run_dir.mkdir(parents=True)
+        record = {
+            "runId": _RECORDED_CHILD_RUN_ID,
+            "executionCwd": str(registry_root),
+            "tempPath": str(temp_path),
+        }
+        if publish_group:
+            record["pgid"] = pgid
+        (run_dir / record_io.MANIFEST_FILE).write_text(
+            json.dumps(record),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            temp_path.parent,
+            PRODUCTION_COMPACT_TEMP_ROOT,
+            "the child fixture must own a real production compact temp",
+        )
+        return RecordedChild(registry_root, temp_path, pgid, process, producer, script)
+
+    def publish_retry_child(self, child: RecordedChild, *, delay: float) -> subprocess.Popen:
+        """Launch this run's retry attempt and republish it into the same record.
+
+        Mirrors `runner._run_single_tracked_attempt`: the retry is a real child
+        in its own session launched with the run's own compact temp as its
+        TMPDIR, and its pid/pgid replace the previous attempt's in the same
+        manifest -- written under the run's registry lock, which is the same
+        lock containment takes for its deletion decision. The record is left as
+        the current generation: the retried run, not the attempt that preceded
+        it.
+        """
+        from tests import proc_harness
+
+        env = os.environ.copy()
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            env[name] = str(child.temp_path)
+        process = subprocess.Popen(
+            [sys.executable, str(child.script), str(delay)],
+            env=env,
+            start_new_session=True,
+        )
+        pgid = os.getpgid(process.pid)
+
+        def reap() -> None:
+            with contextlib.suppress(OSError):
+                proc_harness.reap_process_group(pgid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=15)
+
+        self.addCleanup(reap)
+        manifest_path = (
+            child.registry_root
+            / record_io.RUNS_DIR_NAME
+            / _RECORDED_CHILD_RUN_ID
+            / record_io.MANIFEST_FILE
+        )
+        with run_registry.registry_lock(child.registry_root, timeout_seconds=5.0):
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            record["pid"] = process.pid
+            record["pgid"] = pgid
+            run_registry.write_json_atomic(manifest_path, record)
+        return process
+
+    def test_containment_retains_the_temp_of_a_live_child_with_no_argv_marker(self):
+        """A live child whose command line proves nothing keeps its TMPDIR.
+
+        Pi takes its prompt on stdin and its normal argv carries no workspace
+        flag, so a run manifest can name a live child that none of the paths in
+        that record appear in. Containment used to filter exactly those children
+        out and then remove the directory they were writing into, while still
+        reporting the removal as a success. The child here exits 3 when a write
+        fails, so it reports that outcome itself, and only a child whose exit is
+        confirmed gone lets its temp go.
+
+        Its producer runs the whole time, so the first retention is the producer
+        boundary; the second, taken after that producer is reaped while the
+        unmarked child is still writing, is the marker rule: the child's group is
+        awaited, never signalled, because nothing in its command line proves the
+        group is this run's.
+        """
+        from tests import assert_compact_temps_contained, reap_recorded_compact_temps
+
+        with mock.patch("tests.COMPACT_TEMP_CHILD_GRACE_SECONDS", 0.4):
+            child = self._spawn_recorded_child(delay=1.2, marker_in_argv=False)
+            child.wait_for_first_write()
+
+            # The producer is still alive: it may launch another attempt into
+            # this same temp, so nothing is deleted.
+            removed, surviving = reap_recorded_compact_temps(
+                child.registry_root, producers=child.producers()
+            )
+            self.assertEqual(removed, [])
+            self.assertEqual(surviving, [child.temp_path])
+            self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+
+            child.finish_producer()
+            with self.assertRaises(AssertionError) as caught:
+                assert_compact_temps_contained(child.registry_root, producers=child.producers())
+
+            self.assertIn(str(child.temp_path), str(caught.exception))
+            self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+            self.assertEqual(child.process.wait(timeout=15), 0, "the child lost its TMPDIR")
+            self.assertTrue((child.temp_path / "child-write-2.txt").is_file())
+
+            # Once that child is gone the same call removes the temp it kept.
+            removed, surviving = reap_recorded_compact_temps(
+                child.registry_root, producers=child.producers()
+            )
+            self.assertEqual(surviving, [])
+            self.assertEqual(removed, [child.temp_path])
+            self.assertFalse(child.temp_path.exists(), child.temp_path)
+
+    def test_containment_returns_a_live_producers_temp_until_that_process_exits(self):
+        """A producer that may still retry keeps every temp of its run.
+
+        The real Delegate subprocess is still running the fake engine here, and
+        the fake engine writes one marker, waits, then writes a second one --
+        exiting 3 when either write fails, so the child reports for itself
+        whether teardown pulled its TMPDIR away. Containment called in that
+        window must hand the exact temp back and name it: the run's compact temp
+        is shared by every attempt the producer may still launch, so no group it
+        happens to have launched is a deletion boundary. Only its exit is, and
+        the same call removes the temp afterwards.
+        """
+        from tests import (
+            compact_temp_names,
+            derived_production_compact_temp,
+            reap_recorded_compact_temps,
+            recorded_compact_temps,
+        )
+
+        for fake_exit in ("0", "1"):
+            with self.subTest(fake_exit=fake_exit):
+                repo = make_git_repo()
+                self.addCleanup(repo.cleanup)
+                fake_bin = self.make_cursor_safe_fake_agent_writing_in_its_tmpdir()
+                config = Path(repo.name) / "config.json"
+                config.write_text(json.dumps(delegate_config.embedded_default_config()))
+                env = os.environ.copy()
+                env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+                env["DELEGATE_CONFIG"] = str(config)
+                env["FAKE_EXIT"] = fake_exit
+                env["FAKE_CHILD_DELAY"] = "0.5"
+                base = self.private_tmp_env(env)
+
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(SCRIPT_PATH),
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "cursor",
+                        "safe",
+                        "review",
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                )
+                try:
+                    registry_root = Path(repo.name) / ".delegate"
+                    # The manifest records the path while the child runs, so
+                    # the test can name the directory the child is writing into
+                    # without waiting for the run to finish; the derivation
+                    # check keeps that record honest.
+                    deadline = time.monotonic() + 10
+                    while True:
+                        recorded = recorded_compact_temps(registry_root)
+                        if recorded and (Path(recorded[0][1]) / "child-write-1.txt").is_file():
+                            run_id, temp_path = recorded[0]
+                            break
+                        if time.monotonic() >= deadline:
+                            self.fail("the tracked child never wrote inside its compact temp")
+                        time.sleep(0.02)
+                    self.assertEqual(
+                        temp_path,
+                        derived_production_compact_temp(registry_root, run_id),
+                    )
+                    # The producer is mid-flight: it may still launch a retry
+                    # into this same temp, so containment hands it back.
+                    removed, surviving = reap_recorded_compact_temps(
+                        registry_root, producers=[process]
+                    )
+                    self.assertEqual(removed, [])
+                    self.assertEqual(surviving, [temp_path])
+                    self.assertTrue(temp_path.is_dir(), temp_path)
+                    _stdout, stderr = process.communicate(timeout=15)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+                self.assertEqual(process.returncode, int(fake_exit), stderr)
+                # The producer has exited, so the run's own child group is the
+                # last thing settled before this temp may go.
+                removed, surviving = reap_recorded_compact_temps(registry_root, producers=[process])
+                self.assertEqual(surviving, [])
+                self.assertEqual(removed, [temp_path])
+                self.assertFalse(temp_path.exists(), temp_path)
+                self.assertNotIn(temp_path.name, compact_temp_names())
+                self.assertEqual(safe_temp_dirs(base), set())
+
+    def test_containment_retains_the_temp_of_a_live_child_before_its_group_is_published(self):
+        """A record that names no child group must not authorize deleting a temp.
+
+        `runner._prepare_tracked_run` writes the compact ``tempPath`` before the
+        run launches, and the child's pid/pgid reach that same manifest only
+        afterwards, under the registry lock the runner holds across the launch
+        (`runner._run_single_tracked_attempt`). Containment reads manifests
+        without that lock, so ``tempPath`` with no group is a real intermediate
+        state of a live child -- not a record of a run that never launched, as
+        the containment previously assumed when it deleted the directory and
+        reported success. The child here exits 3 when a write fails, so it
+        reports that outcome itself.
+        """
+        from tests import assert_compact_temps_contained, reap_recorded_compact_temps
+
+        child = self._spawn_recorded_child(delay=1.2, marker_in_argv=True, publish_group=False)
+        child.wait_for_first_write()
+
+        # A live producer retains the temp whatever its record says about the
+        # attempt it has launched so far.
+        removed, surviving = reap_recorded_compact_temps(
+            child.registry_root, producers=child.producers()
+        )
+        self.assertEqual(removed, [])
+        self.assertEqual(surviving, [child.temp_path])
+
+        child.finish_producer()
+        with self.assertRaises(AssertionError) as caught:
+            assert_compact_temps_contained(child.registry_root, producers=child.producers())
+
+        self.assertIn(str(child.temp_path), str(caught.exception))
+        self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+        self.assertEqual(child.process.wait(timeout=15), 0, "the child lost its TMPDIR")
+        self.assertTrue((child.temp_path / "child-write-2.txt").is_file())
+
+        # The record still names no group, so the temp stays retained even now
+        # that this fixture's producer and child have exited: a group the record
+        # never published is unknown child state, and only a record that names a
+        # group can establish that the directory has no live writer left.
+        removed, surviving = reap_recorded_compact_temps(
+            child.registry_root, producers=child.producers()
+        )
+        self.assertEqual(removed, [])
+        self.assertEqual(surviving, [child.temp_path])
+        self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+
+    def test_containment_does_not_read_an_unconfirmed_reap_as_a_child_exit(self):
+        """A reap that does not settle its group must not authorize deletion.
+
+        The reaper suppresses signal failures and returns nothing, so after the
+        grace a signal is only a request: delivery, a delayed child, and an
+        unsignallable member all reach the caller the same way. This child's
+        command line does carry the recorded marker and the reap is replaced by
+        a no-op, so containment -- with the producer already reaped, so the
+        retention can only come from the unsettled group -- must keep the temp
+        and report it while the child keeps writing; a real reap of the same
+        shape removes the temp only after the group is confirmed gone.
+        """
+        from tests import assert_compact_temps_contained, reap_recorded_compact_temps
+
+        with mock.patch("tests.COMPACT_TEMP_CHILD_GRACE_SECONDS", 0.4):
+            with mock.patch(
+                "tests.proc_harness.reap_recorded_group_matching", lambda pgid, marker: None
+            ):
+                child = self._spawn_recorded_child(delay=1.2, marker_in_argv=True)
+                child.wait_for_first_write()
+                child.finish_producer()
+
+                with self.assertRaises(AssertionError) as caught:
+                    assert_compact_temps_contained(child.registry_root, producers=child.producers())
+
+                self.assertIn(str(child.temp_path), str(caught.exception))
+                self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+                self.assertEqual(child.process.wait(timeout=15), 0, "the child lost its TMPDIR")
+
+            signalled = self._spawn_recorded_child(delay=30, marker_in_argv=True)
+            signalled.wait_for_first_write()
+            signalled.finish_producer()
+
+            removed, surviving = reap_recorded_compact_temps(
+                signalled.registry_root, producers=signalled.producers()
+            )
+
+            self.assertEqual(surviving, [])
+            self.assertEqual(removed, [signalled.temp_path])
+            self.assertFalse(signalled.temp_path.exists(), signalled.temp_path)
+            self.assertLess(
+                signalled.process.wait(timeout=15),
+                0,
+                "the owned child was signalled, not waited out",
+            )
+
+    def test_containment_keeps_the_temp_of_the_generation_a_same_run_retry_published(self):
+        """A group that went quiet is not authority to delete a run's temp.
+
+        `runner._run_single_tracked_attempt` reuses one run's compact temp for
+        the primary attempt, a thread retry, an auth fallback, and an
+        empty-success retry: each attempt is a new child in a new session whose
+        pid/pgid is published into the same manifest under the registry lock.
+        Containment that mapped each manifest to the group it snapshotted and
+        then used that map for the removal could confirm the old attempt quiet,
+        delete the shared temp, and report success while the run's live retry was
+        writing into it.
+
+        This fixture publishes exactly that retry -- a real child, a real
+        manifest write under the same lock -- once the old group has been
+        confirmed quiet and before the deletion decision, which is the window the
+        producer boundary cannot see on its own: the retry child is not a new
+        process the producer launched, it *is* the run's next attempt. The retry
+        child exits 3 when a write of its own fails, so it reports whether its
+        TMPDIR survived.
+        """
+        from tests import proc_harness, reap_recorded_compact_temps
+
+        child = self._spawn_recorded_child(delay=0.0, marker_in_argv=True)
+        child.wait_for_first_write()
+        self.assertEqual(child.process.wait(timeout=15), 0, "the first attempt failed")
+        child.finish_producer()
+
+        retry: dict[str, subprocess.Popen] = {}
+        await_process_group = proc_harness.await_process_group
+
+        def await_then_republish(pgid: int, *, timeout: float) -> bool:
+            quiet = await_process_group(pgid, timeout=timeout)
+            if pgid == child.pgid and "process" not in retry:
+                retry["process"] = self.publish_retry_child(child, delay=1.2)
+            return quiet
+
+        with mock.patch("tests.proc_harness.await_process_group", await_then_republish):
+            removed, surviving = reap_recorded_compact_temps(
+                child.registry_root, producers=child.producers()
+            )
+
+        self.assertEqual(removed, [], "the temp went with the generation that was awaited")
+        self.assertEqual(surviving, [child.temp_path])
+        self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+        process = retry["process"]
+        self.assertEqual(process.wait(timeout=15), 0, "the retry child lost its TMPDIR")
+        self.assertTrue((child.temp_path / "child-write-2.txt").is_file())
+
+        # The record now names the retry's group, and that is the generation to
+        # settle: once it is gone the same call removes the temp it kept, so the
+        # retention above was a handback rather than a leak.
+        removed, surviving = reap_recorded_compact_temps(
+            child.registry_root, producers=child.producers()
+        )
+        self.assertEqual(surviving, [])
+        self.assertEqual(removed, [child.temp_path])
+        self.assertFalse(child.temp_path.exists(), child.temp_path)
+
+    def test_containment_deletes_nothing_without_producer_evidence(self):
+        """A caller that proves no producer exited gets retention, not a delete.
+
+        Containment cannot read producer completion out of the record: the
+        manifest names the attempt child's pid/pgid, never the Delegate process
+        that owns the run, and a temp whose owning process is unknown may be
+        written into again by that process's next attempt. So a call with no
+        usable evidence keeps every recorded temp and names it, even when the
+        attempt child that the record names has already exited.
+        """
+        from tests import reap_recorded_compact_temps
+
+        child = self._spawn_recorded_child(delay=0.0, marker_in_argv=True)
+        child.wait_for_first_write()
+        self.assertEqual(child.process.wait(timeout=15), 0, "the first attempt failed")
+
+        removed, surviving = reap_recorded_compact_temps(child.registry_root)
+
+        self.assertEqual(removed, [])
+        self.assertEqual(surviving, [child.temp_path])
+        self.assertTrue(child.temp_path.is_dir(), child.temp_path)
+
+    def test_containment_keeps_every_temp_when_the_owned_process_scan_fails(self):
+        """A scan that could not be completed is not evidence a producer exited.
+
+        The scan answers "no owned Delegate process is left", and containment
+        reads that as permission to delete a run's temp. `ps` failing, timing
+        out, or printing a listing that cannot be read is no answer at all: it
+        used to come back as an empty result and pass for a quiet machine, which
+        certified a live producer gone. Here the recorded child has exited and
+        its producer has been reaped, so deletion is legal on every other term --
+        only the failed scan stands in the way, and it must stand in the way
+        loudly while the temp stays put.
+        """
+        from tests import proc_harness, process_guard, reap_recorded_compact_temps
+        from tests.process_guard import OwnedProcessScanError
+
+        child = self._spawn_recorded_child(delay=0.0, marker_in_argv=True)
+        child.wait_for_first_write()
+        self.assertEqual(child.process.wait(timeout=15), 0, "the fixture child failed")
+        child.finish_producer()
+
+        with (
+            mock.patch.object(
+                process_guard.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    args=["ps"], returncode=1, stdout="", stderr="ps: cannot read\n"
+                ),
+            ),
+            self.assertRaises(OwnedProcessScanError),
+        ):
+            reap_recorded_compact_temps(
+                child.registry_root,
+                producers=[proc_harness.reaped_owned_producers(child.registry_root)],
+            )
+
+        self.assertTrue(child.temp_path.is_dir(), child.temp_path)
 
     def test_human_launch_announces_workspace_origin_before_execution(self):
         repo = make_git_repo()
@@ -191,7 +814,16 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self,
         payload: dict,
         base: Path,
+        *,
+        producers: Sequence[object] = (),
     ) -> None:
+        # The child was a real Delegate subprocess, so it resolved the
+        # production compact child temp root; contain what its run manifest
+        # recorded while this test's workspace registry still exists. The
+        # `producers` are the reaped handles of the Delegate processes that
+        # drove those runs: a run's compact temp is shared by all of its
+        # attempts, so only those processes exiting makes deleting it safe.
+        self.contain_compact_temps(payload["cwd"], producers=producers)
         pid = payload.get("pid")
         self.assertIsInstance(pid, int)
         deadline = time.monotonic() + 5
@@ -888,7 +1520,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
         self.assertTrue(payload.get("isolatedWorkspace"))
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+            payload, base, producers=[completed]
+        )
 
     def test_cursor_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
@@ -926,6 +1560,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             env=env,
             check=False,
         )
+        self.contain_compact_temps(repo.name, producers=[completed])
         self.assertEqual(completed.returncode, 0)
         self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
         self.assertEqual(tracked.read_text(), "dirty\n")
@@ -956,6 +1591,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 env=env,
                 check=False,
             )
+            self.contain_compact_temps(workspace, producers=[completed])
             self.assertEqual(completed.returncode, 0)
             self.assertFalse((Path(workspace) / "mutated-by-agent.txt").exists())
             self.assertEqual(source.read_text(), "keep-me\n")
@@ -1030,6 +1666,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             env=env,
             check=False,
         )
+        self.contain_compact_temps(repo.name, producers=[completed])
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
@@ -1307,6 +1944,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             env=env,
             check=False,
         )
+        self.contain_compact_temps(repo.name, producers=[completed])
         self.assertEqual(completed.returncode, 0)
         payload = json.loads(completed.stdout)
         self.assertFalse((Path(repo.name) / "mutated-by-codex.txt").exists())
@@ -1359,7 +1997,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+            payload, base, producers=[completed]
+        )
 
     def make_kimi_safe_fake(self):
         temp = tempfile.TemporaryDirectory()
@@ -1415,7 +2055,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+            payload, base, producers=[completed]
+        )
 
     def test_effective_prompt_codex_safe_order(self):
         user = "review the diff"

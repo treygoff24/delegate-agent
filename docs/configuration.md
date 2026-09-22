@@ -325,7 +325,11 @@ Controls local run recording.
   `false`. When `true`, every wrapped safe- and work-mode prompt is prefixed
   with it before any persona, safe-mode, or worktree framing is added.
   `--pass-through` launches and `call`-mode prompts never receive the
-  preamble, regardless of this setting.
+  preamble, regardless of this setting. The requirement is explicitly bounded:
+  the child reads the served skill index once, reads only the skill files it
+  judged relevant, and does not run discovery CLIs (`doctor`, `--help` probing,
+  directory listings) to enumerate skills, so the mandatory review cannot turn
+  into an open-ended discovery loop before the task starts.
 
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,

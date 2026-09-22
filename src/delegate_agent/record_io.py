@@ -24,6 +24,7 @@ RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
 STDOUT_LOG = "stdout.log"
 STDERR_LOG = "stderr.log"
 MANIFEST_FILE = "manifest.json"
+RUNS_DIR_NAME = "runs"
 STATE_FILE = "state.json"
 STATE_SCHEMA = "delegate.state.v1"
 SNAPSHOT_FILE = "snapshot.json"
@@ -33,7 +34,7 @@ TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 
 def runs_dir(registry_root: Path) -> Path:
-    return registry_root / "runs"
+    return registry_root / RUNS_DIR_NAME
 
 
 def run_directory(registry_root: Path, run_id: str) -> Path:

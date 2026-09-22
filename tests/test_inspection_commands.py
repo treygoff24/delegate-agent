@@ -229,6 +229,62 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["runs"][0]["initiatorRoot"], "codex:root-thread")
 
+    def test_emit_runs_and_ps_construct_usage_from_the_allowlisted_shape(self):
+        """`runs`/`ps` summaries allowlist the persisted usage they project.
+
+        Both commands build each row from `state.json`, which whichever process
+        shares the workspace can rewrite, so a tampered usage object must not
+        reach the summary: unknown keys, alternate spellings, a secret-shaped or
+        newline-bearing basis, and bool/non-finite/negative counters are all
+        discarded.
+        """
+        secret = "sk-tamperruns1234567890"
+        run_id, _alias = self.write_run(harness="cursor")
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        expected = {"basis": "reported", "inputTokens": 21, "costUsd": 0.5}
+        cases = (
+            (
+                {
+                    "basis": "reported",
+                    "inputTokens": 21,
+                    "outputTokens": True,
+                    "cacheReadTokens": float("inf"),
+                    "cacheWriteTokens": -1,
+                    "cache_read_tokens": 99,
+                    "costUsd": 0.5,
+                    "note": secret,
+                },
+                expected,
+            ),
+            ({"basis": f"reported\n{secret}", "inputTokens": 4}, None),
+            ({"basis": "guessed", "inputTokens": 4}, None),
+        )
+        for case, expected_usage in cases:
+            for command in (
+                inspection_commands.RunsCommand(json_mode=True),
+                inspection_commands.RunsCommand(active=True, json_mode=True),
+            ):
+                with self.subTest(usage=case.get("basis"), active=command.active):
+                    state = run_registry.load_run_state(self.registry_root, run_id)
+                    state["usage"] = case
+                    run_registry.write_json_atomic(run_path / "state.json", state)
+                    stdout = io.StringIO()
+
+                    code = inspection_commands.emit_runs(
+                        command,
+                        workspace_path=str(self.workspace),
+                        stdout=stdout,
+                    )
+
+                    output = stdout.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertNotIn(secret, output)
+                    summary = json.loads(output)["runs"][0]
+                    if expected_usage is None:
+                        self.assertNotIn("usage", summary)
+                    else:
+                        self.assertEqual(summary["usage"], expected_usage)
+
     def test_emit_runs_structural_projection_omits_content_fields(self):
         run_id, _alias = self.write_run(harness="codex", assistant_text="included")
         index = run_registry.load_index(self.registry_root)
@@ -598,6 +654,62 @@ class InspectionCommandTests(unittest.TestCase):
             stdout=text,
         )
         self.assertNotIn("showing", text.getvalue())
+
+    def test_emit_runs_bare_status_filter_in_empty_workspace_warns_scope(self):
+        # Reproduced from a real session: `runs --running` from a directory with
+        # no Registry printed an empty table with no hint, which reads as "every
+        # lane died". The workspace-scope hint must not require --group/--harness.
+        with tempfile.TemporaryDirectory() as empty:
+            for flag_name, kwargs in (
+                ("running", {"running": True}),
+                ("stale", {"stale": True}),
+                ("active", {"active": True}),
+            ):
+                with self.subTest(flag=flag_name):
+                    stdout = io.StringIO()
+                    code = inspection_commands.emit_runs(
+                        inspection_commands.RunsCommand(json_mode=True, **kwargs),
+                        workspace_path=empty,
+                        stdout=stdout,
+                    )
+                    payload = json.loads(stdout.getvalue())
+                    self.assertEqual(code, 0)
+                    self.assertEqual(payload["runs"], [])
+                    self.assertEqual(len(payload["warnings"]), 1)
+                    warning = payload["warnings"][0]
+                    self.assertIn("workspace-scoped", warning)
+                    self.assertIn("--cwd PATH", warning)
+                    self.assertNotIn(f"Drop --{flag_name}", warning)
+
+    def test_emit_runs_bare_listing_in_empty_workspace_warns_scope(self):
+        with tempfile.TemporaryDirectory() as empty:
+            stdout = io.StringIO()
+            code = inspection_commands.emit_runs(
+                inspection_commands.RunsCommand(),
+                workspace_path=empty,
+                stdout=stdout,
+            )
+
+            output = stdout.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("warning:", output)
+            self.assertIn("workspace-scoped", output)
+            self.assertIn("--cwd PATH", output)
+
+    def test_emit_runs_populated_listing_stays_warning_free(self):
+        self.write_run(harness="codex", group="wave9", assistant_text="here")
+
+        stdout = io.StringIO()
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(len(payload["runs"]), 1)
+        self.assertNotIn("warnings", payload)
 
     def test_emit_runs_zero_row_group_warns_workspace_scoped(self):
         self.write_run(harness="codex", group="other", assistant_text="elsewhere")

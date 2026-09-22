@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -34,6 +36,102 @@ DRY_RUN_WRITE_WARNING = (
     "dry-run only stubs agent calls; script filesystem writes are live. "
     "State-writing scripts must branch on dry_run/is_dry_run or run from a disposable checkout."
 )
+
+SYSTEMD_CGROUP_PATH = Path("/proc/self/cgroup")
+# A unit name is a single path component: `[A-Za-z0-9_.@-]+` with a `.service`
+# suffix. Unit names may not contain `/`, so anchoring the name at the leaf is
+# exact rather than a heuristic.
+_SYSTEMD_UNIT_NAME_RE = re.compile(r"[A-Za-z0-9_.@-]+\.service")
+# A transient or user unit injected under the per-user manager slice
+# (`/user.slice/user-1000.slice/user@1000.service/...`) is known only to that
+# user's manager; `systemctl show` without `--user` cannot see it.
+_SYSTEMD_USER_MANAGER_PREFIX = "/user.slice/"
+# KillMode values that leave a detached supervisor alive when the unit's main
+# process exits. `control-group` (the systemd default) and `mixed` do not.
+SYSTEMD_SAFE_KILL_MODES = frozenset({"process", "none"})
+
+
+@dataclass(frozen=True)
+class SystemdUnit:
+    """The unit that owns the current process, and the manager that knows it."""
+
+    name: str
+    user_manager: bool
+
+
+def _systemd_unit_from_cgroup(text: str) -> SystemdUnit | None:
+    """The systemd service unit this process runs under, if any.
+
+    Only the leaf path component of a cgroup line names the unit that owns the
+    current process. Searching the whole path returns an ancestor: an ordinary
+    interactive launch sits at
+    `/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.example.scope`,
+    where `user@1000.service` is the per-user manager, not this process's unit.
+    That ancestor stays alive while the session does, so warning about its
+    KillMode would be false and would fire on every interactive run.
+    """
+    for line in text.splitlines():
+        path = line.rsplit(":", 1)[-1].strip()
+        leaf = path.rstrip("/").rsplit("/", 1)[-1]
+        if _SYSTEMD_UNIT_NAME_RE.fullmatch(leaf):
+            return SystemdUnit(leaf, path.startswith(_SYSTEMD_USER_MANAGER_PREFIX))
+    return None
+
+
+def _systemd_kill_mode(unit: str, *, user_manager: bool = False) -> str | None:
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return None
+    argv = [systemctl, "--user"] if user_manager else [systemctl]
+    argv.extend(["show", "-p", "KillMode", "--value", unit])
+    try:
+        result = subprocess.run(  # nosec B603 - fixed argv, no shell.
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    mode = result.stdout.strip().lower()
+    return mode or None
+
+
+def _systemd_detach_warning() -> str | None:
+    """Warn when the invoking systemd unit will reap the detached supervisor.
+
+    `workflow run` forks, setsids, and execs the supervisor, then the invoking
+    process exits. Under `systemd-run`'s default `KillMode=control-group`, that
+    exit reaps the whole cgroup and kills the supervisor about half a second
+    later -- while the unit still reports `Result=success`,
+    `ExecMainStatus=0` and ActiveState=inactive, so nothing on the systemd side
+    admits the loss. Only `KillMode=process` (or `none`) keeps it alive.
+    """
+    try:
+        cgroup = SYSTEMD_CGROUP_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    unit = _systemd_unit_from_cgroup(cgroup)
+    if unit is None:
+        return None
+    kill_mode = _systemd_kill_mode(unit.name, user_manager=unit.user_manager)
+    if kill_mode is not None and kill_mode in SYSTEMD_SAFE_KILL_MODES:
+        return None
+    detail = (
+        f"its KillMode is {kill_mode!r}"
+        if kill_mode is not None
+        else "its KillMode could not be read, and the default is control-group"
+    )
+    return (
+        f"this launch runs inside systemd unit {unit.name}, and {detail}: the unit's main "
+        "process is this command, which exits as soon as the supervisor is detached. "
+        "systemd will then stop the supervisor with the rest of the cgroup while the "
+        "unit reports success -- re-run under `-p KillMode=process` (or set it in the "
+        "unit) so the workflow outlives the launcher."
+    )
 
 
 def _delegate_cli_argv() -> list[str]:
@@ -267,7 +365,10 @@ def emit_run(
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
         if not root.exists():
-            raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
+            raise DelegateError(
+                "workflow_not_found",
+                f"Workflow not found: {wf_id}. {_workflow_state_hint(workspace)}",
+            )
         _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
         try:
             pin = workflow_pinning.load_pin(wf_id)
@@ -552,6 +653,9 @@ def emit_run(
             workspace=workspace,
             pin=pin,
         )
+        systemd_warning = _systemd_detach_warning()
+        if systemd_warning is not None and systemd_warning not in warnings:
+            warnings.append(systemd_warning)
         previous_environment = workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
         try:
             runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
@@ -692,11 +796,28 @@ def emit_dry_run(
     return EXIT_OK
 
 
+def _workflow_state_hint(workspace: Path) -> str:
+    """Say where workflow state was searched.
+
+    Workflow dirs live under the workspace's own ``.delegate`` store, so a
+    lookup from the main checkout of the repo a workflow runs in legitimately
+    finds nothing.  Naming the searched root and the ``--cwd`` form keeps
+    "stored elsewhere" distinguishable from "gone".
+    """
+    return (
+        f"Workflow state is workspace-scoped; searched {registry.workflow_root(workspace)} "
+        "(use --cwd PATH to target the workspace that launched it)."
+    )
+
+
 def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
     root = _workflow_dir_for_command(command, workspace)
     payload = registry.read_json(root / registry.STATUS_FILE)
     if payload is None:
-        raise DelegateError("workflow_not_found", f"Workflow status not found: {command.wf_id}")
+        raise DelegateError(
+            "workflow_not_found",
+            f"Workflow status not found: {command.wf_id} (looked in {root}).",
+        )
     view = _status_view(root, payload)
     if command.json_mode:
         rendering.print_json(view, stdout)
@@ -975,10 +1096,12 @@ def emit_reject(
             key, label = state.resolve_agent_key(key_or_label)
         except ValueError as exc:
             raise DelegateError("workflow_reject_unresolved", str(exc)) from exc
-        event: JsonObject = {"key": key, "reason": reason}
-        if label is not None:
-            event["label"] = label
-        state.append_journal_only("agent_rejected", **event)
+        # An operator tombstone is a coordinator action, never the seat's own
+        # invalid output; journal consumers need the distinction.
+        state.append_journal_only(
+            "agent_rejected",
+            **runtime.rejection_event(key=key, label=label, reason=reason, by="coordinator"),
+        )
     finally:
         with contextlib.suppress(OSError):
             os.close(lock_fd)
@@ -1255,7 +1378,10 @@ def _workflow_dir_for_command(command: WorkflowCommand, workspace: Path) -> Path
         raise DelegateError("missing_workflow", f"workflow {command.action} requires <wfId>.")
     root = registry.workflow_dir(workspace, _validate_wf_id(command.wf_id))
     if not root.exists():
-        raise DelegateError("workflow_not_found", f"Workflow not found: {command.wf_id}")
+        raise DelegateError(
+            "workflow_not_found",
+            f"Workflow not found: {command.wf_id}. {_workflow_state_hint(workspace)}",
+        )
     return root
 
 

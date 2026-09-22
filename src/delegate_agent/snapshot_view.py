@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import TypedDict, cast
 
 from delegate_agent import retention as delegate_retention
-from delegate_agent import run_metadata, run_registry
+from delegate_agent import run_metadata, run_registry, usage_record
 from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.redaction import redact_value
 
@@ -77,6 +77,7 @@ class SnapshotView(TypedDict, total=False):
     terminalRecord: JsonObject
     continuityMode: str
     modelProvenance: JsonObject
+    usage: JsonObject
     malformedLines: int
     malformedSamples: list[str]
     unhandledEventTypes: JsonObject
@@ -98,6 +99,14 @@ def merge_snapshot_view(
     view: JsonObject = dict(snapshot or {})
     if state:
         view.update(state)
+    # A snapshot reads a persisted record a shared workspace can rewrite, so the
+    # projected usage is reconstructed through the shared allowlist; a record
+    # with no normalized basis contributes no usage key at all.
+    usage = usage_record.normalized_usage(view.get("usage"))
+    if usage is None:
+        view.pop("usage", None)
+    else:
+        view["usage"] = usage
     if not view:
         view = {
             "schema": run_registry.SNAPSHOT_SCHEMA,
