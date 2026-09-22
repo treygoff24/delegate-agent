@@ -713,7 +713,7 @@ provider, including configured custom or local providers.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
 - `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
 - Effort strings may not start with `-` or contain whitespace, double quotes, or backslashes.
-- Codex `max` support is model-scoped and bundled only for `gpt-5.6-sol` as of 2026-07. Other Codex models fail closed unless an exact config, profile-discovery, or legacy workspace-cache declaration includes `max`.
+- Codex `max` support is model-scoped and bundled for the GPT-6 models (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) as of 2026-09. Other Codex models fail closed unless an exact config, profile-discovery, or legacy workspace-cache declaration includes `max`.
 
 Use config for private models or a deliberate override. A malformed profile
 cache is treated as absent and can be replaced by the next setup or refresh.

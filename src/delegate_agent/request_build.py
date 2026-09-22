@@ -3347,7 +3347,7 @@ def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mo
         "unsupported_continuity_mode",
         f"--continuity-mode pinned cannot verify the Claude alias {model!r}: it names no "
         "model family, and Claude reports a dated served id rather than the alias. Pin a "
-        "concrete model id (for example claude-opus-5), use a family alias (opus, sonnet, "
+        "concrete model id (for example claude-opus-5-5), use a family alias (opus, sonnet, "
         "haiku, fable), or run with --continuity-mode fungible." + DRY_RUN_HINT,
     )
 

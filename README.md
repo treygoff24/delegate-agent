@@ -300,9 +300,10 @@ Codex model routing is deliberately model-first rather than aliasing every
 model/effort pair: define model aliases in `codex.models`, then set effort per
 run with `--reasoning-effort`. Per-model effort menus (including any efforts
 newer than the bundled data) belong in the private `reasoning.capabilities`
-config block, which overrides the bundled defaults. Codex `max` is bundled only
-for `gpt-5.6-sol` as of 2026-07; other Codex models require an exact config or
-profile-discovery declaration, or legacy workspace-cache declaration.
+config block, which overrides the bundled defaults. Codex `max` is bundled for
+`gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna` as of 2026-09; other Codex models
+require an exact config or profile-discovery declaration, or legacy
+workspace-cache declaration.
 
 Fast mode is an independent per-run serving choice. `--fast` requests Codex's
 Fast service tier, `--no-fast` explicitly requests Standard, and omitting both

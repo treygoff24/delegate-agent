@@ -235,8 +235,8 @@ override; Claude and Grok emit native `--effort`; OpenCode emits `--variant`
 and validates it when exact discovered variants exist; Pi and Oh My Pi emit
 `--thinking`. Devin and Kimi expose no Delegate effort transport.
 
-Codex `max` support is model-scoped and, as of 2026-07, bundled only for
-`gpt-5.6-sol`. Other Codex models fail closed unless an exact
+Codex `max` support is model-scoped and, as of 2026-09, bundled for
+`gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`. Other Codex models fail closed unless an exact
 config, profile-discovery, or legacy workspace-cache declaration explicitly
 supports `max`;
 other engines retain their independently documented effort sets.
@@ -322,7 +322,7 @@ delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-o
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
 - Prompt text is delivered on stdin to `codex exec`; dry-run argv and tracked run manifests do not contain the prompt.
 - Model selection uses `--model` (alias from `codex.models` or a raw model ID), the run-input JSON `model`, or `codex.defaultModel`.
-- `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved. The `max` level is bundled only for `gpt-5.6-sol` as of 2026-07.
+- `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved. The `max` level is bundled for the GPT-6 models (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) as of 2026-09.
 - `--fast` requests Codex Fast for one run; `--no-fast` explicitly requests Standard; omission inherits Codex configuration. The selected tier is recorded as `requestedFast` when explicit.
 - For Codex, `--output-schema FILE` supplies the JSON Schema OpenAI enforces on the final message. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. Delegate recursively preflights strict object schemas: missing `additionalProperties: false` is supplied in a temporary execution copy with a warning, while an incomplete `required` list or `additionalProperties` value other than `false` fails before launch. The source file is never modified. When set, Delegate suppresses completion-report prompt injection so the schema owns the whole final message. Claude supports `--output-schema` in every mode: the schema contents are inlined as `--json-schema`, and in tracked safe/work runs the child keeps `stream-json` so live snapshots still work while the final result text is the schema-bound JSON. Other engines reject it.
 

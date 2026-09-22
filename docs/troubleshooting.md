@@ -137,7 +137,7 @@ delegate --json capabilities
 Common causes:
 
 - Codex effort was requested with a label not supported by the resolved model or the harness-default fallback capability.
-- Codex `max` was requested for a model other than `gpt-5.6-sol`, the only bundled Codex model that supports it as of 2026-07, without an exact config, profile-discovery, or legacy workspace-cache declaration.
+- Codex `max` was requested for a model outside the bundled set that declares it — the GPT-6 models (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) as of 2026-09 — without an exact config, profile-discovery, or legacy workspace-cache declaration.
 - Claude effort was absent from the installed harness's discovered native enum and from Delegate's bundled compatibility labels.
 - Grok exact model declarations override its harness-wide compatibility enum; an effort can therefore be valid at the flag level but rejected for the selected model.
 - OpenCode rejects a variant missing from an exact discovered variant menu. Without exact evidence, it preserves pass-through behavior and records `opencode_variant_unvalidated`.
