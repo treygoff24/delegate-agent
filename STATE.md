@@ -1,6 +1,56 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-21 (Grok 4.7 bump; no new public release)
+Updated: 2026-09-22 (GPT-6 Sol/Luna + Claude Opus 5.5 bump; no new public release)
+
+- `908abd6` moves the bundled Codex rows to the GPT-6 line and the bundled
+  Claude row to `claude-opus-5-5`. `gpt-6-sol` and `gpt-6-luna` replace the
+  `gpt-5.6-sol`/`gpt-5.6-luna` rows, `gpt-5.6-terra` is dropped outright, and
+  the `pi`/`omp` bundled selectors follow to `openai-codex/gpt-6-sol`. Verified
+  against live `codex debug models` (codex-cli 0.156.0) on **both** the work and
+  personal profiles: Sol is `low`–`ultra` at a `medium` default, Luna is
+  `low`–`max` at `medium`. `claude-opus-5-5` is real per Cursor's catalog, which
+  carries the full `claude-opus-5-5-*` ladder; the Claude CLI exposes no
+  non-interactive enumeration, so the bundled row is the advisory source.
+- Gate at that revision: 3,398 passed, 15 skipped, 2,576 subtests, compileall
+  clean, pinned Ruff check and format clean. One earlier full-gate run showed
+  `test_structured_retry_timeout_exhaustion_reaps_every_workspace` failing
+  `'relaunch' != 'resume'`; it passed in isolation and did not recur on the
+  authoritative run. Treated as a pre-existing flake, not a regression — its
+  file is untouched by this change and the assertion has no coupling to model
+  ids. Worth a look if it reappears.
+- Devbox live config bumped alongside (backup `config.json.bak-20260922-gpt6`):
+  `codex.defaultModel` and the `sol`/`luna` aliases point at the GPT-6 ids, the
+  `terra` alias is deleted, and the stale `gpt-5.6-*` rows are removed from
+  `reasoning.capabilities.codex`. **Ruling:** no GPT-6 rows were added back to
+  that config block. Fresh discovery carries exact evidence for both models and
+  the bundled table now covers them as fallback, so a config row would only pin
+  a default that can drift from the vendor's. `daybreak` keeps its config row.
+  Effort source for sol/luna/astra now reads `discovery` rather than `config`.
+- Devbox runtime promoted to
+  `~/.delegate/releases/908abd6f48120313-70b116ee08d5d9e4`,
+  `promotionMatchesRuntime: true`, no active supervisors, both profile
+  discovery caches refreshed through the installed command. Live smokes served
+  `gpt-6-sol` and `gpt-6-luna` (token echo), and a tracked `safe` run recorded
+  `sol -> gpt-6-sol` with zero fallback hops and no continuity violation. Codex
+  reports no served-model id (`servedModelSource: unavailable`), which is a
+  harness limitation and matches the prior run's record.
+- Effort ladders are honored end to end on the new runtime: `sol` at `ultra`
+  forwards `model_reasoning_effort="ultra"`, and `luna` at `ultra` fails closed
+  naming `low, medium, high, xhigh, max`.
+- **The Mac is not bumped.** Its `~/.delegate/config.json` still carries the
+  `gpt-5.6-*` ids and the `terra` alias, and its runtime predates `908abd6`.
+  The same config edit plus `delegate-promote-checkout` is owed there.
+- **Open for Trey: the Terra image lane.** The work-a global CLAUDE.md routes
+  image generation to "a Terra lane via `delegate` (work mode) using its native
+  `image_gen`". That alias no longer exists here. The Codex catalog exposes no
+  `image_gen` gating on any model — Terra's row carried no image capability the
+  GPT-6 rows lack — so re-pointing the lane at Sol or Luna is likely all that is
+  needed, but that is unverified and the decision is his.
+- `delegate doctor` reports one pre-existing warning unrelated to this change:
+  `codex.profile 'delegate'` layers a `delegate.config.toml` that does not
+  exist, so every codex run resolves no overlay.
+
+## Previous record (2026-09-21)
 
 - `642b9d6` bumps the bundled Grok declarations to 4.7. Cursor's 4.7 ladder
   drops the `cursor-` prefix (`grok-4.7-xhigh`, `grok-4.7-xhigh-fast`); the
