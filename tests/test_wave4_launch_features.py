@@ -314,7 +314,8 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         payload = json.loads(stdout.getvalue())
         run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
         manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
-        expected_scratch = Path(manifest["scratchPath"])
+        expected_scratch = Path(manifest["tempPath"])
+        self.assertNotEqual(expected_scratch, Path(manifest["scratchPath"]))
         stdout_log = (run_path / "stdout.log").read_text(encoding="utf-8")
         self.assertIn(f"TMPDIR={expected_scratch}", stdout_log)
         self.assertIn(f"TMP={expected_scratch}", stdout_log)
@@ -350,7 +351,12 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         self.assertIn("--strict-config", argv)
         permissions = manifest["scratchPermissions"]
         self.assertEqual(permissions["base"], ":read-only")
-        self.assertEqual(permissions["writableRoots"], [manifest["scratchPath"]])
+        # Scratch holds the prompt/schema artifacts; the child's compact temp
+        # root is the second writable root its own TMPDIR writes need.
+        self.assertEqual(
+            permissions["writableRoots"],
+            [manifest["scratchPath"], manifest["tempPath"]],
+        )
         self.assertIn(f'default_permissions="{permissions["profile"]}"', argv)
         self.assertEqual(payload["scratchPermissions"], permissions)
 

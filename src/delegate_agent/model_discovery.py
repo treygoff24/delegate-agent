@@ -279,6 +279,115 @@ def _discovered_default(discovery: JsonObject | None, engine: str) -> str | None
     return default if isinstance(default, str) and default else None
 
 
+def discovered_model_ids(discovery: JsonObject | None, engine: str) -> tuple[str, ...]:
+    """Catalog selectors a discovery snapshot observed for one engine.
+
+    Empty means the snapshot carries no catalog for that engine -- absence of
+    evidence, which callers must not read as evidence that a configured model
+    is gone.
+    """
+    return tuple(
+        entry["id"]
+        for entry in _discovered_models(discovery, engine)
+        if isinstance(entry.get("id"), str)
+    )
+
+
+def nearest_model_ids(model: str, catalog: tuple[str, ...], *, limit: int = 5) -> list[str]:
+    """Catalog selectors closest to ``model``, by shared prefix then length."""
+    lowered = model.lower()
+
+    def score(selector: str) -> tuple[int, int, str]:
+        candidate = selector.lower()
+        prefix = 0
+        while prefix < min(len(candidate), len(lowered)) and candidate[prefix] == lowered[prefix]:
+            prefix += 1
+        return (-prefix, abs(len(candidate) - len(lowered)), candidate)
+
+    return sorted(catalog, key=score)[:limit]
+
+
+def configured_model_absence_warning(
+    engine: str,
+    model: str | None,
+    discovery: JsonObject | None,
+    *,
+    alias: str | None = None,
+) -> tuple[str, ...]:
+    """Warn when a configured selector is absent from the discovered catalog.
+
+    A configured default is validated for type only, so a retired selector
+    survives in config until something else fails on it: cursor-agent rejects an
+    unknown model outright ("Cannot use this model: grok"), while a
+    fuzzy-resolving engine quietly serves a different concrete model. This is a
+    warning, never a refusal -- a provider-side catalog lag is not evidence that
+    a selector is dead -- and the configured value is never rewritten.
+
+    ``alias`` names the `<engine>.models` key a configured target came from, so
+    the finding points at the key an operator wrote rather than at a target
+    that no other line of config mentions. Configured and catalog selectors are
+    both operator/provider-supplied, so every one of them is redacted before it
+    enters the message: the warning is persisted in `delegate.doctor.v1` and
+    printed at launch, both of which promise to scrub credential-shaped text.
+    """
+    if not model:
+        return ()
+    catalog = discovered_model_ids(discovery, engine)
+    if not catalog or model in catalog:
+        return ()
+    subject = (
+        f"{engine} alias {redaction.redact_string(alias)!r} targets "
+        f"{redaction.redact_string(model)!r}, which is"
+        if alias
+        else f"{engine} model {redaction.redact_string(model)!r} is"
+    )
+    nearest = nearest_model_ids(model, catalog)
+    suggestion = (
+        " Nearest discovered selectors: "
+        + ", ".join(redaction.redact_string(selector) for selector in nearest)
+        + "."
+        if nearest
+        else ""
+    )
+    return (
+        f"{subject} absent from the discovered catalog.{suggestion} "
+        "Run `delegate capabilities refresh` to update the cached catalog; "
+        f"`delegate models {engine} --live` shows a fresh catalog without saving it.",
+    )
+
+
+def configured_alias_absence_warnings(
+    engine: str,
+    models: object,
+    discovery: JsonObject | None,
+) -> tuple[str, ...]:
+    """Warn about configured `<engine>.models` targets the catalog does not list.
+
+    Only the selected model is resolved through the alias table on a launch, so
+    a target no run currently selects is still a selector an operator wrote
+    down expecting it to work: a typo or a retired id sits there until someone
+    happens to name its alias. Cache-only and advisory, exactly like the
+    default-model check: no probe, no launch refusal, no rewrite of config.
+    """
+    if not isinstance(models, dict):
+        return ()
+    warnings: list[str] = []
+    checked: set[str] = set()
+    for alias, target in models.items():
+        if not isinstance(target, str) or not target or target in checked:
+            continue
+        checked.add(target)
+        warnings.extend(
+            configured_model_absence_warning(
+                engine,
+                target,
+                discovery,
+                alias=alias if isinstance(alias, str) and alias else None,
+            )
+        )
+    return tuple(warnings)
+
+
 def _legacy_reasoning_models(cache: JsonObject | None, engine: str) -> list[JsonObject]:
     if not isinstance(cache, dict):
         return []

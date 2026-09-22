@@ -97,6 +97,19 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--force", argv)
         self.assertNotIn("--approve-mcps", argv)
 
+    def test_skill_review_preamble_is_bounded_against_discovery_loops(self):
+        """The mandatory review must not become open-ended skill discovery.
+
+        pi/gemini work lanes stalled 5-10 minutes in tool-discovery loops before
+        doing any work; the requirement stays mandatory but says where it stops.
+        """
+        prefix = prompt_instructions.SKILL_REVIEW_PREFIX
+
+        self.assertIn("This is a bounded review, not a discovery task.", prefix)
+        self.assertIn("Read the served skill index once", prefix)
+        self.assertIn("Do not run discovery CLIs", prefix)
+        self.assertIn("This requirement is mandatory for every Delegate Agent run", prefix)
+
     def test_discovered_codex_default_validates_effort_without_pinning_argv(self):
         discovery = {
             "harnesses": {

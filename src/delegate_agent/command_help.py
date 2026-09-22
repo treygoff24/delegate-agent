@@ -1478,6 +1478,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
             OptionSpec("--name", "NAME", "Resolve a saved user-level workflow name."),
         ),
+        notes=(
+            "The supervisor is detached, so the invoking process exits immediately. Under a "
+            "systemd unit that means the unit's KillMode must be `process` (systemd-run -p "
+            "KillMode=process): the default `control-group` reaps the supervisor with the "
+            "rest of the cgroup while the unit still reports success. Launching inside such "
+            "a unit prints a warning naming the unit.",
+        ),
         see_also=("workflow status", "workflow events", "workflow wait"),
     ),
     "workflow resume": CommandSpec(
@@ -2097,6 +2104,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Discovery output applies best-effort credential scrubbing; secret-shaped model IDs or paths are redacted, so copy exact values from config.",
             "Agent discovery should prefer --summary, then use raw output only when needed.",
+            "--summary takes no <engine> argument; use `delegate models <engine>` for a per-engine catalog.",
             "Cached reads use the selected profile's private discovery snapshot and do not invoke child binaries.",
             "--live runs a fresh metadata probe in the selected profile environment and does not update the cache.",
             "Bundled tables remain advisory fallbacks; explicit config and harness observations take precedence.",

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from delegate_agent import run_registry, run_status
 from delegate_agent.workflows import registry, runtime
-from tests import proc_harness
+from tests import assert_compact_temps_contained, proc_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "delegate.py"
@@ -28,9 +28,17 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # Registered before the workflow reaper, so it runs after the launched
+        # workflows are reaped and before this test's temp workspace (and the
+        # run manifests that name each child's compact temp) is removed.
+        self.addCleanup(self._contain_compact_temps)
         self.launched_workflows: list[str] = []
         self.captured_workflow_identities: dict[str, tuple[int, int]] = {}
         self.captured_workflow_pgids: dict[str, set[int]] = {}
+        # Producer evidence gathered by `_cleanup_workflows`, which runs first:
+        # containment deletes a child's compact temp only once the processes
+        # that could launch another attempt into it are proven gone.
+        self.producer_proofs: list[object] = []
         self.addCleanup(self._cleanup_workflows)
         self.workspace = Path(self.temp.name)
         self.home = self.workspace / "home"
@@ -55,6 +63,10 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _contain_compact_temps(self) -> None:
+        """Contain the compact child temps this test's run manifests record."""
+        assert_compact_temps_contained(self.workspace / ".delegate", producers=self.producer_proofs)
+
     def _env(self, sleep: float) -> dict[str, str]:
         env = os.environ.copy()
         env.pop("DELEGATE_WORKFLOW_LOCK_FD", None)
@@ -77,6 +89,16 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                 proc_harness.reap_process_tree(*identity)
             for pgid in self.captured_workflow_pgids.get(wf_id, ()):
                 proc_harness.reap_recorded_group_matching(pgid, str(self.workspace))
+        # Reaping those workflows is the boundary containment needs: a supervisor
+        # that is gone can launch no further child, and each proof re-checks its
+        # own lock -- and the workspace scan reaps and re-checks the Delegate
+        # processes this test owns -- at the deletion decision rather than here.
+        # This test's HOME is inside its workspace, so every producer carries the
+        # workspace root: the CLI calls run as `bin/delegate.py --cwd
+        # <workspace>` and each supervisor's child runs as the pinned entrypoint
+        # under `<workspace>/home`, whose path contains that root.
+        self.producer_proofs.extend(proc_harness.workflow_producer_proofs(self.workspace))
+        self.producer_proofs.append(proc_harness.reaped_owned_producers(self.workspace))
 
     def _launch(
         self,

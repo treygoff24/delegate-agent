@@ -27,6 +27,7 @@ from delegate_agent import (
     account_binding,
     harness_discovery,
     mail,
+    model_discovery,
     personas,
     profiles,
     reasoning,
@@ -2818,6 +2819,9 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         resume_session_id=build.resume_session_id,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
+    warnings.extend(
+        model_discovery.configured_model_absence_warning("cursor", model, build.discovery)
+    )
     return EngineRequestParts(
         model=model,
         argv=argv,

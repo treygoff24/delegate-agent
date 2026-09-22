@@ -292,9 +292,14 @@ def build_followup_plan(
     if not raw_session_id:
         raise DelegateError(
             "session-missing",
-            f"Run {alias} has no recorded harnessSessionId; relaunch with --resumable.",
+            f"Run {alias} has no recorded harnessSessionId; relaunch with --resumable "
+            f"(work-mode codex or claude) to record one, or carry this run's report into a "
+            f"new run with `delegate resume {alias}`.",
             diagnostics={"code": "session-missing"},
-            next_actions=["Relaunch the run with --resumable."],
+            next_actions=[
+                "Relaunch the run with --resumable (work mode, codex or claude) when a native followup will be needed.",
+                f'delegate resume {alias} "<extra instructions>"',
+            ],
         )
 
     session_id = validate_session_id(raw_session_id, source_engine, alias=alias)

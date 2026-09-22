@@ -15,6 +15,8 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from tests import assert_compact_temps_contained, proc_harness
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 CLI_PATH = ROOT / "bin" / "delegate.py"
@@ -152,6 +154,22 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.config_path = self.write_workspace_config()
 
     def tearDown(self):
+        # Every run in this test's registry that was launched as a real
+        # subprocess recorded a production compact child temp that only
+        # `runs prune` removes. Contain it here, while the registry that records
+        # the path still exists, and before the workspace temp goes away. The
+        # producers are the Delegate processes this test spawned, and every one
+        # of them is launched as `bin/delegate.py --cwd <workspace> ...`
+        # (`run_cli` and the inline `subprocess.run`/`Popen` sites), so the
+        # workspace root is the ownership marker they all carry: the scan both
+        # reaps any such producer left running and proves none is left, because
+        # a producer that is still alive may launch another attempt into its
+        # run's temp. A scan that cannot be completed raises instead of
+        # answering, so it can never certify a producer exited unobserved.
+        assert_compact_temps_contained(
+            self.registry_root,
+            producers=[proc_harness.reaped_owned_producers(self.workspace)],
+        )
         self.bin_temp.cleanup()
         self.workspace_temp.cleanup()
 

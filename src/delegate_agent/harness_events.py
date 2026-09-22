@@ -665,6 +665,11 @@ class StreamAccumulator:
     provider_terminal_state: str | None = None
     provider_terminal_reason: str | None = None
     served_model: str | None = None
+    # The provider reported alongside `served_model`, when the harness splits
+    # the two (OMP). Callers comparing the served model against a requested
+    # selector need it to rebuild the provider-qualified identity; without it a
+    # correct OMP lane reads as a model substitution.
+    served_model_provider: str | None = None
     _served_model_identity: str | None = field(default=None, repr=False)
     model_observations: list[JsonObject] = field(default_factory=list)
     model_fallback_hops: list[JsonObject] = field(default_factory=list)
@@ -974,6 +979,7 @@ class StreamAccumulator:
         append_bounded_model_event(self.model_observations, observation)
         if prior is None:
             self.served_model = model
+            self.served_model_provider = provider
             self._served_model_identity = identity
             requested = self.requested_model
             if (
@@ -1012,6 +1018,7 @@ class StreamAccumulator:
         self.model_fallback_hops_total += 1
         append_bounded_model_event(self.model_fallback_hops, hop)
         self.served_model = model
+        self.served_model_provider = provider
         self._served_model_identity = identity
         self.sticky_model_turn = turn
         if self.continuity_mode == "pinned":
@@ -1257,12 +1264,19 @@ class StreamAccumulator:
             )
             self.current = _tool_current(tool, target)
 
-    def _record_recoverable_assistant_text(self, text: str) -> None:
+    def _record_recoverable_assistant_text(self, text: str) -> str | None:
+        """Record assistant text and keep it as the recoverable final message.
+
+        Returns the stripped text, like ``_record_assistant_text``: callers that
+        also need the text (codex stores it as its unsealed turn candidate) must
+        not have to re-derive it.
+        """
         stripped = self._record_assistant_text(text)
         if stripped:
             self._last_recoverable_assistant_text = stripped
             if is_substantive_assistant_text(stripped):
                 self._last_substantive_assistant_text = stripped
+        return stripped
 
     def _record_devin_assistant_text(self, text: str) -> None:
         # Devin's stdout is delivered one line at a time with no explicit
@@ -1334,7 +1348,12 @@ class StreamAccumulator:
                 return
             text = _extract_text(item.get("text")) or _extract_text(item.get("content"))
             if text:
-                stripped = self._record_assistant_text(text)
+                # Recorded as recoverable, not just as assistant text: codex
+                # seals completion_text only on turn.completed, so a run that
+                # ends after its final message without that event would
+                # otherwise have a complete report in the stream and nothing
+                # recoverable to show for it.
+                stripped = self._record_recoverable_assistant_text(text)
                 self._codex_completion_candidate = stripped
             else:
                 self._codex_completion_candidate = None

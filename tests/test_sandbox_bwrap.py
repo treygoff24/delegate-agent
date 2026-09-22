@@ -1199,7 +1199,11 @@ class EndToEndBwrapRunTests(CommandTestBase):
         self.assertEqual(observed.get("git"), "ok")
         self.assertFalse((workspace / "leak.txt").exists())
         manifest = run_registry.load_run_manifest(workspace / ".delegate", payload["runId"])
-        self.assertTrue((Path(manifest["scratchPath"]) / "bwrap-temp").is_file())
+        # The child's temp writes land under its own TMPDIR (the compact temp
+        # root, rw-bound separately from the scratch), and the file survives
+        # inside that root -- outside the run would be a boundary leak.
+        self.assertTrue((Path(manifest["tempPath"]) / "bwrap-temp").is_file())
+        self.assertNotEqual(manifest["tempPath"], manifest["scratchPath"])
 
     def test_boundary_construction_error_is_a_recorded_launch_failure(self):
         if not sandbox_bwrap.bwrap_available():

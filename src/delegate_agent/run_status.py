@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from delegate_agent import archived_logs, record_io
+from delegate_agent import archived_logs, record_io, usage_record
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.terminal_states import COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, STALLED
@@ -282,6 +282,12 @@ def build_run_summary(
             value = state.get(key)
             if value is not None:
                 summary[key] = value
+        # `runs`/`ps` report usage from a record a shared workspace can rewrite,
+        # so the summary carries the allowlisted normalized shape, not the bytes
+        # the record holds.
+        usage = usage_record.normalized_usage(state.get("usage"))
+        if usage is not None:
+            summary["usage"] = usage
     summary.update(status_fields(state))
     if summary.get("effectiveStatus") == STATUS_STALE:
         summary["nextActions"] = stale_next_actions(handle, cwd=source_cwd)

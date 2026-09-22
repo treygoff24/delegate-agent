@@ -22,6 +22,8 @@ SKILL_REVIEW_PREFIX = """## Delegate sub-agent skill review requirement
 
 Before doing the task, review the full list of skills available in your current agent environment. Load/read and apply any skill instructions that are relevant to the task, workspace, tools, code quality, verification, or final deliverable. If no skill is relevant, proceed normally after explicitly deciding that. This requirement is mandatory for every Delegate Agent run; do not skip it just because the parent prompt did not mention skills.
 
+This is a bounded review, not a discovery task. Read the served skill index once, then read the skill files you judged relevant — nothing else. Do not run discovery CLIs to enumerate skills (`<tool> doctor`, `--help` probing, directory listings, or repeated reads of the skill index), and do not read the index again if you have already read it in this session. If you cannot find a skill index after one attempt, say so and proceed with the task; the review must never delay the work it precedes.
+
 Respect the current Delegate run mode. In safe/read-only mode, skill instructions may guide analysis, review, or recommendations, but must not override the read-only requirement.
 
 """

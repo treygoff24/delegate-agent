@@ -1616,6 +1616,46 @@ def emit_error(
     return error.exit_code
 
 
+def _configured_model_warnings(
+    config: JsonObject,
+    *,
+    profile_name: str | None,
+) -> tuple[str, ...]:
+    """Warn about configured default models the discovery catalog does not list.
+
+    Configured defaults are validated for type only, so a retired selector sits
+    in config until something else fails on it: a cursor default that
+    cursor-agent refuses outright, or a default a fuzzy-resolving engine quietly
+    substitutes for. Configured `<engine>.models` alias targets are checked the
+    same way -- a selector an operator wrote down is worth a warning even when
+    no launch selects it yet. This is a warning and never a refusal -- a
+    provider-side catalog lag must not block launches -- and an empty or missing
+    catalog for an engine stays silent.
+    """
+    from delegate_agent import harness_discovery, model_discovery, request_build
+
+    discovery = harness_discovery.load_discovery_cache(profile_name)
+    warnings: list[str] = []
+    for engine in sorted(KNOWN_ENGINES):
+        section = config.get(engine)
+        if not isinstance(section, dict):
+            continue
+        default_model = section.get("defaultModel")
+        if isinstance(default_model, str) and default_model:
+            resolved = request_build.resolve_model_selection(section, default_model)
+            warnings.extend(
+                model_discovery.configured_model_absence_warning(engine, resolved, discovery)
+            )
+        warnings.extend(
+            model_discovery.configured_alias_absence_warnings(
+                engine, section.get("models"), discovery
+            )
+        )
+    # One dead target can be named by both the default and an alias; the same
+    # finding twice is noise, so identical messages collapse.
+    return tuple(dict.fromkeys(warnings))
+
+
 def _doctor_config_warnings(
     global_options: _request_models.GlobalOptions,
 ) -> tuple[str, ...]:
@@ -1639,7 +1679,11 @@ def _doctor_config_warnings(
     except (DelegateError, delegate_config.ConfigError, OSError, ValueError):
         return ()
     warning = profiles.codex_profile_overlay_warning(config, resolution)
-    return (warning,) if warning is not None else ()
+    warnings = [warning] if warning is not None else []
+    # Discovery is advisory evidence; a broken cache must not break doctor.
+    with contextlib.suppress(OSError, ValueError):
+        warnings.extend(_configured_model_warnings(config, profile_name=resolution.name))
+    return tuple(warnings)
 
 
 def main(

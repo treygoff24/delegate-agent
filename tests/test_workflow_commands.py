@@ -39,7 +39,7 @@ from delegate_agent.workflows import commands as workflow_commands  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 from delegate_agent.workflows import runtime as workflow_runtime  # noqa: E402
 from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
-from tests import proc_harness  # noqa: E402
+from tests import assert_compact_temps_contained, proc_harness  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
 
@@ -54,9 +54,34 @@ def _argv_pairs(argv: list[str]) -> list[list[str]]:
 
 
 class WorkflowCommandTests(unittest.TestCase):
+    def _contain_compact_temps(self) -> None:
+        """Contain this test's recorded child temps once its producers are gone.
+
+        A run here is driven by a child Delegate process the workflow supervisor
+        launched, and the supervisor is the process that can start another one.
+        The per-test reapers have run by now, so each supervisor's own lock is
+        the proof that it can launch no further child, and the workspace scan
+        reaps and re-checks the Delegate processes this test owns. This test's
+        HOME is inside its workspace, so the workspace root is a marker every
+        producer carries: the CLI calls run as `bin/delegate.py --cwd
+        <workspace>` and a supervisor's child runs as the pinned entrypoint
+        under `<workspace>/home`, whose path contains that root. The fake engines
+        hold no files under the temp root.
+        """
+        producers = [
+            *proc_harness.workflow_producer_proofs(self.workspace),
+            proc_harness.reaped_owned_producers(self.workspace),
+        ]
+        assert_compact_temps_contained(self.workspace / ".delegate", producers=producers)
+        assert_compact_temps_contained(self.home / ".delegate", producers=producers)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # Registered here, before every per-test reaper, so it runs after them:
+        # the proofs it needs are that each supervisor that drove a child run is
+        # gone, which is exactly what those cleanups reap.
+        self.addCleanup(self._contain_compact_temps)
         self.workspace = Path(self.temp.name)
         self.home = self.workspace / "home"
         self.home.mkdir()
@@ -2137,6 +2162,85 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(approved.stdout)["error"], "unsupported_workflow_version")
         self.assertFalse((root / workflow_registry.APPROVAL_FILE).exists())
 
+    def test_rejection_source_is_recorded_when_the_emitter_declares_it(self) -> None:
+        """Seat, merge-gate, and coordinator rejections must be distinguishable.
+
+        All three are spelled `agent_rejected` with a free-text reason, so a
+        per-seat report built from the journal credited models with engine and
+        coordinator decisions.
+        """
+        wf_id = "wf_444444444444"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "workflowKeyVersion": 2,
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.append_event("agent_started", key="seat-key", label="review")
+        state.append_event("agent_started", key="gate-key", label="merge")
+        state.append_event("agent_started", key="coord-key", label="coordinate")
+
+        state.reject_agent("review", "execute/fix result invalid", by="seat")
+        state.reject_agent("merge", "merge result invalid", by="merge-gate")
+        # An emitter that declares nothing keeps the legacy event shape rather
+        # than guessing a category on its behalf.
+        state.reject_agent("coordinate", "plan-unpark retry")
+
+        events = [
+            event
+            for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+            if event.get("type") == "agent_rejected"
+        ]
+        self.assertEqual(
+            [event.get("rejectedBy") for event in events], ["seat", "merge-gate", None]
+        )
+        self.assertEqual([event["key"] for event in events], ["seat-key", "gate-key", "coord-key"])
+
+    def test_rejection_source_rejects_an_unknown_category(self) -> None:
+        wf_id = "wf_555555555555"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "workflowKeyVersion": 2,
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.append_event("agent_started", key="agent-key", label="draft")
+
+        with self.assertRaises(ValueError):
+            state.reject_agent("draft", "policy", by="reviewer")
+
     def test_reject_is_durable_idempotent_and_sequence_ordered(self) -> None:
         wf_id = "wf_333333333333"
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
@@ -2408,6 +2512,12 @@ class WorkflowCommandTests(unittest.TestCase):
         events = json.loads(self.run_delegate(["--json", "workflow", "events", wf_id]).stdout)[
             "events"
         ]
+        rejected_events = [event for event in events if event.get("type") == "agent_rejected"]
+        self.assertEqual(len(rejected_events), 1)
+        self.assertEqual(rejected_events[0]["key"], first_key)
+        # An operator tombstone is a coordinator action, never the seat's own
+        # invalid output.
+        self.assertEqual(rejected_events[0]["rejectedBy"], "coordinator")
         started = [event for event in events if event.get("type") == "agent_started"]
         self.assertEqual(len(started), 2)
         self.assertNotEqual(started[0]["key"], started[1]["key"])
@@ -3231,6 +3341,157 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(waited.returncode, 0, waited.stderr)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], "new")
+
+    def test_systemd_unit_with_control_group_killmode_warns_before_detaching(self) -> None:
+        """A unit whose main process exits reaps the detached supervisor.
+
+        systemd-run defaults to KillMode=control-group, so the unit reports
+        Result=success while the workflow is already dead.
+        """
+        cgroup = self.workspace / "cgroup"
+        cgroup.write_text("0::/system.slice/run-u42.service\n", encoding="utf-8")
+        script = self.write_workflow('meta = {"name": "systemd-warning"}\nreturn True\n')
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+            mock.patch.object(workflow_commands, "SYSTEMD_CGROUP_PATH", cgroup),
+            mock.patch.object(
+                workflow_commands,
+                "_systemd_kill_mode",
+                return_value="control-group",
+            ),
+            mock.patch.object(workflow_runtime, "detach_supervisor"),
+        ):
+            code = workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", script=str(script), json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        (warning,) = [item for item in payload["warnings"] if "systemd" in item]
+        self.assertIn("run-u42.service", warning)
+        self.assertIn("KillMode=process", warning)
+
+    def test_a_unit_that_keeps_the_supervisor_alive_does_not_warn(self) -> None:
+        cgroup = self.workspace / "cgroup"
+        cgroup.write_text("0::/system.slice/run-u42.service\n", encoding="utf-8")
+        script = self.write_workflow('meta = {"name": "systemd-quiet"}\nreturn True\n')
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+            mock.patch.object(workflow_commands, "SYSTEMD_CGROUP_PATH", cgroup),
+            mock.patch.object(
+                workflow_commands,
+                "_systemd_kill_mode",
+                return_value="process",
+            ),
+            mock.patch.object(workflow_runtime, "detach_supervisor"),
+        ):
+            code = workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", script=str(script), json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse([item for item in payload.get("warnings", []) if "systemd" in item])
+
+    def test_an_interactive_session_cgroup_is_not_a_systemd_unit(self) -> None:
+        self.assertIsNone(
+            workflow_commands._systemd_unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/session-3.scope\n"
+            )
+        )
+        self.assertEqual(
+            workflow_commands._systemd_unit_from_cgroup(
+                "1:name=systemd:/system.slice/delegate-workflow.service\n"
+            ),
+            workflow_commands.SystemdUnit("delegate-workflow.service", user_manager=False),
+        )
+
+    def test_an_ancestor_user_manager_service_is_not_the_current_unit(self) -> None:
+        """Only the leaf component names the unit that owns this process.
+
+        An ordinary interactive launch sits at
+        `.../user@1000.service/app.slice/app-org.example.scope`; the per-user
+        manager is an ancestor that stays alive with the session, so selecting
+        it warned about a KillMode that never reaps the detached supervisor.
+        """
+        self.assertIsNone(
+            workflow_commands._systemd_unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.example.scope\n"
+            )
+        )
+        # The same ancestor path with a service leaf IS this process's unit.
+        unit = workflow_commands._systemd_unit_from_cgroup(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r42.service\n"
+        )
+        self.assertEqual(unit, workflow_commands.SystemdUnit("run-r42.service", user_manager=True))
+
+    def test_a_system_transient_service_is_a_system_manager_unit(self) -> None:
+        unit = workflow_commands._systemd_unit_from_cgroup("0::/system.slice/run-u42.service\n")
+        self.assertEqual(unit, workflow_commands.SystemdUnit("run-u42.service", user_manager=False))
+
+    def test_a_user_manager_unit_is_queried_through_its_own_manager(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="process\n", stderr="")
+
+        with (
+            mock.patch.object(workflow_commands.shutil, "which", return_value="/usr/bin/systemctl"),
+            mock.patch.object(workflow_commands.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(
+                workflow_commands._systemd_kill_mode("run-r42.service", user_manager=True),
+                "process",
+            )
+            self.assertEqual(workflow_commands._systemd_kill_mode("run-u42.service"), "process")
+
+        self.assertEqual(calls[0][:2], ["/usr/bin/systemctl", "--user"])
+        self.assertNotIn("--user", calls[1])
+
+    def test_an_interactive_scope_under_a_user_manager_never_warns(self) -> None:
+        """The user-manager ancestor must not produce the severe detach warning."""
+        cgroup = self.workspace / "cgroup-user-session"
+        cgroup.write_text(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.example.scope\n",
+            encoding="utf-8",
+        )
+        script = self.write_workflow('meta = {"name": "systemd-user-session"}\nreturn True\n')
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+            mock.patch.object(workflow_commands, "SYSTEMD_CGROUP_PATH", cgroup),
+            # Even an unsafe KillMode on the manager must not be reported: this
+            # process does not run as the manager.
+            mock.patch.object(
+                workflow_commands, "_systemd_kill_mode", return_value="control-group"
+            ),
+            mock.patch.object(workflow_runtime, "detach_supervisor"),
+        ):
+            code = workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", script=str(script), json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse([item for item in payload.get("warnings", []) if "systemd" in item])
 
     def test_resume_launch_failure_restores_prior_status_and_result(self) -> None:
         wf_id = "wf_123456789abc"

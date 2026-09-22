@@ -234,6 +234,11 @@ class WaitCancelCommandTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["error"], "no_matching_runs")
         self.assertIn("No runs found for group: missing", payload["message"])
+        # A group launched with --cwd elsewhere is invisible here; the error has
+        # to say the Registry is workspace-scoped and name the searched root.
+        self.assertIn("workspace-scoped", payload["message"])
+        self.assertIn("--cwd PATH", payload["message"])
+        self.assertIn(str(self.registry_root), payload["message"])
         self.assertEqual(err, "")
 
     def test_wait_group_warns_when_work_runs_share_nonisolated_workspace_json(self):

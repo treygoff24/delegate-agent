@@ -277,10 +277,12 @@ def parse_simple_inspection_subcommand(
                 "--live requires an engine argument (delegate models <engine> --live).",
             )
         if summary and engine is not None:
-            raise DelegateError(
+            error = DelegateError(
                 "invalid_option_combination",
                 "--summary is not supported with models <engine>.",
             )
+            error.next_actions = ["delegate help models", "delegate --json models <engine>"]
+            raise error
         if engine is not None and engine not in KNOWN_ENGINES:
             raise DelegateError(
                 "invalid_engine",

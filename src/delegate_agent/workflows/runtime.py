@@ -25,6 +25,7 @@ from delegate_agent import (
     personas,
     profiles,
     reasoning,
+    redaction,
     run_registry,
     structured_output,
     wait_cancel_commands,
@@ -123,6 +124,8 @@ class ChildAttemptOutcome:
     execution_cwd: str | None = None
     session_id: str | None = None
     session_metadata: JsonObject | None = None
+    exit_code: int | None = None
+    stderr_tail: str | None = None
 
     def as_json(self) -> JsonObject:
         payload: JsonObject = {
@@ -135,6 +138,14 @@ class ChildAttemptOutcome:
             "sessionId": self.session_id,
             "sessionMetadata": self.session_metadata,
         }
+        # A child that dies before publishing a run record leaves the JSON
+        # decode of empty stdout as the only diagnosis. The exit code and the
+        # harness's own stderr (quota, auth, launch refusal) are what actually
+        # say why, so carry them on the outcome the journal records.
+        if self.exit_code is not None:
+            payload["exitCode"] = self.exit_code
+        if self.stderr_tail:
+            payload["stderrTail"] = self.stderr_tail
         return payload
 
 
@@ -185,6 +196,19 @@ def _normalize_child_failure_reason(value: object, *, default: str) -> str:
     return default
 
 
+def _child_failure_default_reason(returncode: int) -> str:
+    """The reason for a child that published no usable envelope.
+
+    Both launch paths (`agent()` and `followup`) ask this after the child's
+    return code is known, so the two cannot disagree about the same condition.
+    An exit-zero child broke the envelope contract rather than crashing, so
+    naming a nonzero exit would report an event that never happened. A child
+    that did exit nonzero keeps the normalized reason its own payload would
+    have produced.
+    """
+    return "invalid_envelope" if returncode == 0 else "nonzero_exit"
+
+
 def _child_attempt_outcome(
     payload: JsonObject | None,
     *,
@@ -223,10 +247,12 @@ def _child_attempt_outcome(
     )
 
 
-def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _DelegateChildResult:
+def _child_result_from_payload(
+    result: JsonObject, *, text: str | None, default_reason: str = "nonzero_exit"
+) -> _DelegateChildResult:
     outcome = None
     if result.get("ok") is not True:
-        outcome = _child_attempt_outcome(result, default_reason="nonzero_exit", text=text)
+        outcome = _child_attempt_outcome(result, default_reason=default_reason, text=text)
     return _DelegateChildResult(
         text=text,
         run_id=result.get("runId") if isinstance(result.get("runId"), str) else None,
@@ -258,11 +284,56 @@ def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _Dele
     )
 
 
+CHILD_STDERR_TAIL_CHARS = 2000
+
+# Why an agent key was tombstoned. The reason string is emitter-owned free text,
+# so journal consumers could not tell a seat whose own output was refused from a
+# merge gate refusing an accepted result, or from a coordinator invalidating a
+# cached result, without hand-classifying reason strings and crediting models
+# with integration and coordinator decisions.
+REJECTION_SOURCES = ("seat", "merge-gate", "coordinator")
+
+
+def _normalize_rejection_source(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in REJECTION_SOURCES:
+        raise ValueError(f"reject() source must be one of {', '.join(REJECTION_SOURCES)}")
+    return value
+
+
+def rejection_event(
+    *,
+    key: str,
+    label: str | None,
+    reason: str,
+    by: str | None = None,
+) -> JsonObject:
+    event: JsonObject = {"key": key, "reason": reason}
+    if label is not None:
+        event["label"] = label
+    source = _normalize_rejection_source(by)
+    if source is not None:
+        event["rejectedBy"] = source
+    return event
+
+
+def _child_stderr_tail(stderr: bytes | str | None) -> str | None:
+    """Bounded, redacted tail of a failing child's own stderr."""
+    if stderr is None:
+        return None
+    text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr
+    tail = text[-CHILD_STDERR_TAIL_CHARS:].strip()
+    return redaction.redact_string(tail) if tail else None
+
+
 def _failed_child_result(
     recovered: _DelegateChildResult | None,
     *,
     reason: str,
     session_id: str | None = None,
+    exit_code: int | None = None,
+    stderr_tail: str | None = None,
 ) -> _DelegateChildResult:
     prior = recovered or _DelegateChildResult(None, None, None, None)
     outcome = prior.outcome or ChildAttemptOutcome(
@@ -282,6 +353,8 @@ def _failed_child_result(
         execution_cwd=outcome.execution_cwd,
         session_id=session_id or outcome.session_id,
         session_metadata=outcome.session_metadata,
+        exit_code=exit_code if exit_code is not None else outcome.exit_code,
+        stderr_tail=stderr_tail or outcome.stderr_tail,
     )
     return _DelegateChildResult(
         text=None,
@@ -1508,14 +1581,12 @@ class WorkflowState:
                 return key, raw
         raise ValueError(f"reject() could not resolve agent key or label: {raw!r}")
 
-    def reject_agent(self, key_or_label: object, reason: object) -> str:
+    def reject_agent(self, key_or_label: object, reason: object, *, by: object = None) -> str:
         """Durably tombstone an agent key so a later call executes fresh."""
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reject() expects a non-empty reason string")
         key, label = self.resolve_agent_key(key_or_label)
-        event: JsonObject = {"key": key, "reason": reason}
-        if label is not None:
-            event["label"] = label
+        event = rejection_event(key=key, label=label, reason=reason, by=by)
         # append_event writes the tombstone and updates the in-memory fold under
         # the same lock used by lifecycle cache decisions.
         self.append_event("agent_rejected", **event)
@@ -2040,9 +2111,16 @@ class WorkflowDsl:
     def log(self, message: object) -> None:
         self.state.append_event("log", message=str(message))
 
-    def reject(self, key_or_label: object, reason: object) -> None:
-        """Invalidate an agent result explicitly; emitters own this policy."""
-        self.state.reject_agent(key_or_label, reason)
+    def reject(self, key_or_label: object, reason: object, *, by: object = None) -> None:
+        """Invalidate an agent result explicitly; emitters own this policy.
+
+        ``by`` labels who refused the result: ``seat`` (the agent's own output
+        failed validation), ``merge-gate`` (integration refused an accepted
+        result), or ``coordinator`` (a cached result was invalidated). It lands
+        on the ``agent_rejected`` event as ``rejectedBy`` so a per-seat report
+        does not credit a model with an engine or coordinator decision.
+        """
+        self.state.reject_agent(key_or_label, reason, by=by)
 
     def park_item(self, name: object, result: JsonValue = None) -> None:
         self.state.park_item(name, result)
@@ -3294,7 +3372,17 @@ class WorkflowDsl:
             elif attempt == 0:
                 attempt_prompt = prompt
             elif resume_session_id is not None:
-                attempt_prompt = _structured_resume_prompt(prior_error)
+                # A resumed session keeps the engine's context but not this
+                # schema: the shape was never in the child's own conversation
+                # history unless the first attempt carried it. Two GLM review
+                # retries rebuilt the shape from memory, echoed a root-array
+                # schema's `items` keyword as an object wrapper, and failed
+                # validation again. Re-render the schema into the correction
+                # instead of trusting recalled structure.
+                attempt_prompt = _structured_prompt(
+                    _structured_resume_prompt(prior_error), schema, "", ""
+                )
+                attempt_prompt_has_schema = True
             else:
                 attempt_prompt = _correction_prompt(prompt, prior_output, prior_error)
             attempt_persona = persona if resume_session_id is None else None
@@ -3527,6 +3615,31 @@ class WorkflowDsl:
         _release_structured_retry_worktree_for_state(self.state, run_id)
         self.state.retry_worktree_runs.discard(run_id)
 
+    def _record_unparsed_child_stdout(
+        self,
+        *,
+        engine: str,
+        workflow_agent_key: str,
+        exit_code: int,
+        stdout_chars: int,
+        stderr_tail: str | None,
+    ) -> None:
+        """Record that a child's stdout was not JSON at all.
+
+        Both child-launch paths (the initial `agent()` launch and `followup`)
+        reach this: stdout that never parsed says nothing about why the child
+        died, so the exit code and the bounded, redacted stderr tail are the
+        only diagnosis a retry or an operator gets.
+        """
+        self.state.append_event(
+            "child_stdout_unparsed",
+            engine=engine,
+            key=workflow_agent_key,
+            exitCode=exit_code,
+            stdoutChars=stdout_chars,
+            stderrTail=stderr_tail,
+        )
+
     def _run_delegate(
         self,
         engine: str,
@@ -3701,8 +3814,20 @@ class WorkflowDsl:
                 else None
             )
             normalized_reason = _normalize_child_failure_reason(
-                failure_reason, default="nonzero_exit"
+                failure_reason, default=_child_failure_default_reason(completed.returncode)
             )
+            stderr_tail = _child_stderr_tail(completed.stderr)
+            if result is None:
+                # stdout was not JSON at all: the child's own diagnosis never
+                # arrived, so the exit code and its stderr tail are the only
+                # evidence a retry or an operator gets.
+                self._record_unparsed_child_stdout(
+                    engine=engine,
+                    workflow_agent_key=workflow_agent_key,
+                    exit_code=completed.returncode,
+                    stdout_chars=len(text),
+                    stderr_tail=stderr_tail,
+                )
             if return_metadata:
                 # Preserve the failed run's workspace/branch for the structured
                 # retry protocol.  Cleaning it here would discard checkpoint
@@ -3712,7 +3837,12 @@ class WorkflowDsl:
                     if isinstance(result, dict)
                     else _DelegateChildResult(None, None, None, None)
                 )
-                return _failed_child_result(child, reason=normalized_reason)
+                return _failed_child_result(
+                    child,
+                    reason=normalized_reason,
+                    exit_code=completed.returncode,
+                    stderr_tail=stderr_tail,
+                )
             cleanup = (
                 result.get("temporaryWorkspaceCleanup")
                 if isinstance(result, dict)
@@ -3746,17 +3876,55 @@ class WorkflowDsl:
                 self.state.wf_id,
                 workflow_agent_key,
             )
+            # Same classifier as the nonzero branch and as followup: exit zero
+            # with unparsed stdout is a broken envelope, not a failed process.
+            reason = _child_failure_default_reason(completed.returncode)
+            stderr_tail = _child_stderr_tail(completed.stderr)
+            self._record_unparsed_child_stdout(
+                engine=engine,
+                workflow_agent_key=workflow_agent_key,
+                exit_code=completed.returncode,
+                stdout_chars=len(text),
+                stderr_tail=stderr_tail,
+            )
             if return_metadata:
-                return _failed_child_result(recovered, reason="structured")
+                return _failed_child_result(
+                    recovered,
+                    reason=reason,
+                    exit_code=completed.returncode,
+                    stderr_tail=stderr_tail,
+                )
             if recovered is not None:
                 _cleanup_structured_retry_workspace(recovered.workspace_cleanup)
             raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}")
         if not isinstance(result, dict) or not result.get("ok", False):
+            default_reason = _child_failure_default_reason(completed.returncode)
             child = (
-                _child_result_from_payload(result, text=None) if isinstance(result, dict) else None
+                _child_result_from_payload(result, text=None, default_reason=default_reason)
+                if isinstance(result, dict)
+                else None
             )
-            if return_metadata and child is not None:
-                return child
+            if return_metadata:
+                # Exit zero with no usable envelope: nothing failed at the
+                # process level, so the reason names the contract the child
+                # broke instead of claiming a nonzero exit that never happened.
+                # The child's own failureReason wins when it published one.
+                reason = (
+                    child.outcome.failure_reason
+                    if child is not None and child.outcome is not None
+                    else default_reason
+                )
+                recovered = child or _workflow_agent_run_result_metadata(
+                    self.state.workspace,
+                    self.state.wf_id,
+                    workflow_agent_key,
+                )
+                return _failed_child_result(
+                    recovered,
+                    reason=reason,
+                    exit_code=completed.returncode,
+                    stderr_tail=_child_stderr_tail(completed.stderr),
+                )
             if child is not None:
                 _cleanup_structured_retry_workspace(child.workspace_cleanup)
             else:
@@ -3998,14 +4166,19 @@ class WorkflowDsl:
                 prior_error = str(exc)
                 if attempt >= attempts:
                     break
-                self.state.append_event(
-                    "agent_structured_retry",
-                    engine=prior_child.engine,
-                    attempt=attempt,
-                    error=prior_error,
-                    key=key,
-                    label=label,
-                )
+                retry_event: JsonObject = {
+                    "engine": prior_child.engine,
+                    "attempt": attempt,
+                    "error": prior_error,
+                    "key": key,
+                    "label": label,
+                }
+                # The retry event is where an operator looks for why the child
+                # failed; a failed child's own stderr (quota, auth, launch
+                # refusal) belongs here rather than only on the attempt event.
+                if child.outcome is not None and child.outcome.stderr_tail:
+                    retry_event["stderrTail"] = child.outcome.stderr_tail
+                self.state.append_event("agent_structured_retry", **retry_event)
                 self._wait_retry_backoff(attempt)
         if schema is None:
             return None
@@ -4082,13 +4255,30 @@ class WorkflowDsl:
             or not isinstance(result, dict)
             or result.get("ok") is not True
         ):
+            default_reason = _child_failure_default_reason(completed.returncode)
             child = (
-                _child_result_from_payload(result, text=None) if isinstance(result, dict) else None
+                _child_result_from_payload(result, text=None, default_reason=default_reason)
+                if isinstance(result, dict)
+                else None
             )
-            return _failed_child_result(
+            stderr_tail = _child_stderr_tail(completed.stderr)
+            failed = _failed_child_result(
                 child,
-                reason=child.outcome.failure_reason if child and child.outcome else "nonzero_exit",
+                reason=child.outcome.failure_reason if child and child.outcome else default_reason,
+                exit_code=completed.returncode,
+                stderr_tail=stderr_tail,
             )
+            if result is None:
+                # stdout was not JSON at all: the decode error alone says
+                # nothing about why the child died.
+                self._record_unparsed_child_stdout(
+                    engine=engine,
+                    workflow_agent_key=workflow_agent_key,
+                    exit_code=completed.returncode,
+                    stdout_chars=len(text),
+                    stderr_tail=stderr_tail,
+                )
+            return failed
         if isinstance(result.get("text"), str):
             return _child_result_from_payload(result, text=result["text"])
         assistant = result.get("assistantText")

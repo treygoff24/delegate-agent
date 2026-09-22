@@ -113,11 +113,21 @@ def validate(identity: JsonObject, config: JsonObject) -> None:
     # Different detector provenance is harmless when it selects the same
     # profile and namespaces. Raw ambient overrides hidden by definitions do
     # not change effective identity and must not create a false refusal.
-    if any(
-        current[key] != identity.get(key)
+    drift_keys = [
+        key
         for key in ("profile", "namespaces", "fallbackProfile", "fallbackCodexHome")
-    ):
+        if current[key] != identity.get(key)
+    ]
+    if drift_keys:
+        # Name the keys and both values: the comparison list is short, and an
+        # operator who cannot see which binding drifted only knows to relaunch.
+        details = "; ".join(
+            f"{key}: pin={identity.get(key)!r}, current={current[key]!r}" for key in drift_keys
+        )
         raise WorkflowPinError(
             "workflow_profile_drift",
-            "selected Delegate profile or credential namespace differs from the workflow creation pin; restore its selector/home bindings or start a new workflow",
+            "selected Delegate profile or credential namespace differs from the workflow "
+            f"creation pin ({details}); restore its selector/home bindings "
+            "(HOME, DELEGATE_PROFILE, AI_PROFILE, DELEGATE_CONFIG, or an engine home override) "
+            "or start a new workflow",
         )

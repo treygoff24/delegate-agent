@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -56,6 +57,36 @@ class ExecutionTestBase(unittest.TestCase):
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
         self._test_home = home.name
+
+    def contain_compact_temps(
+        self, *workspaces: str | Path, producers: Sequence[object] = ()
+    ) -> list[Path]:
+        """Contain the compact child temps a workspace's run manifests record.
+
+        A test that spawns a real Delegate subprocess starts a fresh
+        interpreter: it resolves the production compact child temp root that
+        this process pins away, and only `runs prune` removes what it allocated.
+        Call this from the test, after the producer process returned and before
+        the workspace's own temp directory is cleaned, so the recorded paths can
+        still be read and a surviving one fails the test.
+
+        `producers` is this test's positive evidence that the processes which
+        drive those runs cannot launch another attempt into them: the reaped
+        `Popen` or `CompletedProcess` of each Delegate subprocess the test
+        spawned, or a `proc_harness` proof for a producer it has no handle for.
+        Without that evidence the recorded temps are retained and reported
+        instead of deleted -- a run's compact temp is shared by every attempt of
+        that run, so a producer that may still retry would lose its child's
+        TMPDIR mid-run.
+        """
+        from tests import assert_compact_temps_contained
+
+        removed: list[Path] = []
+        for workspace in workspaces:
+            removed.extend(
+                assert_compact_temps_contained(Path(workspace) / ".delegate", producers=producers)
+            )
+        return removed
 
     def private_tmp_env(self, env) -> str:
         """Point env's TMPDIR/TMP/TEMP at a fresh per-test dir.
@@ -149,6 +180,30 @@ class ExecutionTestBase(unittest.TestCase):
             'if [ "${FAKE_ECHO_ARGS:-0}" = "1" ]; then\n'
             "  printf 'OUT:%s\\n' \"$*\"\n"
             "fi\n"
+            'exit "${FAKE_EXIT:-0}"\n'
+        )
+        path.chmod(0o755)
+        return bin_dir
+
+    def make_cursor_safe_fake_agent_writing_in_its_tmpdir(self):
+        """A cursor fake that writes inside its TMPDIR before and after a delay.
+
+        The tracked child's TMPDIR is the run's compact temp, so a write that
+        fails there is the child observing that its own directory was removed
+        while it was still running; exit code 3 marks exactly that.
+        """
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        path = bin_dir / "agent"
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf "first\\n" > "$TMPDIR/child-write-1.txt" || exit 3\n'
+            'sleep "${FAKE_CHILD_DELAY:-0.5}"\n'
+            'printf "second\\n" > "$TMPDIR/child-write-2.txt" || exit 3\n'
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            '- delayed child\\\\n- wrote twice","usage":{"inputTokens":5,'
+            '"outputTokens":3}}\\n\'\n'
             'exit "${FAKE_EXIT:-0}"\n'
         )
         path.chmod(0o755)

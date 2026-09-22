@@ -1200,6 +1200,20 @@ def _remove_run_record_artifacts(
                 f"refusing to prune run {run_id}: recorded scratch path {recorded_path} "
                 f"does not match current owned path {expected}"
             )
+    if manifest is not None and "tempPath" in manifest:
+        # The compact child temp is deleted by the same run-owned cleanup as
+        # the scratch, so a recorded path that no longer matches the owned one
+        # is conflicting metadata: refuse rather than delete a directory the
+        # record no longer claims.
+        recorded_temp = manifest.get("tempPath")
+        if not isinstance(recorded_temp, str) or not recorded_temp:
+            raise OSError(f"refusing to prune run {run_id}: invalid recorded temp path")
+        expected_temp = run_scratch.expected_compact_temp_path(registry_root, run_id)
+        if Path(os.path.abspath(recorded_temp)) != expected_temp:
+            raise OSError(
+                f"refusing to prune run {run_id}: recorded temp path {recorded_temp} "
+                f"does not match current owned path {expected_temp}"
+            )
     # A manifest without a recorded scratch path, or an absent legacy manifest,
     # carries no deletion pointer, and a run that allocated no scratch can
     # still have left a sidecar (the mail-push private homes). The

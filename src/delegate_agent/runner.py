@@ -359,7 +359,7 @@ def pinned_continuity_unverified_text(harness: str, requested: str | None) -> st
     completes with servedModelSource=unavailable and nothing was checked. Say
     so on the record rather than letting the mode read as verified.
     """
-    target = requested or "the requested model"
+    target = redaction.redact_string(requested) if requested else "the requested model"
     return (
         f"{PINNED_UNVERIFIED_WARNING_PREFIX}: {harness} reported no model event, so the "
         f"served model could not be checked against {target}; this run is pinned in name "
@@ -369,6 +369,51 @@ def pinned_continuity_unverified_text(harness: str, requested: str | None) -> st
 
 def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
     return pinned_continuity_unverified_text(ctx.harness, _requested_model(ctx))
+
+
+MODEL_SUBSTITUTION_WARNING_PREFIX = "model_substitution"
+
+
+def model_substitution_warning(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator | None,
+) -> str | None:
+    """Warn when fungible/panel continuity served a different model.
+
+    In pinned mode a switch pauses the run, so the mode is self-reporting. In
+    fungible and panel modes a fallback is silent: the record carries
+    requested/resolved/served model, but nothing said the run was produced by
+    something other than what was asked for, and a substituted lane reads as a
+    clean approval of the requested model's work.
+
+    Identity goes through the same harness-aware equivalence the pinned check
+    uses, so an OMP `provider/model` identity, a Cursor display name, or a
+    Claude family alias is the requested model rather than a substitution.
+    Every model value is redacted: the warning is persisted in state, the
+    completion report, and the doctor payload, all of which promise to scrub
+    credential-shaped material.
+    """
+    if ctx.continuity_mode not in ("fungible", "panel"):
+        return None
+    served = accumulator.served_model if accumulator is not None else None
+    resolved = ctx.model_resolved or ctx.model
+    if not served or not resolved:
+        return None
+    if harness_events.served_model_matches_requested(
+        ctx.harness,
+        resolved,
+        served,
+        display_name=accumulator.requested_model_display_name,
+        served_provider=accumulator.served_model_provider,
+    ):
+        return None
+    requested = redaction.redact_string(_requested_model(ctx) or resolved)
+    return (
+        f"{MODEL_SUBSTITUTION_WARNING_PREFIX}: requested "
+        f"{requested} resolved to {redaction.redact_string(resolved)} but the harness served "
+        f"{redaction.redact_string(served)} under {ctx.continuity_mode} continuity; this run's "
+        "output is not the requested model's"
+    )
 
 
 def _acceptance_slice(ctx: RunContext) -> JsonObject:
@@ -507,7 +552,10 @@ def _terminal_record(
 
 
 def _pinned_pause_notice(ctx: RunContext, *, reason: str) -> str:
-    model = _requested_model(ctx) or "requested model"
+    # This notice is persisted as `failoverNotice` and prepended to the
+    # completion report, so the requested model is redacted like every other
+    # model value that enters warning prose.
+    model = redaction.redact_string(_requested_model(ctx)) or "requested model"
     return (
         f"[model-continuity] Pinned run paused: {model} became unavailable ({reason}); "
         "Delegate did not start a fallback route. Resume after availability returns, or "
@@ -706,8 +754,16 @@ def build_run_record(
         and (accumulator is None or accumulator.served_model is None)
     ):
         warnings.append(pinned_continuity_unverified_warning(ctx))
+    substitution_warning = model_substitution_warning(ctx, accumulator)
+    if substitution_warning is not None:
+        warnings.append(substitution_warning)
     if warnings:
         record["warnings"] = warnings
+    # Token usage was parsed and merged but only ever landed in the call-mode
+    # launch response, so cost/throughput accounting for tracked runs had to
+    # fall back to wall-clock. Persist it with the record it describes.
+    if accumulator is not None and accumulator.usage is not None:
+        record["usage"] = redaction.redact_value(accumulator.usage)
     if accumulator is not None:
         _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
         recent_events, events_meta = accumulator.bounded_recent_events()
@@ -1114,6 +1170,35 @@ def _auth_remediation_line(ctx: RunContext) -> str:
             "Remediation: inspect `delegate profiles`, then refresh Codex auth with `codex login`."
         )
     return f"Remediation: re-authenticate the {ctx.harness} CLI."
+
+
+DELEGATE_REPORT_NOTICE_HEADER = "Delegate run metadata (delegate-authored):"
+
+
+def delegate_report_notice(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    usage: JsonObject | None,
+) -> str | None:
+    """Delegate-authored run metadata attached above a completion report.
+
+    Usage and a model-substitution warning describe the run, not the child's
+    answer, so they are labelled as delegate-authored instead of being folded
+    into the child's prose: the child's text and its `completionReportSource`
+    attribution are unchanged. Bounded by construction -- one line per finding,
+    each already normalized or redacted by its own producer.
+    """
+    lines: list[str] = []
+    substitution = model_substitution_warning(ctx, accumulator)
+    if substitution is not None:
+        lines.append(substitution)
+    label = rendering.usage_label(usage) if isinstance(usage, dict) else None
+    if label is not None:
+        lines.append(f"usage: {label}")
+    if not lines:
+        return None
+    return "\n".join([DELEGATE_REPORT_NOTICE_HEADER, *(f"- {line}" for line in lines)])
 
 
 def _completion_report_text_and_source(
@@ -1616,6 +1701,10 @@ class TrackedRunFiles:
     stdout_log: Path
     stderr_log: Path
     scratch_dir: Path | None = None
+    # The short-path directory the child sees as TMPDIR/TMP/TEMP. The run
+    # scratch keeps its own path and cleanup contract; this one exists because
+    # a child's Unix socket does not fit under the scratch path.
+    temp_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1966,11 +2055,15 @@ def _prepare_tracked_run(
     run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
     run_registry.ensure_private_dir(run_path)
     scratch_dir: Path | None = None
+    temp_dir: Path | None = None
     if ctx.mode == "safe" or ctx.effective_isolation != "none":
         scratch_plan: run_scratch.ScratchPlan | None = None
         try:
             scratch_plan = run_scratch.plan(ctx.registry_root, ctx.run_id)
             scratch_dir = run_scratch.allocate_plan(scratch_plan)
+            # The child's TMPDIR is short by construction, so a Unix socket it
+            # binds there fits `sun_path`; the run scratch keeps its own path.
+            temp_dir = run_scratch.allocate_compact_temp(ctx.registry_root, ctx.run_id)
         except run_scratch.ScratchSafetyError as exc:
             error = RunnerLaunchError(
                 "unsafe_scratch_directory",
@@ -2005,6 +2098,8 @@ def _prepare_tracked_run(
     manifest = build_manifest(ctx, manifest_argv or argv)
     if scratch_dir is not None:
         manifest["scratchPath"] = str(scratch_dir)
+    if temp_dir is not None:
+        manifest["tempPath"] = str(temp_dir)
     write_manifest(run_path, manifest)
 
     stdout_log = run_path / STDOUT_LOG
@@ -2016,25 +2111,30 @@ def _prepare_tracked_run(
         stdout_log=stdout_log,
         stderr_log=stderr_log,
         scratch_dir=scratch_dir,
+        temp_dir=temp_dir,
     )
 
 
-def _env_overrides_with_scratch(
+def _env_overrides_with_temp_dir(
     env_overrides: dict[str, str] | None,
-    scratch_dir: Path | None,
+    temp_dir: Path | None,
 ) -> dict[str, str] | None:
-    if scratch_dir is None:
+    if temp_dir is None:
         return env_overrides
     return {
         **(env_overrides or {}),
-        "TMPDIR": str(scratch_dir),
-        "TMP": str(scratch_dir),
-        "TEMP": str(scratch_dir),
+        "TMPDIR": str(temp_dir),
+        "TMP": str(temp_dir),
+        "TEMP": str(temp_dir),
     }
 
 
 def _codex_argv_with_scratch(
-    argv: list[str], scratch_dir: Path | None, *, permission_profile: str | None = None
+    argv: list[str],
+    scratch_dir: Path | None,
+    *,
+    permission_profile: str | None = None,
+    temp_dir: Path | None = None,
 ) -> list[str]:
     if scratch_dir is None or "--sandbox" not in argv:
         return list(argv)
@@ -2045,14 +2145,22 @@ def _codex_argv_with_scratch(
         raise RunnerLaunchError(
             "invalid_scratch_directory", "Codex scratch must be an existing non-symlink directory."
         )
-    scratch = str(scratch_dir.resolve(strict=True))
+    writable = [str(scratch_dir.resolve(strict=True))]
+    if temp_dir is not None:
+        if temp_dir.is_symlink() or not temp_dir.is_dir():
+            raise RunnerLaunchError(
+                "invalid_scratch_directory",
+                "Codex child temp must be an existing non-symlink directory.",
+            )
+        writable.append(str(temp_dir.resolve(strict=True)))
     # Profile tables merge with lower config layers. An unpredictable name
     # prevents a pre-existing same-name profile from adding writable roots.
     name = permission_profile or f"delegate_safe_{os.urandom(16).hex()}"
-    definition = (
-        f'permissions.{name}={{extends=":read-only",filesystem={{'
-        f'{json.dumps(scratch, ensure_ascii=False)}="write"}}}}'
-    )
+    # The child's TMPDIR is a second writable root: the scratch entry keeps
+    # prompt/schema artifacts writable, and temp alone would leave the child's
+    # own temp writes refused under the read-only base.
+    filesystem = ",".join(f'{json.dumps(path, ensure_ascii=False)}="write"' for path in writable)
+    definition = f'permissions.{name}={{extends=":read-only",filesystem={{{filesystem}}}}}'
     updated = list(argv)
     del updated[sandbox_index : sandbox_index + 2]
     # Never allow an older Codex to silently ignore named permission settings:
@@ -2082,12 +2190,13 @@ def _launch_tracked_process(
     env_overrides: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
+    temp_dir: Path | None = None,
     sandbox: sandbox_bwrap.SandboxPlan | None = None,
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
-        overrides=_env_overrides_with_scratch(env_overrides, scratch_dir)
+        overrides=_env_overrides_with_temp_dir(env_overrides, temp_dir)
     )
     for key in drop_env:
         env.pop(key, None)
@@ -2109,6 +2218,9 @@ def _launch_tracked_process(
             masks=sandbox.masks,
             extra_rw_roots=[
                 *[bind.path for bind in sandbox.binds if bind.mode == "rw"],
+                # The child's TMPDIR must be writable inside the boundary too,
+                # or every temp write and socket bind fails there.
+                *([str(temp_dir)] if temp_dir is not None else []),
                 *(extra_rw_roots or []),
             ],
             extra_ro_roots=[bind.path for bind in sandbox.binds if bind.mode == "ro"],
@@ -2248,14 +2360,23 @@ def _capture_tracked_process(
         harness=ctx.harness,
     )
     pgid = process_group_pgid or _process_group_for_process(process)
-    persist_progress(
-        files.run_path,
-        ctx,
-        accumulator,
-        status="running",
-        pid=process.pid,
-        pgid=pgid,
-    )
+    # The live generation (status/pid/pgid) is already durable: it was published
+    # under the launch-generation lock once Popen returned and before this
+    # capture entry, so this refresh is a convenience re-read of the same
+    # record. The bounded registry-lock budget is an admission budget -- it may
+    # fail a launch before a child exists, but contention after Popen must never
+    # abandon a live child, so refresh best-effort with no wait instead of
+    # propagating a raw TimeoutError.
+    with contextlib.suppress(TimeoutError):
+        persist_progress(
+            files.run_path,
+            ctx,
+            accumulator,
+            status="running",
+            pid=process.pid,
+            pgid=pgid,
+            lock_timeout_seconds=0,
+        )
 
     line_buffer = ""
     stdout_bytes_counter = ByteCounter()
@@ -2662,6 +2783,22 @@ def _ctx_with_stdin_warnings(
     return replace(ctx, warnings=(*ctx.warnings, *stdin_failures))
 
 
+def _codex_recoverable_final_text(accumulator: harness_events.StreamAccumulator) -> str:
+    """Codex's last substantive agent message, when the stream carried one.
+
+    Codex seals ``completion_text`` on ``turn.completed``. A run that ends
+    after its final agent message without that event — or after the seal —
+    leaves a complete report in the assistant stream and nothing in the
+    completion channel, which then classified as resultQuality=empty and read
+    as "the lane did nothing". Only substantive text is adopted: a progress
+    preamble is not a report, and adopting one would turn a true no-output
+    verdict into a false success.
+    """
+    if accumulator.assistant_recovery_quality() != "substantive_assistant_fallback":
+        return ""
+    return accumulator.recoverable_assistant_text or ""
+
+
 def _completion_report_source(
     ctx: RunContext,
     accumulator: harness_events.StreamAccumulator,
@@ -2670,13 +2807,13 @@ def _completion_report_source(
 ) -> str:
     if accumulator.completion_text:
         return accumulator.completion_text
-    if (
-        completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
-        and ctx.harness != "codex"
-        and ctx.engine != "codex"
-    ):
-        return accumulator.assistant_text
-    return ""
+    if completion_report_mode != delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
+        return ""
+    if ctx.harness == "codex" or ctx.engine == "codex":
+        # assistant_text accumulates every agent message for codex; the
+        # recoverable-final-message helpers already pick the closing one.
+        return _codex_recoverable_final_text(accumulator)
+    return accumulator.assistant_text
 
 
 MAIL_PUSH_EVENT_KIND = mail.MAIL_PUSH_EVENT_KIND
@@ -2953,11 +3090,22 @@ def _finalize_tracked_run(
         failure_message=failure_message,
         stderr_tail=stderr_tail,
     )
+    # Everything below prefixes delegate-authored material onto the artifact.
+    # The child's own text is what the quality heuristic is about, so
+    # classification reads it before any notice is attached.
+    child_report_text = report_text
     failover_notice = merged_extra.get("failoverNotice")
     if isinstance(failover_notice, str) and failover_notice.strip():
         report_text = (
             f"{failover_notice}\n\n{report_text}" if report_text.strip() else failover_notice
         )
+    # Usage and the substitution warning describe the run rather than the
+    # child's answer, and the record-derived views are not the only surface a
+    # reviewer reads: without this the report artifact still presents a
+    # substituted lane as the requested model's clean work.
+    notice = delegate_report_notice(ctx, capture.accumulator, usage=capture.accumulator.usage)
+    if notice is not None:
+        report_text = f"{notice}\n\n{report_text}" if report_text.strip() else notice
     report_written = write_completion_report(files.run_path, report_text)
     result_quality = (
         RESULT_QUALITY_NO_ASSISTANT_TEXT
@@ -2965,7 +3113,7 @@ def _finalize_tracked_run(
         else _classify_result_quality(
             ctx=ctx,
             exit_code=exit_code,
-            report_text=report_text,
+            report_text=child_report_text,
             report_written=report_written,
             report_source=report_source,
             accumulator=capture.accumulator,
@@ -3392,6 +3540,7 @@ def _run_single_tracked_attempt(
                     ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
                 ),
                 scratch_dir=scratch_dir,
+                temp_dir=files.temp_dir,
                 sandbox=ctx.sandbox,
                 engine=ctx.engine,
                 extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
@@ -3520,6 +3669,10 @@ def _merge_tracked_attempt_captures(
     )
     accumulator.served_model = (
         current_capture.accumulator.served_model or prior_capture.accumulator.served_model
+    )
+    accumulator.served_model_provider = (
+        current_capture.accumulator.served_model_provider
+        or prior_capture.accumulator.served_model_provider
     )
     for event in (
         *prior_capture.accumulator.model_observations,
@@ -3778,7 +3931,12 @@ def _execute_tracked(
         else None
     )
     run_argv = (
-        _codex_argv_with_scratch(argv, files.scratch_dir, permission_profile=scratch_profile)
+        _codex_argv_with_scratch(
+            argv,
+            files.scratch_dir,
+            permission_profile=scratch_profile,
+            temp_dir=files.temp_dir,
+        )
         if ctx.engine == "codex"
         else argv
     )
@@ -3787,12 +3945,18 @@ def _execute_tracked(
         scratch_permissions = {
             "profile": scratch_profile,
             "base": ":read-only",
-            "writableRoots": [str(files.scratch_dir.resolve(strict=True))],
+            "writableRoots": [
+                str(files.scratch_dir.resolve(strict=True)),
+                *([str(files.temp_dir.resolve(strict=True))] if files.temp_dir else []),
+            ],
         }
         ctx = replace(ctx, scratch_permissions=scratch_permissions)
     run_manifest_argv = (
         _codex_argv_with_scratch(
-            manifest_argv, files.scratch_dir, permission_profile=scratch_profile
+            manifest_argv,
+            files.scratch_dir,
+            permission_profile=scratch_profile,
+            temp_dir=files.temp_dir,
         )
         if ctx.engine == "codex" and manifest_argv is not None
         else manifest_argv
@@ -3800,6 +3964,8 @@ def _execute_tracked(
     if ctx.engine == "codex" and files.scratch_dir is not None:
         manifest = build_manifest(ctx, run_manifest_argv or run_argv)
         manifest["scratchPath"] = str(files.scratch_dir)
+        if files.temp_dir is not None:
+            manifest["tempPath"] = str(files.temp_dir)
         write_manifest(files.run_path, manifest)
     sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(

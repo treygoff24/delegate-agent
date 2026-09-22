@@ -116,7 +116,11 @@ def _resolve_targets(
             targets.setdefault(target.run_id, target)
     if not targets:
         if group is not None:
-            raise WaitCancelError("no_matching_runs", f"No runs found for group: {group}")
+            raise WaitCancelError(
+                "no_matching_runs",
+                f"No runs found for group: {group}. The run Registry is workspace-scoped "
+                f"({registry_root}); use --cwd PATH to target another workspace's Registry.",
+            )
         raise WaitCancelError("missing_handle", "wait/cancel requires at least one run handle.")
     return list(targets.values())
 

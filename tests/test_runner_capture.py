@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,6 +30,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent import mail  # noqa: E402
+from tests import assert_compact_temps_contained  # noqa: E402
 
 
 def load_module(path: Path, name: str):
@@ -2001,6 +2004,10 @@ class RunnerCaptureTests(unittest.TestCase):
                     },
                     check=False,
                 )
+            # The CLI child was a real subprocess: contain the compact child
+            # temp its run manifest recorded before this workspace temp goes
+            # away, while the registry that names the path still exists.
+            assert_compact_temps_contained(root, producers=[completed])
             self.assertEqual(completed.returncode, 0)
             self.assertIn("alias:", completed.stdout)
             self.assertNotIn("OUT:", completed.stdout)
@@ -2069,6 +2076,9 @@ class RunnerCaptureTests(unittest.TestCase):
             env=env,
             check=False,
         )
+        # The CLI child was a real subprocess: contain the compact child temp
+        # its run manifest recorded before this test's repo temp is cleaned.
+        assert_compact_temps_contained(Path(repo_temp.name) / ".delegate", producers=[completed])
         self.assertEqual(completed.returncode, 0)
         self.assertIn("OUT:raw", completed.stdout)
         self.assertIn("ERR:raw", completed.stderr)
@@ -2220,6 +2230,269 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         self.assertNotIn("warnings", fungible)
 
+    def test_fungible_run_served_by_another_model_warns(self):
+        """A substituted lane must not read as the requested model's work.
+
+        Effects OMP lanes requested GLM5.3/Qwen3.8 and were served GLM4.6/Qwen3Max
+        with no warning on any human surface; the record carried the provenance
+        and nothing said the run had been substituted.
+        """
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model="glm-5.3",
+            model_resolved="glm-5.3",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-4.6"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        (warning,) = record["warnings"]
+        self.assertTrue(warning.startswith(self.runner.MODEL_SUBSTITUTION_WARNING_PREFIX))
+        self.assertIn("glm-5.3", warning)
+        self.assertIn("glm-4.6", warning)
+        self.assertIn("fungible", warning)
+
+    def test_a_provider_qualified_omp_identity_is_not_a_substitution(self):
+        """OMP splits provider and model; the resolved selector is qualified.
+
+        `openrouter/glm-5.3` served as `{provider: openrouter, model: glm-5.3}`
+        is the requested model, and comparing the bare served id against the
+        qualified selector labelled a clean lane as substituted.
+        """
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model="openrouter/glm-5.3",
+            model_resolved="openrouter/glm-5.3",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-5.3"
+        accumulator.served_model_provider = "openrouter"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_an_omp_provider_qualified_lane_served_elsewhere_still_warns(self):
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model="openrouter/glm-5.3",
+            model_resolved="openrouter/glm-5.3",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-4.6"
+        accumulator.served_model_provider = "openrouter"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        (warning,) = record["warnings"]
+        self.assertIn("glm-4.6", warning)
+
+    def test_a_cursor_display_name_is_not_a_substitution(self):
+        ctx = self.runner.replace(
+            self._pinned_context("cursor"),
+            model="grok-4.5-high",
+            model_resolved="grok-4.5-high",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+        accumulator.served_model = "Grok 4.5 High"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_a_claude_family_alias_is_not_a_substitution(self):
+        ctx = self.runner.replace(
+            self._pinned_context("claude"),
+            model="opus",
+            model_resolved="opus",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+        accumulator.served_model = "claude-opus-5-20260101"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_a_substitution_warning_redacts_model_values(self):
+        """Warnings are persisted and printed; a credential-shaped selector stays secret."""
+        secret = "sk-livesecret1234567890"
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model=secret,
+            model_resolved=secret,
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-4.6"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        (warning,) = record["warnings"]
+        self.assertNotIn(secret, warning)
+        self.assertIn("glm-4.6", warning)
+
+    def test_a_run_served_by_its_resolved_model_does_not_warn(self):
+        ctx = self.runner.replace(
+            self._pinned_context("claude"),
+            model="claude-opus-5",
+            model_resolved="claude-opus-5",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+        accumulator.served_model = "claude-opus-5"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_pinned_run_does_not_get_the_substitution_warning(self):
+        """Pinned continuity pauses on a switch; it never reaches this path."""
+        ctx = self.runner.replace(
+            self._pinned_context("claude"),
+            model="claude-opus-5",
+            model_resolved="claude-opus-5",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+        accumulator.served_model = "claude-sonnet-5"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_tracked_run_record_persists_reported_usage(self):
+        """Cost/throughput accounting had no usage for tracked runs."""
+        ctx = self._pinned_context("claude")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+        accumulator.usage = {
+            "basis": "reported",
+            "inputTokens": 29957,
+            "outputTokens": 12,
+            "costUsd": 0.5,
+        }
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertEqual(record["usage"]["basis"], "reported")
+        self.assertEqual(record["usage"]["inputTokens"], 29957)
+        self.assertEqual(record["usage"]["outputTokens"], 12)
+        self.assertAlmostEqual(record["usage"]["costUsd"], 0.5)
+
+    def test_tracked_run_record_omits_usage_the_harness_never_reported(self):
+        ctx = self._pinned_context("claude")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="claude")
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("usage", record)
+
+    def test_codex_run_without_turn_completed_recovers_its_final_message(self):
+        """The report was in stdout; delegate said nothing was recoverable.
+
+        A codex work lane sealed no `turn.completed`, so completion_text stayed
+        empty, the report was declared `resultQuality=empty`, and the diagnostics
+        pointed at a run that had produced a complete report.
+        """
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            report = (
+                "Status: blocked\n\n"
+                "Cause: the brief contradicts the plan contract.\n\n"
+                "Files changed: none\n\n"
+                "Remaining work: the coordinator must rule on the contradiction.\n"
+            )
+            event = json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": report}}
+            )
+            script = Path(workspace) / "codex"
+            script.write_text(
+                f"#!/usr/bin/env bash\nprintf '%s\\n' {shlex.quote(event)}\nexit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-20T21:42:33Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["completionReportSource"], "stdout_recovery")
+            self.assertNotEqual(payload["resultQuality"], "empty")
+            report_path = root / "runs" / run_id / "completion-report.md"
+            self.assertIn("Status: blocked", report_path.read_text(encoding="utf-8"))
+
+    def test_codex_run_with_a_progress_only_message_still_reports_empty(self):
+        """The planted negative: a preamble is not a completion report."""
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            event = json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I'll start by checking the tree."},
+                }
+            )
+            script = Path(workspace) / "codex"
+            script.write_text(
+                f"#!/usr/bin/env bash\nprintf '%s\\n' {shlex.quote(event)}\nexit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-20T21:42:33Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["resultQuality"], "empty")
+            self.assertFalse(payload["completionReportWritten"])
+
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
             {
@@ -2247,6 +2520,89 @@ class RunnerCaptureTests(unittest.TestCase):
             },
         )
         self.assertEqual(payload["sessionId"], "cursor-123")
+
+    def _execute_cursor_result_with_report(self, event, *, continuity_mode="fungible"):
+        """Run a cursor fixture with the completion report written to disk."""
+        workspace = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workspace, True)
+        root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = self.registry.register_run(root, harness="cursor")
+        script = Path(workspace) / "cursor_result.py"
+        script.write_text(
+            f"print({json.dumps(json.dumps(event))})\n",
+            encoding="utf-8",
+        )
+        ctx = self.runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            model_resolved="composer-2.5",
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=self.registry.utc_now_iso(),
+            continuity_mode=continuity_mode,
+        )
+        code, payload = self.runner.execute_tracked(
+            [sys.executable, str(script)],
+            workspace,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+        self.assertEqual(code, 0)
+        assert payload is not None
+        report = (root / "runs" / run_id / "completion-report.md").read_text(encoding="utf-8")
+        return payload, report
+
+    def test_substitution_warning_precedes_the_child_report_in_the_artifact(self):
+        """State-derived views are not the only surface a reviewer reads.
+
+        The report artifact is what a reviewing caller consumes, so a
+        substituted lane that reads as the requested model's clean work there is
+        the same silent acceptance the warning exists to prevent -- while the
+        child's own text and its attribution stay intact underneath.
+        """
+        payload, report = self._execute_cursor_result_with_report(
+            {
+                "type": "result",
+                "subtype": "success",
+                "model": "Grok 4.5 High",
+                "result": "Status: completed\n- child findings\n- finished",
+                "usage": {"inputTokens": 29957, "outputTokens": 12},
+            }
+        )
+
+        notice_index = report.index(self.runner.DELEGATE_REPORT_NOTICE_HEADER)
+        child_index = report.index("Status: completed")
+        self.assertEqual(notice_index, 0)
+        self.assertLess(notice_index, child_index)
+        self.assertIn(self.runner.MODEL_SUBSTITUTION_WARNING_PREFIX, report)
+        self.assertIn("Grok 4.5 High", report)
+        # Usage rides the same delegate-authored block, and the child's report
+        # keeps its own attribution.
+        self.assertIn("usage: basis=reported inputTokens=29957 outputTokens=12", report)
+        self.assertEqual(payload["completionReportSource"], "child")
+
+    def test_clean_run_report_carries_no_delegate_notice(self):
+        payload, report = self._execute_cursor_result_with_report(
+            {
+                "type": "result",
+                "subtype": "success",
+                "model": "Composer 2.5",
+                "result": "Status: completed\n- nothing substituted\n- finished",
+            }
+        )
+
+        self.assertNotIn(self.runner.DELEGATE_REPORT_NOTICE_HEADER, report)
+        self.assertNotIn(self.runner.MODEL_SUBSTITUTION_WARNING_PREFIX, report)
+        self.assertEqual(payload["completionReportSource"], "child")
 
     def test_tracked_completion_payload_omits_usage_when_child_reports_none(self):
         payload = self._execute_cursor_result(

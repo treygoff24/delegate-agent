@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -43,14 +44,14 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             },
         )
 
-    def _dsl(self) -> runtime.WorkflowDsl:
+    def _dsl(self, cli_argv: list[str] | None = None) -> runtime.WorkflowDsl:
         state = runtime.WorkflowState(
             wf_id="wf_666666666666",
             workspace=self.workspace,
             root=self.root,
             script_path=self.script,
             config={},
-            cli_argv=["delegate"],
+            cli_argv=cli_argv or ["delegate"],
             args=None,
             budget=runtime.Budget(None),
         )
@@ -156,6 +157,382 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             {"timeout-key", "timeout-label", "model-id"},
         )
         self.assertEqual(event["scope"], "root")
+
+    def test_resume_retry_prompt_re_renders_the_schema(self) -> None:
+        """A resume correction without the schema rebuilds the shape from memory.
+
+        Two GLM review retries echoed a root-array schema's outer keyword as an
+        object wrapper and failed validation again; the retry prompt was 152
+        bytes of prose with no schema in it.
+        """
+        schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+        first = runtime._DelegateChildResult(
+            text=None,
+            run_id="del_20260827T040000Z_resume1",
+            execution_cwd="/tmp/resume-worktree",
+            session_id="session-1",
+            outcome=runtime.ChildAttemptOutcome(
+                run_id="del_20260827T040000Z_resume1",
+                failure_reason="timeout",
+                session_id="session-1",
+            ),
+        )
+        dsl = self._dsl()
+        calls: list[mock._Call] = []
+
+        def run(*args: object, **kwargs: object) -> runtime._DelegateChildResult:
+            calls.append(mock.call(*args, **kwargs))
+            if len(calls) == 1:
+                return first
+            return runtime._DelegateChildResult(
+                text=json.dumps({"ok": True}),
+                run_id="del_20260827T040000Z_resume2",
+                execution_cwd="/tmp/resume-worktree",
+                session_id="session-1",
+            )
+
+        with (
+            mock.patch.object(dsl, "_run_delegate", side_effect=run),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            value = dsl._run_structured_or_text(
+                "omp",
+                "retry",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="worktree",
+                passthrough=False,
+                timeout=1,
+                retries=1,
+                key="workflow-key",
+            )
+
+        self.assertEqual(value, {"ok": True})
+        self.assertEqual(calls[1].kwargs["resume_session_id"], "session-1")
+        retry_prompt = calls[1].args[1]
+        self.assertIn(json.dumps(schema, sort_keys=True), retry_prompt)
+        self.assertIn("failed validation", retry_prompt)
+
+    def test_a_failed_child_launch_records_its_stderr_and_exit_code(self) -> None:
+        """A child that dies before publishing JSON must still say why.
+
+        The journal recorded only 'child attempt nonzero_exit: Expecting value:
+        line 1 column 1 (char 0)' — the decode error of empty stdout — and the
+        child's real stderr was discarded.
+        """
+        fake = self.workspace / "fake-delegate"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'quota exceeded for workspace; retry after reset\\n' >&2\n"
+            "exit 3\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        dsl = self._dsl(cli_argv=[str(fake)])
+
+        result = dsl._run_delegate_followup(
+            "del_20260920T000000Z_abc123",
+            "prompt text",
+            engine="codex",
+            timeout=5,
+            prefer_assistant=False,
+            workflow_agent_key="capture-key",
+            label="capture",
+        )
+
+        self.assertIsNotNone(result.outcome)
+        assert result.outcome is not None
+        payload = result.outcome.as_json()
+        self.assertEqual(payload["failureReason"], "nonzero_exit")
+        self.assertEqual(payload["exitCode"], 3)
+        self.assertIn("quota exceeded", payload["stderrTail"])
+        event = next(
+            event
+            for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
+            if event.get("type") == "child_stdout_unparsed"
+        )
+        self.assertEqual(event["exitCode"], 3)
+        self.assertEqual(event["stdoutChars"], 0)
+        self.assertIn("quota exceeded", event["stderrTail"])
+
+    def test_an_initial_child_launch_records_its_stderr_and_exit_code(self) -> None:
+        """The first `agent()` attempt must carry the same evidence as a followup.
+
+        A child that dies before publishing JSON (quota, auth, launch refusal)
+        leaves the decode error of empty stdout as the journal's only diagnosis,
+        and the initial launch is the common case: followups already carried
+        the exit code and stderr tail, initial launches did not.
+        """
+        fake = self.workspace / "fake-initial-delegate"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'quota exceeded for workspace; retry after reset\n' >&2\n"
+            "exit 3\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        dsl = self._dsl(cli_argv=[str(fake)])
+
+        result = dsl._run_delegate(
+            "codex",
+            "prompt text",
+            mode="safe",
+            model=None,
+            effort=None,
+            fast=None,
+            isolation="none",
+            passthrough=False,
+            timeout=5,
+            output_schema=None,
+            prefer_assistant=False,
+            workflow_agent_key="initial-capture-key",
+            label="initial-capture",
+            return_metadata=True,
+        )
+
+        assert isinstance(result, runtime._DelegateChildResult)
+        assert result.outcome is not None
+        payload = result.outcome.as_json()
+        self.assertEqual(payload["failureReason"], "nonzero_exit")
+        self.assertEqual(payload["exitCode"], 3)
+        self.assertIn("quota exceeded", payload["stderrTail"])
+        event = next(
+            event
+            for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
+            if event.get("type") == "child_stdout_unparsed"
+        )
+        self.assertEqual(event["exitCode"], 3)
+        self.assertEqual(event["stdoutChars"], 0)
+        self.assertIn("quota exceeded", event["stderrTail"])
+
+    def test_an_initial_child_launch_redacts_its_stderr(self) -> None:
+        secret = "sk-initialsecret1234567890"
+        fake = self.workspace / "fake-initial-delegate-secret"
+        fake.write_text(
+            f"#!/usr/bin/env bash\nprintf 'debug %s\n' {secret} >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        dsl = self._dsl(cli_argv=[str(fake)])
+
+        result = dsl._run_delegate(
+            "codex",
+            "prompt text",
+            mode="safe",
+            model=None,
+            effort=None,
+            fast=None,
+            isolation="none",
+            passthrough=False,
+            timeout=5,
+            output_schema=None,
+            prefer_assistant=False,
+            workflow_agent_key="initial-secret-key",
+            return_metadata=True,
+        )
+
+        assert isinstance(result, runtime._DelegateChildResult)
+        assert result.outcome is not None
+        tail = result.outcome.as_json()["stderrTail"]
+        self.assertIn("debug", tail)
+        self.assertNotIn(secret, tail)
+
+    def test_exit_zero_invalid_envelope_is_not_reported_as_a_nonzero_exit(self) -> None:
+        """Exit zero with an unusable envelope is a contract break, not a crash.
+
+        `nonzero_exit` was the default reason for every child that published no
+        usable `ok` envelope, which is false for a child that exited 0.
+        """
+        fake = self.workspace / "fake-initial-delegate-empty"
+        fake.write_text(
+            "#!/usr/bin/env bash\nprintf '{\"ok\": false}\n'\nexit 0\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        dsl = self._dsl(cli_argv=[str(fake)])
+
+        result = dsl._run_delegate(
+            "codex",
+            "prompt text",
+            mode="safe",
+            model=None,
+            effort=None,
+            fast=None,
+            isolation="none",
+            passthrough=False,
+            timeout=5,
+            output_schema=None,
+            prefer_assistant=False,
+            workflow_agent_key="initial-invalid-envelope",
+            return_metadata=True,
+        )
+
+        assert isinstance(result, runtime._DelegateChildResult)
+        assert result.outcome is not None
+        payload = result.outcome.as_json()
+        self.assertEqual(payload["failureReason"], "invalid_envelope")
+        self.assertEqual(payload["exitCode"], 0)
+
+    def _write_fake_delegate(
+        self,
+        name: str,
+        *,
+        stdout: str,
+        stderr: str,
+        exit_code: int,
+    ) -> Path:
+        """A fake child whose stdout and stderr are exactly the given bytes."""
+        stdout_path = self.workspace / f"{name}.stdout"
+        stderr_path = self.workspace / f"{name}.stderr"
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text(stderr, encoding="utf-8")
+        fake = self.workspace / name
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            f"cat {shlex.quote(str(stdout_path))}\n"
+            f"cat {shlex.quote(str(stderr_path))} >&2\n"
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        return fake
+
+    def _unparsed_stdout_event(self, key: str) -> dict:
+        events = [
+            event
+            for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
+            if event.get("type") == "child_stdout_unparsed" and event.get("key") == key
+        ]
+        self.assertEqual(len(events), 1, events)
+        return events[0]
+
+    def test_an_initial_exit_zero_child_with_unparsed_stdout_reports_the_contract(self) -> None:
+        """Exit zero with no JSON at all is a broken envelope, not a crash.
+
+        The initial path returned reason 'structured' with no exit code, no
+        stderr tail, and no `child_stdout_unparsed` event, so a child that exits
+        0 after writing empty or non-JSON stdout kept the decode error of its
+        own stdout as the journal's only diagnosis.
+        """
+        secret = "sk-exitzeroinitial1234567890"
+        stderr_text = f"cannot parse child stdout; debug {secret}\n"
+        for label, stdout_text in (("empty", ""), ("non-json", "not json at all\n")):
+            with self.subTest(stdout=label):
+                key = f"initial-exit-zero-{label}"
+                fake = self._write_fake_delegate(
+                    f"fake-initial-exit-zero-{label}",
+                    stdout=stdout_text,
+                    stderr=stderr_text,
+                    exit_code=0,
+                )
+                dsl = self._dsl(cli_argv=[str(fake)])
+
+                result = dsl._run_delegate(
+                    "codex",
+                    "prompt text",
+                    mode="safe",
+                    model=None,
+                    effort=None,
+                    fast=None,
+                    isolation="none",
+                    passthrough=False,
+                    timeout=5,
+                    output_schema=None,
+                    prefer_assistant=False,
+                    workflow_agent_key=key,
+                    label="initial-exit-zero",
+                    return_metadata=True,
+                )
+
+                assert isinstance(result, runtime._DelegateChildResult)
+                assert result.outcome is not None
+                payload = result.outcome.as_json()
+                self.assertEqual(payload["failureReason"], "invalid_envelope")
+                self.assertEqual(payload["exitCode"], 0)
+                self.assertIn("cannot parse child stdout", payload["stderrTail"])
+                self.assertNotIn(secret, payload["stderrTail"])
+
+                event = self._unparsed_stdout_event(key)
+                self.assertEqual(event["exitCode"], 0)
+                self.assertEqual(event["stdoutChars"], len(stdout_text))
+                self.assertIn("cannot parse child stdout", event["stderrTail"])
+                self.assertNotIn(secret, event["stderrTail"])
+
+    def test_a_followup_exit_zero_child_with_unparsed_stdout_reports_the_contract(self) -> None:
+        """The followup path called this same condition a nonzero exit.
+
+        `nonzero_exit` was the fallback reason whenever the payload did not
+        parse, even for a child that exited 0, so a retry or an operator read a
+        process failure that never happened on the followup lane.
+        """
+        secret = "sk-exitzerofollowup1234567890"
+        stderr_text = f"diagnostic for followup; token {secret}\n"
+        for label, stdout_text in (("empty", ""), ("non-json", "not json at all\n")):
+            with self.subTest(stdout=label):
+                key = f"followup-exit-zero-{label}"
+                fake = self._write_fake_delegate(
+                    f"fake-followup-exit-zero-{label}",
+                    stdout=stdout_text,
+                    stderr=stderr_text,
+                    exit_code=0,
+                )
+                dsl = self._dsl(cli_argv=[str(fake)])
+
+                result = dsl._run_delegate_followup(
+                    "del_20260920T000000Z_abc125",
+                    "prompt text",
+                    engine="codex",
+                    timeout=5,
+                    prefer_assistant=False,
+                    workflow_agent_key=key,
+                    label="followup-exit-zero",
+                )
+
+                assert result.outcome is not None
+                payload = result.outcome.as_json()
+                self.assertEqual(payload["failureReason"], "invalid_envelope")
+                self.assertEqual(payload["exitCode"], 0)
+                self.assertIn("diagnostic for followup", payload["stderrTail"])
+                self.assertNotIn(secret, payload["stderrTail"])
+
+                event = self._unparsed_stdout_event(key)
+                self.assertEqual(event["exitCode"], 0)
+                self.assertEqual(event["stdoutChars"], len(stdout_text))
+                self.assertIn("diagnostic for followup", event["stderrTail"])
+                self.assertNotIn(secret, event["stderrTail"])
+
+    def test_a_failed_child_tail_is_bounded_and_redacted(self) -> None:
+        secret = "sk-livesecret1234567890"
+        fake = self.workspace / "fake-delegate-secret"
+        fake.write_text(
+            f"#!/usr/bin/env bash\nprintf 'debug %s\\n' {secret} >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        dsl = self._dsl(cli_argv=[str(fake)])
+
+        result = dsl._run_delegate_followup(
+            "del_20260920T000000Z_abc124",
+            "prompt text",
+            engine="codex",
+            timeout=5,
+            prefer_assistant=False,
+            workflow_agent_key="capture-secret-key",
+        )
+
+        assert result.outcome is not None
+        tail = result.outcome.as_json()["stderrTail"]
+        self.assertIn("debug", tail)
+        self.assertNotIn(secret, tail)
+        self.assertLessEqual(len(tail), runtime.CHILD_STDERR_TAIL_CHARS)
 
     def test_workflow_notify_events_cover_paused_failed_and_succeeded_states(self) -> None:
         scenarios = {

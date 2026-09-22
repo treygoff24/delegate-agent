@@ -8,6 +8,7 @@ from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 from delegate_agent.snapshot_view import SnapshotView
+from delegate_agent.usage_record import USAGE_COUNTER_KEYS
 
 
 def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
@@ -274,6 +275,28 @@ def render_runs_text(
             print(f"warning: {warning}", file=stdout)
 
 
+def usage_label(usage: JsonObject) -> str | None:
+    """One-line rendering of a normalized usage record, or None for no evidence.
+
+    The record's own vocabulary only: the `basis` the harness's evidence
+    supports plus whichever numeric counters it reported. `basis: unavailable`
+    says nothing was reported, so it renders nothing instead of claiming a
+    measurement, and callers that get None omit the line entirely.
+    """
+    basis = usage.get("basis")
+    if not isinstance(basis, str) or not basis or basis == "unavailable":
+        return None
+    parts = [f"basis={basis}"]
+    for key in USAGE_COUNTER_KEYS:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            parts.append(f"{key}={value}")
+    cost = usage.get("costUsd")
+    if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+        parts.append(f"costUsd={cost}")
+    return " ".join(parts)
+
+
 def run_output_json_payload(
     *,
     alias: str | None,
@@ -281,6 +304,7 @@ def run_output_json_payload(
     sections: JsonObject,
     resolution: JsonObject | None = None,
     warnings: list[str] | None = None,
+    usage: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "schema": run_registry.RUN_OUTPUT_SCHEMA,
@@ -294,6 +318,10 @@ def run_output_json_payload(
         payload.update(resolution)
     if warnings:
         payload["warnings"] = warnings
+    # The usage record run-output reconstructed at its read boundary from the
+    # persisted state, already in the allowlisted normalized shape.
+    if usage is not None:
+        payload["usage"] = usage
     return payload
 
 
@@ -340,9 +368,13 @@ def render_run_output_text(
     section_meta: JsonObject | None = None,
     resolution: JsonObject | None = None,
     warnings: list[str] | None = None,
+    usage: JsonObject | None = None,
 ) -> None:
     if resolution:
         render_resolution_text(resolution, stdout)
+    label = usage_label(usage) if usage is not None else None
+    if label is not None:
+        print(f"usage: {label}", file=stdout)
     if warnings:
         print("warnings:", file=stdout)
         for warning in warnings:
