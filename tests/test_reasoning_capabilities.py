@@ -68,26 +68,26 @@ class ReasoningCapabilityTests(unittest.TestCase):
     def test_codex_sol_accepts_bundled_ultra_effort(self):
         capability = resolve_reasoning_capability(
             harness="codex",
-            model="gpt-5.6-sol",
+            model="gpt-6-sol",
             requested_effort="ultra",
             config={},
         )
         self.assertIsNotNone(capability)
         assert capability is not None
         self.assertEqual(capability.effort, "ultra")
-        self.assertEqual(capability.default_effort, "low")
+        self.assertEqual(capability.default_effort, "medium")
         self.assertEqual(capability.source, "bundled")
 
     def test_codex_luna_rejects_ultra_effort(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
             resolve_reasoning_capability(
                 harness="codex",
-                model="gpt-5.6-luna",
+                model="gpt-6-luna",
                 requested_effort="ultra",
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("gpt-5.6-luna", ctx.exception.message)
+        self.assertIn("gpt-6-luna", ctx.exception.message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, ctx.exception.message)
 
     def test_codex_declared_model_rejects_max_effort(self):
@@ -127,7 +127,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
             "reasoning": {
                 "capabilities": {
                     "codex": {
-                        "gpt-5.6-terra": {
+                        "gpt-5.5": {
                             "supported": ["low", "medium", "high", "xhigh", "max"],
                             "default": "medium",
                         }
@@ -137,7 +137,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
         }
         capability = resolve_reasoning_capability(
             harness="codex",
-            model="gpt-5.6-terra",
+            model="gpt-5.5",
             requested_effort="max",
             config=config,
         )

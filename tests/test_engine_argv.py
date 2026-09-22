@@ -240,7 +240,7 @@ class EngineArgvTests(CommandTestBase):
     # dropping it falls through to bundled. Naming a model bundled data covers is
     # what makes the repair reachable; an invented model id would be refused
     # identically before and after the probe and prove nothing.
-    _BUNDLED_CODEX_MODEL = "gpt-5.6-sol"
+    _BUNDLED_CODEX_MODEL = "gpt-6-sol"
 
     def _upgraded_codex_discovery(self, supported: list[str] | None = None) -> dict:
         return {
@@ -1432,7 +1432,7 @@ class EngineArgvTests(CommandTestBase):
 
     def test_codex_sol_max_reasoning_effort_is_forwarded(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
-        config["codex"]["defaultModel"] = "gpt-5.6-sol"
+        config["codex"]["defaultModel"] = "gpt-6-sol"
         request = self.build_git_request(
             "codex",
             "safe",

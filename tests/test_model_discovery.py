@@ -642,7 +642,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             harnesses = materialize_minimum_harnesses(Path(tmp))
             config = self.embedded_default_config()
             expected = {
-                "codex": ("gpt-5.6-sol", "live"),
+                "codex": ("gpt-6-sol", "live"),
                 "grok": ("grok-4.5", "live"),
                 "kimi": ("kimi-code/k3", "live"),
             }

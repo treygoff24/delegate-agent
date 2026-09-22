@@ -13,9 +13,8 @@ class BundledModelEntry(TypedDict, total=False):
 BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
     "codex": (
         {"id": "gpt-6-astra"},
-        {"id": "gpt-5.6-sol"},
-        {"id": "gpt-5.6-terra"},
-        {"id": "gpt-5.6-luna"},
+        {"id": "gpt-6-sol"},
+        {"id": "gpt-6-luna"},
         {"id": "gpt-5.5"},
         {"id": "gpt-5.4"},
         {"id": "gpt-5.4-mini"},
@@ -67,7 +66,7 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "claude-sonnet-4-6"},
         {"id": "claude-haiku-4-5"},
         {"id": "claude-fable-5"},
-        {"id": "claude-opus-5"},
+        {"id": "claude-opus-5-5"},
         {"id": "claude-sonnet-5"},
         {"id": "claude-fable-5-1"},
     ),
@@ -87,12 +86,12 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "openai/gpt-5"},
     ),
     "pi": (
-        {"id": "openai-codex/gpt-5.6-sol"},
+        {"id": "openai-codex/gpt-6-sol"},
         {"id": "anthropic/claude-opus-4-8"},
         {"id": "anthropic/claude-sonnet-5"},
     ),
     "omp": (
-        {"id": "openai-codex/gpt-5.6-sol"},
+        {"id": "openai-codex/gpt-6-sol"},
         {"id": "anthropic/claude-opus-4-8"},
         {"id": "anthropic/claude-sonnet-5"},
     ),

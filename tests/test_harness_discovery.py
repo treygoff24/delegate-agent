@@ -399,13 +399,13 @@ class StructuredParserTests(unittest.TestCase):
 
     def test_codex_reuses_reasoning_payload_contract(self):
         fragment = self.parse_codex((FIXTURES / "codex_models.json").read_text())
-        model = fragment["models"]["gpt-5.6-sol"]
-        self.assertEqual(model["displayName"], "GPT-5.6-Sol")
+        model = fragment["models"]["gpt-6-sol"]
+        self.assertEqual(model["displayName"], "GPT-6-Sol")
         self.assertEqual(
             model["reasoning"]["supported"],
             ["low", "medium", "high", "xhigh", "max", "ultra"],
         )
-        self.assertEqual(model["reasoning"]["default"], "low")
+        self.assertEqual(model["reasoning"]["default"], "medium")
         self.assertEqual(model["reasoning"]["evidence"], "exact")
 
     def test_omp_exact_thinking_and_false_vs_unknown_reasoning(self):

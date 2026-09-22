@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Bundled Codex declarations move to the GPT-6 line. `gpt-6-sol` and
+  `gpt-6-luna` replace the `gpt-5.6-sol`/`gpt-5.6-luna` rows and `gpt-5.6-terra`
+  is dropped outright, verified against live `codex` enumeration on both the
+  work and personal profiles (2026-09-22): Sol carries `low`-`ultra` at a
+  `medium` default, Luna carries `low`-`max` at `medium`. The `pi` and `omp`
+  bundled selectors follow to `openai-codex/gpt-6-sol`, and the Codex discovery
+  fixture mirrors the live payload for the new slug. Doc prose that named
+  `gpt-5.6-sol` as the single bundled `max`-capable Codex model was already
+  stale and now names the bundled set (`gpt-6-astra`, `gpt-6-sol`,
+  `gpt-6-luna`).
+- Bundled Claude declarations replace `claude-opus-5` with `claude-opus-5-5`,
+  and the pinned-continuity error prose names the new id.
 - Bundled Grok declarations bumped to 4.7. The Grok CLI now ships `grok-4.7` as
   its upstream default (bundled rows: `grok-4.7`, `grok-4.6`). Cursor's 4.7
   ladder drops the `cursor-` prefix the 4.5/4.6 rows carried, so the bundled

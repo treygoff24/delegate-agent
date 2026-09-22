@@ -509,7 +509,7 @@ def _cursor_pin_matches(requested: str, served: str, display_name: str | None) -
 
 
 def _claude_pin_matches(requested: str, served: str) -> bool:
-    # `opus[1m]` and `claude-opus-5[1m]` name a context-window variant of the
+    # `opus[1m]` and `claude-opus-5-5[1m]` name a context-window variant of the
     # same model, so the documented bracket suffix is stripped before comparing,
     # by the same helper the request-build preflight uses.
     base = claude_alias_base(requested).strip()

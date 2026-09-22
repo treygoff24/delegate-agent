@@ -21,15 +21,11 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
             "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
             "default": "low",
         },
-        "gpt-5.6-sol": {
-            "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
-            "default": "low",
-        },
-        "gpt-5.6-terra": {
+        "gpt-6-sol": {
             "supported": ("low", "medium", "high", "xhigh", "max", "ultra"),
             "default": "medium",
         },
-        "gpt-5.6-luna": {
+        "gpt-6-luna": {
             "supported": ("low", "medium", "high", "xhigh", "max"),
             "default": "medium",
         },
