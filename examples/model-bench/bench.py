@@ -154,7 +154,8 @@ def normalize_effort(words: list[str]) -> str | None:
 
 def split_effort(name: str) -> tuple[str, str | None]:
     """Split a model name into (base name, effort level or None)."""
-    name = name.lower()
+    name, _, tag = name.lower().partition(":")  # OpenRouter-style variant: ":free", ":thinking"
+    name = f"{name} ({tag})" if tag in EFFORT_WORDS else name
     hints = re.findall(r"\(([^)]*)\)|\[([^\]]*)\]", name)
     hint_words = [w for pair in hints for part in pair for w in re.split(r"[^a-z0-9]+", part) if w]
     name = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", name)
