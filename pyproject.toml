@@ -66,6 +66,8 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests", "bin"]
+# Delegate workflow scripts use injected globals and a top-level return.
+extend-exclude = ["examples/**/workflow.py"]
 
 [tool.ruff.lint]
 select = [

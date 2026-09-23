@@ -1,0 +1,25 @@
+# SWE-bench Verified collection notes
+
+Captured 2026-09-22 local time (raw retrieval timestamps are 2026-09-23 UTC). The official leaderboard's newest Verified submission is dated 2026-02-26. Its current Verified board has 180 submissions. The source does not identify a separate leaderboard benchmark version; this is the 500-task SWE-bench Verified split.
+
+## What it measures
+
+SWE-bench evaluates whether an AI system can resolve real GitHub issues in a repository. The system receives the issue and pre-fix repository state, then its patch is evaluated with issue-specific fail-to-pass tests and regression tests. SWE-bench Verified is a 500-problem subset selected after human review. The Hugging Face card and relevant official pages are captured in `raw/swe-bench-verified/`.
+
+## Capture method and scope
+
+Downloaded the official leaderboard's source JSON from `https://raw.githubusercontent.com/SWE-bench/swe-bench.github.io/master/data/leaderboards.json`, saved as `raw/swe-bench-verified/leaderboards.json`. Also saved the official leaderboard page, the Hugging Face dataset card, the leaderboard repository license, and a concise capture of the relevant OpenAI assessment page text. The JSON identifies a `Verified` board with 180 records; all 180 records are represented as one `resolved_rate` row per submission. This includes entries whose model is listed as `Multiple` or `Undisclosed`, because they are still published board results; their `model_id` is `unknown/multiple` or `unknown/undisclosed`. Other model IDs are best-effort canonicalizations, preferring the source's model tags and organization. Harness is recorded separately, including mini-SWE-agent version when published. The source distinguishes 18 reasoning-effort entries; effort appears as a separate field. The 45 rows with published `instance_cost` values retain those unrounded values alongside their scores. No leaderboard evaluation-time field is published.
+
+## Metrics and provenance
+
+`resolved_rate` is the leaderboard's `resolved` percentage; the values are copied as published and higher is better. Each result covers 500 tasks (`n=500`), per the dataset card. `cost_usd` uses the raw `instance_cost` field, which the official table labels average cost per task; its basis is `per_task`. No confidence intervals are provided. `measured_on` is the source result date. Results are official leaderboard submissions reported by the independent benchmark operator, though each run uses a separately named agent/harness and many are not marked as checked by the SWE-bench team. The source's `checked` status is retained in row notes when it is not true.
+
+## Caveats, freshness, and terms
+
+Although retrieved on 2026-09-22, the board's newest dated result is 2026-02-26, so these are stale published results. Scores are not controlled comparisons of bare language models: agent scaffolds differ, entries may be vendor/team submissions, and the board includes composite and undisclosed models. The original tasks and solutions are public. In its 2026-02-23 assessment, OpenAI says the benchmark is increasingly contaminated; it reports that all frontier models it tested reproduced gold patches or task-specific details on some tasks, and that at least 59.4% of an audited subset of often-failed problems had tests rejecting functionally correct submissions. OpenAI says it has stopped reporting Verified scores and recommends SWE-bench Pro. This is OpenAI's assessment, not an independent re-evaluation of every row captured here.
+
+The leaderboard repository's captured `LICENSE` is CC BY-NC 4.0. The Hugging Face card capture does not state a dataset license, and the leaderboard does not separately specify licensing for each score; therefore row-level `license` is null rather than assuming the repository license covers all result data. The OpenAI article's full page could not be downloaded by curl (HTTP 403); its relevant content was read with a web page reader and summarized in the raw text capture. We did not retrieve individual logs or trajectories; only published leaderboard records are captured.
+
+## Verification
+
+Verified 2026-09-22 against the captured official `Verified` board in `raw/swe-bench-verified/leaderboards.json`; every published result was present in that capture, so no live-source fallback was needed. All 180 JSONL lines parse and contain all 24 fields specified in `SCHEMA.md`. The ten highest-scoring rows (JSONL lines 1-10; scores 79.2, 79.2, 78.8, 77.4, 76.8, 76.8, 76.8, 76.4, 75.8, and 75.8) each match the corresponding source submission's model display name, resolved score, date, and instance cost. A full source-to-row identity and value cross-check mapped all 180 source submissions one-to-one to rows with no mismatches. The board contains 180 submissions and 89 distinct displayed model names; the rows likewise contain 180 records and 89 distinct `model_raw` names. The captured model release dates have no entry later than 2026-02-12, and no row was identified for a model released in the month before verification. No rows were changed.

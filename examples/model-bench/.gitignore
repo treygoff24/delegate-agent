@@ -1,0 +1,8 @@
+# Source captures are other people's pages: kept locally for verification, never published.
+raw/
+# Launch envelopes and rendered briefs are per-run scratch.
+runs/
+# Collected rows and the combined table are large; they are published in the
+# separate model-bench dataset repo, not in the Delegate source tree.
+data/*/rows.jsonl
+combined.jsonl
