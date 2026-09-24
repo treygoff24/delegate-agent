@@ -860,6 +860,17 @@ class CodexProfileExecutionTests(unittest.TestCase):
         self.assertNotIn("DELEGATE_EXECUTION_ROOT", env)
         self.assertNotIn("WORKSPACE_ROOT", env)
 
+    def test_child_environment_drops_the_interactive_recall_marker(self):
+        with mock.patch.dict(os.environ, {"MEMORUM_INTERACTIVE_RECALL": "1"}, clear=False):
+            ambient = self.profiles.child_environment()
+            pure = self.profiles.child_environment(pure=True)
+            overridden = self.profiles.child_environment(
+                overrides={"MEMORUM_INTERACTIVE_RECALL": "1"}
+            )
+
+        for env in (ambient, pure, overridden):
+            self.assertNotIn("MEMORUM_INTERACTIVE_RECALL", env)
+
     def test_fallback_environment_keeps_authoritative_delegate_roots(self):
         resolution = self.profiles.ProfileResolution(
             name="personal",

@@ -290,6 +290,9 @@ def child_environment(
         else:
             env.update(overrides)
     _strip_workflow_pin_environment(env)
+    # A dispatched lane is never Trey's interactive session: drop the marker
+    # that turns on Memorum passive recall, whatever the mode or profile.
+    env.pop("MEMORUM_INTERACTIVE_RECALL", None)
     return env
 
 
