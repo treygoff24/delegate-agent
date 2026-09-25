@@ -78,7 +78,8 @@ WORKFLOW_ACTION_KINDS = {
 SAFE_WORKSPACE_SYNC_NOTE = (
     "Safe mode reviews your **current working tree** — uncommitted tracked edits "
     "and untracked, non-ignored files are mirrored into an isolated throwaway copy "
-    "(only gitignored paths are excluded), so you can review local changes without "
+    "(only ignored paths are excluded, .git/info/exclude matches included; Delegate "
+    "names info/exclude-only omissions in a warning), so you can review local changes without "
     "committing first or pasting a diff. Absolute source-workspace paths in the prompt "
     "are mapped into that copy; reports should cite workspace-relative paths rather than "
     "temporary isolation paths. Tracked JSON reports the effective safe backend as "
