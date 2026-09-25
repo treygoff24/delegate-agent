@@ -194,13 +194,56 @@ def _resolve_default_profile(
     return None
 
 
+def _detect_env_profile(
+    config: JsonObject,
+    env: Mapping[str, str | None],
+    definitions: Mapping[str, JsonObject],
+    warnings: list[str],
+) -> tuple[str | None, str | None]:
+    """First defined profile named by a ``profiles.detectFrom`` variable."""
+    selected: str | None = None
+    source: str | None = None
+    detect_from = profiles_section(config).get("detectFrom")
+    for var_name in detect_from if isinstance(detect_from, list) else []:
+        if not isinstance(var_name, str):
+            continue
+        raw = env.get(var_name)
+        value = raw.strip() if isinstance(raw, str) else ""
+        if not value:
+            continue
+        if value not in definitions:
+            safe_value = redaction.redact_mapping_value(var_name, value)
+            _warn_once(
+                warnings,
+                f"profile detect var {var_name}={safe_value} is not defined; ignoring it.",
+            )
+            continue
+        if selected is None:
+            selected = value
+            source = var_name
+            continue
+        if value != selected:
+            _warn_once(
+                warnings,
+                f"profile mismatch ({source}={selected} vs {var_name}={value}); using {selected}.",
+            )
+    return selected, source
+
+
 def resolve_active_profile(
     config: JsonObject,
     env: Mapping[str, str | None],
     cli_override: str | None = None,
     *,
+    cli_override_inherited: bool = False,
     expand_env: Mapping[str, str | None] | None = None,
 ) -> ProfileResolution:
+    """Select the active profile: flag > ``profiles.detectFrom`` env order > ``profiles.default``.
+
+    Whenever a higher layer silently beats a lower one that names a different
+    profile, a warning says which layer won, so an inherited environment value
+    can never quietly override a config's pinned default (or a flag its env).
+    """
     definitions = profile_definitions(config)
     warnings: list[str] = []
     selected: str | None = None
@@ -211,37 +254,36 @@ def resolve_active_profile(
         if not selected or selected not in definitions:
             raise _unknown_profile_error(cli_override, definitions)
         source = "flag"
+        env_selected, env_source = _detect_env_profile(config, env, definitions, [])
+        if env_selected is not None and env_selected != selected:
+            if cli_override_inherited:
+                # Resume/followup reuse the source run's profile because the
+                # caller typed no flag; the warning must not claim one.
+                _warn_once(
+                    warnings,
+                    f"inherited auth profile {selected} from the source run overrides "
+                    f"{env_source}={env_selected} (source run > env).",
+                )
+            else:
+                _warn_once(
+                    warnings,
+                    f"--auth-profile {selected} overrides {env_source}={env_selected} (flag > env).",
+                )
     elif not definitions:
         return empty_profile_resolution()
     else:
-        detect_from = profiles_section(config).get("detectFrom")
-        for var_name in detect_from if isinstance(detect_from, list) else []:
-            if not isinstance(var_name, str):
-                continue
-            raw = env.get(var_name)
-            value = raw.strip() if isinstance(raw, str) else ""
-            if not value:
-                continue
-            if value not in definitions:
-                safe_value = redaction.redact_mapping_value(var_name, value)
-                _warn_once(
-                    warnings,
-                    f"profile detect var {var_name}={safe_value} is not defined; ignoring it.",
-                )
-                continue
-            if selected is None:
-                selected = value
-                source = var_name
-                continue
-            if value != selected:
-                _warn_once(
-                    warnings,
-                    f"profile mismatch ({source}={selected} vs {var_name}={value}); using {selected}.",
-                )
+        selected, source = _detect_env_profile(config, env, definitions, warnings)
+        default = _resolve_default_profile(config, definitions)
         if selected is None:
-            selected = _resolve_default_profile(config, definitions)
+            selected = default
             if selected is not None:
                 source = "default"
+        elif default is not None and default != selected:
+            _warn_once(
+                warnings,
+                f"{source}={selected} overrides the selected config's profiles.default={default} "
+                f"(env > config default); pass --auth-profile {default} to use the default.",
+            )
 
     active_env = (
         profile_env(config, selected, expand_env=expand_env) if selected is not None else {}

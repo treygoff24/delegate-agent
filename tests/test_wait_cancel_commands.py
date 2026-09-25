@@ -142,6 +142,51 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertFalse(payload["timedOut"])
         self.assertEqual(payload["runs"][0]["status"], "succeeded")
 
+    def test_wait_structural_json_keeps_only_decision_fields(self):
+        """dlg-qd1: a compact wait view for callers that only branch on the outcome."""
+        _ok_id, ok_alias = self.write_run(status="succeeded", result_quality="complete")
+        dead_id, dead_alias = self.write_run(status="running", pid=999999999)
+
+        code, out, err = self.run_cli(
+            ["--json", "wait", ok_alias, dead_alias, "--structural", "--interval", "1"]
+        )
+
+        self.assertEqual(code, 1, err)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["timedOut"])
+        for run in payload["runs"]:
+            self.assertLessEqual(set(run), set(wait_cancel_commands.WAIT_STRUCTURAL_KEYS))
+        ok_run, dead_run = payload["runs"]
+        self.assertEqual((ok_run["alias"], ok_run["status"]), (ok_alias, "succeeded"))
+        self.assertEqual(ok_run["resultQuality"], "complete")
+        self.assertEqual(dead_run["runId"], dead_id)
+        self.assertEqual(dead_run["status"], "failed")
+        self.assertEqual(dead_run["staleReason"], "dead_pid")
+        self.assertIn("failureKind", dead_run)
+        _code, full_out, _err = self.run_cli(["--json", "wait", ok_alias, "--interval", "1"])
+        self.assertGreater(
+            len(json.loads(full_out)["runs"][0]), len(ok_run), "structural must be smaller"
+        )
+
+    def test_wait_structural_keeps_resolution_warnings(self):
+        """dlg-qd1: --structural drops run content, so resolution warnings ride at the top."""
+        _older_id, older_alias = self.write_run(status="running", pid=os.getpid())
+        _newest_id, newest_alias = self.write_run(status="succeeded", result_quality="complete")
+
+        code, out, err = self.run_cli(
+            ["--json", "wait", "codex", "--structural", "--interval", "1"]
+        )
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["runs"][0]["alias"], newest_alias)
+        # The run view itself stays reduced: no per-run warning list to carry it.
+        self.assertNotIn("warnings", payload["runs"][0])
+        (warning,) = payload["warnings"]
+        self.assertTrue(warning.startswith("bare_handle_ambiguous:"), warning)
+        self.assertIn(older_alias, warning)
+
     def test_wait_dead_pid_is_terminal_failure_not_timeout(self):
         _run_id, alias = self.write_run(status="running", pid=999999999)
         code, out, err = self.run_cli(
@@ -222,6 +267,28 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(resolved["resolvedWorkspace"], str(self.workspace))
         self.assertGreater(resolved["resolvedAgeSeconds"], 24 * 60 * 60)
         self.assertTrue(any("bare_handle_stale" in warning for warning in resolved["warnings"]))
+
+    def test_wait_bare_harness_names_group_and_running_siblings(self):
+        """dlg-qd1: a bare harness name silently picked the newest of several lanes."""
+        _only_id, only_alias = self.write_run(status="succeeded", group="wave4")
+        code, out, err = self.run_cli(["--json", "wait", "codex", "--interval", "1"])
+        self.assertEqual(code, 0, err)
+        warnings = json.loads(out)["runs"][0].get("warnings", [])
+        self.assertFalse(any("bare_handle_ambiguous" in w for w in warnings), warnings)
+
+        _running_id, running_alias = self.write_run(status="running", pid=os.getpid())
+        _other_id, other_alias = self.write_run(status="succeeded", group="other")
+        _latest_id, latest_alias = self.write_run(status="succeeded", group="wave4")
+
+        code, out, err = self.run_cli(["--json", "wait", "codex", "--interval", "1"])
+
+        self.assertEqual(code, 0, err)
+        resolved = json.loads(out)["runs"][0]
+        self.assertEqual(resolved["resolvedAlias"], latest_alias)
+        (warning,) = [w for w in resolved["warnings"] if "bare_handle_ambiguous" in w]
+        self.assertIn(f"resolved the newest codex run {latest_alias}", warning)
+        self.assertIn(f"{running_alias}, {only_alias}", warning)
+        self.assertNotIn(other_alias, warning)
 
     def test_wait_group_selector_waits_all_matching_runs(self):
         _first_id, first_alias = self.write_run(status="succeeded", group="wave4")

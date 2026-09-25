@@ -24,6 +24,23 @@ class MailDeliveryTests(unittest.TestCase):
             self.workspace, workspace_kind="directory"
         )
 
+    def undelivered_send(self, recipient: str, body: str, env: dict[str, str]) -> dict:
+        """Send expecting zero deliveries; return the ledger rows the error carries.
+
+        dlg-qd1: a send that reaches nobody raises ``mail_not_delivered``
+        instead of returning ok, so these tests read outcomes from the error.
+        """
+        with self.assertRaises(mail.MailError) as caught:
+            mail.send(
+                self.registry_root,
+                mail.MailCommand(action="send", to=recipient, body=body),
+                env=env,
+            )
+        self.assertEqual(caught.exception.error, "mail_not_delivered")
+        diagnostics = caught.exception.diagnostics
+        assert diagnostics is not None
+        return {"msgId": diagnostics["msgId"], "recipients": diagnostics["recipients"]}
+
     def lane(
         self,
         *,
@@ -82,11 +99,7 @@ class MailDeliveryTests(unittest.TestCase):
         with mock.patch.object(
             private_io, "write_bytes_atomic_if_absent", side_effect=OSError("nope")
         ):
-            message = mail.send(
-                self.registry_root,
-                mail.MailCommand(action="send", to=recipient, body="hello"),
-                env=sender_env,
-            )["message"]
+            message = self.undelivered_send(recipient, "hello", sender_env)
         result = mail.status(
             self.registry_root,
             mail.MailCommand(action="status", message_id=message["msgId"]),
@@ -99,11 +112,7 @@ class MailDeliveryTests(unittest.TestCase):
         with mock.patch.object(
             private_io, "write_bytes_atomic_if_absent", side_effect=OSError("nope")
         ):
-            message = mail.send(
-                self.registry_root,
-                mail.MailCommand(action="send", to=recipient, body="hello"),
-                env=sender_env,
-            )["message"]
+            message = self.undelivered_send(recipient, "hello", sender_env)
         inbox = mail.boxes_root(self.registry_root) / message["recipients"][0]["box"] / "inbox"
         expected = inbox / f"{message['msgId']}.mail"
         for kind in ("junk", "symlink"):
@@ -313,11 +322,7 @@ class MailDeliveryTests(unittest.TestCase):
             return real_link(*args, **kwargs)
 
         with mock.patch.object(private_io.os, "link", side_effect=link_once_then_fail):
-            result = mail.send(
-                self.registry_root,
-                mail.MailCommand(action="send", to=recipient, body="link failure"),
-                env=sender_env,
-            )
+            result = {"message": self.undelivered_send(recipient, "link failure", sender_env)}
 
         self.assertEqual(calls, 2)
         row = result["message"]["recipients"][0]

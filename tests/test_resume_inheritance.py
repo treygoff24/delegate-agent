@@ -112,6 +112,49 @@ class ResumeFixture(CommandTestBase):
 
 
 class ResumeInheritanceTests(ResumeFixture):
+    def test_inherited_profile_warning_names_the_source_run(self):
+        # A personal-realm run resumed from a work-realm shell inherits the
+        # source profile; the warning must say so instead of claiming the
+        # caller typed --auth-profile.
+        self.write_config(
+            {
+                "profiles": {
+                    "definitions": {
+                        "work": {"env": {"CODEX_HOME": "$HOME/codex-work"}},
+                        "personal": {"env": {"CODEX_HOME": "$HOME/codex-personal"}},
+                    }
+                }
+            }
+        )
+        _run_id, alias, _run_path = self.seed_run(manifest={"authProfile": "personal"})
+        # The Python profile guard also reads AI_PROFILE; give it the overlay it
+        # expects so the run reaches profile resolution instead of failing closed.
+        overlay = Path(self._config_env["HOME"]) / ".delegate"
+        overlay.mkdir(parents=True, exist_ok=True)
+        (overlay / "config.work.json").write_text("{}\n", encoding="utf-8")
+        self._config_env["AI_PROFILE"] = "work"
+
+        inherited, _stderr = self.run_resume(["--dry-run", alias, "continue it"])
+
+        self.assertEqual(inherited["authProfile"], "personal")
+        self.assertEqual(
+            inherited["warnings"],
+            [
+                "inherited auth profile personal from the source run overrides "
+                "AI_PROFILE=work (source run > env)."
+            ],
+        )
+
+        # The same profile named by a typed flag keeps the flag wording, so the
+        # pairing is visible from the CLI.
+        typed, _stderr = self.run_resume(
+            ["--dry-run", "--auth-profile", "personal", alias, "continue it"]
+        )
+        self.assertEqual(typed["authProfile"], "personal")
+        self.assertEqual(
+            typed["warnings"], ["--auth-profile personal overrides AI_PROFILE=work (flag > env)."]
+        )
+
     def test_codex_dry_run_inherits_table_and_honors_overrides(self):
         codex_home = Path(self._config_env["HOME"]) / "codex-source"
         codex_home.mkdir(parents=True)
@@ -444,3 +487,42 @@ class ResumeInheritanceTests(ResumeFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
+    """dlg-qd1: a resumed Run could never be followed up; it recorded no session."""
+
+    def test_resume_of_a_resumable_run_is_resumable(self):
+        _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertTrue(payload.get("resumable"), payload)
+        self.assertNotIn("--ephemeral", payload["argv"])
+
+    def test_resume_of_a_plain_run_stays_plain(self):
+        _run_id, alias, _run_path = self.seed_run()
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+
+    def test_cross_engine_resume_drops_the_opt_in_and_says_so(self):
+        _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
+
+        payload, stderr = self.run_resume(["--dry-run", "--engine", "grok", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+        self.assertIn("resumable dropped: grok work runs do not support --resumable", stderr)
+        self.assertIn("continue the resumed run with delegate resume", stderr)
+
+    def test_safe_resume_drops_the_opt_in_with_a_mode_accurate_note(self):
+        _run_id, alias, _run_path = self.seed_run(mode="safe", manifest={"resumable": True})
+
+        payload, stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+        self.assertIn("resumable dropped: codex safe runs do not support --resumable", stderr)
+        self.assertIn("native followup requires a codex or claude work run", stderr)
+        self.assertIn("continue the resumed run with delegate resume", stderr)
+        self.assertNotIn("cannot record a native session", stderr)

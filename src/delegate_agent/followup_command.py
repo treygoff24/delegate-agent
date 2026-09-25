@@ -200,6 +200,60 @@ def _resolve_followup_target(registry_root: Path, handle: str) -> tuple[str, str
     return run_id, alias
 
 
+def _later_continuations(
+    registry_root: Path, run_id: str
+) -> list[tuple[str, str, str | None, str | None]]:
+    """Runs that resumed or followed up ``run_id``, oldest first.
+
+    Each entry is (handle, relation, engine, native_session_id).
+
+    Run ids start with their UTC launch second, so only runs from that second
+    on can descend from this one; older manifests are never opened.
+    """
+    index = run_registry.load_index(registry_root)
+    floor = run_id[: len("del_YYYYMMDDTHHMMSSZ")]
+    found: list[tuple[str, str, str, str | None, str | None]] = []
+    for candidate, entry in run_registry.index_run_entries(index):
+        if candidate == run_id or candidate[: len(floor)] < floor:
+            continue
+        try:
+            manifest = run_registry.load_run_manifest_or_none(registry_root, candidate)
+        except (OSError, ValueError, run_registry.RegistryJsonError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        resumed = manifest.get("resumedFrom")
+        if manifest.get("followupOf") == run_id:
+            relation = "followup"
+        elif isinstance(resumed, dict) and resumed.get("runId") == run_id:
+            relation = "resume"
+        else:
+            continue
+        handle = entry.get("alias") if isinstance(entry.get("alias"), str) else candidate
+        try:
+            state = run_registry.load_run_state_or_none(registry_root, candidate)
+            snapshot = run_registry.load_run_snapshot_or_none(registry_root, candidate)
+        except (OSError, ValueError, run_registry.RegistryJsonError):
+            # Advisory lineage only: an unreadable sibling never blocks a followup.
+            state = snapshot = None
+        session_id = next(
+            (
+                record["harnessSessionId"]
+                for record in (state, snapshot, manifest)
+                if isinstance(record, dict)
+                and isinstance(record.get("harnessSessionId"), str)
+                and record["harnessSessionId"]
+            ),
+            None,
+        )
+        engine = _manifest_str(manifest, "engine") or _manifest_str(manifest, "harness")
+        found.append((candidate, handle, relation, engine, session_id))
+    return [
+        (handle, relation, engine, session_id)
+        for _candidate, handle, relation, engine, session_id in sorted(found)
+    ]
+
+
 def build_followup_plan(
     parsed: ParsedCommand,
     workspace: ResolvedWorkspace,
@@ -306,6 +360,19 @@ def build_followup_plan(
     session_id = validate_session_id(raw_session_id, source_engine, alias=alias)
 
     notes: list[str] = []
+    continuations = _later_continuations(registry_root, run_id)
+    if continuations and continuations[-1][2:] != (source_engine, session_id):
+        latest_alias, relation, _latest_engine, latest_session_id = continuations[-1]
+        continue_with = (
+            f"delegate followup {latest_alias}"
+            if latest_session_id
+            else f"delegate resume {latest_alias} (it recorded no native session)"
+        )
+        notes.append(
+            f"{alias} was already continued by {latest_alias} ({relation}). This followup "
+            f"resumes {alias}'s own session and will not see {latest_alias}'s work; to continue "
+            f"from there use: {continue_with}."
+        )
 
     model = (
         _manifest_str(manifest, "requestedModel")
@@ -403,6 +470,7 @@ def build_followup_plan(
             completion_report=global_options.completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            auth_profile_inherited=auth_profile is not None and global_options.auth_profile is None,
             group=group,
             notify=global_options.notify,
         ),

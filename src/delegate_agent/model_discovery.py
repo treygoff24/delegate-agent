@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TextIO
 
@@ -386,6 +387,123 @@ def configured_alias_absence_warnings(
             )
         )
     return tuple(warnings)
+
+
+def launch_catalog(discovery: JsonObject | None, engine: str) -> tuple[tuple[str, ...], str]:
+    """The catalog a launch checks a selector against, and its provenance.
+
+    The discovered catalog is authoritative when the snapshot has one; the
+    bundled table stands in only when discovery has nothing for the engine.
+    """
+    discovered = discovered_model_ids(discovery, engine)
+    if discovered:
+        return discovered, "discovered"
+    bundled = tuple(entry["id"] for entry in BUNDLED_MODELS.get(engine, ()) if "id" in entry)
+    return bundled, "bundled"
+
+
+def launch_model_absence_warning(
+    engine: str,
+    model: str | None,
+    discovery: JsonObject | None,
+    *,
+    catalog_model: str | None = None,
+) -> tuple[str, ...]:
+    """Warn on discovered catalog misses or likely typos in the bundled list.
+
+    Launch preflight refuses only selectors it can prove unverifiable; a
+    concrete id the harness will reject still launches and fails inside the
+    child. This names the likely cause first. Advisory only: a catalog can lag
+    the provider, so the launch is never refused and the selector never
+    rewritten.
+
+    ``catalog_model`` is the id compared against (and matched against nearest
+    suggestions) when the launch selector carries Delegate-side decoration the
+    catalog never stores, such as a Claude ``[1m]`` context-window suffix.
+    """
+    if not model:
+        return ()
+    lookup = catalog_model if catalog_model is not None else model
+    catalog, source = launch_catalog(discovery, engine)
+    if not catalog or lookup in catalog:
+        return ()
+    if source == "bundled":
+        # Ranking alone always returns neighbors, even for unrelated selectors.
+        # Cursor's optional provider prefix is not part of the model spelling.
+        prefix = "cursor-" if engine == "cursor" else ""
+        catalog = tuple(
+            selector
+            for selector in catalog
+            if SequenceMatcher(
+                None,
+                lookup.lower().removeprefix(prefix),
+                selector.lower().removeprefix(prefix),
+            ).ratio()
+            >= 0.8
+        )
+        if not catalog:
+            return ()
+    nearest = nearest_model_ids(lookup, catalog)
+    if source == "bundled":
+        return (
+            f"{engine} model {redaction.redact_string(model)!r} is not in Delegate's small "
+            f"built-in list; no discovery snapshot catalog exists for {engine}. "
+            "It resembles "
+            + ", ".join(redaction.redact_string(selector) for selector in nearest)
+            + ". The launch proceeds. Run `delegate capabilities refresh` to update the "
+            f"cached catalog, or `delegate models {engine} --live` to see a fresh one.",
+        )
+    suggestion = (
+        " Nearest known selectors: "
+        + ", ".join(redaction.redact_string(selector) for selector in nearest)
+        + "."
+        if nearest
+        else ""
+    )
+    return (
+        f"{engine} model {redaction.redact_string(model)!r} is absent from the {source} "
+        f"catalog, so {engine} may reject it.{suggestion} Run `delegate capabilities refresh` "
+        f"to update the cached catalog, or `delegate models {engine} --live` to see a fresh one.",
+    )
+
+
+_FAMILY_WORD_RE = re.compile(r"[A-Za-z]+")
+# Preferred effort/tier suffix inside one family version when a bare family name
+# is resolved: the unsuffixed selector, then the balanced tiers.
+_FAMILY_SUFFIX_PREFERENCE = ("", "high", "medium", "xhigh", "low")
+
+
+def newest_family_selector(word: str, catalog: tuple[str, ...]) -> str | None:
+    """Newest catalog selector for a bare family name such as ``grok``.
+
+    Matches ``<word>-<version>[-suffix]`` with an optional ``cursor-`` prefix,
+    takes the highest version, and within it prefers a non-fast selector and
+    then ``_FAMILY_SUFFIX_PREFERENCE``. Returns None for anything that is not a
+    bare word or when nothing in the catalog belongs to the family.
+    """
+    if not _FAMILY_WORD_RE.fullmatch(word):
+        return None
+    pattern = re.compile(rf"(?:cursor-)?{re.escape(word.lower())}-(\d+(?:\.\d+)*)(?:-(.+))?")
+    ranked: list[tuple[tuple[int, ...], bool, int, str]] = []
+    for selector in catalog:
+        match = pattern.fullmatch(selector.lower())
+        if match is None:
+            continue
+        version = tuple(int(part) for part in match.group(1).split("."))
+        suffix_parts = (match.group(2) or "").split("-")
+        fast = "fast" in suffix_parts
+        tier = "-".join(part for part in suffix_parts if part and part != "fast")
+        rank = (
+            _FAMILY_SUFFIX_PREFERENCE.index(tier)
+            if tier in _FAMILY_SUFFIX_PREFERENCE
+            else len(_FAMILY_SUFFIX_PREFERENCE)
+        )
+        ranked.append((version, not fast, -rank, selector))
+    if not ranked:
+        return None
+    best = max(ranked, key=lambda item: (item[0], item[1], item[2]))
+    ties = sorted(item[3] for item in ranked if item[:3] == best[:3])
+    return ties[0]
 
 
 def _legacy_reasoning_models(cache: JsonObject | None, engine: str) -> list[JsonObject]:

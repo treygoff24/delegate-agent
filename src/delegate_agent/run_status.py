@@ -378,6 +378,65 @@ def list_run_summaries(
 ) -> tuple[list[JsonObject], int, int, RunListingIds]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    candidates, scoped_ids = _run_summary_candidates(
+        registry_root,
+        index,
+        active=active,
+        status_filter=status_filter,
+        harness=harness,
+        group=group,
+    )
+    total = len(candidates)
+    selected: list[JsonObject] = []
+    for summary, candidate_state, projected, entry in candidates[:limit]:
+        full_state = (
+            record_io.load_run_state_or_none(registry_root, summary["runId"])
+            if projected
+            else candidate_state
+        )
+        manifest = record_io.load_run_manifest_or_none(registry_root, summary["runId"])
+        summary = build_run_summary(
+            registry_root,
+            summary["runId"],
+            entry,
+            include_logs=False,
+            state=full_state,
+            manifest=manifest,
+        )
+        stdout_bytes, stderr_bytes = effective_log_byte_sizes(
+            registry_root,
+            summary["runId"],
+            full_state,
+        )
+        summary["stdoutBytes"] = stdout_bytes
+        summary["stderrBytes"] = stderr_bytes
+        warnings = large_log_warnings(stdout_bytes, stderr_bytes)
+        for warning in summary["warnings"]:
+            if warning not in warnings:
+                warnings.append(warning)
+        summary["warnings"] = warnings
+        selected.append(summary)
+    return (
+        selected,
+        total,
+        len(scoped_ids),
+        RunListingIds(
+            matched=frozenset(str(summary["runId"]) for summary, *_ in candidates),
+            scoped=frozenset(scoped_ids),
+        ),
+    )
+
+
+def _run_summary_candidates(
+    registry_root: Path,
+    index: JsonObject,
+    *,
+    active: bool,
+    status_filter: str | None,
+    harness: str | None,
+    group: str | None,
+) -> tuple[list[tuple[JsonObject, JsonObject | None, bool, JsonObject]], set[str]]:
+    """Cheap summaries for every run in scope that passes the filters, newest first."""
     candidates: list[tuple[JsonObject, JsonObject | None, bool, JsonObject]] = []
     scoped_ids: set[str] = set()
     for run_id, entry in record_io.index_run_entries(index):
@@ -420,42 +479,43 @@ def list_run_summaries(
             continue
         candidates.append((summary, state, projected_state is not None, entry))
     candidates.sort(key=lambda item: item[0].get("activityAt", ""), reverse=True)
-    total = len(candidates)
-    selected: list[JsonObject] = []
-    for summary, candidate_state, projected, entry in candidates[:limit]:
-        full_state = (
-            record_io.load_run_state_or_none(registry_root, summary["runId"])
-            if projected
-            else candidate_state
-        )
-        manifest = record_io.load_run_manifest_or_none(registry_root, summary["runId"])
-        summary = build_run_summary(
-            registry_root,
-            summary["runId"],
-            entry,
-            include_logs=False,
-            state=full_state,
-            manifest=manifest,
-        )
-        stdout_bytes, stderr_bytes = effective_log_byte_sizes(
-            registry_root,
-            summary["runId"],
-            full_state,
-        )
-        summary["stdoutBytes"] = stdout_bytes
-        summary["stderrBytes"] = stderr_bytes
-        warnings = large_log_warnings(stdout_bytes, stderr_bytes)
-        for warning in summary["warnings"]:
-            if warning not in warnings:
-                warnings.append(warning)
-        summary["warnings"] = warnings
-        selected.append(summary)
-    return (
-        selected,
-        total,
-        len(scoped_ids),
-        RunListingIds(
-            matched=frozenset(str(summary["runId"]) for summary, *_ in candidates),
-            scoped=frozenset(scoped_ids),
-        ),
+    return candidates, scoped_ids
+
+
+def count_run_summaries(
+    registry_root: Path,
+    index: JsonObject,
+    *,
+    active: bool = False,
+    status_filter: str | None = None,
+    harness: str | None = None,
+    group: str | None = None,
+    seen_run_ids: set[str] | None = None,
+) -> tuple[dict[str, dict[str, int]], RunListingIds]:
+    """Counts by status, harness, and group over every matching run, with no rows.
+
+    Uses the same cheap pass and filters as :func:`list_run_summaries`, so the
+    counts agree with the listing's ``total`` and never load full manifests or
+    log sizes for runs a listing would not show.
+    Buckets skip ids already counted from an earlier Registry root.
+    """
+    candidates, scoped_ids = _run_summary_candidates(
+        registry_root,
+        index,
+        active=active,
+        status_filter=status_filter,
+        harness=harness,
+        group=group,
+    )
+    counts: dict[str, dict[str, int]] = {"byStatus": {}, "byHarness": {}, "byGroup": {}}
+    for summary, _state, _projected, _entry in candidates:
+        if seen_run_ids is not None and summary["runId"] in seen_run_ids:
+            continue
+        for bucket, key in (("byStatus", "status"), ("byHarness", "harness"), ("byGroup", "group")):
+            value = summary.get(key)
+            label = value if isinstance(value, str) and value else "(none)"
+            counts[bucket][label] = counts[bucket].get(label, 0) + 1
+    return counts, RunListingIds(
+        matched=frozenset(str(summary["runId"]) for summary, *_ in candidates),
+        scoped=frozenset(scoped_ids),
     )

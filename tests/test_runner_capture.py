@@ -308,6 +308,181 @@ class RunnerCaptureTests(unittest.TestCase):
                 payload.get("warnings"),
             )
 
+    def test_safe_mode_dns_failure_points_at_work_mode(self):
+        """dlg-qd1: a sandboxed resolver failure reads like an outage without this hint."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "no-dns"
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        for mode, expected in (("safe", True), ("work", False)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as workspace:
+                root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+                run_id, alias = self.registry.register_run(root, harness="codex")
+                ctx = self.runner.RunContext(
+                    registry_root=root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="codex",
+                    engine="codex",
+                    mode=mode,
+                    model="model-id",
+                    source_cwd=workspace,
+                    execution_cwd=workspace,
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at="2026-08-25T00:00:00Z",
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script)],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    stdin_text="prompt",
+                )
+                self.assertNotEqual(code, 0)
+                hints = [w for w in payload.get("warnings", []) if "safe mode may block" in w]
+                if expected:
+                    self.assertEqual(len(hints), 1, payload.get("warnings"))
+                    self.assertIn("delegate codex work", hints[0])
+                else:
+                    self.assertEqual(hints, [])
+
+    def test_successful_safe_run_with_dns_text_gets_no_hint(self):
+        """dlg-qd1: a child can print getaddrinfo while succeeding; the sandbox hint is for failures."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "chatty-resolver"
+        event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Status: completed the task."},
+            }
+        )
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
+            f"printf '%s\\n' {shlex.quote(event)}\nexit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        for mode in ("safe", "work"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as workspace:
+                code, payload = self._tracked_script_run(script, mode=mode, workspace=workspace)
+
+                self.assertEqual(code, 0, payload)
+                self.assertEqual(payload.get("error"), None)
+                self.assertEqual(
+                    [w for w in payload.get("warnings", []) if "safe mode may block" in w],
+                    [],
+                )
+
+    def test_diagnosed_provider_failure_gets_no_dns_hint(self):
+        """Quota/auth failures keep their cause even with resolver text in stderr."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "provider-failure"
+        for message, reason in (
+            ("Error 401: unauthorized request", "auth_failed"),
+            ("You exceeded your current quota usage limit", "usage_limit"),
+        ):
+            with self.subTest(reason=reason):
+                script.write_text(
+                    "#!/usr/bin/env bash\ncat >/dev/null\n"
+                    "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
+                    f"echo {shlex.quote(message)} >&2\nexit 7\n",
+                    encoding="utf-8",
+                )
+                script.chmod(0o755)
+                with tempfile.TemporaryDirectory() as workspace:
+                    code, payload = self._tracked_script_run(
+                        script, mode="safe", workspace=workspace
+                    )
+
+                self.assertEqual(code, 7)
+                self.assertEqual(payload["failureReason"], reason)
+                self.assertEqual(
+                    [w for w in payload.get("warnings", []) if "safe mode may block" in w], []
+                )
+
+    def test_dns_hint_gate_reads_the_failure_kind(self):
+        # The end-to-end cases above cover the wiring; this covers the kinds that
+        # are hard to stage from a script (a pi/omp provider terminal event).
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-25T00:00:00Z",
+            )
+            signal_text = "Error: getaddrinfo ENOTFOUND api.example.com"
+            for status, reason, expected in (
+                ("failed", "child_failed", True),
+                ("failed", "exit_nonzero", True),
+                ("failed", "provider_error", False),
+                ("failed", "usage_limit", False),
+                ("failed", "auth_failed", False),
+                ("succeeded", None, False),
+                ("cancelled", "harness_cancelled", False),
+            ):
+                with self.subTest(status=status, reason=reason):
+                    hint = self.runner._safe_mode_network_warning(
+                        ctx, signal_text, status=status, failure_reason=reason
+                    )
+                    self.assertEqual(hint is not None, expected, hint)
+
+            for kind in self.runner.outcome.FAILURE_KINDS:
+                with self.subTest(kind=kind):
+                    hint = self.runner._safe_mode_network_warning(
+                        ctx, signal_text, status="failed", failure_reason=kind
+                    )
+                    self.assertEqual(hint is not None, kind == "exit_nonzero", hint)
+
+    def _tracked_script_run(self, script: Path, *, mode: str, workspace: str) -> tuple[int, dict]:
+        root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = self.registry.register_run(root, harness="codex")
+        ctx = self.runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="codex",
+            engine="codex",
+            mode=mode,
+            model="model-id",
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-25T00:00:00Z",
+        )
+        return self.runner.execute_tracked(
+            [str(script)],
+            workspace,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            stdin_text="prompt",
+        )
+
     def test_successful_run_carries_no_stderr_tail(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

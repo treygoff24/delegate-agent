@@ -56,7 +56,9 @@ delegate mail prune [--older-than DAYS] [--dry-run]
 
 `send` records per-recipient outcomes (`delivered`, `failed`,
 `skipped_ineligible`, or `blocked`); `status` may report `pruned` when a
-delivered mailbox file is gone. `watch --once` emits metadata-only NDJSON and
+delivered mailbox file is gone. A send that delivers to nobody exits 1 with
+the typed error `mail_not_delivered`, naming each recipient's outcome and
+reason; its ledger stays readable through `mail status`. `watch --once` emits metadata-only NDJSON and
 returns exit code 124 on timeout. Read-only profile guards allow inbox,
 status, watch, and `read --peek`; mutating mail operations remain protected.
 `mail prune --dry-run` is byte-preserving and best-effort; under concurrent
@@ -1260,13 +1262,13 @@ persistent-worktree isolation semantics are unchanged.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]
 delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
 delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
-delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
+delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
 ```
 
@@ -1292,6 +1294,7 @@ creating a Run or writing a prompt record.
 | --- | --- | --- | --- | --- |
 | Engine | `engine`, falling back to `harness` | `--engine` | A missing or unknown source engine refuses resume. | The selected engine becomes the target; engine-scoped fields below may drop. |
 | Mode | `mode` | None; v1 does not override mode. | A missing or invalid mode refuses resume. | Retained unchanged. |
+| Native session opt-in | `resumable` | None | Only an exact `true` opts in; omitted or legacy values leave it off. | Kept only for Codex or Claude work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
 | Model selection | `modelAlias`, then `modelRequested`, `modelResolved`, then `model` | `--model` | No usable key uses the target engine configuration default and emits a note. | Source model selection drops; pass `--model` to pin a target model. |
 | Reasoning effort | `requestedReasoningEffort`, then `resolvedReasoningEffort`, together with `reasoningEffortSource` | `--reasoning-effort` | Missing effort uses the target default and emits a note. A source value from configuration is re-resolved through target capability/configuration; only `cli` and `input-json` source intent is inherited directly. | Source effort drops with a note; an explicit override remains valid. |
 | Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |
@@ -1444,7 +1447,7 @@ remembers temporary blocks by hashed credential namespace (`CODEX_HOME/auth.json
 also mirror compatible legacy alias keys so existing launchers share blocks;
 remapped aliases remain isolated.
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. Bare harness, stale numbered-alias, and explicit `--latest` resolutions report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, `resolvedAgeSeconds`, `resolvedStartedAt`, and `newerRunCount`; `resolvedGroup` is included when recorded. Bare-harness resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle. Stale numbered aliases and old explicit `--latest` results add `run_target_stale`; these warnings are advisory and never change which run resolves.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. Bare harness, stale numbered-alias, and explicit `--latest` resolutions report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, `resolvedAgeSeconds`, `resolvedStartedAt`, and `newerRunCount`; `resolvedGroup` is included when recorded. Bare-harness resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle, and one whose newest pick has sibling runs still running (or in the same group) adds `bare_handle_ambiguous` naming them. Stale numbered aliases and old explicit `--latest` results add `run_target_stale`; these warnings are advisory and never change which run resolves.
 
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
