@@ -110,6 +110,54 @@ Delegate also creates a local branch named like:
 delegate/<label>-<short-run-id>
 ```
 
+### Workspace spec: base, env, setup
+
+A work lane in a persistent worktree can declare how its workspace is made:
+
+```bash
+delegate --isolation worktree codex work \
+  --base origin/main \
+  --env API_BASE=http://localhost:8080 --env-file .lane.env \
+  --setup 'npm ci' \
+  "Implement the scoped task."
+```
+
+- `--base REF` cuts the worktree from REF (branch, tag, or commit) instead of
+  the source checkout's HEAD. The creation base recorded for ahead/behind,
+  review diffs, and `--forbid-commit` is that commit. `--base` cannot be
+  combined with `--include-dirty`, and dirty source files are not auto-included,
+  since they are relative to HEAD rather than to REF.
+- `--env NAME=VALUE` (repeatable) and `--env-file PATH` (repeatable; `NAME=VALUE`
+  lines, `#` comments, optional `export`, one pair of surrounding quotes) set
+  variables for the child. `--env` wins over files. Values are written only to
+  the run's private `workspace-env.json`; the manifest and output show names
+  (`workspaceSpec.envKeys`). Names Delegate sets itself (`DELEGATE_*`,
+  `WORKSPACE_ROOT`, `TMPDIR`/`TMP`/`TEMP`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `KIMI_CODE_HOME`) are refused. Delegate and auth-profile variables still take
+  precedence. Errors name the file and line, never the content: an env file
+  cannot carry a quoted value across lines, and a line that opens a quote it
+  does not close on the same line is refused rather than truncated.
+- `--setup CMD` runs CMD with `/bin/sh` in the fresh worktree, under the
+  launching Delegate process, before the child starts, with the run's env and
+  bounded by `--timeout`, which is applied twice: setup gets the timeout, and
+  the child then gets it again from its own launch, so one run can take up to
+  about twice the timeout. Output goes to the run's `setup.log`. A nonzero exit
+  or timeout fails the run with error `workspace_setup_failed` and
+  `failureKind: workspace_setup`, keeps the worktree for inspection, and
+  launches no child. Setup runs in its own process group: `delegate cancel`
+  stops a run whose setup is still running (the record names the setup group
+  under `setupPgid`, never as the child `pid`/`pgid`), and a launcher that is
+  terminated or interrupted stops that group with it. Delegate never guesses a
+  setup command. Setup output embedded in the failure message has every
+  recorded `--env` value masked.
+
+`run --input-json` accepts the same spec as `base`, `env` (an object of names
+to strings), and `setup`. `resume` and `followup` re-apply the recorded env
+when they attach to the worktree, whatever the resuming shell exports; `base`
+and `setup` are creation-only and are not re-run. A run that failed in setup is
+resumable on those terms: `resume` attaches to the kept worktree without
+re-running setup.
+
 ### Resume attachment
 
 To continue a terminal Run that used a persistent worktree, use the Run handle
@@ -252,6 +300,24 @@ delegate worktree prune --merged --group wave4
 ```
 
 `prune` requires at least one of `--merged` or `--older-than DAYS`. It skips dirty, unknown, detached-source, and merge-check-failed entries unless you pass explicit override flags. `--group NAME` limits prune candidates to that launch group.
+
+A run holds a lease on its worktree while its record is not terminal and the
+Delegate process that launched it (`launcherPid` in the run state) is still the
+same live process. Prune, `worktree list` auto-prune, completion auto-prune,
+`reap`, and `remove` skip a leased worktree with reason `worktree_leased`,
+even when the child's recorded pid is dead. The lease uses the same launcher
+check as never-launched run sealing (a live pid that started after the run is
+a reused pid, not the launcher). It ends when the record turns terminal, so a
+run's own completion retirement is unaffected. Only an explicit `--force`
+overrides it.
+
+A run launched from inside a linked worktree (for example, an agent working in
+its own Delegate worktree) is registered in that worktree's `.delegate/`.
+`delegate runs` in the repository's main worktree also lists the runs of every
+linked worktree that has a registry, tagged with `registryWorkspace`; it reads
+them through `git worktree list` and writes nothing across worktrees. Handle
+commands such as `wait` and `snapshot` still resolve against the registry of
+the workspace they run in, so pass `--cwd <registryWorkspace>` for those.
 
 ## Reap old pooled paths
 

@@ -1661,20 +1661,26 @@ class WorktreeStalenessWarningTests(unittest.TestCase):
 
     A reviewer lane dispatched before a contract fix reviews the tree without it
     and returns a confident verdict about a document that no longer exists in
-    that form. The count was already in the work summary and nothing surfaced it.
+    that form. The count was already in the work summary and nothing surfaced
+    it. The count is `sourceDrift`, measured from the checkout HEAD at dispatch
+    (the creation base can be an older ref under `--base`, and a base-relative
+    count is positive by construction for such a lane).
     """
 
-    def test_only_a_positive_behind_count_warns(self):
+    def test_only_a_positive_dispatch_drift_count_warns(self):
         from delegate_agent.runner import _source_commits_missed as missed
 
-        self.assertEqual(missed({"branchAheadOfSource": {"behind": 3, "ahead": 1}}), 3)
+        self.assertEqual(missed({"sourceDrift": {"commits": 3, "baseOid": "aaa"}}), 3)
         # Zero is the ordinary case and must stay silent, or the warning becomes
         # noise on every run and gets ignored exactly when it matters.
-        self.assertIsNone(missed({"branchAheadOfSource": {"behind": 0, "ahead": 2}}))
+        self.assertIsNone(missed({"sourceDrift": {"commits": 0, "baseOid": "aaa"}}))
         # Absence of the field is not evidence of zero drift.
         self.assertIsNone(missed({"baseCommit": "abc123"}))
-        self.assertIsNone(missed({"branchAheadOfSource": None}))
-        self.assertIsNone(missed({"branchAheadOfSource": {"behind": "3"}}))
+        self.assertIsNone(missed({"sourceDrift": None}))
+        self.assertIsNone(missed({"sourceDrift": {"commits": "3"}}))
+        # A creation base relative count is not drift: it is what `--base` asks
+        # for, and it stays silent even when the summary carries it.
+        self.assertIsNone(missed({"branchAheadOfSource": {"behind": 3, "ahead": 1}}))
         self.assertIsNone(missed(None))
 
     def test_the_warning_names_the_count_and_the_consequence(self):
@@ -1684,8 +1690,10 @@ class WorktreeStalenessWarningTests(unittest.TestCase):
         ctx.isolation_lifecycle = "persistent"
         ctx.forbid_commit = False
         ctx.worktree_attachment = None
+        ctx.creation_context = {}
         summary = {
-            "branchAheadOfSource": {"behind": 4, "ahead": 0},
+            "sourceDrift": {"commits": 4, "baseOid": "aaa"},
+            "branchAheadOfSource": {"behind": 0, "ahead": 0},
             "noChanges": False,
             "commitsCreatedCount": 0,
         }
@@ -1708,7 +1716,9 @@ class WorktreeStalenessWarningTests(unittest.TestCase):
         ctx.isolation_lifecycle = "persistent"
         ctx.forbid_commit = False
         ctx.worktree_attachment = None
+        ctx.creation_context = {}
         summary = {
+            "sourceDrift": {"commits": 0, "baseOid": "aaa"},
             "branchAheadOfSource": {"behind": 0, "ahead": 1},
             "noChanges": False,
             "commitsCreatedCount": 0,
@@ -1719,6 +1729,27 @@ class WorktreeStalenessWarningTests(unittest.TestCase):
         self.assertFalse(
             any("behind the source branch" in warning for warning in warnings),
             f"a current worktree must not warn, got: {warnings}",
+        )
+
+    def test_a_based_lane_names_the_ref_it_was_cut_from(self):
+        from delegate_agent import runner
+
+        ctx = mock.Mock()
+        ctx.isolation_lifecycle = "persistent"
+        ctx.forbid_commit = False
+        ctx.worktree_attachment = None
+        ctx.creation_context = {"baseRef": "release/1.2", "sourceHeadOid": "aaa"}
+        summary = {
+            "sourceDrift": {"commits": 2, "baseOid": "bbb"},
+            "noChanges": False,
+            "commitsCreatedCount": 0,
+        }
+        with mock.patch.object(runner, "_persistent_work_summary", return_value=summary):
+            _, extra = runner._final_extra(ctx, 0)
+        warnings = extra.get("warnings") or []
+        self.assertTrue(
+            any("cut from release/1.2" in warning for warning in warnings),
+            f"a based lane's warning must name its base, got: {warnings}",
         )
 
 

@@ -1357,7 +1357,9 @@ def execute_request(
                 )
             )
         except worktree_execution.PersistentWorktreeError as exc:
-            raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
+            raise DelegateError(
+                exc.error, exc.message, exc.exit_code, diagnostics=exc.diagnostics
+            ) from exc
     with _safe_workspace.safe_isolated_request(request, config=config) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
         if isolated_request.resumed_from is not None and isolated_request.argv:

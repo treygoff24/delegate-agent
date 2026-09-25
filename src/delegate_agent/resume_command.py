@@ -24,7 +24,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import personas, run_registry, worktree_mgmt, worktree_records
+from delegate_agent import (
+    personas,
+    run_registry,
+    workspace_spec,
+    worktree_mgmt,
+    worktree_records,
+)
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -568,6 +574,28 @@ def _inherit_model(
     return None, None
 
 
+def recorded_workspace_env(
+    run_path: Path, manifest: JsonObject, *, verb: str, notes: list[str]
+) -> dict[str, str] | None:
+    """The source run's workspace env, replayed when re-entering its worktree.
+
+    The values come from the run's private workspace-env.json, never from the
+    shell that runs resume/followup. ``base`` and ``setup`` are creation-only.
+    """
+    env = workspace_spec.read_run_env(run_path)
+    spec = manifest.get("workspaceSpec")
+    if isinstance(spec, dict) and (spec.get("base") is not None or spec.get("setup") is not None):
+        notes.append(
+            f"workspace base/setup are creation-only and were not re-run: the {verb} "
+            "attaches to the existing worktree."
+        )
+    if env:
+        notes.append(
+            f"workspace env replayed from the source run (keys: {', '.join(sorted(env))})."
+        )
+    return env or None
+
+
 def build_resume_plan(
     parsed: ParsedCommand,
     workspace: ResolvedWorkspace,
@@ -763,6 +791,7 @@ def build_resume_plan(
     # Worktree applicability branches on the source lifecycle.
     attach: JsonObject | None = None
     isolation: str | None = None
+    workspace_env: dict[str, str] | None = None
     persistent_source = worktree_records._is_persistent_worktree_run(
         source_state,
         manifest,
@@ -793,6 +822,7 @@ def build_resume_plan(
             )
         )
         isolation = "none"  # the attach executor supplies the execution workspace
+        workspace_env = recorded_workspace_env(run_path, manifest, verb="resumed run", notes=notes)
         if manifest.get("includeDirty") is True:
             notes.append(
                 "includeDirty is creation-only and was dropped: the resumed run "
@@ -863,6 +893,8 @@ def build_resume_plan(
         mail_push=opts.mail_push,
         continuity_mode=continuity_mode,
         warnings=opts.warnings,
+        workspace_env=workspace_env,
+        workspace_env_recorded=workspace_env is not None,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",

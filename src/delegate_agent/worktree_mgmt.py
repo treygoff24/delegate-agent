@@ -233,7 +233,7 @@ def safety_error_payload(
             record=record,
             next_actions=[f"delegate wait {first}", f"delegate cancel {first}"],
         )
-    if reason in {"run_active", "run_not_terminal", "process_group_alive"}:
+    if reason in {"run_active", "run_not_terminal", "process_group_alive", "worktree_leased"}:
         return _error_payload(
             reason,
             "Worktree owner is still active; wait for the run to finish before removing.",
@@ -305,6 +305,10 @@ def _owner_run_block_reason(
     state = run_registry.load_run_state_or_none(registry_root, run_id)
     fields = run_status.status_fields(state)
     status = fields["effectiveStatus"]
+    if status != run_status.STATUS_RUNNING and worktree_records.launcher_lease_held(
+        registry_root, run_id, state
+    ):
+        return "worktree_leased"
     if status == run_status.STATUS_STALE:
         stale_reason = fields.get("staleReason")
         if stale_reason not in (None, "dead_pid"):
@@ -906,6 +910,20 @@ def _suppress_merge_suggestions(
     return ahead == 0
 
 
+def _local_branch_exists(source_git_root: str, ref: str) -> bool:
+    """True when `ref` names a local branch in `source_git_root`.
+
+    A tag, a remote-tracking ref, or a sha does not: `git switch` cannot reach
+    them, so no merge-into-base command can be suggested for such a base.
+    """
+    result = _run_git(
+        source_git_root,
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{ref}"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def suggested_commands(
     record: PersistentWorktreeRecord,
     status: str,
@@ -918,9 +936,12 @@ def suggested_commands(
     branch = record.get("branch")
     creation = record.get("creationContext")
     base = creation.get("sourceHeadOid") if isinstance(creation, dict) else None
+    base_ref_value = creation.get("baseRef") if isinstance(creation, dict) else None
+    base_ref = base_ref_value if isinstance(base_ref_value, str) and base_ref_value else None
     review_diff = None
     review_diff_base = None
     merge = None
+    merge_into_base = None
     cherry = None
     if isinstance(execution_cwd, str) and status in (STATUS_PRESENT, STATUS_UNKNOWN):
         review_diff = _shell(["git", "-C", execution_cwd, "diff", "--stat", "HEAD"])
@@ -931,13 +952,26 @@ def suggested_commands(
         ahead_behind_payload=ahead_behind_payload,
     )
     if not suppress_merge and isinstance(source_git_root, str) and isinstance(branch, str):
-        merge = _shell(["git", "-C", source_git_root, "merge", "--no-ff", branch])
+        # A lane cut from `--base` does not contain the checkout branch's later
+        # commits, so merging it into the checkout's current branch would drag
+        # the stale base's history along with it. The review diff against the
+        # creation base and the cherry-pick range are the integration vehicles
+        # for such a lane; the merge belongs on the base's own branch.
+        if base_ref is None:
+            merge = _shell(["git", "-C", source_git_root, "merge", "--no-ff", branch])
+        elif _local_branch_exists(source_git_root, base_ref):
+            merge_into_base = (
+                _shell(["git", "-C", source_git_root, "switch", base_ref])
+                + " && "
+                + _shell(["git", "-C", source_git_root, "merge", "--no-ff", branch])
+            )
         if isinstance(base, str) and base:
             cherry = _shell(["git", "-C", source_git_root, "cherry-pick", f"{base}..{branch}"])
     return {
         "reviewDiff": review_diff,
         "reviewDiffVsCreationBase": review_diff_base,
         "mergeIntoSource": merge,
+        "mergeIntoBaseBranch": merge_into_base,
         "cherryPickRange": cherry,
         "safeRemove": f"delegate worktree remove {alias}",
         "discardAndRemove": f"delegate worktree remove {alias} --discard-uncommitted",
