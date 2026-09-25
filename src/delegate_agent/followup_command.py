@@ -461,6 +461,8 @@ def build_followup_plan(
             completion_report=global_options.completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            auth_profile_inherited=auth_profile is not None
+            and global_options.auth_profile is None,
             group=group,
             notify=global_options.notify,
         ),

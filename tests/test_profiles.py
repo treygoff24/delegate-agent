@@ -231,6 +231,34 @@ class ProfileResolutionTests(unittest.TestCase):
         )
         self.assertEqual(resolved.warnings, ())
 
+    def test_inherited_override_warning_names_the_source_run(self):
+        # Resume/followup reuse the source run's profile because the caller typed
+        # no flag; the warning must not accuse them of typing one.
+        config = base_config(personal="/tmp/personal", work="/tmp/work")
+        resolved = self.profiles.resolve_active_profile(
+            config,
+            {"AI_PROFILE": "work"},
+            cli_override="personal",
+            cli_override_inherited=True,
+        )
+        self.assertEqual(resolved.name, "personal")
+        self.assertEqual(resolved.source, "flag")
+        self.assertEqual(
+            resolved.warnings,
+            (
+                "inherited auth profile personal from the source run overrides "
+                "AI_PROFILE=work (source run > env).",
+            ),
+        )
+
+        # A typed flag keeps the flag wording.
+        typed = self.profiles.resolve_active_profile(
+            config, {"AI_PROFILE": "work"}, cli_override="personal"
+        )
+        self.assertEqual(
+            typed.warnings, ("--auth-profile personal overrides AI_PROFILE=work (flag > env).",)
+        )
+
     def test_unknown_explicit_override_hard_errors(self):
         config = base_config(work="/tmp/work")
         with self.assertRaises(DelegateError) as ctx:

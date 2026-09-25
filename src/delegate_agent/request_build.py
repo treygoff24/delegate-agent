@@ -1699,6 +1699,7 @@ def _build_normalized_launch(
             forbid_commit=launch.forbid_commit,
             include_dirty=launch.include_dirty,
             auth_profile_override=global_options.auth_profile,
+            auth_profile_inherited=global_options.auth_profile_inherited,
             output_schema=spec.output_schema,
             output_schema_text=launch.output_schema_text,
             warnings=(*launch.warnings, *output_schema_warnings, *isolation_warnings),
@@ -2455,6 +2456,7 @@ def build_request(
     forbid_commit: bool = False,
     include_dirty: bool = False,
     auth_profile_override: str | None = None,
+    auth_profile_inherited: bool = False,
     output_schema: str | None = None,
     output_schema_text: str | None = None,
     warnings: tuple[str, ...] = (),
@@ -2588,6 +2590,7 @@ def build_request(
         config,
         os.environ,
         cli_override=auth_profile_override,
+        cli_override_inherited=auth_profile_inherited,
         expand_env=expand_env,
     )
     discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
