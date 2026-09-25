@@ -26,6 +26,7 @@ from delegate_agent import (
 )
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
+from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -660,24 +661,28 @@ def _publish_setup_pgid(
     logic reads a published ``pid``/``pgid`` as "the child launched", and no
     child exists yet. The field is cleared as soon as setup ends, so a record
     that outlives its setup never points at a recycled group.
+
+    Read-modify-write under the registry lock: ``delegate cancel`` stamps its
+    marker under the same lock, and an unlocked write here could put back a
+    state that predates it.
     """
-    run_path = registration.run_path
+    pre_ctx = registration.pre_ctx
     try:
-        state = run_registry.load_run_state_or_none(
-            registration.pre_ctx.registry_root, registration.run_id
-        )
-        if not isinstance(state, dict):
-            return
-        if pgid is None:
-            if "setupPgid" not in state:
+        with delegate_runner._launch_registry_lock(pre_ctx):
+            state = run_registry.load_run_state_or_none(pre_ctx.registry_root, registration.run_id)
+            if not isinstance(state, dict):
                 return
-            state.pop("setupPgid", None)
-        else:
-            state["setupPgid"] = pgid
-        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
-    except OSError:
+            if pgid is None:
+                if "setupPgid" not in state:
+                    return
+                state.pop("setupPgid")
+            else:
+                state["setupPgid"] = pgid
+            run_registry.write_run_state(registration.run_path, state)
+    except (OSError, DelegateError, delegate_runner.RunnerLaunchError):
         # The setup itself must not fail because the record could not be
-        # annotated; `delegate cancel` then refuses this window as it did before.
+        # annotated; `delegate cancel` then refuses this window as it did
+        # before, and a terminated launcher still takes setup down with it.
         return
 
 
