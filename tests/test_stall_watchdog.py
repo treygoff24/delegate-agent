@@ -819,6 +819,19 @@ class ProgressProbeTests(unittest.TestCase):
 
 
 class CompletionReportTests(unittest.TestCase):
+    def test_the_prompt_template_line_is_not_a_report(self):
+        for line in (
+            "Status: completed / blocked / failed",
+            "- **Status:** completed / blocked / failed",
+            "- Status: completed/blocked/failed",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(stall_watchdog.completion_report_status(f"intro\n{line}\n"))
+        self.assertEqual(
+            stall_watchdog.completion_report_status("- **Status:** blocked\n- need creds"),
+            "blocked",
+        )
+
     def test_trailing_report_status_is_found(self):
         text = "worked a while\n\n## Completion report\n- **Status:** completed\n- did it"
         self.assertEqual(stall_watchdog.completion_report_status(text), "completed")

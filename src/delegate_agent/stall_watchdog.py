@@ -866,8 +866,11 @@ def tool_events_from(events: Iterable[object]) -> tuple[ToolEvent, ...]:
     return tuple(picked)
 
 
+# The lookahead rejects the prompt's own template line, "Status: completed /
+# blocked / failed", which a child may echo back before doing any work: a real
+# report names one status, not the menu.
 _COMPLETION_REPORT_STATUS_RE = re.compile(
-    r"^[ \t>*_-]*\**status\**\s*:\s*\**\s*(completed|blocked|failed)\b",
+    r"^[ \t>*_-]*\**status\**\s*:\s*\**\s*(completed|blocked|failed)\b(?!\**\s*/)",
     re.IGNORECASE | re.MULTILINE,
 )
 # How far from the end of the output a completion report's status line may sit
