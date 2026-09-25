@@ -29,6 +29,7 @@ from delegate_agent.constants import (
     validate_pure_call,
 )
 from delegate_agent.errors import DelegateError, command_suggestions
+from delegate_agent.record_io import RUN_ID_RE
 from delegate_agent.request_models import (
     CONTINUITY_MODES,
     FollowupOptions,
@@ -810,9 +811,19 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
 
 
 def unknown_subcommand_message(subcommand: str) -> str:
+    one_run = (
+        "use: delegate snapshot HANDLE (status and metadata), "
+        "delegate run-output HANDLE (output), or delegate runs (the list)"
+    )
     suggestion_only = {
         "codex-auth": "use: delegate profiles",
         "kill": "use: delegate cancel ...",
+        "show": one_run,
+        "status": one_run,
+        "info": one_run,
+        "inspect": one_run,
+        "logs": "use: delegate run-output HANDLE (or --stderr for its stderr log)",
+        "output": "use: delegate run-output HANDLE",
     }
     if subcommand.startswith("droid-"):
         model = subcommand.removeprefix("droid-")
@@ -849,6 +860,10 @@ def unknown_action_error(parent: str, action: str) -> DelegateError:
         next_actions=[f"delegate help {parent} {match}" for match in matches]
         or [f"delegate help {parent}"],
     )
+
+
+# Options people reach for when they mean the positional mail body.
+_MAIL_BODY_OPTION_GUESSES = frozenset({"--body", "--message", "--msg", "--text", "-m", "-b"})
 
 
 def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -896,7 +911,17 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             values[token] = value
             i += 2
             continue
-        if token.startswith("-"):
+        if token.startswith("-") and token != "-":
+            option = token.split("=", 1)[0]
+            if action == "send" and option in _MAIL_BODY_OPTION_GUESSES:
+                raise DelegateError(
+                    "unknown_option",
+                    f"mail send has no {option} option: the body is the positional BODY, "
+                    "--file FILE, or '-' to read stdin. "
+                    "Example: delegate mail send --to coordinator --subject status 'The review is ready.'",
+                    command="mail send",
+                    help_topic="mail send",
+                )
             raise DelegateError("unknown_option", f"mail {action} does not support option: {token}")
         positional.append(token)
         i += 1
@@ -1545,6 +1570,23 @@ def parse_dry_run(
 _OPTION_SHAPED_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*$")
 
 
+def _followup_inherited_route_options() -> frozenset[str]:
+    """Options `resume` takes to change a route that `followup` inherits."""
+    resume = command_help.COMMAND_SPECS["resume"]
+    followup = command_help.COMMAND_SPECS["followup"]
+    own = {opt.flag for opt in followup.options}
+    return frozenset(opt.flag for opt in resume.options if opt.flag not in own)
+
+
+def _followup_inherited_route_message(option: str) -> str:
+    return (
+        f"followup has no {option} option: {option} belongs to resume. A followup inherits the "
+        "source run's route (engine, model, effort, progress, schema) from its manifest, so "
+        "route changes and creation-time options are both given to resume: "
+        f"delegate resume {option} ... HANDLE 'instructions'."
+    )
+
+
 def _absorbed_option_warning(option: str) -> str:
     return (
         f"option after the prompt is treated as prompt text: {option}. "
@@ -1851,6 +1893,15 @@ def parse_followup(
             continue
         if handle is None:
             if token.startswith("-"):
+                option = token.split("=", 1)[0]
+                if option in _followup_inherited_route_options():
+                    raise DelegateError(
+                        "unknown_option",
+                        _followup_inherited_route_message(option),
+                        command="followup",
+                        help_topic="followup",
+                        next_actions=["delegate help resume"],
+                    )
                 raise DelegateError("unknown_option", unknown_option_message("followup", token))
             handle = token
             i += 1
@@ -2400,6 +2451,7 @@ def parse_runs(
     running = False
     stale = False
     structural = False
+    summary = False
     harness: str | None = None
     group: str | None = None
     limit: int | None = None
@@ -2424,6 +2476,10 @@ def parse_runs(
             continue
         if token == "--structural":
             structural = True
+            i += 1
+            continue
+        if token == "--summary":
+            summary = True
             i += 1
             continue
         if token == "--harness":
@@ -2456,7 +2512,14 @@ def parse_runs(
                 invalid_error="invalid_limit",
             )
             continue
-        raise DelegateError("unknown_option", f"{command_label} does not support option: {token}")
+        raise _runs_unknown_token_error(command_label, token)
+    if summary and (structural or limit is not None):
+        conflict = "--structural" if structural else "--limit"
+        raise DelegateError(
+            "invalid_option_combination",
+            f"{command_label} --summary prints counts with no rows, so {conflict} does not apply. "
+            f"Use {command_label} {conflict} for a row listing.",
+        )
     selected_modes = [
         label
         for label, selected in (
@@ -2483,9 +2546,42 @@ def parse_runs(
             group=group,
             limit=limit,
             structural=structural,
+            summary=summary,
             json_mode=json_mode,
         ),
     )
+
+
+# Options people try when they want one run's detail from a listing command.
+_RUNS_HANDLE_OPTION_GUESSES = frozenset(
+    {"--id", "--run", "--run-id", "--alias", "--handle", "--name"}
+)
+
+
+def _looks_like_run_handle(token: str) -> bool:
+    """A run id or a ``<harness>-<n>`` alias, the two forms `snapshot` accepts."""
+    if RUN_ID_RE.match(token):
+        return True
+    harness, _, number = token.rpartition("-")
+    return harness in KNOWN_ENGINES and number.isdigit()
+
+
+def _runs_unknown_token_error(command_label: str, token: str) -> DelegateError:
+    """A listing takes filters only; point one-run requests at the per-run commands."""
+    option = token.split("=", 1)[0]
+    if option in _RUNS_HANDLE_OPTION_GUESSES or _looks_like_run_handle(token):
+        shown = option if token.startswith("-") else f"the argument {token!r}"
+        return DelegateError(
+            "unknown_option",
+            f"{command_label} lists runs and takes filters only, so it does not accept {shown}. "
+            "For one run use: delegate snapshot HANDLE (status and metadata), "
+            "delegate run-output HANDLE (its output), or delegate runs --harness HARNESS / "
+            "--group NAME to narrow the list.",
+            command=command_label,
+            help_topic=command_label,
+            next_actions=["delegate snapshot HANDLE", "delegate run-output HANDLE"],
+        )
+    return DelegateError("unknown_option", f"{command_label} does not support option: {token}")
 
 
 def parse_runs_prune(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -2675,6 +2771,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     timeout = wait_cancel_commands.WAIT_DEFAULT_TIMEOUT_SECONDS
     interval = wait_cancel_commands.WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report = False
+    structural = False
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -2715,6 +2812,10 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             completion_report = True
             i += 1
             continue
+        if token == "--structural":
+            structural = True
+            i += 1
+            continue
         if token.startswith("-"):
             raise DelegateError("unknown_option", unknown_option_message("wait", token))
         handles.append(token)
@@ -2733,6 +2834,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             timeout_seconds=timeout,
             interval_seconds=interval,
             completion_report=completion_report,
+            structural=structural,
             json_mode=json_mode,
         ),
     )

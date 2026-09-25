@@ -11,7 +11,7 @@ _delegate_profile_config="${HOME}/.delegate/config.${AI_PROFILE:-}.json"
 _delegate_subcommand() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json|--pass-through|--no-completion-report)
+      --json|--pass-through|--no-completion-report|--no-mail)
         shift
         ;;
       --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
@@ -32,6 +32,45 @@ _delegate_subcommand() {
         ;;
     esac
   done
+}
+
+# Print the global --auth-profile the Python parser would honor, or nothing.
+# Mirrors _normalize_global_options in delegate_agent/cli_parser.py: every token
+# before `--` is scanned (an --auth-profile after the subcommand is still
+# global), flag globals are skipped, value globals are skipped with their value,
+# and the last occurrence wins. `--auth-profile=X` is not special-cased because
+# the Python walk only matches the two-token spelling. The one approximation:
+# cli_parser keeps command-local twins of --group/--completion-report in the
+# command stream, which only changes the walk when one of those is immediately
+# followed by `--auth-profile` — an argv the command's own parser rejects.
+_delegate_flag_profile() {
+  _delegate_flag_value=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --)
+        break
+        ;;
+      --json|--pass-through|--no-completion-report|--no-mail)
+        shift
+        ;;
+      --auth-profile)
+        [ "$#" -ge 2 ] || break
+        [ "$2" = "--" ] && break
+        _delegate_flag_value="$2"
+        shift 2
+        ;;
+      --cwd|--isolation|--completion-report|--group|--notify)
+        [ "$#" -ge 2 ] || break
+        [ "$2" = "--" ] && break
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  [ -n "$_delegate_flag_value" ] && printf '%s\n' "$_delegate_flag_value"
+  return 0
 }
 
 _delegate_launch_help_request() {
@@ -106,7 +145,7 @@ _delegate_launch_help_request() {
 _delegate_is_readonly_request() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json|--pass-through|--no-completion-report)
+      --json|--pass-through|--no-completion-report|--no-mail)
         shift
         ;;
       --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
@@ -237,6 +276,36 @@ Fix: create the profile config from config.example.json, or run 'env -u AI_PROFI
 Temporary bypass: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, ambient Codex).
 EOF
 }
+
+# Precedence, one order for config file, keys, and profile (the table lives in
+# docs/configuration.md, "Profile and config precedence"):
+#   --auth-profile NAME  >  DELEGATE_CONFIG / AI_PROFILE environment  >  base config.
+# A flag naming a profile with an overlay selects that overlay, its keys, and
+# AI_PROFILE for the child. Every time the flag overrides or loses to the
+# environment, say so on stderr.
+_delegate_flag="$(_delegate_flag_profile "$@")"
+if [ -n "$_delegate_flag" ]; then
+  # Match profiles.resolve_active_profile, including Unicode whitespace.
+  _delegate_flag="$(python3 -c 'import sys; print(sys.argv[1].strip())' "$_delegate_flag")" || exit "$?"
+fi
+case "$_delegate_flag" in
+  work|personal)
+    _delegate_flag_config="${HOME}/.delegate/config.${_delegate_flag}.json"
+    if [ -r "$_delegate_flag_config" ]; then
+      if [ -n "$_delegate_incoming_config" ] && [ "$_delegate_incoming_config" != "$_delegate_flag_config" ]; then
+        echo "delegate: warning: --auth-profile ${_delegate_flag} selects ${_delegate_flag_config} over DELEGATE_CONFIG=${_delegate_incoming_config} (flag > env). Drop the flag to use that config." >&2
+      fi
+      if [ -n "${AI_PROFILE:-}" ] && [ "${AI_PROFILE}" != "$_delegate_flag" ]; then
+        echo "delegate: warning: --auth-profile ${_delegate_flag} overrides AI_PROFILE=${AI_PROFILE} for this command and its child (flag > env)." >&2
+      fi
+      export AI_PROFILE="$_delegate_flag"
+      _delegate_profile_config="$_delegate_flag_config"
+      _delegate_incoming_config=""
+    elif [ -n "$_delegate_incoming_config" ] || { [ -n "${AI_PROFILE:-}" ] && [ "${AI_PROFILE}" != "$_delegate_flag" ]; }; then
+      echo "delegate: warning: --auth-profile ${_delegate_flag} has no ${_delegate_flag_config}, so the flag selects only the profiles.definitions entry; config and keys stay with ${_delegate_incoming_config:-AI_PROFILE=${AI_PROFILE:-}}. Fix: 'env -u AI_PROFILE delegate config sync-profiles' creates the overlay." >&2
+    fi
+    ;;
+esac
 
 if [ -n "${AI_PROFILE:-}" ]; then
   case "${AI_PROFILE}" in

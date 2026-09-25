@@ -195,6 +195,69 @@ class FollowupRefusalsTests(unittest.TestCase):
         self.assertIn("th_valid12345", argv)
         self.assertNotIn("--ephemeral", argv)
 
+    def test_followup_of_an_already_continued_run_names_the_newer_session(self):
+        """dlg-qd1: following up the original silently dropped the resumed run's work."""
+        source_id, source = self.write_test_run(harness_session_id="th_source12345")
+        exit_code, _stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", source, "continue"]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("already continued", stderr)
+
+        resumed_id, resumed = self.write_test_run(harness_session_id="th_resumed1234")
+        path = run_registry.run_directory(self.registry_root, resumed_id) / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["resumedFrom"] = {"runId": source_id, "alias": source}
+        run_registry.write_json_atomic(path, manifest)
+
+        exit_code, stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", source, "continue"]
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("th_source12345", json.loads(stdout)["argv"])
+        self.assertIn(f"{source} was already continued by {resumed} (resume)", stderr)
+        self.assertIn(f"delegate followup {resumed}", stderr)
+
+        # A continuation with no recorded native session cannot be followed up.
+        snapshot_path = run_registry.run_directory(self.registry_root, resumed_id) / "snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot.pop("harnessSessionId")
+        run_registry.write_json_atomic(snapshot_path, snapshot)
+        _exit_code, _stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", source, "continue"]
+        )
+        self.assertIn(f"delegate resume {resumed} (it recorded no native session)", stderr)
+
+    def test_native_followup_warning_compares_session_identity(self):
+        source_id, source = self.write_test_run(harness_session_id="th_source12345")
+        followup_id, followup = self.write_test_run(harness_session_id="th_source12345")
+        run_path = run_registry.run_directory(self.registry_root, followup_id)
+        manifest_path = run_path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["followupOf"] = source_id
+        run_registry.write_json_atomic(manifest_path, manifest)
+
+        exit_code, stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", source, "continue"]
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("th_source12345", json.loads(stdout)["argv"])
+        self.assertNotIn("already continued", stderr)
+        self.assertNotIn("will not see", stderr)
+
+        # A newer state session takes precedence over the older snapshot.
+        state_path = run_path / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["harnessSessionId"] = "th_different12345"
+        run_registry.write_json_atomic(state_path, state)
+        exit_code, _stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", source, "continue"]
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn(f"{source} was already continued by {followup} (followup)", stderr)
+        self.assertIn(f"delegate followup {followup}", stderr)
+
     def test_followup_inherits_pinned_continuity_mode(self):
         _run_id, alias = self.write_test_run(
             harness="codex",

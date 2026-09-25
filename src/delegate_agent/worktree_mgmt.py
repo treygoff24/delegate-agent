@@ -1189,6 +1189,7 @@ def resolve_record(
     *,
     handle: str | None,
     latest_harness: str | None = None,
+    workspace: Path | None = None,
 ) -> PersistentWorktreeRecord:
     index = run_registry.load_index(registry_root)
     if latest_harness is not None:
@@ -1235,20 +1236,25 @@ def resolve_record(
             }
         )
         return latest_record
+    if _looks_like_path(handle):
+        return _record_for_path(registry_root, handle, workspace=workspace)
     resolved = run_registry.resolve_handle(index, handle)
     if resolved.run_id is None:
         suggestions = suggest_worktree_handles(registry_root, handle)
         next_actions = (
             [f"delegate worktree show {suggestions[0]}"]
             if suggestions
-            else ["delegate worktree list"]
+            else ["delegate worktree list", "delegate worktree reap --path PATH"]
         )
         raise WorktreeManagementError(
             _error_payload(
                 "unknown_handle",
                 (
                     f"Unknown run handle: {handle}. Suggestions: "
-                    f"{', '.join(suggestions) if suggestions else '(none)'}"
+                    f"{', '.join(suggestions) if suggestions else '(none)'}. "
+                    "Handles resolve only in this workspace's Registry; pass --cwd SOURCE_REPO "
+                    "for another one, or give the worktree's path instead. A worktree whose "
+                    "run record is gone is removed with: delegate worktree reap --path PATH."
                 ),
                 next_actions=next_actions,
                 suggestions=suggestions,
@@ -1265,15 +1271,101 @@ def resolve_record(
     )
     if record is None:
         alias = run_registry.alias_for_run(index, run_id)
+        owner = _worktree_owner_of(registry_root, index, run_id)
+        message = f"Run is not a persistent worktree run: {alias or run_id}."
+        next_actions = [f"delegate snapshot {alias or run_id}"]
+        if owner is not None:
+            owner_handle, relation = owner
+            message += (
+                f" It {relation} {owner_handle}, which owns the worktree; "
+                f"use: delegate worktree show {owner_handle}."
+            )
+            next_actions.insert(0, f"delegate worktree show {owner_handle}")
         raise WorktreeManagementError(
             _error_payload(
                 "not_worktree_run",
-                f"Run is not a persistent worktree run: {alias or run_id}",
+                message,
                 record={"alias": alias, "runId": run_id},
-                next_actions=[f"delegate snapshot {alias or run_id}"],
+                next_actions=next_actions,
             )
         )
     return record
+
+
+def _looks_like_path(handle: str) -> bool:
+    """Aliases and run ids never contain a separator or start with ~ or '.'."""
+    return os.sep in handle or "/" in handle or handle.startswith(("~", "."))
+
+
+def _record_for_path(
+    registry_root: Path,
+    handle: str,
+    *,
+    workspace: Path | None = None,
+) -> PersistentWorktreeRecord:
+    expanded = os.path.expanduser(handle)
+    if workspace is not None and not os.path.isabs(expanded):
+        # A relative path names a worktree inside the workspace this command was
+        # pointed at (`--cwd`), not inside the process's current directory.
+        expanded = str(workspace / expanded)
+    wanted = worktree_records._canonical_path(expanded)
+    for record in load_persistent_records(registry_root):
+        cwd = record.get("executionCwd")
+        if isinstance(cwd, str) and worktree_records._canonical_path(cwd) == wanted:
+            record.update(
+                {
+                    "requestedHandle": handle,
+                    "resolvedHandle": record.get("alias") or record.get("runId"),
+                    "resolutionKind": "path",
+                }
+            )
+            return record
+    raise WorktreeManagementError(
+        _error_payload(
+            "unknown_worktree_path",
+            (
+                f"No persistent worktree run in this Registry uses {wanted}. Handles and paths "
+                "resolve only in this workspace's Registry; pass --cwd SOURCE_REPO for another "
+                "one. A worktree whose run record is gone is removed with: "
+                f"delegate worktree reap --path {wanted}."
+            ),
+            next_actions=["delegate worktree list", f"delegate worktree reap --path {wanted}"],
+            list_command="delegate worktree list",
+        )
+    )
+
+
+def _worktree_owner_of(
+    registry_root: Path, index: JsonObject, run_id: str
+) -> tuple[str, str] | None:
+    """The run whose worktree this run used: attachment, resume, or followup parent."""
+    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    if not isinstance(manifest, dict):
+        return None
+    candidates: list[tuple[object, str]] = []
+    attachment = manifest.get("worktreeAttachment")
+    if isinstance(attachment, dict):
+        candidates.append(
+            (attachment.get("sourceAlias") or attachment.get("sourceRunId"), "ran attached to")
+        )
+    resumed = manifest.get("resumedFrom")
+    if isinstance(resumed, dict):
+        candidates.append((resumed.get("alias") or resumed.get("runId"), "was resumed from"))
+    followup_of = manifest.get("followupOf")
+    if isinstance(followup_of, str):
+        candidates.append(
+            (run_registry.alias_for_run(index, followup_of) or followup_of, "followed up")
+        )
+    for handle, relation in candidates:
+        if not isinstance(handle, str) or not handle:
+            continue
+        parent = run_registry.resolve_handle(index, handle)
+        if parent.run_id is None or parent.run_id == run_id:
+            continue
+        entry = index.get("runs", {}).get(parent.run_id)
+        if _record_for_run(registry_root, parent.run_id, entry if isinstance(entry, dict) else {}):
+            return handle, relation
+    return None
 
 
 def show_worktree(
@@ -1282,8 +1374,11 @@ def show_worktree(
     handle: str | None,
     latest_harness: str | None = None,
     include_detached: bool = False,
+    workspace: Path | None = None,
 ) -> JsonObject:
-    record = resolve_record(registry_root, handle=handle, latest_harness=latest_harness)
+    record = resolve_record(
+        registry_root, handle=handle, latest_harness=latest_harness, workspace=workspace
+    )
     entry = decorate_record(
         record,
         include_detached=include_detached,

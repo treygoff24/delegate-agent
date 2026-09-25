@@ -32,6 +32,29 @@ class MailContractTests(CommandTestBase):
     def _assert_sorted_json(test: unittest.TestCase, raw: str, payload: dict) -> None:
         test.assertEqual(raw, json.dumps(payload, sort_keys=True) + "\n")
 
+    def test_send_that_reaches_nobody_is_a_typed_failure_naming_each_skip(self):
+        """dlg-qd1: ok on a send means at least one inbox received it."""
+        _run_id, safe_alias = run_registry.register_run(
+            self.registry_root, harness="cursor", metadata={"mode": "safe"}
+        )
+        code, payload, _stderr = self._run_json("mail", "send", "--to", safe_alias, "hello?")
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "delegate.error.v1")
+        self.assertEqual(payload["error"], "mail_not_delivered")
+        (row,) = payload["diagnostics"]["recipients"]
+        self.assertEqual(row["outcome"], "skipped_ineligible")
+        self.assertIn(f"{safe_alias}: skipped_ineligible ({row['reason']})", payload["message"])
+        self.assertIn("running work-mode runs", payload["message"])
+        msg_id = payload["diagnostics"]["msgId"]
+        self.assertIn(f"delegate mail status {msg_id}", payload["nextActions"])
+        # The attempt stays on the sent ledger for `mail status`.
+        status = mail.status(
+            self.registry_root, mail.MailCommand(action="status", message_id=msg_id)
+        )
+        self.assertEqual(status["message"]["recipients"][0]["outcome"], "skipped_ineligible")
+
     def test_send_inbox_read_status_have_frozen_v1_contracts(self):
         with (
             mock.patch.object(mail, "_next_message_id", return_value=self._MESSAGE_ID),

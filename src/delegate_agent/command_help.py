@@ -126,7 +126,9 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
     OptionSpec(
         "--auth-profile",
         "NAME",
-        "Select an already-defined profiles.definitions environment for a supported command.",
+        "Select an already-defined profiles.definitions environment for a supported command. "
+        "Precedence: flag > environment (DELEGATE_CONFIG, AI_PROFILE, profiles.detectFrom) > "
+        "config default; delegate warns whenever one layer overrides another.",
     ),
     OptionSpec(
         "--group",
@@ -933,6 +935,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "are continuation instructions, including flag-like text.",
             "For native harness session re-entry with preserved conversation context, "
             "use `delegate followup`.",
+            "Resuming a --resumable source keeps that opt-in when the new engine is codex or "
+            "claude: the resumed Run records its own native session, so continue it with "
+            "`delegate followup <new alias>`. A followup of the original resumes the "
+            "original session and does not see the resumed Run's work.",
         ),
         see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
         unsupported_global_options=("--isolation",),
@@ -1028,7 +1034,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
         usage=(
             "delegate [--json] runs [--active|--running|--stale|--recent] "
-            "[--harness HARNESS] [--group NAME] [--limit N] [--structural]",
+            "[--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]",
         ),
         options=(
             OptionSpec(
@@ -1051,6 +1057,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
             ),
+            OptionSpec(
+                "--summary",
+                None,
+                "Print counts by status, harness, and group for every matching run, with no rows.",
+            ),
         ),
         examples=(
             "delegate runs --active",
@@ -1059,9 +1070,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --harness cursor --limit 5",
             "delegate runs --group wave4",
             "delegate --json runs --recent --structural",
+            "delegate runs --group wave4 --summary",
         ),
         notes=(
             "--active, --running, --stale, and --recent are mutually exclusive.",
+            "--summary counts every match (no --limit) and replaces the rows; "
+            "--structural keeps the rows but drops their content.",
+            "runs takes filters only; for one run use delegate snapshot HANDLE or "
+            "delegate run-output HANDLE.",
             "JSON includes total (pre-limit match count) and truncated "
             "(true when total exceeds the returned rows); text mode prints "
             "'showing N of M runs (raise --limit to see more)' when truncated.",
@@ -1173,6 +1189,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate mail send --to coordinator --subject status 'The review is ready.'",),
         notes=(
             "Only effectively running work-mode recipients receive a publication; other registered recipients are ledgered as skipped_ineligible.",
+            "A send succeeds only when at least one recipient received it; a send that reaches nobody fails with mail_not_delivered (exit 1), names each recipient's outcome and reason, and stays on the sent ledger for mail status.",
             "Rules are evaluated after group expansion and cannot be bypassed by group addressing.",
             "Bodies are capped at 256 KiB and direct blocked routes refuse with the do-not-route-around explanation.",
         ),
@@ -1293,7 +1310,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="ps",
         summary="List active tracked runs (alias for runs --active).",
         usage=(
-            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] [--structural]",
+            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] "
+            "[--structural] [--summary]",
         ),
         options=(
             OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
@@ -1303,6 +1321,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 "--structural",
                 None,
                 "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
+            ),
+            OptionSpec(
+                "--summary",
+                None,
+                "Print counts by status, harness, and group for active runs, with no rows.",
             ),
         ),
         examples=("delegate ps", "delegate ps --harness codex", "delegate --json ps --structural"),
@@ -1394,7 +1417,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Wait for tracked runs to finish and report terminal states.",
         usage=(
             "delegate [--json] wait <handle>... [--latest HARNESS] [--group NAME] "
-            "[--timeout SEC] [--interval SEC] [--completion-report]",
+            "[--timeout SEC] [--interval SEC] [--completion-report] [--structural]",
         ),
         arguments=(
             ArgSpec(
@@ -1413,12 +1436,19 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--group", "NAME", "Wait for all runs tagged with this group."),
             OptionSpec("--interval", "SEC", "Polling interval in seconds (default 3; min 1)."),
             OptionSpec("--completion-report", None, "Append each run's completion report."),
+            OptionSpec(
+                "--structural",
+                None,
+                "JSON only: reduce each run to identity, terminal status, and failure fields "
+                "(resolution warnings move to the payload's top level); text output ignores it.",
+            ),
         ),
         examples=(
             "delegate wait codex-1 cursor-2",
             "delegate wait --latest droid:glm --timeout 600 --interval 1",
             "delegate wait --group wave4",
             "delegate --json wait cursor --completion-report",
+            "delegate --json wait --group wave4 --structural",
         ),
         notes=(
             "Exit codes: 0 all succeeded; 1 any failed/cancelled; 124 timeout.",
@@ -1727,6 +1757,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "Selection is read-only: flag > profiles.detectFrom environment order > profiles.default.",
+            "A layer that overrides a different lower-layer choice warns (for example, an inherited "
+            "DELEGATE_PROFILE over the loaded config's profiles.default); the profile shim applies the "
+            "same order to config files, so --auth-profile NAME selects config.NAME.json over "
+            "DELEGATE_CONFIG when that overlay exists.",
             "Env values are key-aware redacted; inline profile env must not contain secrets.",
         ),
         see_also=("describe", "codex", "models"),
@@ -1971,7 +2005,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ArgSpec(
                 "<handle>",
                 False,
-                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
+                "Worktree run ID, numbered alias, bare harness latest-worktree selector, or the worktree path.",
             ),
         ),
         options=(
@@ -2004,7 +2038,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ArgSpec(
                 "<handle>",
                 True,
-                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
+                "Worktree run ID, numbered alias, bare harness latest-worktree selector, or the worktree path.",
             ),
         ),
         options=(

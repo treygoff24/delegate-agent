@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, redaction, run_registry, snapshot_view
+from delegate_agent import command_errors, redaction, run_registry, run_status, snapshot_view
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
@@ -110,6 +110,7 @@ class RunsCommand:
     older_than_days: int | None = None
     dry_run: bool = False
     structural: bool = False
+    summary: bool = False
     json_mode: bool = False
 
 
@@ -195,6 +196,10 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         status_filter = None
     sources: list[tuple[str | None, Path]] = [(None, registry_root)] if registry_root else []
     sources.extend(linked_registry_roots(workspace_path))
+    if command.summary:
+        return _emit_runs_summary(
+            command, sources, mode=mode, status_filter=status_filter, stdout=stdout
+        )
     summaries: list[JsonObject] = []
     seen_run_ids: set[str] = set()
     matched_ids: set[str] = set()
@@ -248,25 +253,7 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         ]
     else:
         summaries = [redaction.redact_value(summary) for summary in summaries]
-    warnings: list[str] = []
-    if not summaries:
-        # An empty table reads as "every lane died" unless the listing says why.
-        # The workspace-scope hint is not a property of --group/--harness: a bare
-        # status-filtered listing against an empty Registry needs it just as much.
-        status_filter_present = command.running or command.stale or command.active
-        if status_filter_present and scope_total > 0:
-            if command.running:
-                warnings.append("No running runs matched. Drop --running to include terminal runs.")
-            elif command.stale:
-                warnings.append("No stale runs matched. Drop --stale to include terminal runs.")
-            else:
-                warnings.append("No active runs matched. Drop --active to include terminal runs.")
-        elif scope_total == 0:
-            warnings.append(
-                "No matching runs in this workspace Registry. "
-                "The run Registry is workspace-scoped; use --cwd PATH to target another "
-                "workspace's Registry."
-            )
+    warnings = _runs_empty_warnings(command, total=total, scope_total=scope_total)
     if command.json_mode:
         delegate_rendering.print_json(
             delegate_rendering.runs_json_payload(
@@ -286,4 +273,85 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             total=total,
             warnings=warnings or None,
         )
+    return 0
+
+
+def _runs_empty_warnings(command: RunsCommand, *, total: int, scope_total: int) -> list[str]:
+    if total:
+        return []
+    # Status filters distinguish an empty result from an empty Registry scope.
+    if (command.running or command.stale or command.active) and scope_total > 0:
+        flag = "running" if command.running else "stale" if command.stale else "active"
+        return [f"No {flag} runs matched. Drop --{flag} to include terminal runs."]
+    if scope_total == 0:
+        return [
+            "No matching runs in this workspace Registry. "
+            "The run Registry is workspace-scoped; use --cwd PATH to target another "
+            "workspace's Registry."
+        ]
+    return []
+
+
+RUNS_SUMMARY_SCHEMA = "delegate.runs.summary.v1"
+
+
+def _emit_runs_summary(
+    command: RunsCommand,
+    sources: list[tuple[str | None, Path]],
+    *,
+    mode: str,
+    status_filter: str | None,
+    stdout: TextIO,
+) -> int:
+    """Counts for every matching run, with no rows (``runs --summary``)."""
+    counts: dict[str, dict[str, int]] = {"byStatus": {}, "byHarness": {}, "byGroup": {}}
+    matched_ids: set[str] = set()
+    scope_ids: set[str] = set()
+    for linked_workspace, root in sources:
+        try:
+            found, found_ids = run_status.count_run_summaries(
+                root,
+                run_registry.load_index(root),
+                active=command.active,
+                status_filter=status_filter,
+                harness=command.harness,
+                group=command.group,
+                seen_run_ids=matched_ids,
+            )
+        except (OSError, ValueError, DelegateError):
+            if linked_workspace is None:
+                raise
+            continue
+        matched_ids |= found_ids.matched
+        scope_ids |= found_ids.scoped
+        for bucket, values in found.items():
+            for label, count in values.items():
+                counts[bucket][label] = counts[bucket].get(label, 0) + count
+    ordered = {
+        bucket: dict(sorted(values.items(), key=lambda item: (-item[1], item[0])))
+        for bucket, values in counts.items()
+    }
+    total = len(matched_ids)
+    warnings = _runs_empty_warnings(command, total=total, scope_total=len(scope_ids))
+    if command.json_mode:
+        delegate_rendering.print_json(
+            {
+                "schema": RUNS_SUMMARY_SCHEMA,
+                "ok": True,
+                "mode": mode,
+                "total": total,
+                **ordered,
+                **({"warnings": warnings} if warnings else {}),
+            },
+            stdout,
+        )
+        return 0
+    for warning in warnings:
+        print(f"warning: {warning}", file=stdout)
+    print(f"mode: {mode}", file=stdout)
+    print(f"total: {total}", file=stdout)
+    for bucket, label in (("byStatus", "status"), ("byHarness", "harness"), ("byGroup", "group")):
+        values = ordered[bucket]
+        rendered = ", ".join(f"{name} {count}" for name, count in values.items()) or "-"
+        print(f"{label}: {rendered}", file=stdout)
     return 0

@@ -53,7 +53,31 @@ class WaitCommand:
     timeout_seconds: int = WAIT_DEFAULT_TIMEOUT_SECONDS
     interval_seconds: int = WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report: bool = False
+    structural: bool = False
     json_mode: bool = False
+
+
+# `wait --json --structural`: what a caller needs to decide its next step
+# (identity, terminal status, and why a run failed), without the full view.
+WAIT_STRUCTURAL_KEYS = (
+    "runId",
+    "alias",
+    "harness",
+    "group",
+    "mode",
+    "rawStatus",
+    "effectiveStatus",
+    "status",
+    "terminalState",
+    "resultQuality",
+    "failureKind",
+    "failureReason",
+    "staleReason",
+    "exitCode",
+    "startedAt",
+    "finishedAt",
+    "completionReportContent",
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +219,15 @@ def _run_succeeded(payload: JsonObject) -> bool:
     )
 
 
+# Handle-resolution warnings: advisory, never a change to which run resolves,
+# and the only per-run warnings the text table prints.
+WAIT_RESOLUTION_WARNING_PREFIXES = (
+    "bare_handle_stale:",
+    "bare_handle_ambiguous:",
+    "run_target_stale:",
+)
+
+
 def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
     for run in runs:
         delegate_rendering.render_resolution_text(run, stdout)
@@ -202,7 +235,7 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         if isinstance(warnings, list):
             for warning in warnings:
                 if isinstance(warning, str) and warning.startswith(
-                    ("bare_handle_stale:", "run_target_stale:")
+                    WAIT_RESOLUTION_WARNING_PREFIXES
                 ):
                     print(f"warning: {warning}", file=stdout)
     print("alias        status     quality          failure", file=stdout)
@@ -242,6 +275,28 @@ def _group_workspace_warnings(command: WaitCommand, runs: list[JsonObject]) -> l
         "execution workspace; commit between feature waves or use persistent worktree "
         f"isolation and integrate separately: {', '.join(shared)}"
     ]
+
+
+def _resolution_warnings(runs: list[JsonObject]) -> list[str]:
+    """The handle-resolution warnings a structural view would otherwise drop.
+
+    ``--structural`` keeps each run's identity and terminal fields only, so the
+    run's own ``warnings`` list goes away; a compact caller still has to learn
+    that its bare handle was stale or ambiguous, so these ride at the top level.
+    """
+    found: list[str] = []
+    for run in runs:
+        warnings = run.get("warnings")
+        if not isinstance(warnings, list):
+            continue
+        for warning in warnings:
+            if (
+                isinstance(warning, str)
+                and warning.startswith(WAIT_RESOLUTION_WARNING_PREFIXES)
+                and warning not in found
+            ):
+                found.append(warning)
+    return found
 
 
 def _append_reports(
@@ -309,8 +364,12 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
             "ok": not timed_out and all(_run_succeeded(run) for run in runs),
             "schema": WAIT_SCHEMA,
             "timedOut": timed_out,
-            "runs": runs,
+            "runs": [{key: run[key] for key in WAIT_STRUCTURAL_KEYS if key in run} for run in runs]
+            if command.structural
+            else runs,
         }
+        if command.structural:
+            warnings = [*warnings, *(w for w in _resolution_warnings(runs) if w not in warnings)]
         if warnings:
             payload["warnings"] = warnings
         delegate_rendering.print_json(payload, stdout)

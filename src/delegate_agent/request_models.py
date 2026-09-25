@@ -32,6 +32,9 @@ class GlobalOptions:
     auth_profile: str | None = None
     group: str | None = None
     notify: str | None = None
+    # Resume and followup reuse the source run's manifest profile without the
+    # caller typing --auth-profile; the resolution warning says so.
+    auth_profile_inherited: bool = False
 
 
 @dataclass

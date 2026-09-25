@@ -56,6 +56,7 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
+    CLAUDE_FAMILY_ALIASES,
     CLAUDE_UNPINNABLE_ALIASES,
     DRY_RUN_HINT,
     ENGINES_PROSE,
@@ -1698,6 +1699,7 @@ def _build_normalized_launch(
             forbid_commit=launch.forbid_commit,
             include_dirty=launch.include_dirty,
             auth_profile_override=global_options.auth_profile,
+            auth_profile_inherited=global_options.auth_profile_inherited,
             output_schema=spec.output_schema,
             output_schema_text=launch.output_schema_text,
             warnings=(*launch.warnings, *output_schema_warnings, *isolation_warnings),
@@ -1738,7 +1740,23 @@ def _build_normalized_launch(
     if launch.expect_files:
         request.expect_files = tuple(launch.expect_files)
     _apply_workspace_spec(request, launch)
+    if stderr is not None and not launch.dry_run:
+        _print_launch_notices(request, spec.forbid_commit_note, stderr)
     return request
+
+
+def _print_launch_notices(request: Request, forbid_commit_note: str | None, stderr: TextIO) -> None:
+    """Say at launch what the finalization report would otherwise say too late.
+
+    The implied worktree and a missing Codex overlay both change what the child
+    runs against; a caller reading stderr at launch can still stop the run.
+    """
+    if forbid_commit_note is not None:
+        print(f"delegate: {forbid_commit_note}", file=stderr)
+    if request.engine == "codex":
+        for warning in request.warnings:
+            if warning.startswith("codex.profile "):
+                print(f"delegate: warning: {warning}", file=stderr)
 
 
 def _workspace_spec_declared(launch: LaunchOptions) -> bool:
@@ -2438,6 +2456,7 @@ def build_request(
     forbid_commit: bool = False,
     include_dirty: bool = False,
     auth_profile_override: str | None = None,
+    auth_profile_inherited: bool = False,
     output_schema: str | None = None,
     output_schema_text: str | None = None,
     warnings: tuple[str, ...] = (),
@@ -2571,6 +2590,7 @@ def build_request(
         config,
         os.environ,
         cli_override=auth_profile_override,
+        cli_override_inherited=auth_profile_inherited,
         expand_env=expand_env,
     )
     discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
@@ -2784,6 +2804,30 @@ def _cursor_fixed_reasoning_effort_error(
     )
 
 
+def _resolve_cursor_family_name(
+    selector: str, discovery: JsonObject | None
+) -> tuple[str, str | None]:
+    """Resolve a bare family name (``grok``) to the newest catalog selector.
+
+    cursor-agent rejects a family word outright ("Cannot use this model: grok"),
+    so a pin that is not itself a catalog selector but names a family the
+    catalog carries resolves to that family's newest selector, with a warning
+    naming the choice. Configured ``cursor.models`` aliases were already
+    applied, so an operator's own alias always wins.
+    """
+    catalog, source = model_discovery.launch_catalog(discovery, "cursor")
+    if selector in catalog:
+        return selector, None
+    newest = model_discovery.newest_family_selector(selector, catalog)
+    if newest is None:
+        return selector, None
+    return newest, (
+        f"cursor model {selector!r} is a family name cursor-agent rejects; resolved it to "
+        f"{newest!r}, the newest {source} {selector} selector. Pin a concrete id to choose "
+        "another version, effort, or speed."
+    )
+
+
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     cursor = build.config["cursor"]
@@ -2794,6 +2838,11 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pinned = resolve_model_selection(cursor, build.model_alias)
 
     warnings: list[str] = []
+    base_model, family_warning = _resolve_cursor_family_name(
+        pinned or cursor["defaultModel"], build.discovery
+    )
+    if pinned is not None:
+        pinned = base_model
     capability: reasoning.ReasoningCapability | None = None
     mappings = cursor.get("reasoningEffortModels")
     discovered_routes: dict[str, str] = {}
@@ -2801,7 +2850,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         record = reasoning._discovery_harness_record(build.discovery, "cursor")
         raw_models = record.get("models") if record is not None else None
         discovered_models = raw_models if isinstance(raw_models, dict) else {}
-        base_model = pinned or cursor["defaultModel"]
         base_entry = discovered_models.get(base_model)
         route_family = base_entry.get("routeFamily") if isinstance(base_entry, dict) else None
         if isinstance(route_family, str) and route_family:
@@ -2841,7 +2889,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             effort_source=build.effort_source,
         )
         warnings.extend(reasoning_warnings)
-        model = capability.model if capability is not None else cursor["defaultModel"]
+        model = capability.model if capability is not None else base_model
         capability_model_source = "config"
     elif build.requested_effort is not None and discovered_routes:
         routed_model = discovered_routes.get(build.requested_effort)
@@ -2908,8 +2956,16 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model = base_model
         capability_model_source = "config"
     else:
-        model = pinned or cursor["defaultModel"]
+        model = base_model
         capability_model_source = "explicit" if pinned is not None else "config"
+
+    model, effective_family_warning = _resolve_cursor_family_name(model, build.discovery)
+    if effective_family_warning is not None:
+        warnings.append(effective_family_warning)
+    elif family_warning is not None and (
+        model == base_model or capability_model_source == "discovery"
+    ):
+        warnings.append(family_warning)
 
     argv = build_cursor_argv(
         cursor["argvPrefix"],
@@ -2922,9 +2978,8 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         resume_session_id=build.resume_session_id,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
-    warnings.extend(
-        model_discovery.configured_model_absence_warning("cursor", model, build.discovery)
-    )
+    # The shared launch-time catalog check covers this engine (see
+    # _launch_model_catalog_warnings); a second call here would warn twice.
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -3459,6 +3514,33 @@ def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mo
     )
 
 
+# Engines whose request builder already checks its resolved selector against
+# the catalog, with engine-specific wording.
+_ENGINES_WITH_OWN_CATALOG_CHECK = frozenset({"omp"})
+
+
+def _launch_model_catalog_warnings(
+    engine: str, model: str | None, discovery: JsonObject | None
+) -> tuple[str, ...]:
+    """Launch-time catalog check for every engine without its own.
+
+    Claude family and provider-chosen aliases are not concrete ids, so they are
+    never compared against a catalog of dated ids. A Claude ``[1m]`` context
+    window is Delegate-side decoration the catalog never stores, so membership
+    and nearest suggestions use the base selector the provider is asked for.
+    """
+    if engine in _ENGINES_WITH_OWN_CATALOG_CHECK or not model:
+        return ()
+    if engine == "claude":
+        base = claude_alias_base(model)
+        if base.lower() in (*CLAUDE_FAMILY_ALIASES, *CLAUDE_UNPINNABLE_ALIASES):
+            return ()
+        return model_discovery.launch_model_absence_warning(
+            engine, model, discovery, catalog_model=base
+        )
+    return model_discovery.launch_model_absence_warning(engine, model, discovery)
+
+
 def _omp_catalog_absence_warning(
     model: str | None, discovery: JsonObject | None
 ) -> tuple[str, ...]:
@@ -3814,6 +3896,7 @@ def _build_request_for_workspace(
         ),
     )
     _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
+    catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})
     if isolation_context is not None and isolation_context.isolation_lifecycle == "persistent":
@@ -3872,7 +3955,7 @@ def _build_request_for_workspace(
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,
-            warnings=(*warnings, *parts.warnings),
+            warnings=(*warnings, *parts.warnings, *catalog_warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
             agent_config_text=parts.agent_config_text,
@@ -3956,7 +4039,13 @@ def _apply_profile_resolution(
             )
     auth_profile = resolution.name
     fallback_profile = None
+    launch_warnings: tuple[str, ...] = ()
     if request.engine == "codex":
+        # doctor reports a missing codex.profile overlay; a launch repeats it
+        # because Codex accepts the missing file silently on every run.
+        overlay_warning = profiles.codex_profile_overlay_warning(config, resolution)
+        if overlay_warning is not None:
+            launch_warnings = (overlay_warning,)
         if resolution.name is not None and resolution.codex_home is None:
             raise DelegateError(
                 "profile_missing_codex_home",
@@ -3966,7 +4055,7 @@ def _apply_profile_resolution(
             fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
-        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),
+        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings, *launch_warnings)),
         env_overrides=env_overrides or None,
         auth_profile=auth_profile,
         fallback_auth_profile=fallback_profile,

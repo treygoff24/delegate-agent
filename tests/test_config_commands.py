@@ -206,6 +206,7 @@ class LauncherShimTests(unittest.TestCase):
             "  'argv': sys.argv[1:],\n"
             "  'delegateConfig': os.environ.get('DELEGATE_CONFIG'),\n"
             "  'aiProfile': os.environ.get('AI_PROFILE'),\n"
+            "  'profileKeyMarker': os.environ.get('PROFILE_KEY_MARKER'),\n"
             "}, sys.stdout)\n",
             encoding="utf-8",
         )
@@ -421,6 +422,168 @@ class LauncherShimTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(payload["delegateConfig"], str(explicit_config))
         self.assertEqual(result.stderr, "")
+
+    def test_auth_profile_flag_beats_ambient_delegate_config_and_warns(self):
+        # flag > env: an inherited DELEGATE_CONFIG/AI_PROFILE must not silently
+        # keep the other realm's config when --auth-profile names an overlay.
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            personal_config = root / "config.personal.json"
+            personal_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            argv = ["--json", "--auth-profile", "personal", "profiles"]
+            result = self.run_shim(argv, env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["argv"], argv)
+        self.assertEqual(payload["delegateConfig"], str(personal_config))
+        self.assertEqual(payload["aiProfile"], "personal")
+        self.assertIn(
+            f"--auth-profile personal selects {personal_config} over DELEGATE_CONFIG={work_config}",
+            result.stderr,
+        )
+        self.assertIn("overrides AI_PROFILE=work", result.stderr)
+
+    def test_auth_profile_whitespace_selects_matching_overlay_and_keys(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            for profile in ("work", "personal"):
+                (root / f"config.{profile}.json").write_text("{}\n", encoding="utf-8")
+                keys = Path(home) / ".ai-profiles" / profile / "keys.zsh"
+                keys.parent.mkdir(parents=True)
+                keys.write_text(f"export PROFILE_KEY_MARKER={profile}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(root / "config.work.json")
+            for value in (
+                " personal ",
+                "\tpersonal\r\n",
+                "\u2003personal\u00a0",
+                "\x1cpersonal\x1f",
+            ):
+                with self.subTest(value=value):
+                    argv = ["--auth-profile", value, "profiles"]
+                    result = self.run_shim(argv, env=env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["argv"], argv)
+                    self.assertEqual(payload["delegateConfig"], str(root / "config.personal.json"))
+                    self.assertEqual(payload["aiProfile"], "personal")
+                    self.assertEqual(payload["profileKeyMarker"], "personal")
+
+    def test_auth_profile_flag_matching_environment_is_silent(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            result = self.run_shim(["--auth-profile", "work", "profiles"], env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(work_config))
+        self.assertEqual(result.stderr, "")
+
+    def test_auth_profile_flag_without_overlay_warns_that_env_config_stays(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            result = self.run_shim(
+                ["--auth-profile", "personal", "profiles"],
+                env=self.shim_env(home, probe, "work"),
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(work_config))
+        self.assertEqual(payload["aiProfile"], "work")
+        self.assertIn("--auth-profile personal has no", result.stderr)
+        self.assertIn("config.personal.json", result.stderr)
+        self.assertIn("config sync-profiles", result.stderr)
+
+    def test_auth_profile_scan_matches_the_python_global_walk(self):
+        # The shim must resolve the same global --auth-profile the parser would:
+        # any position before `--`, the last occurrence, and neither the `=`
+        # spelling nor a post-terminator token that the Python walk never reads.
+        from delegate_agent import cli_parser as parser_api
+
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            personal_config = root / "config.personal.json"
+            personal_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            cases = (
+                # After the subcommand: still a global before `--`.
+                (["codex", "work", "--auth-profile", "personal", "x"], "personal"),
+                # After another global flag, including one the shim used to miss.
+                (["--no-mail", "--auth-profile", "personal", "codex", "work", "x"], "personal"),
+                (["models", "--auth-profile", "personal"], "personal"),
+                # Two flags: the last one wins.
+                (["--auth-profile", "work", "--auth-profile", "personal", "profiles"], "personal"),
+                # After `--` it is prompt data, not a flag.
+                (["profiles", "--", "--auth-profile", "personal"], "work"),
+                # `--auth-profile=NAME` is not a global in the Python walk.
+                (["models", "--auth-profile=personal"], "work"),
+            )
+            resolved = []
+            for argv, expected in cases:
+                with self.subTest(argv=argv):
+                    result = self.run_shim(argv, env=env)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(payload["argv"], argv)
+                    self.assertEqual(payload["aiProfile"], expected)
+                    if expected == "personal":
+                        self.assertEqual(payload["delegateConfig"], str(personal_config))
+                        self.assertIn("--auth-profile personal", result.stderr)
+                    else:
+                        self.assertEqual(payload["delegateConfig"], str(work_config))
+                        self.assertNotIn("--auth-profile", result.stderr)
+                    resolved.append((argv, expected))
+
+        # Parity against the walk the shim mirrors, not against a table.
+        for argv, expected in resolved:
+            with self.subTest(python=argv):
+                globals_argv, _command_argv = parser_api._normalize_global_options(argv)
+                profiles = [
+                    globals_argv[index + 1]
+                    for index, token in enumerate(globals_argv)
+                    if token == "--auth-profile"
+                ]
+                self.assertEqual(profiles[-1] if profiles else "work", expected)
+
+    def test_no_mail_global_does_not_hide_the_subcommand_from_the_readonly_scan(self):
+        # `--no-mail` is a global flag, so the read-only classifier must skip it
+        # instead of reading it as the command name and blocking the launch gate.
+        with tempfile.TemporaryDirectory() as home:
+            probe = self.write_probe(Path(home))
+            result = self.run_shim(
+                ["--no-mail", "models"],
+                env=self.shim_env(home, probe, "work"),
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["argv"], ["--no-mail", "models"])
+        self.assertIn("continuing because 'models' is read-only", result.stderr)
 
     def test_explicit_delegate_config_does_not_bypass_missing_profile_overlay(self):
         with tempfile.TemporaryDirectory() as home:
