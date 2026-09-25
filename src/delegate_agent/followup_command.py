@@ -25,7 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import run_registry, worktree_records
+from delegate_agent import run_registry, stall_watchdog, worktree_records
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -405,6 +405,8 @@ def build_followup_plan(
             and manifest_timeout > 0
         ):
             timeout = manifest_timeout
+    # Only an explicit --stall-minutes is recorded; absence re-resolves config.
+    stall_minutes = stall_watchdog.stall_minutes_value(manifest.get("stallMinutes"))
 
     group = global_options.group or _manifest_str(manifest, "group")
     auth_profile = global_options.auth_profile or _manifest_str(manifest, "authProfile")
@@ -452,6 +454,7 @@ def build_followup_plan(
         reasoning_effort=reasoning_effort,
         fast=fast,
         timeout=timeout,
+        stall_minutes=stall_minutes,
         dry_run=opts.dry_run,
         model=model,
         resumable=True,

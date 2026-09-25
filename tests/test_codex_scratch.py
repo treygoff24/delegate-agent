@@ -226,7 +226,15 @@ class CodexScratchTests(unittest.TestCase):
                 self.assertEqual(manifest["tempPath"], str(temp))
                 scratch = Path(manifest["scratchPath"])
                 self.assertNotEqual(temp, scratch)
-                self.assertLess(len(str(temp)), 60, str(temp))
+                # The socket budget is measured against the production root:
+                # the suite pins the root under its own temp directory, which
+                # is longer on macOS (`/private/tmp/dt-*/var-tmp`) than the
+                # `/private/var/tmp` a real launch uses.
+                pinned_root = Path(run_scratch.PERSISTENT_TEMP_ROOT).resolve()
+                relative = temp.relative_to(pinned_root)
+                self.assertEqual(relative.parent.name, f"dlg-{os.geteuid()}")
+                production = Path("/var/tmp").resolve() / relative
+                self.assertLess(len(str(production)), 60, str(production))
                 self.assertNotEqual(
                     scratch, run_registry.run_directory(registry, manifest["runId"]) / "scratch"
                 )

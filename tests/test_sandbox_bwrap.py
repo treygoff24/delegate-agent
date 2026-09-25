@@ -625,6 +625,74 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
         self.assertEqual(resolved.path, str(self.repo.resolve()))
 
 
+class UvProjectEnvironmentTests(unittest.TestCase):
+    """uv cannot create <workspace>/.venv under the read-only workspace bind."""
+
+    def workspace(self, *, pyproject: bool = True, venv: bool = False) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        if pyproject:
+            (root / "pyproject.toml").write_text("[project]\nname='p'\n", encoding="utf-8")
+        if venv:
+            (root / ".venv").mkdir()
+        return root
+
+    def test_a_uv_project_without_a_venv_gets_one_in_the_writable_dir(self):
+        root = self.workspace()
+        self.assertEqual(
+            sandbox_bwrap.uv_project_environment(str(root), {}, "/run/tmp"),
+            os.path.join("/run/tmp", sandbox_bwrap.UV_PROJECT_VENV_DIRNAME),
+        )
+
+    def test_existing_venv_explicit_setting_and_non_projects_are_left_alone(self):
+        self.assertIsNone(
+            sandbox_bwrap.uv_project_environment(str(self.workspace(venv=True)), {}, "/t")
+        )
+        self.assertIsNone(
+            sandbox_bwrap.uv_project_environment(
+                str(self.workspace()), {"UV_PROJECT_ENVIRONMENT": "/mine"}, "/t"
+            )
+        )
+        self.assertIsNone(
+            sandbox_bwrap.uv_project_environment(str(self.workspace(pyproject=False)), {}, "/t")
+        )
+        self.assertIsNone(sandbox_bwrap.uv_project_environment(str(self.workspace()), {}, None))
+
+    def launch_env(self, *, sandboxed: bool) -> tuple[dict[str, str], str]:
+        from delegate_agent import runner
+
+        root = self.workspace()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with (
+            mock.patch.object(sandbox_bwrap, "wrap_engine_argv", lambda **kw: kw["engine_argv"]),
+            mock.patch.object(sandbox_bwrap, "preflight_plan"),
+            mock.patch.object(runner.subprocess, "Popen") as popen,
+            mock.patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("UV_PROJECT_ENVIRONMENT", None)
+            runner._launch_tracked_process(
+                ["engine"],
+                str(root),
+                stdin_text=None,
+                temp_dir=Path(temp.name),
+                sandbox=sandbox_bwrap.SandboxPlan(None) if sandboxed else None,
+            )
+        return popen.call_args.kwargs["env"], temp.name
+
+    def test_the_sandboxed_launch_hands_the_child_the_writable_venv(self):
+        env, temp_dir = self.launch_env(sandboxed=True)
+        self.assertEqual(
+            env["UV_PROJECT_ENVIRONMENT"],
+            os.path.join(temp_dir, sandbox_bwrap.UV_PROJECT_VENV_DIRNAME),
+        )
+
+    def test_an_unsandboxed_launch_leaves_uv_alone(self):
+        env, _temp_dir = self.launch_env(sandboxed=False)
+        self.assertNotIn("UV_PROJECT_ENVIRONMENT", env)
+
+
 class RunnerTempBaseTests(unittest.TestCase):
     def test_prompt_temp_files_land_under_scratch_when_sandboxed(self):
         from delegate_agent import runner

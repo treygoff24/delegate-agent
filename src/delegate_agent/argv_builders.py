@@ -11,6 +11,8 @@ read-only flag sets. Preserve those branches exactly.
 
 from __future__ import annotations
 
+import re
+
 from delegate_agent import reasoning
 from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
@@ -106,6 +108,49 @@ PI_FAMILY_SAFE_LOCKDOWN = {
         "always-ask",
     ),
 }
+
+
+# A path token is a run of characters outside this class. Matching is split in
+# two linear passes (tokenize, then find the last image extension in each token)
+# because a single ``[^...]+\.(ext)`` pattern backtracks quadratically on one
+# long token with no whitespace: a 1 MB run of dots took minutes.
+OMP_IMAGE_TOKEN_SEPARATORS = re.compile(r"[\s'\"`()<>]+")
+OMP_IMAGE_EXTENSION_PATTERN = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic)(?![\w.])", re.IGNORECASE
+)
+OMP_IMAGE_PATH_WARNING = (
+    "omp attaches images only from @path command-line arguments, and Delegate sends the "
+    "omp prompt on stdin, so image paths in this prompt ({paths}) reach the child as plain "
+    "text, @ prefix or not. Ask the child to open them with its read tool, which loads images."
+)
+
+
+def omp_image_path_warnings(engine: str, prompt: str, *, limit: int = 3) -> tuple[str, ...]:
+    """Warn when an omp prompt names image files it will not auto-attach.
+
+    omp expands ``@file`` only in argv MESSAGES (omp 18.3.0 ``src/cli/args.ts``);
+    piped stdin text is never scanned. Delegate deliberately does not lift
+    prompt paths into argv attachments: that would let a safe-mode prompt pull
+    host files from outside the isolated workspace into the child's context.
+    """
+    if engine != "omp":
+        return ()
+    found: list[str] = []
+    for token in OMP_IMAGE_TOKEN_SEPARATORS.split(prompt):
+        # The path runs from the token start (an optional @ included) to its last
+        # image extension, and needs at least one character before that dot.
+        extensions = list(OMP_IMAGE_EXTENSION_PATTERN.finditer(token))
+        if not extensions or extensions[-1].start() < 1:
+            continue
+        path = token[: extensions[-1].end()]
+        if path not in found:
+            found.append(path)
+    if not found:
+        return ()
+    shown = ", ".join(found[:limit]) + (
+        f", ... (+{len(found) - limit} more)" if len(found) > limit else ""
+    )
+    return (OMP_IMAGE_PATH_WARNING.format(paths=shown),)
 
 
 def redacted_prompt_argv(argv: list[str]) -> list[str]:

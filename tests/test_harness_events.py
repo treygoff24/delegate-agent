@@ -1017,7 +1017,9 @@ class HarnessEventsTests(unittest.TestCase):
             [(event.kind, event.tool, event.target) for event in acc.events if event.tool],
             [
                 ("tool.started", "read", "notes.txt"),
-                ("tool.completed", "read", None),
+                # The real end event carries no args; the target is recovered
+                # from the start by toolCallId.
+                ("tool.completed", "read", "notes.txt"),
             ],
         )
         self.assertIsInstance(result_text, str)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,6 +114,59 @@ class OmpStdinTransportTests(CommandTestBase):
         # The read-only lockdown is untouched by the transport move.
         self.assertIn("--approval-mode", request.argv)
         self.assertIn("always-ask", request.argv)
+
+    def omp_request(self, engine: str, prompt: str):
+        return self.build_git_request(
+            engine,
+            "safe",
+            None,
+            "/repo",
+            prompt,
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+
+    def test_omp_image_paths_in_a_stdin_prompt_raise_the_attachment_warning(self):
+        request = self.omp_request("omp", "Compare @shots/before.png with /tmp/After.JPG please")
+        notes = [note for note in request.warnings if "attaches images only" in note]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("@shots/before.png", notes[0])
+        self.assertIn("/tmp/After.JPG", notes[0])
+        # Nothing is lifted into argv: attachments there would bypass isolation.
+        self.assertFalse(any(token.startswith("@") for token in request.argv))
+
+    def test_the_image_warning_ignores_emails_plain_prompts_and_other_engines(self):
+        self.assertEqual(
+            argv_api.omp_image_path_warnings("omp", "mail trey@example.com about logo work"),
+            (),
+        )
+        self.assertEqual(argv_api.omp_image_path_warnings("omp", "review task"), ())
+        # A bare extension is not a path; an @ alone before the dot still is one.
+        self.assertEqual(argv_api.omp_image_path_warnings("omp", "any .png file"), ())
+        self.assertEqual(len(argv_api.omp_image_path_warnings("omp", "see @.png")), 1)
+        self.assertEqual(argv_api.omp_image_path_warnings("pi", "look at a.png"), ())
+        request = self.omp_request("pi", "look at a.png")
+        self.assertFalse(any("attaches images only" in note for note in request.warnings))
+
+    def test_the_image_scan_stays_linear_on_a_megabyte_token_without_whitespace(self):
+        # One regex over [^\s...]+\.(ext) backtracked quadratically here: a 1 MB
+        # run of dots (or slashes) took minutes. Run it in a child so a regression
+        # fails on the timeout instead of hanging the suite.
+        script = (
+            "from delegate_agent import argv_builders as a\n"
+            "for body in ('.' * 1_000_000, '/' * 1_000_000, 'x/' * 500_000):\n"
+            "    assert a.omp_image_path_warnings('omp', body) == (), body[:4]\n"
+            "hit = a.omp_image_path_warnings('omp', 'see ' + '/' * 1_000_000 + 'a.png now')\n"
+            "assert len(hit) == 1 and 'a.png' in hit[0]\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_omp_accepts_a_flag_like_prompt_now_that_it_never_reaches_argv(self):
         # The planted negative for the deleted guard: these prompts used to raise

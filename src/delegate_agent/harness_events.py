@@ -187,6 +187,9 @@ MALFORMED_SAMPLE_CHARS = 200
 # rename visible. Bounded because the type string comes from the child.
 UNHANDLED_EVENT_TYPE_LIMIT = 32
 UNHANDLED_EVENT_TYPE_CHARS = 64
+# pi/omp remember each tool start's target until its end arrives; a run whose
+# ends never arrive must not grow that memory without bound.
+PI_PENDING_TOOL_LIMIT = 256
 
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
@@ -292,6 +295,19 @@ class EventBuffer:
     def __iter__(self) -> Iterator[NormalizedEvent]:
         yield from self._head
         yield from self._tail
+
+    def last(self, count: int) -> list[NormalizedEvent]:
+        """The most recent ``count`` retained events, oldest first.
+
+        Bounded by what is retained: past the head the buffer keeps only a
+        tail, so a request larger than the retained total returns what is left.
+        """
+        if count <= 0:
+            return []
+        if len(self._tail) >= count:
+            return list(self._tail)[-count:]
+        needed = count - len(self._tail)
+        return self._head[-needed:] + list(self._tail) if self._tail else self._head[-count:]
 
     def __len__(self) -> int:
         return len(self._head) + len(self._tail)
@@ -1542,8 +1558,17 @@ class StreamAccumulator:
         # continues as ordinary text with exit 0. Do not infer denial here.
         tool = _string_field(part, "tool") or "tool"
         state = part.get("state")
-        status = _completed_tool_status(state.get("status") if isinstance(state, dict) else None)
+        raw_status = state.get("status") if isinstance(state, dict) else None
         target = _opencode_tool_target(part)
+        if isinstance(raw_status, str) and raw_status.strip().lower() in _OPENCODE_RUNNING_STATUSES:
+            # A tool that is still running has not completed: recording it as a
+            # completion would end a failure streak it never broke.
+            self.events.append(
+                NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target)
+            )
+            self.current = _tool_current(tool, target)
+            return
+        status = _completed_tool_status(raw_status)
         self.events.append(
             NormalizedEvent(
                 kind="tool.completed",
@@ -1749,9 +1774,22 @@ class StreamAccumulator:
         tool = _string_field(payload, "toolName") or "tool"
         args = payload.get("args")
         target = _tool_use_target({"input": args}) if isinstance(args, dict) else None
+        tool_id = _string_field(payload, "toolCallId")
         status = None
         if completed:
             status = "error" if payload.get("isError") is True else "success"
+            # A real `tool_execution_end` carries the toolCallId but no `args`,
+            # so the target lives only on the start event. Without it, every
+            # failure has no target and can never count as a repeat.
+            started = self._pending_tool_uses.pop(tool_id, None) if tool_id else None
+            if target is None and started is not None:
+                target = started[1]
+        elif tool_id:
+            # Starts whose end never arrives would otherwise pile up for the
+            # rest of the run; the oldest are the least likely to complete.
+            while len(self._pending_tool_uses) >= PI_PENDING_TOOL_LIMIT:
+                del self._pending_tool_uses[next(iter(self._pending_tool_uses))]
+            self._pending_tool_uses[tool_id] = (tool, target)
         self.events.append(
             NormalizedEvent(
                 kind="tool.completed" if completed else "tool.started",
@@ -2079,6 +2117,11 @@ def _cursor_tool_status(body: JsonObject) -> str | None:
     if result.keys() & {"error", "failure", "failed"}:
         return "error"
     return None
+
+
+# OpenCode tool states that mean the call has not finished yet (the checked-in
+# fixtures show only completed and error, but the state machine has more).
+_OPENCODE_RUNNING_STATUSES = frozenset({"pending", "running", "in_progress", "started"})
 
 
 def _completed_tool_status(status: JsonValue) -> str | None:
