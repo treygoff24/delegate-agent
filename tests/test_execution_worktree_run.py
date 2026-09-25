@@ -16,6 +16,7 @@ from delegate_agent import prompt_transport as transport_api
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
 from delegate_agent import run_registry as registry_api
+from delegate_agent import run_status
 from delegate_agent import runner as runner_api
 from delegate_agent import worktree_execution as worktree_execution_api
 from delegate_agent import worktree_mgmt as worktree_api
@@ -1399,7 +1400,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         run_dirs = list((Path(repo.name) / ".delegate" / "runs").glob("del_*"))
         self.assertEqual(len(run_dirs), 1)
         state = json.loads((run_dirs[0] / "state.json").read_text())
-        return code, payload, state
+        return code, payload, state, repo.name
 
     def test_quiet_work_run_with_commits_succeeds_with_warning(self):
         # dlg-5kl ruling: a work run that landed changes but ended without
@@ -1409,7 +1410,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             tempfile.TemporaryDirectory() as fake_home,
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
-            code, payload, state = self._run_quiet_persistent_work(commit=True)
+            code, payload, state, _repo = self._run_quiet_persistent_work(commit=True)
         self.assertEqual(code, 0)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "succeeded")
@@ -1422,12 +1423,41 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         self.assertTrue(state["ok"])
         self.assertEqual(state["status"], "succeeded")
 
+    def test_quiet_work_success_summary_keeps_the_null_failure_kind(self):
+        # The summary is a second derivation of the one outcome: without the
+        # key, a consumer feeding it to run_succeeded(..., failure_kind=...)
+        # loses the "outcome recorded" marker, falls back to the result-quality
+        # veto, and calls this success a failure -- the opposite of the envelope.
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            code, payload, state, repo = self._run_quiet_persistent_work(commit=True)
+            root = Path(repo) / ".delegate"
+            index = registry_api.load_index(root)
+            summary = run_status.build_run_summary(
+                root, payload["runId"], index["runs"][payload["runId"]]
+            )
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(state["resultQuality"], "empty")
+        self.assertIn("failureKind", summary)
+        self.assertIsNone(summary["failureKind"])
+        self.assertEqual(
+            run_status.run_succeeded(
+                summary["status"],
+                summary.get("resultQuality"),
+                failure_kind=run_status.record_failure_kind(summary),
+            ),
+            payload["ok"],
+        )
+
     def test_quiet_work_run_without_changes_fails_as_no_assistant_text(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
-            code, payload, state = self._run_quiet_persistent_work(commit=False)
+            code, payload, state, _repo = self._run_quiet_persistent_work(commit=False)
         self.assertEqual(code, 1)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["failureKind"], "no_assistant_text")

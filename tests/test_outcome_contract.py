@@ -157,6 +157,22 @@ class TrackedOutcomeTests(unittest.TestCase):
         )
         self.assertEqual(state["failureKind"], "deliverable_missing")
 
+    def test_quiet_run_with_a_missing_expect_file_reports_deliverable_missing(self) -> None:
+        # The run is empty AND its deliverable is missing. The caller asked for
+        # the deliverable verdict, so the envelope must name deliverable_missing
+        # rather than the no-output label (both fail the run).
+        turn = shlex.quote(json.dumps({"type": "turn.completed"}))
+        body = f"printf '%s\\n' {turn}\nexit 0\n"
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, state = self._run(workspace, body, expect_files=("out/report.md",))
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["failureKind"], "deliverable_missing")
+        self.assertEqual(payload["error"], "deliverable_missing")
+        self.assertEqual(payload["expectedFiles"]["missing"], ["out/report.md"])
+        self.assertEqual(state["failureKind"], "deliverable_missing")
+
     def test_expect_file_present_keeps_the_run_succeeded(self) -> None:
         body = (
             "mkdir -p out && printf 'done\\n' > out/report.md\n"
@@ -296,6 +312,43 @@ class CallOutcomeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(payload["failureKind"], "no_assistant_text")
 
+    def test_real_empty_retry_classifies_from_the_retry_not_the_first_attempt(self) -> None:
+        # The first invocation exits 0, prints nothing, and reports a quota
+        # refusal on stderr, so execute_call retries it; the retry exits 0 with
+        # a clean stderr and no output either. The retried call must report
+        # no_assistant_text: provider_quota would make a workflow skip the
+        # structured correction retry and send an operator to credential
+        # rotation. This drives the retry inside execute_call, not the merge.
+        with tempfile.TemporaryDirectory() as workspace:
+            counter = Path(workspace) / "attempt-count"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                f"n=$(( $(cat {shlex.quote(str(counter))} 2>/dev/null || echo 0) + 1 ))\n"
+                f"echo $n > {shlex.quote(str(counter))}\n"
+                'if [ "$n" = 1 ]; then\n'
+                "  printf 'ERROR: 429 Too Many Requests: You have hit your usage limit.\\n' >&2\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            result = runner.execute_call(
+                [str(script), "task"], workspace, harness="codex", read_only=True
+            )
+            attempts = counter.read_text(encoding="utf-8").strip()
+        self.assertEqual(attempts, "2")
+        self.assertTrue(result.empty_retry_attempted)
+        self.assertFalse(result.empty_retry_resolved)
+        self.assertEqual(result.final_attempt_stderr_tail, "")
+        self.assertIn("usage limit", result.stderr_tail)
+        code, payload = self._execute(result)
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["failureKind"], "no_assistant_text")
+        self.assertEqual(payload["error"], "empty_result")
+        self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
+
 
 class ComputeOutcomeTests(unittest.TestCase):
     def test_precedence_and_failure_kinds(self) -> None:
@@ -316,6 +369,23 @@ class ComputeOutcomeTests(unittest.TestCase):
             ),
             (dict(child_exit_code=0, result_quality="no_assistant_text"), "no_assistant_text", 1),
             (dict(child_exit_code=0, missing_deliverables=("a.md",)), "deliverable_missing", 1),
+            # The deliverable verdict outranks the no-output one: the caller
+            # asked whether the file exists.
+            (
+                dict(child_exit_code=0, result_quality="empty", missing_deliverables=("a.md",)),
+                "deliverable_missing",
+                1,
+            ),
+            (
+                dict(
+                    child_exit_code=0,
+                    result_quality="empty",
+                    work_changed=True,
+                    missing_deliverables=("a.md",),
+                ),
+                "deliverable_missing",
+                1,
+            ),
             (dict(child_exit_code=0, result_quality="ok"), None, 0),
         ]
         for kwargs, kind, exit_code in cases:
@@ -346,6 +416,32 @@ class StructuredOutputOutcomeTests(unittest.TestCase):
 
     def test_stray_control_characters_outside_strings_are_stripped(self) -> None:
         self.assertEqual(workflow_schema.parse_json_tolerant('{"a":\x01 1}'), {"a": 1})
+
+    def test_a_stray_byte_inside_a_prose_wrapped_fenced_answer_is_not_a_decoy(self) -> None:
+        # The scanned document fails to decode only because of the stray byte, so
+        # the scanner used to walk on and answer with the quoted key it found
+        # inside the damaged block.
+        text = 'Here you go:\n```json\n{"a":\x01 1}\n```\n'
+        self.assertEqual(workflow_schema.parse_json_tolerant(text), {"a": 1})
+        self.assertEqual(
+            workflow_schema.parse_json_tolerant(
+                text,
+                {
+                    "type": "object",
+                    "required": ["a"],
+                    "properties": {"a": {"type": "integer"}},
+                    "additionalProperties": False,
+                },
+            ),
+            {"a": 1},
+        )
+
+    def test_a_stray_byte_in_a_later_candidate_keeps_the_damaged_document(self) -> None:
+        # The damaged document follows a valid candidate, so stripping only the
+        # whole input cannot recover it: the quoted fragment inside the block
+        # stays the last decodable value the scan finds.
+        text = 'notes [1, 2] then the answer {"a":\x01 1} end'
+        self.assertEqual(workflow_schema.parse_json_tolerant(text), {"a": 1})
 
 
 class WorkflowAgentFailureTests(unittest.TestCase):
@@ -484,12 +580,14 @@ _PI_TEXT = {
 class FinalAttemptClassificationTests(unittest.TestCase):
     """Provider signals classify a run only from its final attempt (dlg-5kl)."""
 
-    def _run_pi(self, workspace: str, attempts: list[str]) -> tuple[int, dict[str, object]]:
+    def _run_attempts(
+        self, workspace: str, attempts: list[str], *, harness: str = "pi"
+    ) -> tuple[int, dict[str, object]]:
         # Each invocation runs the next attempt body; the counter file keeps
         # the fake's state across the runner's retry.
         counter = Path(workspace) / "attempt-count"
         cases = "".join(f"  {index}) {body.strip()} ;;\n" for index, body in enumerate(attempts, 1))
-        script = Path(workspace) / "pi"
+        script = Path(workspace) / harness
         script.write_text(
             "#!/usr/bin/env bash\n"
             f"n=$(( $(cat {shlex.quote(str(counter))} 2>/dev/null || echo 0) + 1 ))\n"
@@ -499,13 +597,13 @@ class FinalAttemptClassificationTests(unittest.TestCase):
         )
         script.chmod(0o755)
         root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
-        run_id, alias = run_registry.register_run(root, harness="pi")
+        run_id, alias = run_registry.register_run(root, harness=harness)
         ctx = runner.RunContext(
             registry_root=root,
             run_id=run_id,
             alias=alias,
-            harness="pi",
-            engine="pi",
+            harness=harness,
+            engine=harness,
             mode="safe",
             model=None,
             source_cwd=workspace,
@@ -531,7 +629,7 @@ class FinalAttemptClassificationTests(unittest.TestCase):
         # pi/omp report a session-layer quota refusal as an error notice; with
         # no later successful turn_end it is the provider's last word.
         with tempfile.TemporaryDirectory() as workspace:
-            code, payload = self._run_pi(
+            code, payload = self._run_attempts(
                 workspace, [_pi_line(_PI_QUOTA_NOTICE) + _pi_line(_PI_TEXT)]
             )
         self.assertEqual(code, 1)
@@ -540,7 +638,7 @@ class FinalAttemptClassificationTests(unittest.TestCase):
 
     def test_final_attempt_unrecovered_quota_survives_the_retry_merge(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            code, payload = self._run_pi(
+            code, payload = self._run_attempts(
                 workspace,
                 [":", _pi_line(_PI_QUOTA_NOTICE) + _pi_line(_PI_TEXT)],
             )
@@ -550,7 +648,7 @@ class FinalAttemptClassificationTests(unittest.TestCase):
 
     def test_earlier_attempt_quota_does_not_label_a_clean_empty_final_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            code, payload = self._run_pi(
+            code, payload = self._run_attempts(
                 workspace,
                 # An attempt with no stdout at all is what the empty-result retry
                 # retries, so the first attempt's quota refusal is on stderr.
@@ -627,3 +725,43 @@ class FinalAttemptClassificationTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(payload["failureKind"], "no_assistant_text")
         self.assertNotEqual(payload.get("failureReason"), "usage_limit")
+
+    def test_earlier_attempt_provider_terminal_does_not_label_a_successful_retry(self) -> None:
+        # Attempt 1 records a provider terminal (a refusal-coded error) and fails
+        # with a lost Codex thread, so Delegate retries it; the retry answers with
+        # text and exits 0. The merged run succeeded: the terminal state belongs to
+        # the attempt that recorded it, and calling this run failed or cancelled
+        # would make an orchestrator re-dispatch work that landed.
+        refusal = shlex.quote(
+            json.dumps(
+                {"type": "error", "code": "provider_refusal", "message": "Provider refusal: policy"}
+            )
+        )
+        lost = shlex.quote(
+            json.dumps({"type": "error", "message": "no thread with id: synthetic-thread"})
+        )
+        text = shlex.quote(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": REPORT},
+                }
+            )
+        )
+        turn = shlex.quote(json.dumps({"type": "turn.completed"}))
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload = self._run_attempts(
+                workspace,
+                [
+                    f"printf '%s\\n' {refusal}\nprintf '%s\\n' {lost}\nexit 1",
+                    f"printf '%s\\n' {text}\nprintf '%s\\n' {turn}",
+                ],
+                harness="codex",
+            )
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIsNone(payload["failureKind"])
+        self.assertEqual(payload["assistantText"], REPORT)
+        self.assertNotEqual(payload.get("failureReason"), "provider_refusal")
+        self.assertTrue(payload["codexThreadFallback"]["resolved"])
