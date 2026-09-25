@@ -273,6 +273,7 @@ _WORKSPACE_SPEC_OPTIONS = (
         "and launches no child; output goes to the run's setup.log.",
     ),
 )
+WORKSPACE_SPEC_FLAGS = tuple(option.flag for option in _WORKSPACE_SPEC_OPTIONS)
 _EXPECT_FILE_OPTION = OptionSpec(
     "--expect-file",
     "PATH",
@@ -2333,8 +2334,8 @@ for _engine in (*KNOWN_ENGINES, "dry-run"):
             _MAIL_PUSH_OPTION,
             _EXPECT_FILE_OPTION,
             _CONTINUITY_MODE_OPTION,
-            *PERSONA_OPTIONS,
             *_WORKSPACE_SPEC_OPTIONS,
+            *PERSONA_OPTIONS,
         ),
     )
 
@@ -2348,10 +2349,7 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--expect-file",
         "--mail-push",
         "--resumable",
-        "--base",
-        "--env",
-        "--env-file",
-        "--setup",
+        *WORKSPACE_SPEC_FLAGS,
     }
 )
 _CALL_UNSUPPORTED_GLOBAL_OPTIONS = (
