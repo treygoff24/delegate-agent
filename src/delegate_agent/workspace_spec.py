@@ -39,6 +39,9 @@ WORKSPACE_ENV_SCHEMA = "delegate.workspace-env.v1"
 SETUP_LOG_FILE = "setup.log"
 SETUP_FAILED = "workspace_setup_failed"
 SETUP_TAIL_CHARS = 2000
+# Also mask fragments of values wrapped across lines by their writer.
+SETUP_FRAGMENT_GRAM = 8
+ENV_VALUE_MASK = "***"
 # How long the setup process group gets to exit on SIGTERM before escalation to
 # SIGKILL, and how often the group is probed in between.
 SETUP_KILL_GRACE_SECONDS = 5.0
@@ -205,8 +208,45 @@ def mask_recorded_env_values(text: str, env: Mapping[str, str] | None) -> str:
         reverse=True,
     )
     for value in values:
-        text = text.replace(value, "***")
+        text = text.replace(value, ENV_VALUE_MASK)
     return text
+
+
+def mask_recorded_env_fragments(text: str, env: Mapping[str, str] | None) -> str:
+    """Mask merged spans covered by recorded values' 8-character substrings.
+
+    Applied after whole-value masking and tail cutting. Values of four to
+    seven characters receive whole-value masking only; shorter values are exempt.
+    """
+    if not text or not env:
+        return text
+    grams: set[str] = set()
+    for value in env.values():
+        if isinstance(value, str) and len(value) >= SETUP_FRAGMENT_GRAM:
+            grams.update(
+                value[start : start + SETUP_FRAGMENT_GRAM]
+                for start in range(len(value) - SETUP_FRAGMENT_GRAM + 1)
+            )
+    if not grams:
+        return text
+    covered = [False] * len(text)
+    for start in range(len(text) - SETUP_FRAGMENT_GRAM + 1):
+        if text[start : start + SETUP_FRAGMENT_GRAM] in grams:
+            for position in range(start, start + SETUP_FRAGMENT_GRAM):
+                covered[position] = True
+    masked: list[str] = []
+    position = 0
+    while position < len(text):
+        if not covered[position]:
+            masked.append(text[position])
+            position += 1
+            continue
+        end = position
+        while end < len(text) and covered[end]:
+            end += 1
+        masked.append(ENV_VALUE_MASK)
+        position = end
+    return "".join(masked)
 
 
 def validate_setup(value: object, *, origin: str) -> str:
@@ -412,10 +452,11 @@ def _deferred_sigterm(pending: _PendingInterrupt) -> Iterator[None]:
     """Record SIGTERM instead of raising it, for a window that cannot take it.
 
     :func:`terminate_as_exception` raises from whatever bytecode the signal
-    lands on, which is wrong in two windows: the fork inside ``Popen``, before
+    lands on, which is wrong during the fork inside ``Popen``, before
     ``process`` is bound, where nothing could take the new group down; and the
     ``setupPgid`` clear, where cleanup would swallow the exception and the
-    launcher would go on to launch the child. Here the handler only records the
+    launcher would go on to launch the child. Final kill escalation also needs
+    protection so repeated TERM cannot interrupt its grace. The handler records the
     signum, and :meth:`_PendingInterrupt.replay` raises it as the window ends --
     with the process in hand -- so the interruption still takes setup down.
 
@@ -470,8 +511,8 @@ def run_setup(
     child launched" to the unlaunched-seal logic.
 
     ``mask_values`` is the run's recorded ``--env`` set: setup output shows
-    expanded values, so ``output_tail`` is masked before it is cut to
-    :data:`SETUP_TAIL_CHARS` and never carries one.
+    expanded values, so ``output_tail`` masks complete values and fragments
+    of at least eight characters.
     """
     fd = run_registry.open_private_file(log_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
     started = time.monotonic()
@@ -522,7 +563,9 @@ def run_setup(
                         publish_pgid(None)
             except SetupInterrupted:
                 if process is not None:
-                    _kill_group(process)
+                    # Another TERM must not interrupt the final SIGKILL escalation.
+                    with _deferred_sigterm(pending):
+                        _kill_group(process)
                 raise
             except Exception:
                 # Annotating the record must not fail the setup itself.
@@ -532,17 +575,11 @@ def run_setup(
         data = log_path.read_bytes()
     except OSError:
         data = b""
-    # Mask before cutting. A value that straddles the tail boundary would
-    # otherwise reach `state.json` and the error envelope as its suffix: the
-    # suffix does not match the whole value, so masking the cut tail cannot
-    # catch it. Read back far enough for any crossing value to be complete, and
-    # 4 bytes per character covers the worst-case UTF-8 encoding of the window.
-    overlap = max(
-        (len(value) for value in (mask_values or {}).values() if isinstance(value, str)),
-        default=0,
-    )
-    text = data[-(SETUP_TAIL_CHARS + overlap) * 4 :].decode("utf-8", errors="replace")
-    tail = mask_recorded_env_values(text, mask_values)[-SETUP_TAIL_CHARS:]
+    # Mask the whole log before cutting: a bounded read can start inside a
+    # value and expose its suffix when replacements shrink the window. Then
+    # mask fragments from values whose writer wrapped them across lines.
+    text = mask_recorded_env_values(data.decode("utf-8", errors="replace"), mask_values)
+    tail = mask_recorded_env_fragments(text[-SETUP_TAIL_CHARS:], mask_values)
     return SetupResult(
         exit_code=exit_code,
         duration_ms=duration_ms,
