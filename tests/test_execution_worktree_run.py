@@ -402,7 +402,11 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 isolation_context=request.isolation_context,
             )
             with mock.patch.dict(
-                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+                os.environ,
+                {
+                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_ASSISTANT_RESULT": "1",
+                },
             ):
                 code, _ = self.delegate.execute_request(
                     request,
@@ -510,7 +514,13 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 "import json, os\n"
                 "with open(os.environ['FAKE_ENV_LOG'], 'w', encoding='utf-8') as handle:\n"
                 "    json.dump({key: value for key, value in os.environ.items() "
-                "if key in ('DELEGATE_RUN_ID', 'DELEGATE_MAIL_SELF')}, handle)\n",
+                "if key in ('DELEGATE_RUN_ID', 'DELEGATE_MAIL_SELF')}, handle)\n"
+                # A cursor `result` event with genuine assistant text, so the
+                # run's resultQuality is `ok` rather than the empty-output
+                # failure the outcome contract now gives an exit-0 child with
+                # no assistant text.
+                'print(json.dumps({"type": "result", "result": '
+                '"Status: completed\\n- identity fake"}))\n',
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -560,7 +570,13 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             fake = Path(fake_home) / "fake-agent"
             fake.write_text(
                 "#!/usr/bin/env bash\n"
-                f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{observed_path}"\n',
+                f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{observed_path}"\n'
+                # A cursor `result` event with genuine assistant text, so the
+                # run's resultQuality is `ok` rather than the empty-output
+                # failure the outcome contract now gives an exit-0 child with
+                # no assistant text.
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- initiator fake\"}\\n'\n",
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -891,12 +907,35 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["/fallback"])
 
     def _make_logging_fake_bin(self, name, log_file):
-        """Make a fake binary that logs its argv to a file."""
+        """Make a fake binary that logs its argv to a file.
+
+        Also emits a stream-json completion with genuine assistant text in
+        the format the child's engine actually speaks (harness_events.py),
+        so an exit-0 run's resultQuality is `ok` rather than the empty-output
+        failure the outcome contract now gives a child that produced none.
+        """
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         bin_dir = Path(temp.name)
         path = bin_dir / name
-        path.write_text(f'#!/usr/bin/env bash\necho "$@" >> {log_file}\nexit 0\n')
+        if name == "codex":
+            result_lines = (
+                'printf \'{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"Status: completed\\\\n- logging fake"}}\\n\'\n'
+                'printf \'{"type":"turn.completed"}\\n\'\n'
+            )
+        elif name == "grok":
+            result_lines = (
+                'printf \'{"type":"text","data":"Status: completed\\\\n- logging fake"}\\n\'\n'
+                'printf \'{"type":"end","stopReason":"end_turn"}\\n\'\n'
+            )
+        else:
+            # "agent" (cursor) and "droid" both speak the cursor/claude
+            # stream-json `result` shape.
+            result_lines = (
+                'printf \'{"type":"result","result":"Status: completed\\\\n- logging fake"}\\n\'\n'
+            )
+        path.write_text(f'#!/usr/bin/env bash\necho "$@" >> {log_file}\n{result_lines}exit 0\n')
         path.chmod(0o755)
         return bin_dir
 
@@ -912,6 +951,12 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             "printf 'committed\\n' > committed-by-agent.txt\n"
             "git add committed-by-agent.txt\n"
             "git commit -m 'agent commit' >/dev/null\n"
+            # A cursor `result` event with genuine assistant text, so the
+            # run's resultQuality is `ok` rather than the empty-output
+            # failure the outcome contract now gives an exit-0 child with no
+            # assistant text.
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- commit fake\"}\\n'\n"
             'exit "${FAKE_EXIT:-0}"\n'
         )
         path.chmod(0o755)
@@ -1537,7 +1582,11 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 isolation_context=request.isolation_context,
             )
             with mock.patch.dict(
-                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+                os.environ,
+                {
+                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_ASSISTANT_RESULT": "1",
+                },
             ):
                 code, _ = self.delegate.execute_request(
                     request,

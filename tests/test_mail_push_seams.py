@@ -56,7 +56,15 @@ class MailPushSeamTests(CommandTestBase):
             "with open(os.environ['FAKE_OBSERVATIONS'], 'a', encoding='utf-8') as handle:\n"
             "    handle.write(json.dumps(observation) + '\\n')\n"
             + failure
-            + "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+            # Emit both the codex (item.completed/turn.completed) and the
+            # cursor/claude (result) stream shapes so the same fake works for
+            # every engine this file launches; the accumulator ignores whatever
+            # shape doesn't match its harness. Per the outcome contract
+            # (src/delegate_agent/outcome.py), an exit-0 child with no assistant
+            # text now fails the run, so these fakes must carry real text.
+            + "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Status: completed. ok'}}))\n"
+            + "print(json.dumps({'type': 'turn.completed', 'usage': {}}))\n"
+            + "print(json.dumps({'type': 'result', 'result': 'Status: completed. ok', 'permission_denials': []}))\n",
             encoding="utf-8",
         )
         fake.chmod(0o755)

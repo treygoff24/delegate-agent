@@ -74,7 +74,13 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 '"${DELEGATE_EXECUTION_ROOT:-}" "$WORKSPACE_ROOT" >> "$DELEGATE_ENV_LOG"\n'
                 # Stdout output keeps the call-mode leg a genuine success: an
                 # empty call now reports failed/empty_result by design.
-                "printf 'env probe ok\\n'\n",
+                "printf 'env probe ok\\n'\n"
+                # A cursor `result` event with genuine assistant text: a
+                # tracked (work/safe/worktree) run's resultQuality must be
+                # `ok`, not the empty-output failure the outcome contract now
+                # gives an exit-0 child with no assistant text.
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- env probe fake\"}\\n'\n",
             )
             config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
             config_path = self.write_config(config)
@@ -141,7 +147,16 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             outside.write_text("host secret\n", encoding="utf-8")
             os.symlink(outside, repo_path / "external-link")
 
-            agent = self.write_executable("agent", "exit 0\n")
+            agent = self.write_executable(
+                "agent",
+                # A cursor `result` event with genuine assistant text, so the
+                # run's resultQuality is `ok` rather than the empty-output
+                # failure the outcome contract now gives an exit-0 child with
+                # no assistant text.
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- dirty worktree fake\"}\\n'\n"
+                "exit 0\n",
+            )
             config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
             # This test inspects the realized seeded files after completion;
             # opt out of lifecycle retirement for that inspection.
@@ -222,7 +237,16 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             repo_path = Path(repo.name)
             filename = "line\nbreak.txt"
             (repo_path / filename).write_text("new\n", encoding="utf-8")
-            agent = self.write_executable("agent", "exit 0\n")
+            agent = self.write_executable(
+                "agent",
+                # A cursor `result` event with genuine assistant text, so the
+                # run's resultQuality is `ok` rather than the empty-output
+                # failure the outcome contract now gives an exit-0 child with
+                # no assistant text.
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- disclosure fake\"}\\n'\n"
+                "exit 0\n",
+            )
             config_path = self.write_config(
                 self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
             )
@@ -251,7 +275,16 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
     def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _git_cd = self._make_git_repo_with_commit()
-            agent = self.write_executable("agent", "exit 0\n")
+            agent = self.write_executable(
+                "agent",
+                # A cursor `result` event with genuine assistant text, so the
+                # run's resultQuality is `ok` rather than the empty-output
+                # failure the outcome contract now gives an exit-0 child with
+                # no assistant text.
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- include-dirty fake\"}\\n'\n"
+                "exit 0\n",
+            )
             config_path = self.write_config(
                 self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
             )
@@ -290,7 +323,13 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
         repo, _git_cd = self._make_git_repo_with_commit()
         agent = self.write_executable(
             "agent",
-            'printf "TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\n" "$TMPDIR" "$TMP" "$TEMP"\n',
+            'printf "TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\n" "$TMPDIR" "$TMP" "$TEMP"\n'
+            # A cursor `result` event with genuine assistant text, so the
+            # run's resultQuality is `ok` rather than the empty-output
+            # failure the outcome contract now gives an exit-0 child with no
+            # assistant text.
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- scratch env fake\"}\\n'\n",
         )
         config = self.config_with_cursor(agent)
         config["profiles"]["default"] = "profiled"
@@ -324,7 +363,17 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
 
     def test_codex_safe_run_manifest_records_read_only_scratch_profile(self):
         repo, _git_cd = self._make_git_repo_with_commit()
-        codex = self.write_executable("codex", "exit 0\n")
+        codex = self.write_executable(
+            "codex",
+            # A codex `item.completed`/`turn.completed` pair with genuine
+            # assistant text, so the run's resultQuality is `ok` rather than
+            # the empty-output failure the outcome contract now gives an
+            # exit-0 child with no assistant text.
+            'printf \'{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"Status: completed\\\\n- scratch profile fake"}}\\n\'\n'
+            'printf \'{"type":"turn.completed"}\\n\'\n'
+            "exit 0\n",
+        )
         config = config_api.embedded_default_config()
         config["codex"]["binary"] = str(codex)
         config["codex"]["defaultModel"] = "gpt-test"

@@ -30,6 +30,7 @@ from delegate_agent import (
     structured_output,
     wait_cancel_commands,
 )
+from delegate_agent import outcome as run_outcome
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -106,6 +107,20 @@ class PersonaDigestMismatch(RuntimeError):
 WORKFLOW_TRANSIENT_FAILURES = frozenset(
     {"timeout", "agent_timeout", "call_timeout", "stall", "stalled"}
 )
+# A structured child that exited 0 with no output used to reach schema
+# validation as an ordinary invalid answer and earn a correction retry. The
+# outcome contract now reports it as a failed child (empty_result); keep the
+# correction retry for structured calls only, where it is side-effect free.
+WORKFLOW_STRUCTURED_RETRYABLE_FAILURES = WORKFLOW_TRANSIENT_FAILURES | {"empty_result"}
+
+# Detectable feature flags for workflow scripts (the ``capabilities`` global).
+# A script checks ``capabilities.get("agentFailure")`` before passing
+# ``on_failure="typed"`` so it runs unchanged on an older runtime.
+WORKFLOW_CAPABILITIES: dict[str, int] = {
+    "agentFailure": 1,
+    "agentMeta": 1,
+    "failureKind": 1,
+}
 
 
 def _workflow_retry_delay(attempt: int) -> float:
@@ -126,11 +141,14 @@ class ChildAttemptOutcome:
     session_metadata: JsonObject | None = None
     exit_code: int | None = None
     stderr_tail: str | None = None
+    failure_kind: str | None = None
 
     def as_json(self) -> JsonObject:
         payload: JsonObject = {
             "runId": self.run_id,
             "failureReason": self.failure_reason,
+            "failureKind": self.failure_kind
+            or run_outcome.failure_kind_for_reason(self.failure_reason, exit_code=self.exit_code),
             "branch": self.branch,
             "worktree": self.worktree,
             "executionCwd": self.execution_cwd,
@@ -156,12 +174,111 @@ class StructuredAttemptOutcome:
     last_parsed_candidate: JsonValue | None
     validation_error: str
     candidate_present: bool = False
+    attempts: int = 0
+    failure_kind: str = run_outcome.FAILURE_STRUCTURED_INVALID
 
     def as_json(self) -> JsonObject:
         return {
             "lastParsedCandidate": (self.last_parsed_candidate if self.candidate_present else None),
+            "candidatePresent": self.candidate_present,
             "validationError": self.validation_error,
+            "attempts": self.attempts,
+            "failureKind": self.failure_kind,
         }
+
+
+class AgentFailure:
+    """What ``agent(..., on_failure="typed")`` returns instead of ``None``.
+
+    Falsy, so ``if not result`` still reads as a failure, and carries what the
+    bare ``None`` threw away: the machine-readable failure kind, the attempt
+    count, the last parsed structured candidate (which failed validation), and
+    the last child's identity and served model.
+    """
+
+    ok = False
+
+    def __init__(
+        self,
+        *,
+        key: str,
+        label: str | None,
+        failure_kind: str,
+        failure_reason: str | None = None,
+        attempts: int = 0,
+        last_parsed_candidate: JsonValue = None,
+        candidate_present: bool = False,
+        validation_error: str | None = None,
+        run_id: str | None = None,
+        engine: str | None = None,
+        served_model: str | None = None,
+        served_provider: str | None = None,
+    ) -> None:
+        self.key = key
+        self.label = label
+        self.failure_kind = failure_kind
+        self.failure_reason = failure_reason
+        self.attempts = attempts
+        self.last_parsed_candidate = last_parsed_candidate
+        self.candidate_present = candidate_present
+        self.validation_error = validation_error
+        self.run_id = run_id
+        self.engine = engine
+        self.served_model = served_model
+        self.served_provider = served_provider
+
+    def __bool__(self) -> bool:
+        return False
+
+    def as_json(self) -> JsonObject:
+        return {
+            "ok": False,
+            "key": self.key,
+            "label": self.label,
+            "failureKind": self.failure_kind,
+            "failureReason": self.failure_reason,
+            "attempts": self.attempts,
+            "lastParsedCandidate": self.last_parsed_candidate,
+            "candidatePresent": self.candidate_present,
+            "validationError": self.validation_error,
+            "runId": self.run_id,
+            "engine": self.engine,
+            "servedModel": self.served_model,
+            "servedProvider": self.served_provider,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"AgentFailure(failure_kind={self.failure_kind!r}, attempts={self.attempts}, "
+            f"label={self.label!r}, run_id={self.run_id!r})"
+        )
+
+
+def _exhaustion_failure_kind(child_outcome: ChildAttemptOutcome | None) -> str:
+    """A structured call's failure kind: the last child's, else invalid output."""
+    if child_outcome is None:
+        return run_outcome.FAILURE_STRUCTURED_INVALID
+    kind = child_outcome.as_json().get("failureKind")
+    return kind if isinstance(kind, str) else run_outcome.FAILURE_STRUCTURED_INVALID
+
+
+def _child_outcome_fields(result: JsonObject) -> JsonObject:
+    """Outcome and served-model fields a workflow journals for each child run."""
+    fields: JsonObject = {}
+    ok = result.get("ok")
+    if isinstance(ok, bool):
+        fields["ok"] = ok
+    for key in ("status", "failureKind", "failureReason", "modelResolved"):
+        value = result.get(key)
+        if isinstance(value, str):
+            fields[key] = value
+    provenance = result.get("modelProvenance")
+    if isinstance(provenance, dict):
+        for key in ("servedModel", "servedProvider"):
+            value = provenance.get(key)
+            if isinstance(value, str):
+                fields[key] = value
+    return fields
 
 
 @dataclass(frozen=True)
@@ -244,6 +361,9 @@ def _child_attempt_outcome(
         ),
         session_id=(data.get("sessionId") if isinstance(data.get("sessionId"), str) else None),
         session_metadata=session_metadata,
+        failure_kind=(
+            data.get("failureKind") if isinstance(data.get("failureKind"), str) else None
+        ),
     )
 
 
@@ -355,6 +475,7 @@ def _failed_child_result(
         session_metadata=outcome.session_metadata,
         exit_code=exit_code if exit_code is not None else outcome.exit_code,
         stderr_tail=stderr_tail or outcome.stderr_tail,
+        failure_kind=(outcome.failure_kind if outcome.failure_reason == reason else None),
     )
     return _DelegateChildResult(
         text=None,
@@ -2027,6 +2148,9 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
             "workflow": dsl.workflow,
             "reject": dsl.reject,
             "structured_attempt": dsl.structured_attempt,
+            "agent_meta": dsl.agent_meta,
+            "AgentFailure": AgentFailure,
+            "capabilities": dict(WORKFLOW_CAPABILITIES),
             "judges": dsl.judges,
             "args": frame.args,
             "budget": state.budget,
@@ -2103,6 +2227,108 @@ class WorkflowDsl:
                 if event.get("type") == "agent_rejected":
                     return None
         return None
+
+    def _resolve_meta_key(self, key_or_label: object | None) -> str | None:
+        if key_or_label is None:
+            key_or_label = getattr(self.state.thread_local, "last_structured_attempt_key", None)
+        if not isinstance(key_or_label, str) or not key_or_label.strip():
+            return None
+        with contextlib.suppress(ValueError):
+            key, _label = self.state.resolve_agent_key(key_or_label)
+            return key
+        return key_or_label
+
+    def _latest_attempt_events(self, key: str) -> list[JsonObject]:
+        """Journal events for ``key`` since its latest ``agent_started``, newest first."""
+        window: list[JsonObject] = []
+        with self.state.journal_lock:
+            events = registry.iter_journal(self.state.journal_path)
+        for event in reversed(events):
+            if event.get("key") != key:
+                continue
+            if not self.state.dry_run and _is_simulated_event(event):
+                continue
+            window.append(event)
+            if event.get("type") == "agent_started":
+                break
+        return window
+
+    def agent_meta(self, key_or_label: object | None = None) -> JsonObject | None:
+        """Outcome and served-model metadata of an agent call's latest child run.
+
+        Defaults to the calling thread's most recent ``agent()`` call. Returns
+        ``None`` when no child run was recorded (dry run, cache replay of an
+        older journal, or a launch that never produced a run).
+        """
+        key = self._resolve_meta_key(key_or_label)
+        if key is None:
+            return None
+        for event in self._latest_attempt_events(key):
+            if event.get("type") != "agent_child":
+                continue
+            meta: JsonObject = {"key": key}
+            for name in (
+                "label",
+                "runId",
+                "engine",
+                "ok",
+                "status",
+                "failureKind",
+                "failureReason",
+                "servedModel",
+                "servedProvider",
+                "modelResolved",
+            ):
+                meta[name] = event.get(name)
+            return meta
+        return None
+
+    def _agent_failure(self, key: str, label: str | None) -> AgentFailure | None:
+        """Rebuild the typed failure of an exhausted call from its journal window."""
+        window = self._latest_attempt_events(key)
+        if not any(
+            event.get("type") == "agent_finished" and event.get("exhausted") is True
+            for event in window
+        ):
+            return None
+        exhausted = next((e for e in window if e.get("type") == "agent_structured_exhausted"), None)
+        attempt_failed = next((e for e in window if e.get("type") == "agent_attempt_failed"), None)
+        child = next((e for e in window if e.get("type") == "agent_child"), None)
+        attempt_outcome = (
+            attempt_failed.get("childAttemptOutcome") if attempt_failed is not None else None
+        )
+        if not isinstance(attempt_outcome, dict):
+            attempt_outcome = {}
+        kind: object = None
+        for source in (exhausted, attempt_outcome, child):
+            if isinstance(source, dict) and isinstance(source.get("failureKind"), str):
+                kind = source["failureKind"]
+                break
+        reason = attempt_outcome.get("failureReason") or (
+            child.get("failureReason") if child is not None else None
+        )
+        child_runs = sum(1 for e in window if e.get("type") == "agent_child")
+        structured_attempts = exhausted.get("attempts") if exhausted is not None else None
+        return AgentFailure(
+            key=key,
+            label=label,
+            failure_kind=(kind if isinstance(kind, str) else run_outcome.FAILURE_EXIT_NONZERO),
+            failure_reason=reason if isinstance(reason, str) else None,
+            attempts=(
+                structured_attempts
+                if isinstance(structured_attempts, int) and structured_attempts > 0
+                else child_runs
+            ),
+            last_parsed_candidate=(
+                exhausted.get("lastParsedCandidate") if exhausted is not None else None
+            ),
+            candidate_present=bool(exhausted.get("candidatePresent")) if exhausted else False,
+            validation_error=(exhausted.get("validationError") if exhausted is not None else None),
+            run_id=child.get("runId") if child is not None else None,
+            engine=child.get("engine") if child is not None else None,
+            served_model=child.get("servedModel") if child is not None else None,
+            served_provider=child.get("servedProvider") if child is not None else None,
+        )
 
     def phase(self, title: str) -> None:
         self.current_phase = str(title)
@@ -2848,7 +3074,10 @@ class WorkflowDsl:
         persona: str | None = None,
         allow_repo_persona: bool = False,
         resumable: bool = False,
-    ) -> JsonValue:
+        on_failure: str = "none",
+    ) -> JsonValue | AgentFailure:
+        if on_failure not in {"none", "typed"}:
+            raise ValueError('on_failure must be "none" or "typed"')
         if not isinstance(prompt, str):
             prompt = str(prompt)
         engines = _engine_chain(engine or self.defaults.get("engine") or DEFAULT_ENGINE)
@@ -3000,7 +3229,7 @@ class WorkflowDsl:
                     return result, candidate
             return None, None
 
-        return self._run_child_lifecycle(
+        value = self._run_child_lifecycle(
             key=key,
             scope=path,
             label=label,
@@ -3025,6 +3254,13 @@ class WorkflowDsl:
             resumable=resumable,
             launch=launch,
         )
+        if value is None and on_failure == "typed":
+            # None is also a schema-valid JSON null; only an exhausted call
+            # (journaled agent_finished exhausted=true) becomes a failure.
+            failure = self._agent_failure(key, label)
+            if failure is not None:
+                return failure
+        return value
 
     def _adopt_existing_agent_run(
         self,
@@ -3482,8 +3718,8 @@ class WorkflowDsl:
             text = child.text
             try:
                 if child.outcome is not None:
-                    last_parsed_candidate = None
-                    candidate_present = False
+                    # Partial output of a failed child is never a candidate; an
+                    # earlier attempt's parsed candidate stays the last one.
                     raise ValueError("child failed; partial output is diagnostic only")
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 last_parsed_candidate = value
@@ -3526,7 +3762,7 @@ class WorkflowDsl:
                     )
                 if attempt >= attempts or (
                     child.outcome is not None
-                    and outcome.failure_reason not in WORKFLOW_TRANSIENT_FAILURES
+                    and outcome.failure_reason not in WORKFLOW_STRUCTURED_RETRYABLE_FAILURES
                 ):
                     break
                 if (
@@ -3590,6 +3826,8 @@ class WorkflowDsl:
             last_parsed_candidate=last_parsed_candidate,
             validation_error=prior_error,
             candidate_present=candidate_present,
+            attempts=attempt + 1 if child is not None else 0,
+            failure_kind=_exhaustion_failure_kind(child.outcome if child is not None else None),
         )
         self._record_structured_attempt(key, outcome)
         self.state.append_durable_event(
@@ -3598,7 +3836,7 @@ class WorkflowDsl:
             scope=self.state.current_scope(),
             label=label,
             engine=engine,
-            attempts=attempt + 1 if child is not None else 0,
+            runId=child.run_id if child is not None else None,
             **outcome.as_json(),
         )
         _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -3796,6 +4034,7 @@ class WorkflowDsl:
                     event["label"] = label
                 if resumable:
                     event["resumable"] = True
+                event.update(_child_outcome_fields(result))
                 self.state.append_event("agent_child", **event)
         if (
             expected_persona_digest is not None
@@ -4134,9 +4373,9 @@ class WorkflowDsl:
             )
             text = child.text
             if child.outcome is not None:
+                # A failed child's partial output is diagnostic only and never a
+                # candidate; an earlier attempt's parsed candidate stays.
                 prior_error = "child attempt " + child.outcome.failure_reason
-                last_parsed_candidate = None
-                candidate_present = False
                 self.state.append_event(
                     "agent_attempt_failed",
                     key=key,
@@ -4186,6 +4425,8 @@ class WorkflowDsl:
             last_parsed_candidate=last_parsed_candidate,
             validation_error=prior_error,
             candidate_present=candidate_present,
+            attempts=attempt + 1 if attempts >= 0 else 0,
+            failure_kind=_exhaustion_failure_kind(child.outcome),
         )
         self._record_structured_attempt(key, outcome)
         self.state.append_durable_event(
@@ -4194,7 +4435,7 @@ class WorkflowDsl:
             scope=self.state.current_scope(),
             label=label,
             engine=prior_child.engine,
-            attempts=attempt + 1 if attempts >= 0 else 0,
+            runId=child.run_id,
             **outcome.as_json(),
         )
         return None
@@ -4249,6 +4490,7 @@ class WorkflowDsl:
                 }
                 if label is not None:
                     event["label"] = label
+                event.update(_child_outcome_fields(result))
                 self.state.append_event("agent_child", **event)
         if (
             completed.returncode != 0

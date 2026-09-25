@@ -163,6 +163,7 @@ def _terminal_payload(registry_root: Path, target: run_registry.RunTarget) -> Js
     if wait_state.get("staleReason"):
         payload["staleReason"] = wait_state["staleReason"]
         payload.setdefault("failureReason", wait_state.get("failureReason"))
+        payload["failureKind"] = "stalled"
     return payload
 
 

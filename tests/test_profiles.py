@@ -135,14 +135,22 @@ def make_pointer_config(
     return config
 
 
-def make_env_probe_binary(root: Path, name: str = "agent") -> Path:
+def make_env_probe_binary(root: Path, name: str = "agent", *, emit_result: bool = True) -> Path:
+    # Outcome contract (src/delegate_agent/outcome.py): an exit-0 child with no
+    # assistant text fails the run, so by default emit a cursor-shaped result
+    # event carrying real completion text. emit_result=False keeps the silent
+    # child for tests that need the empty-result retry path.
+    result_line = (
+        'printf \'%s\\n\' \'{"type":"result","result":"Status: completed. ok"}\'\n'
+        if emit_result
+        else ""
+    )
     path = root / name
     path.write_text(
         "#!/usr/bin/env bash\n"
         'if [ -n "${DELEGATE_ENV_OUT:-}" ]; then\n'
         '  printf "%s\\n" "${DELEGATE_POINTER:-}" >> "${DELEGATE_ENV_OUT}"\n'
-        "fi\n"
-        "exit 0\n",
+        "fi\n" + result_line + "exit 0\n",
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -437,6 +445,10 @@ class CodexProfileExecutionTests(unittest.TestCase):
         fake.write_text(
             "#!/usr/bin/env bash\n"
             f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{log_path}"\n'
+            # Outcome contract (src/delegate_agent/outcome.py): an exit-0 child
+            # with no assistant text now fails the run, so emit a cursor-shaped
+            # result event carrying real completion text.
+            'printf \'%s\\n\' \'{"type":"result","result":"Status: completed. ok"}\'\n'
             "exit 0\n",
             encoding="utf-8",
         )
@@ -607,7 +619,8 @@ class CodexProfileExecutionTests(unittest.TestCase):
             fake_bin.write_text(
                 "#!/usr/bin/env bash\n"
                 f'echo "${{CODEX_HOME:-}}" > "{env_file}"\n'
-                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed. ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -1066,6 +1079,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 'echo "You exceeded your current quota usage limit" >&2\n'
@@ -1103,6 +1117,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'"${{DELEGATE_MAIL_SELF:-}}" >> "{observations}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 'echo "You exceeded your current quota usage limit" >&2\n'
@@ -1163,6 +1178,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'printf "%s\\t%s\\n" "${{CODEX_HOME:-}}" "${{DELEGATE_CONFIG-unset}}" >> "{observations}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 'echo "You exceeded your current quota usage limit" >&2\n'
@@ -1398,7 +1414,11 @@ class ProfilePhase2CliTests(unittest.TestCase):
             child.write_text(
                 "#!/usr/bin/env python3\n"
                 "import json, os, pathlib\n"
-                f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{'config': os.environ.get('DELEGATE_CONFIG'), 'pointer': os.environ.get('DELEGATE_POINTER')}}))\n",
+                f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{'config': os.environ.get('DELEGATE_CONFIG'), 'pointer': os.environ.get('DELEGATE_POINTER')}}))\n"
+                # Outcome contract (src/delegate_agent/outcome.py): an exit-0
+                # child with no assistant text now fails the run, so emit a
+                # cursor-shaped result event carrying real completion text.
+                "print(json.dumps({'type': 'result', 'result': 'Status: completed. ok'}))\n",
                 encoding="utf-8",
             )
             child.chmod(0o755)
@@ -1480,7 +1500,11 @@ class ProfilePhase2CliTests(unittest.TestCase):
             root = Path(tmp)
             env_out = root / "env.txt"
             config_path = root / "config.json"
-            config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
+            # A silent child drives the empty-result retry, so the retry child's
+            # environment is observed too.
+            config = make_pointer_config(
+                cursor_binary=make_env_probe_binary(root, emit_result=False)
+            )
             write_json_config(config_path, config)
             write_profile_overlay(root, "personal")
             code, payload, _stderr = main_json(
@@ -1503,7 +1527,10 @@ class ProfilePhase2CliTests(unittest.TestCase):
                     "AI_PROFILE": "personal",
                 },
             )
-            self.assertEqual(code, 0)
+            # Outcome contract (src/delegate_agent/outcome.py): a run still empty
+            # after its retry now fails with no_assistant_text and exit 1.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(payload["authProfile"], "work")
             self.assertTrue(payload["isolatedWorkspace"])
             self.assertEqual(
@@ -1695,6 +1722,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
                 'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "exit 0\n",
                 encoding="utf-8",
             )

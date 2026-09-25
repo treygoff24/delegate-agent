@@ -50,6 +50,7 @@ class LaunchOptions:
     progress_intent: str | None = None
     forbid_commit: bool = False
     forbid_commit_implied_isolation: bool = False
+    expect_files: tuple[str, ...] = ()
     include_dirty: bool = False
     read_only: bool = False
     pure: bool = False
@@ -203,6 +204,7 @@ class PromptTail(NamedTuple):
     resumable: bool = False
     continuity_mode: str | None = None
     warnings: tuple[str, ...] = ()
+    expect_files: tuple[str, ...] = ()
 
 
 @dataclass
@@ -247,6 +249,7 @@ class Request:
     # any tracked context or child is created.
     tracked_stream_max_bytes: int | None = None
     forbid_commit: bool = False
+    expect_files: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None

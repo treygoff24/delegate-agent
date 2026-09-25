@@ -1176,7 +1176,11 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             dsl.structured_attempt("invalid-key"),
             {
                 "lastParsedCandidate": {"ok": "wrong"},
+                "candidatePresent": True,
                 "validationError": event["validationError"],
+                # dlg-5kl: the typed exhaustion record also names attempts and kind.
+                "attempts": 1,
+                "failureKind": "structured_invalid",
             },
         )
 

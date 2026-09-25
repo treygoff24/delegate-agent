@@ -48,6 +48,7 @@ OPERATOR_CANCEL_REASON = "cancelled_by_user"
 def apply_operator_cancel_override(extra: JsonObject) -> None:
     """Replace any child/provider terminal receipt with the operator outcome."""
     extra["failureReason"] = OPERATOR_CANCEL_REASON
+    extra["failureKind"] = "cancelled"
     extra["exitCode"] = 1
     extra["terminalState"] = FAILED
 
@@ -59,5 +60,12 @@ def apply_operator_cancel_override(extra: JsonObject) -> None:
         terminal_record.pop(key, None)
     extra["terminalRecord"] = terminal_record
 
-    for key in ("error", "message", "nextActions", "terminalEvent", "terminalStatus"):
+    for key in (
+        "error",
+        "message",
+        "nextActions",
+        "terminalEvent",
+        "terminalStatus",
+        "outcomeEvidence",
+    ):
         extra.pop(key, None)

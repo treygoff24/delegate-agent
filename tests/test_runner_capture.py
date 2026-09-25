@@ -312,8 +312,15 @@ class RunnerCaptureTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "chatty-but-fine"
+        event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Status: completed the task."},
+            }
+        )
         script.write_text(
-            "#!/usr/bin/env bash\ncat >/dev/null\necho 'progress noise' >&2\nexit 0\n",
+            "#!/usr/bin/env bash\ncat >/dev/null\necho 'progress noise' >&2\n"
+            f"printf '%s\\n' {shlex.quote(event)}\nexit 0\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -352,8 +359,21 @@ class RunnerCaptureTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "closer"
+        event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "Status: completed despite closed stdin.",
+                },
+            }
+        )
         script.write_text(
-            "#!/usr/bin/env bash\nexec 0<&-\nsleep 0.2\nexit 0\n",
+            "#!/usr/bin/env bash\n"
+            "exec 0<&-\n"
+            "sleep 0.2\n"
+            f"printf '%s\\n' {shlex.quote(event)}\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -608,11 +628,19 @@ class RunnerCaptureTests(unittest.TestCase):
         limit = self.runner.harness_events.EVENT_TEXT_LIMIT
         long_body = "L" * (limit + 42)
         secret = "sk-" + "abcdef1234567890"
+        result_event = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "Status: completed the truncation fixture.",
+            }
+        )
         script.write_text(
             "import sys\n"
             f"print('short-ok')\n"
             f"print({long_body!r})\n"
             f"print('token {secret} visible')\n"
+            f"print({result_event!r})\n"
             "sys.stdout.write('unterminated-final')\n"
             "sys.stdout.flush()\n",
             encoding="utf-8",
@@ -1362,6 +1390,17 @@ class RunnerCaptureTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "stdin_probe.py"
         write_stdin_probe_script(script)
+        # Append genuine assistant text in the codex event format so the run
+        # succeeds under the outcome contract (outcome.py::compute_outcome);
+        # the probe's own stdin:eof/stdin:blocked line is unaffected.
+        codex_event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Status: completed the stdin probe."},
+            }
+        )
+        with script.open("a", encoding="utf-8") as handle:
+            handle.write(f"print({codex_event!r})\n")
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="codex")
@@ -1398,8 +1437,17 @@ class RunnerCaptureTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "stdin_echo.py"
+        codex_event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Status: completed reading stdin."},
+            }
+        )
         script.write_text(
-            "import sys\ndata = sys.stdin.read()\nprint('STDIN:' + data)\n",
+            "import sys\n"
+            "data = sys.stdin.read()\n"
+            "print('STDIN:' + data)\n"
+            f"print({codex_event!r})\n",
             encoding="utf-8",
         )
         secret_prompt = "TOP-SECRET-STDIN-PROMPT"
@@ -1443,12 +1491,20 @@ class RunnerCaptureTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "prompt_file_reader.py"
+        droid_event = json.dumps(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "Status: completed reading the prompt file.",
+            }
+        )
         script.write_text(
             "import sys\n"
             "from pathlib import Path\n"
             "prompt_path = Path(sys.argv[sys.argv.index('--file') + 1])\n"
             "print('PROMPT_FILE:' + str(prompt_path))\n"
-            "print('PROMPT:' + prompt_path.read_text(encoding='utf-8'))\n",
+            "print('PROMPT:' + prompt_path.read_text(encoding='utf-8'))\n"
+            f"print({droid_event!r})\n",
             encoding="utf-8",
         )
         secret_prompt = "TOP-SECRET-FILE-PROMPT"
@@ -1950,15 +2006,17 @@ class RunnerCaptureTests(unittest.TestCase):
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
-            self.assertEqual(code, 0)
+            # A preamble message before a command is not a completion report:
+            # no genuine assistant text ever arrives, so the outcome contract
+            # (outcome.py::compute_outcome) fails the run. A failed run
+            # synthesizes its own completion report rather than leaving none.
+            self.assertEqual(code, 1)
             assert payload is not None
-            self.assertNotIn("completionReportCommand", payload)
-            self.assertNotIn("completionReportPath", payload)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
             run_path = self.registry.run_directory(root, run_id)
-            self.assertFalse((run_path / "completion-report.md").exists())
-            snapshot = self._snapshot(root, run_id)
-            self.assertNotIn("completionReport", snapshot)
-            self.assertIn("I will inspect the repo first", snapshot["assistantText"])
+            self.assertTrue((run_path / "completion-report.md").exists())
+            self.assertIn("I will inspect the repo first", payload["assistantText"])
 
     def test_tracked_text_output_omits_raw_streams(self):
         temp, bin_dir = make_streaming_fake_bin()
@@ -2488,10 +2546,15 @@ class RunnerCaptureTests(unittest.TestCase):
                 stderr=io.StringIO(),
             )
 
-            self.assertEqual(code, 0)
+            # A preamble-only exit-0 run has no assistant text: the outcome
+            # contract (outcome.py::compute_outcome) fails it. A failed run
+            # synthesizes its own completion report rather than leaving none.
+            self.assertEqual(code, 1)
             assert payload is not None
             self.assertEqual(payload["resultQuality"], "empty")
-            self.assertFalse(payload["completionReportWritten"])
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
+            self.assertTrue(payload["completionReportWritten"])
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
 
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
@@ -2878,7 +2941,10 @@ class RunnerCaptureTests(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "import pathlib, sys, time; time.sleep(0.65); pathlib.Path(sys.argv[1]).write_text('complete'); print('done')",
+                        "import json, pathlib, sys, time; time.sleep(0.65); "
+                        "pathlib.Path(sys.argv[1]).write_text('complete'); "
+                        "print(json.dumps({'type': 'result', 'subtype': 'success', "
+                        "'result': 'Status: completed the zero-commit-health fixture.'}))",
                         str(Path(workspace) / "child-complete"),
                     ],
                     workspace,
@@ -4367,7 +4433,10 @@ class RunnerCaptureTests(unittest.TestCase):
                 manifest_argv=[str(script), "<prompt>"],
             )
 
-            self.assertEqual(code, 0)
+            # Both attempts exited 0 with no assistant text: the outcome contract
+            # (outcome.py::compute_outcome) fails the run.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
             self.assertNotEqual(payload.get("error"), "resume_prompt_too_large")
 
@@ -4407,7 +4476,10 @@ class RunnerCaptureTests(unittest.TestCase):
                 manifest_argv=[str(script), "<prompt>"],
             )
 
-            self.assertEqual(code, 0)
+            # Both attempts exited 0 with no assistant text: the outcome contract
+            # (outcome.py::compute_outcome) fails the run.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
             self.assertEqual(payload["resultQuality"], "empty")
             self.assertIn(self.runner.EMPTY_RETRY_WARNING, payload["warnings"])
@@ -4488,7 +4560,13 @@ class RunnerCaptureTests(unittest.TestCase):
                 mock.patch.object(
                     self.runner,
                     "_tracked_capture_quality",
-                    side_effect=[self.runner.RESULT_QUALITY_EMPTY, self.runner.RESULT_QUALITY_OK],
+                    # Primary attempt (empty), the retry's own quality check, and the
+                    # outcome contract's finalize-time read (outcome.py::compute_outcome).
+                    side_effect=[
+                        self.runner.RESULT_QUALITY_EMPTY,
+                        self.runner.RESULT_QUALITY_OK,
+                        self.runner.RESULT_QUALITY_OK,
+                    ],
                 ),
             ):
                 _code, payload = self.runner.execute_tracked(
@@ -4549,7 +4627,11 @@ class RunnerCaptureTests(unittest.TestCase):
                 stderr=io.StringIO(),
                 manifest_argv=[str(script), "<prompt>"],
             )
-            self.assertEqual(code, 0)
+            # "work" mode never retries an empty success, and the child exited
+            # 0 with no assistant text: the outcome contract
+            # (outcome.py::compute_outcome) fails the run.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(counter.read_text(encoding="utf-8"), "x")
             self.assertNotIn("emptyRetry", payload)
 
@@ -5473,7 +5555,12 @@ class RunnerCaptureTests(unittest.TestCase):
                     manifest_argv=[str(script), "<prompt>"],
                 )
 
-            self.assertEqual(code, 0)
+            # The retry's short "ok" is not a completion report, so the run
+            # ends without usable output: a failed outcome, not exit 0. The
+            # primary attempt's quota error was handled by the auth fallback
+            # and must not name this failure.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(
                 payload["stderrBytes"], len(b"usage limit\n") + len(b"fallback\n") + len(b"retry\n")
             )
@@ -5743,7 +5830,11 @@ class RunnerCaptureTests(unittest.TestCase):
                 manifest_argv=[str(script), "<prompt>"],
             )
 
-            self.assertEqual(code, 0)
+            # A write-capable call skips the empty retry, and the child exited
+            # 0 with no assistant text: the outcome contract
+            # (outcome.py::compute_outcome) fails the run.
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
             self.assertEqual(counter.read_text(encoding="utf-8"), "x")
             self.assertEqual(payload["resultQuality"], "empty")
             self.assertNotIn("emptyRetry", payload)
@@ -5757,11 +5848,12 @@ class RunnerCaptureTests(unittest.TestCase):
             grandchild_pid_file = workspace_path / "grandchild.pid"
             script = workspace_path / "child.py"
             script.write_text(
-                "import subprocess, sys\n"
+                "import json, subprocess, sys\n"
                 "grandchild = subprocess.Popen([sys.executable, '-c', "
                 "'import time; time.sleep(60)'])\n"
                 f"open({str(grandchild_pid_file)!r}, 'w').write(str(grandchild.pid))\n"
-                "print('normal completion', flush=True)\n",
+                "print(json.dumps({'type': 'result', 'subtype': 'success', "
+                "'result': 'Status: completed normal completion'}), flush=True)\n",
                 encoding="utf-8",
             )
             root = self.registry.ensure_registry(workspace_path, workspace_kind="directory")

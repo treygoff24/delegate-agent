@@ -1381,7 +1381,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         )
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
-        with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": env_path, "FAKE_ECHO_ARGS": "1", "FAKE_ASSISTANT_RESULT": "1"},
+        ):
             code, payload = cli.execute_request(
                 request,
                 json_mode=True,
@@ -1620,6 +1623,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             '  if [ "$1" = "--workspace" ]; then (cd "$2" && touch mutated-via-argv.txt); fi\n'
             "  shift\n"
             "done\n"
+            # A cursor `result` event with genuine assistant text, so the run's
+            # resultQuality is `ok` rather than the empty-output failure the
+            # outcome contract now gives an exit-0 child with no assistant text.
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- literal-directory fake\"}\\n'\n"
         )
         (fake_bin / "agent").chmod(0o755)
         config = Path(repo.name) / "config.json"
@@ -1693,7 +1701,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             "  esac\n"
             "done\n"
             'touch "$dir/mutated-by-codex.txt"\n'
-            'printf \'{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex completed"}]}\n\'\n'
+            'printf \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed\\\\n- codex fake"}}\\n\'\n'
+            'printf \'{"type":"turn.completed"}\\n\'\n'
             "exit 0\n"
         )
         path.chmod(0o755)
@@ -2009,6 +2018,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         path.write_text(
             "#!/usr/bin/env bash\n"
             "touch mutated-by-kimi.txt\n"
+            'printf \'{"role":"assistant","content":"Status: completed\\\\n- kimi fake"}\\n\'\n'
             "printf 'OUT:%s\\n' \"$*\"\n"
             'exit "${FAKE_EXIT:-0}"\n'
         )

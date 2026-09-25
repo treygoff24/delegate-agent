@@ -116,6 +116,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendUnavailable`. The isolated build path is unchanged.
 
 ### Changed
+- **Exit-code semantics: a child's exit code 0 no longer means success on its
+  own.** One outcome function now decides every run's `ok`, `status`, exit code,
+  persisted record, `wait` result, and workflow `agent()` result, so these can
+  no longer disagree. A tracked or call run now fails with a nonzero exit, and
+  `ok: false`, in three cases where it used to report success. The first is a
+  child that exits 0 without assistant text (`failureKind: no_assistant_text`).
+  Before this change the envelope said `ok: true` with exit 0 while state.json
+  said `ok: false`. The second is a child whose provider's last unrecovered
+  error was a quota or 429 refusal (`provider_quota`). The third is a tracked
+  run whose `--expect-file PATH` deliverable is missing (`deliverable_missing`).
+  Scripts that treated exit 0 from an empty run as success will now see exit 1.
+  Every failed or cancelled run carries `failureKind`, a closed enum listed in
+  `docs/cli-reference.md`.
+- Tracked `safe`/`work` launches accept a repeatable `--expect-file PATH`. After
+  the child exits, Delegate checks the child's process group for members that
+  are still alive and records an `orphanedProcesses` warning before it
+  terminates them.
+- Call-mode JSON carries `assistantText`, `assistantTextChars`, and
+  `assistantTextTruncated` on every engine, the same fields tracked envelopes
+  use. `text`, `textChars`, and `textTruncated` stay for one release as
+  deprecated aliases.
+- Workflows: `agent(..., on_failure="typed")` returns a falsy `AgentFailure`
+  when structured retries run out. It carries the last parsed candidate, the
+  attempt count, `failureKind`, the run id, and the served model and provider;
+  the default is still `None`. The new globals are `agent_meta(label)`, which
+  exposes the child's outcome and served model and provider, and
+  `capabilities`, which lets a script detect these features. A failed child no
+  longer erases an earlier attempt's parsed candidate. A child that exits 0
+  without text now receives a structured correction retry. Structured parsing
+  tolerates raw control characters.
 - Bundled Codex declarations move to the GPT-6 line. `gpt-6-sol` and
   `gpt-6-luna` replace the `gpt-5.6-sol`/`gpt-5.6-luna` rows and `gpt-5.6-terra`
   is dropped outright, verified against live `codex` enumeration on both the

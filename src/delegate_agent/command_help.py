@@ -242,6 +242,13 @@ _INCLUDE_DIRTY_OPTION = OptionSpec(
     "non-ignored files in the new worktree. Dirty source files are auto-included even "
     "without this flag.",
 )
+_EXPECT_FILE_OPTION = OptionSpec(
+    "--expect-file",
+    "PATH",
+    "Repeatable deliverable check for tracked safe/work runs: when the child exits, "
+    "the run fails with failureKind=deliverable_missing unless PATH exists (relative "
+    "paths resolve against the run's execution directory).",
+)
 _MAIL_PUSH_OPTION = OptionSpec(
     "--mail-push",
     None,
@@ -2235,7 +2242,13 @@ for _engine in (*KNOWN_ENGINES, "dry-run"):
     _spec = COMMAND_SPECS[_engine]
     COMMAND_SPECS[_engine] = replace(
         _spec,
-        options=(*_spec.options, _MAIL_PUSH_OPTION, _CONTINUITY_MODE_OPTION, *PERSONA_OPTIONS),
+        options=(
+            *_spec.options,
+            _MAIL_PUSH_OPTION,
+            _EXPECT_FILE_OPTION,
+            _CONTINUITY_MODE_OPTION,
+            *PERSONA_OPTIONS,
+        ),
     )
 
 
@@ -2245,6 +2258,7 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--no-progress",
         "--forbid-commit",
         "--include-dirty",
+        "--expect-file",
         "--mail-push",
         "--resumable",
     }

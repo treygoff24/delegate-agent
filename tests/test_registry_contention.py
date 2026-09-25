@@ -59,7 +59,7 @@ class RegistryContentionTests(unittest.TestCase):
             child = workspace / "child.py"
             child.write_text(
                 "import json, pathlib, sys, time\n"
-                "print(json.dumps({'type': 'message', 'role': 'assistant', 'content': 'HELLO'}), flush=True)\n"
+                "print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'HELLO'}), flush=True)\n"
                 f"pathlib.Path({str(trigger)!r}).touch()\n"
                 f"ready = pathlib.Path({str(lock_ready)!r})\n"
                 "while not ready.exists(): time.sleep(0.005)\n",
@@ -155,7 +155,7 @@ class RegistryContentionTests(unittest.TestCase):
             child = workspace / "child.py"
             child.write_text(
                 "import json, pathlib, sys, time\n"
-                "print(json.dumps({'type': 'message', 'role': 'assistant', 'content': 'HELLO'}), flush=True)\n"
+                "print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'HELLO'}), flush=True)\n"
                 f"pathlib.Path({str(trigger)!r}).touch()\n"
                 f"ready = pathlib.Path({str(lock_ready)!r})\n"
                 "while not ready.exists(): time.sleep(0.005)\n",

@@ -33,7 +33,17 @@ class WorktreeRetirementTests(ExecutionTestBase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         agent = root / "agent"
-        agent.write_text("#!/usr/bin/env bash\nprintf 'done\\n'\n", encoding="utf-8")
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'done\\n'\n"
+            # A cursor `result` event with genuine assistant text, so the
+            # run's resultQuality is `ok` rather than the empty-output
+            # failure the outcome contract now gives an exit-0 child with no
+            # assistant text.
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- clean agent fake\"}\\n'\n",
+            encoding="utf-8",
+        )
         agent.chmod(0o755)
         return agent
 
@@ -149,7 +159,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             repo, _ = self._make_git_repo_with_commit()
             agent = self._clean_agent()
             agent.write_text(
-                "#!/usr/bin/env bash\nprintf 'child dirt\\n' > child-created.txt\nprintf 'done\\n'\n",
+                "#!/usr/bin/env bash\nprintf 'child dirt\\n' > child-created.txt\nprintf 'done\\n'\n"
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- child dirt fake\"}\\n'\n",
                 encoding="utf-8",
             )
             agent.chmod(0o755)
@@ -201,7 +213,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             seeded.write_text("source dirt\n", encoding="utf-8")
             agent = self._clean_agent()
             agent.write_text(
-                "#!/usr/bin/env bash\nprintf 'child edit\\n' > seeded.txt\nprintf 'done\\n'\n",
+                "#!/usr/bin/env bash\nprintf 'child edit\\n' > seeded.txt\nprintf 'done\\n'\n"
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- child edit fake\"}\\n'\n",
                 encoding="utf-8",
             )
             agent.chmod(0o755)
@@ -253,7 +267,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 )
             agent = self._clean_agent()
             agent.write_text(
-                "#!/usr/bin/env bash\nprintf 'child dirt\\n' > child-created.txt\nprintf 'done\\n'\n",
+                "#!/usr/bin/env bash\nprintf 'child dirt\\n' > child-created.txt\nprintf 'done\\n'\n"
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- child dirt fake\"}\\n'\n",
                 encoding="utf-8",
             )
             agent.chmod(0o755)
@@ -356,7 +372,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
     def test_manifest_reconstruction_retains_dirty_tree(self):
         agent = self._clean_agent()
         agent.write_text(
-            "#!/usr/bin/env bash\nprintf 'dirty\\n' > child-created.txt\nprintf 'done\\n'\n",
+            "#!/usr/bin/env bash\nprintf 'dirty\\n' > child-created.txt\nprintf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- dirty tree fake\"}\\n'\n",
             encoding="utf-8",
         )
         agent.chmod(0o755)
@@ -376,7 +394,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             "mkdir -p .beads\n"
             'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
             "printf 'papercut\\n' >> .papercuts.jsonl\n"
-            "printf 'done\\n'\n",
+            "printf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- ledger dirt fake\"}\\n'\n",
             encoding="utf-8",
         )
         agent.chmod(0o755)
@@ -397,7 +417,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             "mkdir -p .beads\n"
             'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
             "printf 'real work\\n' > child-created.txt\n"
-            "printf 'done\\n'\n",
+            "printf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- real work fake\"}\\n'\n",
             encoding="utf-8",
         )
         agent.chmod(0o755)
@@ -418,7 +440,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             "mkdir -p .beads\n"
             'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
             "printf 'real work\\n' > child-created.txt\n"
-            "printf 'done\\n'\n",
+            "printf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- real work fake\"}\\n'\n",
             encoding="utf-8",
         )
         agent.chmod(0o755)

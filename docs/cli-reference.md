@@ -523,7 +523,7 @@ delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-m
 - Model aliases accept either a Pi `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
 - `--reasoning-effort` maps directly to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases select the same levels. Pi has no `auto`.
 - All modes are stateless at Pi's session layer; Delegate's run registry remains the durable record.
-- JSON call responses retain the standard `text` field and also populate `assistantText`, matching tracked safe/work envelopes.
+- JSON call responses carry `assistantText` like every engine's call response; `text` remains as a deprecated alias.
 - `delegate models pi --live` queries Pi's visible provider/model catalog.
 
 Examples:
@@ -1375,6 +1375,42 @@ Common JSON fields for tracked run completion:
   "completionReportCommand": "delegate run-output codex-1 --completion-report"
 }
 ```
+
+### Run outcome: `ok`, `status`, `failureKind`, and the exit code
+
+One function decides every run's outcome, and every surface reports that one
+decision: the JSON envelope's `ok`, `status`, and `exitCode`, the process exit
+code, the persisted record read by `runs`, `snapshot`, `run-output`, and `wait`,
+and the workflow `agent()` return path. `status` is `succeeded`, `failed`, or
+`cancelled`. A failed or cancelled run also carries `failureKind`, a closed enum
+callers can branch on: `exit_nonzero`, `no_assistant_text`, `provider_quota`,
+`provider_auth`, `provider_error`, `provider_refusal`, `provider_max_turns`,
+`session_lost`, `deliverable_missing`, `structured_invalid`, `policy_violation`,
+`model_continuity`, `output_limit`, `stalled`, `timeout`, or `cancelled`.
+`failureReason` keeps the more specific remediation code, and
+`outcomeEvidence` lists what decided the outcome.
+
+A child's exit code of 0 no longer means success on its own. The run fails with
+exit code 1 when the child exits 0 but produced no assistant text
+(`no_assistant_text`, or `provider_quota` when the final attempt's diagnostics
+show a usage limit), when the provider's last unrecovered error was a quota
+refusal (`provider_quota`), or when a file named with `--expect-file` is absent
+(`deliverable_missing`).
+
+`--expect-file PATH` is repeatable on tracked `safe` and `work` launches;
+relative paths resolve against the run's execution directory. Missing paths are
+listed under `expectedFiles.missing`. It is rejected for `call` mode and
+pass-through launches.
+
+After the child exits, Delegate checks the child's process group for members
+that are still alive before it terminates them. If any survive, the run records
+`orphanedProcesses: true` and adds an `orphanedProcesses:` warning. This is only
+a warning; it does not change the outcome.
+
+Call-mode JSON and tracked envelopes share `assistantText`,
+`assistantTextChars`, and `assistantTextTruncated`. Call mode's `text`,
+`textChars`, and `textTruncated` are deprecated aliases that will be removed in
+the next release.
 
 Safe tracked runs include `isolationBackend`, whose value is `copy` for the
 temporary copy/worktree path or `bwrap` for the Linux zero-copy sandbox. The

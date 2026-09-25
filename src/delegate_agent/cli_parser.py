@@ -1198,6 +1198,7 @@ def parse_modeless_engine(
     fast = tail.fast
     progress_intent = tail.progress_intent
     forbid_commit = tail.forbid_commit
+    expect_files = tail.expect_files
     prompt_parts = tail.prompt_parts
     json_mode = tail.json_mode
     isolation = tail.isolation
@@ -1286,6 +1287,7 @@ def parse_modeless_engine(
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
+            expect_files=expect_files,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -1348,6 +1350,7 @@ def parse_droid(
     fast = tail_result.fast
     progress_intent = tail_result.progress_intent
     forbid_commit = tail_result.forbid_commit
+    expect_files = tail_result.expect_files
     prompt_parts = tail_result.prompt_parts
     json_mode = tail_result.json_mode
     isolation = tail_result.isolation
@@ -1431,6 +1434,7 @@ def parse_droid(
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
+            expect_files=expect_files,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -1889,6 +1893,7 @@ def parse_prompt_tail(
     fast: bool | None = None
     progress_intent: str | None = None
     forbid_commit = False
+    expect_files: list[str] = []
     include_dirty = False
     mail_push = False
     read_only = False
@@ -2118,6 +2123,12 @@ def parse_prompt_tail(
             progress_intent = "off"
             i += 1
             continue
+        if token == "--expect-file":
+            if i + 1 >= len(rest) or not rest[i + 1].strip():
+                raise DelegateError("missing_expect_file", "--expect-file requires a path.")
+            expect_files.append(rest[i + 1])
+            i += 2
+            continue
         if token == "--forbid-commit":
             if forbid_commit:
                 raise DelegateError(
@@ -2252,6 +2263,7 @@ def parse_prompt_tail(
         resumable,
         continuity_mode,
         tail_warnings,
+        tuple(expect_files),
     )
 
 
