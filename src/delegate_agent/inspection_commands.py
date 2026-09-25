@@ -218,12 +218,17 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             continue
         # Two worktrees can name one registry (a linked `.delegate` symlink or
         # copy, a path Git reports twice), and one run is one row regardless of
-        # how many worktree paths reach it.
-        found = [
+        # how many worktree paths reach it. The dropped rows are subtracted
+        # from this root's totals too: `found_total`/`found_scope` count the
+        # copy's rows, so an uncorrected "N of M" footer counts every one of
+        # them twice.
+        found_kept = [
             summary
             for summary in found
             if not (isinstance(summary.get("runId"), str) and summary["runId"] in seen_run_ids)
         ]
+        duplicates = len(found) - len(found_kept)
+        found = found_kept
         for summary in found:
             if isinstance(summary.get("runId"), str):
                 seen_run_ids.add(summary["runId"])
@@ -231,8 +236,8 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             for summary in found:
                 summary["registryWorkspace"] = linked_workspace
         summaries.extend(found)
-        total += found_total
-        scope_total += found_scope
+        total += max(0, found_total - duplicates)
+        scope_total += max(0, found_scope - duplicates)
     if len(sources) > 1:
         summaries.sort(key=lambda summary: str(summary.get("activityAt") or ""), reverse=True)
         summaries = summaries[:limit]
