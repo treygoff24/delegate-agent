@@ -8,7 +8,7 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from delegate_agent import stall_watchdog  # noqa: E402
+from delegate_agent import harness_events, stall_watchdog  # noqa: E402
 
 
 def omp_delta(delta: str, *, kind: str = "thinking_delta", seq: int = 0) -> str:
@@ -439,6 +439,216 @@ class WatchdogLifecycleTests(unittest.TestCase):
         self.assertEqual(stall_watchdog.stall_seconds_from_minutes(8), 480.0)
         self.assertEqual(stall_watchdog.stall_seconds_from_minutes(0), 0.0)
         self.assertEqual(stall_watchdog.stall_seconds_from_minutes(-3), 0.0)
+
+
+def codex_command(item_id: str, command: str, *, status: str | None = None) -> str:
+    """One codex command_execution item line; ``status`` None means started."""
+    item = {"id": item_id, "type": "command_execution", "command": command}
+    if status is None:
+        item["status"] = "in_progress"
+        return json.dumps({"type": "item.started", "item": item})
+    item["status"] = status
+    item["exit_code"] = 0 if status == "completed" else 1
+    return json.dumps({"type": "item.completed", "item": item})
+
+
+class _FedWatchdog:
+    """A watchdog fed the way the runner feeds it: raw line plus the tool
+    events the stream accumulator derived from that same line."""
+
+    def __init__(self, watchdog: stall_watchdog.StallWatchdog) -> None:
+        self.watchdog = watchdog
+        self.accumulator = harness_events.StreamAccumulator(harness=watchdog.harness or "codex")
+
+    def feed(self, line: str, now: float) -> None:
+        before = self.accumulator.events.total
+        self.accumulator.ingest_line(line)
+        events = self.accumulator.events.last(self.accumulator.events.total - before)
+        self.watchdog.observe_line(
+            line, now=now, tool_events=stall_watchdog.tool_events_from(events)
+        )
+
+    def command(self, index: int, command: str, *, status: str, start: float, end: float):
+        self.feed(codex_command(f"item_{index}", command), start)
+        self.feed(codex_command(f"item_{index}", command, status=status), end)
+
+
+class RepeatedToolFailureTests(unittest.TestCase):
+    def test_identical_failures_trip_at_the_limit(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        limit = stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT
+        for index in range(limit - 1):
+            fed.command(index, "cat missing.txt", status="failed", start=index, end=index + 0.5)
+        self.assertIsNone(fed.watchdog.stalled_for(limit + 1.0))
+        fed.command(limit, "cat missing.txt", status="failed", start=limit, end=limit + 0.5)
+        idle = fed.watchdog.stalled_for(limit + 1.0)
+        self.assertIsNotNone(idle)
+        detail = fed.watchdog.stall_detail(idle or 0.0)
+        self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+        self.assertEqual(detail["tool"], "command_execution")
+        self.assertEqual(detail["target"], "cat missing.txt")
+        self.assertEqual(detail["failures"], limit)
+
+    def test_a_success_in_between_resets_the_count(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        limit = stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT
+        now = 0.0
+        for index in range(2 * (limit - 1) + 1):
+            if index == limit - 1:
+                fed.command(index, "ls", status="completed", start=now, end=now + 0.5)
+            else:
+                fed.command(index, "cat missing.txt", status="failed", start=now, end=now + 0.5)
+            now += 1.0
+        self.assertIsNone(fed.watchdog.stalled_for(now))
+
+    def test_different_failing_targets_do_not_trip(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT * 2):
+            fed.command(index, f"cat missing-{index}.txt", status="failed", start=index, end=index)
+        self.assertIsNone(fed.watchdog.stalled_for(30.0))
+
+
+class RepeatedToolCallProgressTests(unittest.TestCase):
+    def test_fast_identical_calls_do_not_keep_resetting_the_idle_clock(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=300.0, harness="codex"))
+        fed.command(0, "git status", status="completed", start=0.0, end=1.0)
+        now = 1.0
+        index = 1
+        while now < 400.0:
+            # Ten seconds of thought, one second of the same no-op call.
+            fed.command(index, "git status", status="completed", start=now + 10, end=now + 11)
+            now += 11.0
+            index += 1
+        idle = fed.watchdog.stalled_for(now)
+        self.assertIsNotNone(idle)
+        self.assertEqual(fed.watchdog.stall_detail(idle or 0.0)["stallReason"], "idle")
+
+    def test_distinct_calls_are_still_progress(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=300.0, harness="codex"))
+        now = 0.0
+        for index in range(40):
+            fed.command(index, f"sed -n {index}p f", status="completed", start=now, end=now + 1)
+            now += 11.0
+        self.assertIsNone(fed.watchdog.stalled_for(now))
+
+    def test_a_slow_identical_polling_loop_is_not_idle(self):
+        """Time inside a repeated call is not idle time: waiting is legitimate."""
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=300.0, harness="codex"))
+        now = 0.0
+        for index in range(30):
+            # A 60-second `delegate wait` returning the same thing, 2 s apart.
+            fed.command(index, "delegate wait r1", status="completed", start=now, end=now + 60)
+            now += 62.0
+        self.assertIsNone(fed.watchdog.stalled_for(now))
+
+
+class RunawayOutputTests(unittest.TestCase):
+    def test_unique_output_without_tools_trips_past_the_budget(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="omp", runaway_output_chars=1000
+        )
+        for index in range(30):
+            watchdog.observe_line(omp_delta(f"unique chunk {index} " + "x" * 40), now=index)
+        idle = watchdog.stalled_for(31.0)
+        self.assertIsNotNone(idle)
+        detail = watchdog.stall_detail(idle or 0.0)
+        self.assertEqual(detail["stallReason"], "runaway_output")
+        self.assertEqual(detail["outputCharLimit"], 1000)
+        self.assertGreater(detail["outputChars"], 1000)
+
+    def test_tool_activity_resets_the_budget(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="omp", runaway_output_chars=1000
+        )
+        for index in range(60):
+            watchdog.observe_line(omp_delta(f"unique chunk {index} " + "x" * 40), now=index)
+            if index % 10 == 9:
+                start = {"type": "tool_execution_start", "toolCallId": f"t{index}"}
+                end = {"type": "tool_execution_end", "toolCallId": f"t{index}"}
+                watchdog.observe_line(json.dumps(start), now=index)
+                watchdog.observe_line(json.dumps(end), now=index)
+        self.assertIsNone(watchdog.stalled_for(61.0))
+
+    def test_default_budget_is_far_past_a_real_report(self):
+        self.assertGreaterEqual(stall_watchdog.RUNAWAY_OUTPUT_CHARS_DEFAULT, 100_000)
+
+
+class ProgressProbeTests(unittest.TestCase):
+    def test_a_changed_probe_token_restarts_the_idle_clock(self):
+        heads = iter(["a", "b", "b"])
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=60.0, harness="omp", progress_probe=lambda: next(heads)
+        )
+        watchdog.prime_probe()
+        watchdog.observe_line(omp_delta("hello"), now=0.0)
+        self.assertIsNone(watchdog.stalled_for(100.0))
+        self.assertEqual(watchdog.last_progress_label, "worktree_commit")
+        # Unchanged since the commit: the next window stalls.
+        self.assertIsNotNone(watchdog.stalled_for(200.0))
+
+    def test_an_unknown_probe_never_counts_as_progress(self):
+        def broken() -> str | None:
+            raise OSError("git missing")
+
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=60.0, harness="omp", progress_probe=broken
+        )
+        watchdog.prime_probe()
+        watchdog.observe_line(omp_delta("hello"), now=0.0)
+        self.assertIsNotNone(watchdog.stalled_for(100.0))
+
+
+class CompletionReportTests(unittest.TestCase):
+    def test_trailing_report_status_is_found(self):
+        text = "worked a while\n\n## Completion report\n- **Status:** completed\n- did it"
+        self.assertEqual(stall_watchdog.completion_report_status(text), "completed")
+        self.assertEqual(stall_watchdog.completion_report_status("Status: blocked"), "blocked")
+
+    def test_no_report_or_a_distant_one_is_none(self):
+        self.assertIsNone(stall_watchdog.completion_report_status("still working on it"))
+        distant = "Status: completed\n" + "more work\n" * 2000
+        self.assertIsNone(stall_watchdog.completion_report_status(distant))
+
+    def test_only_text_stream_harnesses_use_it(self):
+        self.assertTrue(stall_watchdog.reports_completion_by_text("devin"))
+        self.assertFalse(stall_watchdog.reports_completion_by_text("claude"))
+
+
+class ProcessGroupActivityTests(unittest.TestCase):
+    def activity(self, first, second):
+        samples = iter([first, second])
+        return stall_watchdog.process_group_activity(
+            4242, rows=lambda _pgid: next(samples), sleep=lambda _s: None
+        )
+
+    def test_cpu_growth_reads_as_active(self):
+        result = self.activity([(10, "S", 1.0, "devin")], [(10, "S", 3.5, "devin")])
+        self.assertEqual(result["childActivity"], "cpu_active")
+        self.assertEqual(result["processes"][0]["cpuSeconds"], 3.5)
+
+    def test_flat_cpu_reads_as_waiting(self):
+        result = self.activity([(10, "S", 1.0, "devin")], [(10, "S", 1.0, "devin")])
+        self.assertEqual(result["childActivity"], "waiting")
+
+    def test_an_empty_group_reads_as_gone(self):
+        self.assertEqual(self.activity([], [])["childActivity"], "no_processes")
+
+    def test_ps_time_parsing(self):
+        self.assertEqual(stall_watchdog._cpu_seconds("01:02.50"), 62.5)
+        self.assertEqual(stall_watchdog._cpu_seconds("1-00:00:01"), 86401.0)
+        self.assertEqual(stall_watchdog._cpu_seconds("garbage"), 0.0)
+
+
+class EventBufferLastTests(unittest.TestCase):
+    def test_last_spans_head_and_tail(self):
+        buffer = harness_events.EventBuffer()
+        total = harness_events.EVENT_HEAD + 5
+        for index in range(total):
+            buffer.append(harness_events.NormalizedEvent(kind="k", message=str(index)))
+        self.assertEqual([e.message for e in buffer.last(2)], [str(total - 2), str(total - 1)])
+        self.assertEqual(buffer.last(0), [])
+        spanning = buffer.last(7)
+        self.assertEqual([e.message for e in spanning], [str(i) for i in range(total - 7, total)])
 
 
 if __name__ == "__main__":

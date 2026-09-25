@@ -17,6 +17,7 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
         *,
         timeout: int | None,
         stall_minutes: float | None = None,
+        flag_minutes: str | None = None,
     ):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
@@ -27,6 +28,8 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
         args = ["--cwd", repo.name, engine, "work"]
         if timeout is not None:
             args.extend(("--timeout", str(timeout)))
+        if flag_minutes is not None:
+            args.extend(("--stall-minutes", flag_minutes))
         args.append("check the workspace")
 
         with tempfile.TemporaryDirectory() as home_tmp:
@@ -67,6 +70,45 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
                 with self.subTest(engine=engine, timeout=timeout):
                     request = self._captured_request(engine, timeout=timeout, stall_minutes=2.5)
                     self.assertEqual(request.stall_seconds, 150.0)
+
+    def test_stall_minutes_flag_pins_this_run_over_config_and_policy(self):
+        for engine in ("kimi", "claude"):
+            with self.subTest(engine=engine):
+                request = self._captured_request(
+                    engine, timeout=900, stall_minutes=2.5, flag_minutes="1.5"
+                )
+                self.assertEqual(request.stall_seconds, 90.0)
+                self.assertTrue(request.stall_seconds_pinned)
+
+    def test_stall_minutes_flag_alone_survives_the_silent_harness_default(self):
+        for engine in ("kimi", "devin"):
+            with self.subTest(engine=engine):
+                request = self._captured_request(engine, timeout=900, flag_minutes="1.5")
+                self.assertEqual(request.stall_seconds, 90.0)
+
+    def test_stall_minutes_flag_zero_disables(self):
+        request = self._captured_request("claude", timeout=None, flag_minutes="0")
+        self.assertEqual(request.stall_seconds, 0.0)
+        self.assertTrue(request.stall_seconds_pinned)
+
+    def test_without_the_flag_the_threshold_is_not_pinned(self):
+        request = self._captured_request("claude", timeout=None)
+        self.assertFalse(request.stall_seconds_pinned)
+
+
+class StallMinutesParserTests(unittest.TestCase):
+    def test_invalid_values_are_refused(self):
+        for value in ("-1", "abc", "inf", "nan"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                code = cli.main(
+                    ["--json", "claude", "work", "--stall-minutes", value, "hi"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(stdout.getvalue())["error"], "invalid_stall_minutes")
 
 
 if __name__ == "__main__":

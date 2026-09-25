@@ -317,6 +317,13 @@ _CHILD_TIMEOUT_OPTION = OptionSpec(
     "the run fails with call_timeout (historical error-code name, kept for API stability). "
     "Applies to call mode and tracked safe/work runs; not supported with pass-through launches.",
 )
+_STALL_MINUTES_OPTION = OptionSpec(
+    "--stall-minutes",
+    "MINUTES",
+    "This run's stall-watchdog threshold: minutes of no new output and no tool activity "
+    "before the child is cancelled with failureReason stalled; 0 disables. Overrides "
+    "stallMinutes config and DELEGATE_STALL_MINUTES. Not supported with pass-through launches.",
+)
 _PROMPT_ARG = ArgSpec(
     "prompt",
     False,
@@ -357,6 +364,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -393,6 +401,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -440,6 +449,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _RESUMABLE_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -489,6 +499,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _PURE_OPTION,
             _OUTPUT_SCHEMA_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -533,6 +544,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -581,6 +593,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -619,6 +632,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -660,6 +674,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -700,6 +715,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -743,6 +759,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -816,6 +833,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _READ_ONLY_OPTION,
             _PURE_OPTION,
             _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(

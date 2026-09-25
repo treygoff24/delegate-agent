@@ -9,6 +9,7 @@ builders, not here.
 
 from __future__ import annotations
 
+import math
 import re
 import shlex
 
@@ -1230,6 +1231,7 @@ def parse_modeless_engine(
     read_only = tail.read_only
     pure = tail.pure
     timeout = tail.timeout
+    stall_minutes = tail.stall_minutes
     include_dirty = tail.include_dirty
     mail_push = tail.mail_push
     model = tail.model
@@ -1267,6 +1269,12 @@ def parse_modeless_engine(
             "invalid_option_combination",
             "--timeout is not supported with --pass-through; "
             "pass-through runs have no tracked deadline.",
+        )
+    if stall_minutes is not None and pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--stall-minutes is not supported with --pass-through; "
+            "pass-through runs have no stall watchdog.",
         )
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
@@ -1318,6 +1326,7 @@ def parse_modeless_engine(
             read_only=read_only,
             pure=pure,
             timeout=timeout,
+            stall_minutes=stall_minutes,
             dry_run=dry_run,
             model=model,
             agent=agent,
@@ -1386,6 +1395,7 @@ def parse_droid(
     read_only = tail_result.read_only
     pure = tail_result.pure
     timeout = tail_result.timeout
+    stall_minutes = tail_result.stall_minutes
     include_dirty = tail_result.include_dirty
     mail_push = tail_result.mail_push
     model = tail_result.model
@@ -1418,6 +1428,12 @@ def parse_droid(
             "invalid_option_combination",
             "--timeout is not supported with --pass-through; "
             "pass-through runs have no tracked deadline.",
+        )
+    if stall_minutes is not None and pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--stall-minutes is not supported with --pass-through; "
+            "pass-through runs have no stall watchdog.",
         )
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
@@ -1469,6 +1485,7 @@ def parse_droid(
             read_only=read_only,
             pure=pure,
             timeout=timeout,
+            stall_minutes=stall_minutes,
             dry_run=dry_run,
             model=model,
             agent=agent,
@@ -1959,6 +1976,7 @@ def parse_prompt_tail(
     resumable = False
     pure = False
     timeout: int | None = None
+    stall_minutes: float | None = None
     model: str | None = None
     continuity_mode: str | None = None
     agent: str | None = None
@@ -2281,6 +2299,13 @@ def parse_prompt_tail(
                 invalid_error="invalid_timeout",
             )
             continue
+        if token == "--stall-minutes":
+            if stall_minutes is not None:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --stall-minutes is allowed."
+                )
+            stall_minutes, i = parse_stall_minutes_option(rest, i)
+            continue
         if token == "--":
             prompt_parts = rest[i:]
             break
@@ -2363,6 +2388,7 @@ def parse_prompt_tail(
         workspace_env or None,
         tuple(workspace_env_files),
         workspace_setup,
+        stall_minutes,
     )
 
 
@@ -3191,6 +3217,25 @@ def parse_positive_int(value: str, *, option: str) -> int:
     if parsed < 1:
         raise DelegateError("invalid_option_value", f"{option} must be at least 1.")
     return parsed
+
+
+def parse_stall_minutes_option(rest: list[str], index: int) -> tuple[float, int]:
+    """Parse ``--stall-minutes N``: a finite, non-negative number; 0 disables."""
+    if index + 1 >= len(rest):
+        raise DelegateError(
+            "missing_stall_minutes", "--stall-minutes requires a number of minutes (0 disables)."
+        )
+    try:
+        parsed = float(rest[index + 1])
+    except ValueError as exc:
+        raise DelegateError(
+            "invalid_stall_minutes", "--stall-minutes must be a number of minutes (0 disables)."
+        ) from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise DelegateError(
+            "invalid_stall_minutes", "--stall-minutes must be a finite number of minutes >= 0."
+        )
+    return parsed, index + 2
 
 
 def parse_required_positive_int_option(

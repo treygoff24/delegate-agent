@@ -296,6 +296,8 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["progressRequested"] = True
     if request.timeout is not None:
         payload["timeoutSeconds"] = request.timeout
+    if request.stall_seconds_pinned:
+        payload["stallMinutes"] = request.stall_seconds / 60
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if request.include_dirty:
@@ -451,7 +453,9 @@ def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Reques
         request.stall_seconds,
         harness=request.engine,
         timeout_seconds=request.timeout,
-        explicitly_configured=_stall_minutes_explicitly_configured(config),
+        explicitly_configured=(
+            request.stall_seconds_pinned or _stall_minutes_explicitly_configured(config)
+        ),
     )
     if stall_seconds == request.stall_seconds:
         return request

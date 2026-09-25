@@ -58,6 +58,8 @@ class LaunchOptions:
     read_only: bool = False
     pure: bool = False
     timeout: int | None = None
+    # Per-run stall watchdog threshold in minutes (0 disables); None = config.
+    stall_minutes: float | None = None
     dry_run: bool = False
     model: str | None = None
     agent: str | None = None
@@ -223,6 +225,7 @@ class PromptTail(NamedTuple):
     workspace_env: dict[str, str] | None = None
     workspace_env_files: tuple[str, ...] = ()
     workspace_setup: str | None = None
+    stall_minutes: float | None = None
 
 
 @dataclass
@@ -257,6 +260,9 @@ class Request:
     # Seconds of no child progress before the stall watchdog cancels the run.
     # 0 disables it. Resolved from config at request-build time.
     stall_seconds: float = float(stall_watchdog.STALL_MINUTES_DEFAULT * 60)
+    # True when --stall-minutes set stall_seconds for this run: it then wins
+    # over config, the silent-harness default policy, and DELEGATE_STALL_MINUTES.
+    stall_seconds_pinned: bool = False
     # Seconds to wait after SIGTERM before escalating a child process group to
     # SIGKILL. Resolved from tracking config at request-build time.
     process_group_termination_grace_sec: float = 3.0

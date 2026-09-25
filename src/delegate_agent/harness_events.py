@@ -293,6 +293,19 @@ class EventBuffer:
         yield from self._head
         yield from self._tail
 
+    def last(self, count: int) -> list[NormalizedEvent]:
+        """The most recent ``count`` retained events, oldest first.
+
+        Bounded by what is retained: past the head the buffer keeps only a
+        tail, so a request larger than the retained total returns what is left.
+        """
+        if count <= 0:
+            return []
+        if len(self._tail) >= count:
+            return list(self._tail)[-count:]
+        needed = count - len(self._tail)
+        return self._head[-needed:] + list(self._tail) if self._tail else self._head[-count:]
+
     def __len__(self) -> int:
         return len(self._head) + len(self._tail)
 
