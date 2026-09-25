@@ -155,7 +155,6 @@ class ResumeInheritanceTests(ResumeFixture):
             typed["warnings"], ["--auth-profile personal overrides AI_PROFILE=work (flag > env)."]
         )
 
-
     def test_codex_dry_run_inherits_table_and_honors_overrides(self):
         codex_home = Path(self._config_env["HOME"]) / "codex-source"
         codex_home.mkdir(parents=True)

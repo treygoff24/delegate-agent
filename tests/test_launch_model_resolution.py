@@ -143,11 +143,15 @@ class LaunchCatalogWarningTests(CommandTestBase):
     def test_claude_context_window_suffix_is_checked_by_its_base_id(self):
         # `[1m]` is Delegate-side decoration the catalog never stores, so the
         # listed base id must stay silent while a real miss still warns.
-        request = self._request("claude", "claude-opus-5-5[1m]", _catalog("claude", "claude-opus-5-5"))
+        request = self._request(
+            "claude", "claude-opus-5-5[1m]", _catalog("claude", "claude-opus-5-5")
+        )
         self.assertEqual(self._catalog_warnings(request), [])
         self.assertEqual(request.model, "claude-opus-5-5[1m]")
 
-        request = self._request("claude", "claude-opus-55[1m]", _catalog("claude", "claude-opus-5-5"))
+        request = self._request(
+            "claude", "claude-opus-55[1m]", _catalog("claude", "claude-opus-5-5")
+        )
         (warning,) = self._catalog_warnings(request)
         self.assertIn("claude-opus-55", warning)
         self.assertIn("claude-opus-5-5", warning)

@@ -290,9 +290,12 @@ def _resolution_warnings(runs: list[JsonObject]) -> list[str]:
         if not isinstance(warnings, list):
             continue
         for warning in warnings:
-            if isinstance(warning, str) and warning.startswith(WAIT_RESOLUTION_WARNING_PREFIXES):
-                if warning not in found:
-                    found.append(warning)
+            if (
+                isinstance(warning, str)
+                and warning.startswith(WAIT_RESOLUTION_WARNING_PREFIXES)
+                and warning not in found
+            ):
+                found.append(warning)
     return found
 
 
