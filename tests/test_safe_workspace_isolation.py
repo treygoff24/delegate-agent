@@ -494,6 +494,52 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 temp_base=temp_base,
             )
 
+    def test_git_safe_workspace_discloses_paths_dropped_only_by_info_exclude(self):
+        """info/exclude-only paths stay out of the copy, but the omission is named;
+        a path a .gitignore also covers is ordinary ignoring and is not listed."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+        (root / ".git" / "info").mkdir(parents=True, exist_ok=True)
+        (root / ".git" / "info" / "exclude").write_text(
+            "notes/\nlocal.txt\nsecret.env\n", encoding="utf-8"
+        )
+        (root / "notes").mkdir()
+        (root / "notes" / "plan.md").write_text("plan\n", encoding="utf-8")
+        (root / "local.txt").write_text("local\n", encoding="utf-8")
+        (root / "secret.env").write_text("TOKEN=x\n", encoding="utf-8")
+
+        worktree_path, temp_base, warnings = safe_api.create_git_safe_workspace(
+            repo.name,
+            include_warnings=True,
+        )
+        try:
+            isolated = Path(worktree_path)
+            self.assertFalse((isolated / "local.txt").exists())
+            self.assertFalse((isolated / "notes").exists())
+            disclosed = [
+                item for item in warnings if safe_api.SAFE_LOCAL_EXCLUDE_WARNING_PREFIX in item
+            ]
+            self.assertEqual(len(disclosed), 1)
+            self.assertIn("local.txt", disclosed[0])
+            self.assertIn("notes/", disclosed[0])
+            self.assertNotIn("secret.env", disclosed[0])
+        finally:
+            safe_api.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_is_quiet_without_local_excludes(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+        (root / "secret.env").write_text("TOKEN=x\n", encoding="utf-8")
+        self.assertEqual(safe_api.local_exclude_omission_warnings(repo.name), ())
+
     def test_git_safe_workspace_recreates_legit_relative_symlink_to_non_ignored_file(self):
         """An untracked relative symlink whose target resolves inside the repo
         to a non-ignored file is recreated (not placeholdered)."""

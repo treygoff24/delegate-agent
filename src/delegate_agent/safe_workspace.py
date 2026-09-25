@@ -112,6 +112,13 @@ SAFE_CHECK_IGNORE_FAIL_CLOSED_WARNING = (
     "symlink target(s); fail-closed replaced all queried symlinks with placeholders."
 )
 
+SAFE_LOCAL_EXCLUDE_WARNING_PREFIX = (
+    "Isolated copy omitted untracked path(s) excluded only by .git/info/exclude "
+    "(the copy drops every ignored path, local excludes included, so private files "
+    "never reach the child); `git add -N` a path or drop its info/exclude pattern "
+    "if the child needs it"
+)
+
 SAFE_ISOLATION_REPORT_INSTRUCTION = (
     "\n\nSafe-isolation note: cite files relative to the workspace in your report; "
     "do not include the temporary workspace path."
@@ -341,6 +348,80 @@ def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
         if token:
             ignored.add(token)
     return ignored, False
+
+
+def local_exclude_omission_warnings(git_root: str, *, limit: int = 5) -> tuple[str, ...]:
+    """Name untracked paths the copy drops only because .git/info/exclude matches them.
+
+    The copy keeps Git's full ignore semantics on purpose: info/exclude is where
+    people park private files, and copying them would widen what a safe child
+    sees. Silently dropping them surprised reviewers, so the omission is
+    disclosed instead. ``check-ignore -v`` reports the highest-precedence
+    matching source, so a path whose winning source is info/exclude is not
+    also covered by a per-directory .gitignore. Best effort: any git failure
+    yields no warning rather than blocking the run.
+    """
+    located = _run_git(
+        git_root,
+        ["rev-parse", "--git-path", "info/exclude"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if located.returncode != 0:
+        return ()
+    exclude_path = Path(located.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = Path(git_root) / exclude_path
+    try:
+        if not exclude_path.read_text(encoding="utf-8", errors="replace").strip():
+            return ()
+    except OSError:
+        return ()
+    listed = _run_git_bytes(
+        git_root,
+        [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--directory",
+            f"--exclude-from={exclude_path}",
+            "-z",
+        ],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if listed.returncode != 0:
+        return ()
+    candidates = [os.fsdecode(token) for token in listed.stdout.split(b"\0") if token]
+    if not candidates:
+        return ()
+    checked = _run_git_bytes(
+        git_root,
+        ["check-ignore", "-v", "-z", "--no-index", "--stdin"],
+        input_bytes=b"\x00".join(os.fsencode(path) for path in candidates) + b"\x00",
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if checked.returncode not in (0, 1):
+        return ()
+    fields = os.fsdecode(checked.stdout).split("\x00")
+    try:
+        exclude_resolved = exclude_path.resolve(strict=False)
+    except OSError:
+        exclude_resolved = exclude_path
+    omitted: list[str] = []
+    for index in range(0, len(fields) - 3, 4):
+        source, _line, _pattern, path = fields[index : index + 4]
+        source_path = Path(source)
+        if not source_path.is_absolute():
+            source_path = Path(git_root) / source_path
+        if source_path.resolve(strict=False) == exclude_resolved and path:
+            omitted.append(path)
+    if not omitted:
+        return ()
+    omitted.sort()
+    preview = ", ".join(omitted[:limit])
+    remaining = len(omitted) - limit
+    if remaining > 0:
+        preview = f"{preview}, ... (+{remaining} more)"
+    return (f"{SAFE_LOCAL_EXCLUDE_WARNING_PREFIX}: {preview}.",)
 
 
 def _classify_untracked_symlink_leaks(
@@ -736,6 +817,7 @@ def sync_git_dirty_snapshot(
             block_external_symlinks(worktree_path, git_root),
             _leak_blocked_symlink_warning(leak_blocked),
             check_ignore_warnings,
+            local_exclude_omission_warnings(git_root),
         ),
     )
 

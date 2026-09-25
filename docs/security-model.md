@@ -188,7 +188,7 @@ submodule refusal, and final-plan preflight remain in force.
 
 #### What safe review can and cannot see
 
-Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Paths matched only by `.git/info/exclude` count as ignored too, since that file is where private scratch usually lives; Delegate lists those omissions in a run warning so a reviewer knows they were withheld. `git add -N <path>` makes one visible to the child.
 
 | Visible in the review copy | Not synced |
 | --- | --- |
