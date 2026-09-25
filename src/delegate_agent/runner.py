@@ -3258,10 +3258,9 @@ def _safe_mode_network_warning(
     """
     if ctx.mode != "safe" or status != run_registry.STATUS_FAILED or failure_reason is None:
         return None
-    if outcome.failure_kind_for_reason(failure_reason) in {
-        outcome.FAILURE_PROVIDER_ERROR,
-        outcome.FAILURE_PROVIDER_AUTH,
-    }:
+    # Keep independently diagnosed failures authoritative; only an otherwise
+    # unexplained child exit gets the speculative sandbox-network hint.
+    if outcome.failure_kind_for_reason(failure_reason) != outcome.FAILURE_EXIT_NONZERO:
         return None
     if not _NETWORK_FAILURE_RE.search(signal_text):
         return None
