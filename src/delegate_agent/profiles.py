@@ -235,6 +235,7 @@ def resolve_active_profile(
     env: Mapping[str, str | None],
     cli_override: str | None = None,
     *,
+    cli_override_inherited: bool = False,
     expand_env: Mapping[str, str | None] | None = None,
 ) -> ProfileResolution:
     """Select the active profile: flag > ``profiles.detectFrom`` env order > ``profiles.default``.
@@ -255,10 +256,19 @@ def resolve_active_profile(
         source = "flag"
         env_selected, env_source = _detect_env_profile(config, env, definitions, [])
         if env_selected is not None and env_selected != selected:
-            _warn_once(
-                warnings,
-                f"--auth-profile {selected} overrides {env_source}={env_selected} (flag > env).",
-            )
+            if cli_override_inherited:
+                # Resume/followup reuse the source run's profile because the
+                # caller typed no flag; the warning must not claim one.
+                _warn_once(
+                    warnings,
+                    f"inherited auth profile {selected} from the source run overrides "
+                    f"{env_source}={env_selected} (source run > env).",
+                )
+            else:
+                _warn_once(
+                    warnings,
+                    f"--auth-profile {selected} overrides {env_source}={env_selected} (flag > env).",
+                )
     elif not definitions:
         return empty_profile_resolution()
     else:
