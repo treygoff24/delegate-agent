@@ -1026,7 +1026,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
         usage=(
             "delegate [--json] runs [--active|--running|--stale|--recent] "
-            "[--harness HARNESS] [--group NAME] [--limit N] [--structural]",
+            "[--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]",
         ),
         options=(
             OptionSpec(
@@ -1049,6 +1049,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
             ),
+            OptionSpec(
+                "--summary",
+                None,
+                "Print counts by status, harness, and group for every matching run, with no rows.",
+            ),
         ),
         examples=(
             "delegate runs --active",
@@ -1057,9 +1062,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --harness cursor --limit 5",
             "delegate runs --group wave4",
             "delegate --json runs --recent --structural",
+            "delegate runs --group wave4 --summary",
         ),
         notes=(
             "--active, --running, --stale, and --recent are mutually exclusive.",
+            "--summary counts every match (no --limit) and replaces the rows; "
+            "--structural keeps the rows but drops their content.",
+            "runs takes filters only; for one run use delegate snapshot HANDLE or "
+            "delegate run-output HANDLE.",
             "JSON includes total (pre-limit match count) and truncated "
             "(true when total exceeds the returned rows); text mode prints "
             "'showing N of M runs (raise --limit to see more)' when truncated.",
@@ -1292,7 +1302,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="ps",
         summary="List active tracked runs (alias for runs --active).",
         usage=(
-            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] [--structural]",
+            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] "
+            "[--structural] [--summary]",
         ),
         options=(
             OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
@@ -1302,6 +1313,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 "--structural",
                 None,
                 "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
+            ),
+            OptionSpec(
+                "--summary",
+                None,
+                "Print counts by status, harness, and group for active runs, with no rows.",
             ),
         ),
         examples=("delegate ps", "delegate ps --harness codex", "delegate --json ps --structural"),
