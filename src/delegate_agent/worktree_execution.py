@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
 from collections.abc import Callable
@@ -412,7 +413,14 @@ def _register_persistent_worktree_run(
         delegate_runner.build_run_record(
             pre_ctx,
             status="creating_isolation",
-            extra={"plannedBranch": branch, "plannedExecutionCwd": worktree_path},
+            extra={
+                "plannedBranch": branch,
+                "plannedExecutionCwd": worktree_path,
+                # This process creates the worktree and then launches the
+                # child. Naming it lets a workflow seal the record only once
+                # this launcher is verifiably gone, not merely quiet.
+                "launcherPid": os.getpid(),
+            },
         ),
     )
 

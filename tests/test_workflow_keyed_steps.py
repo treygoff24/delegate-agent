@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from delegate_agent import run_registry
+from delegate_agent import run_registry, runner, wait_cancel_commands
 from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
 from delegate_agent.workflows import commands, registry, runtime
@@ -423,6 +426,35 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         )
         self.assertEqual(sealed["status"], "cancelled")
 
+    def test_adoption_waits_on_a_never_launched_run_this_lifetime_started(self) -> None:
+        self.register_child(
+            "key-s", {"status": "creating_isolation", "lastActivityAt": self.old(3600)}
+        )
+        state = self.state()
+        state.lifetime_started_keys.add("key-s")
+        seen: list[str] = []
+
+        def wait(workspace: Path, waited_run_id: str, timeout: object) -> bool:
+            seen.append(
+                run_registry.load_run_state_or_none(
+                    run_registry.registry_root(workspace), waited_run_id
+                )["status"]
+            )
+            return True
+
+        dsl = runtime.WorkflowDsl(state, {})
+        with mock.patch.object(runtime, "_wait_for_workflow_agent_run", wait):
+            dsl._adopt_existing_agent_run(
+                "key-s",
+                scope="root/seq#0",
+                phase=None,
+                schema=None,
+                prefer_assistant=False,
+                timeout=1,
+            )
+        self.assertEqual(self.events("agent_adopt_skipped"), [])
+        self.assertEqual(seen, ["creating_isolation"], "the sibling was sealed, not waited on")
+
     def test_adoption_skips_a_cancelled_run(self) -> None:
         self.register_child("key-b", {"status": "cancelled"})
         dsl = runtime.WorkflowDsl(self.state(), {})
@@ -449,6 +481,183 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         self.register_child("key-d", {"status": "running", "lastActivityAt": self.old(5)})
         with self.assertRaises(runtime.WorkflowChildCancellationError):
             runtime.cancel_workflow_children(self.workspace, self.wf_id)
+
+
+def _dead_pid() -> int:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec B603
+    child.wait()
+    return child.pid
+
+
+class UnlaunchedSealRaceTests(unittest.TestCase):
+    """A sealed launch never gains a child, and the seal waits for its launcher."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = Path(self.temp.name)
+        self.registry_root = run_registry.ensure_registry(
+            self.workspace, workspace_kind="directory"
+        )
+        self.run_id, self.alias = run_registry.register_run(self.registry_root, harness="codex")
+        self.run_path = run_registry.run_directory(self.registry_root, self.run_id)
+
+    def write_unlaunched(self, *, launcher_pid: int | None, started_at: datetime) -> None:
+        stale = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat()
+        record = {
+            "schema": run_registry.STATE_SCHEMA,
+            "runId": self.run_id,
+            "alias": self.alias,
+            "status": "creating_isolation",
+            "lastActivityAt": stale,
+        }
+        if launcher_pid is not None:
+            record["launcherPid"] = launcher_pid
+        run_registry.write_run_state(self.run_path, record)
+        manifest = run_registry.load_run_manifest_or_none(self.registry_root, self.run_id) or {}
+        manifest["startedAt"] = started_at.isoformat()
+        runner.write_manifest(self.run_path, manifest)
+
+    def record(self) -> dict:
+        state = run_registry.load_run_state_or_none(self.registry_root, self.run_id)
+        assert isinstance(state, dict)
+        return state
+
+    def ctx(self) -> runner.RunContext:
+        return runner.RunContext(
+            registry_root=self.registry_root,
+            run_id=self.run_id,
+            alias=self.alias,
+            harness="codex",
+            engine="codex",
+            mode="work",
+            model=None,
+            source_cwd=str(self.workspace),
+            execution_cwd=str(self.workspace),
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=datetime.now(UTC).isoformat(),
+        )
+
+    def drive_launch(self, launch: object) -> None:
+        stdout_log = self.run_path / runner.STDOUT_LOG
+        stderr_log = self.run_path / runner.STDERR_LOG
+        run_registry.write_private_bytes(stdout_log, b"")
+        run_registry.write_private_bytes(stderr_log, b"")
+        files = runner.TrackedRunFiles(
+            run_path=self.run_path,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            scratch_dir=None,
+        )
+
+        def capture(*args: object, **kwargs: object) -> None:
+            # Reaching capture means a child launched and its pid was
+            # published; record that instead of supervising the child.
+            self.published = self.record()
+            raise runner.RunnerLaunchError("capture_reached", "a child was launched")
+
+        self.published: dict | None = None
+        with (
+            mock.patch.object(runner, "_launch_tracked_process", launch),
+            mock.patch.object(runner, "_capture_tracked_process", capture),
+        ):
+            runner._run_single_tracked_attempt(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                str(self.workspace),
+                files,
+                self.ctx(),
+                started=time.monotonic(),
+                deadline=time.monotonic() + 30,
+                stdin_text=None,
+                env_overrides=None,
+                scratch_dir=None,
+                progress=False,
+                progress_stderr=None,
+                progress_initial_delay_sec=60,
+                progress_interval_sec=60,
+            )
+
+    def test_a_sealed_creating_isolation_run_never_starts_a_child(self) -> None:
+        self.write_unlaunched(launcher_pid=_dead_pid(), started_at=datetime.now(UTC))
+        self.assertTrue(wait_cancel_commands.seal_unlaunched_run(self.registry_root, self.run_id))
+        started: list[subprocess.Popen[bytes]] = []
+        real_launch = runner._launch_tracked_process
+
+        def spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_launch(*args, **kwargs)
+            started.append(process)
+            return process
+
+        def reap() -> None:
+            for process in started:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, 9)
+                process.wait()
+
+        self.addCleanup(reap)
+        with self.assertRaises(runner.RunnerLaunchError) as raised:
+            self.drive_launch(spy)
+        self.assertIsNone(self.published, "a pid was published over the sealed record")
+        self.assertEqual(started, [], "the sealed launch started a child")
+        self.assertEqual(raised.exception.error, "cancelled_by_user")
+        state = self.record()
+        self.assertEqual(state["status"], "cancelled")
+        self.assertTrue(state["cancelRequested"])
+        self.assertNotIn("pid", state)
+
+    def test_publication_refuses_a_record_sealed_after_admission(self) -> None:
+        self.write_unlaunched(launcher_pid=None, started_at=datetime.now(UTC))
+        run_registry.write_run_state(
+            self.run_path,
+            {**self.record(), "status": "running", "lastActivityAt": run_registry.utc_now_iso()},
+        )
+        started: list[subprocess.Popen[bytes]] = []
+        real_launch = runner._launch_tracked_process
+
+        def seal_during_launch(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_launch(*args, **kwargs)
+            started.append(process)
+            # A writer that bypassed the registry lock seals between the
+            # admission read and the pid publication.
+            run_registry.write_run_state(
+                self.run_path,
+                {**self.record(), "status": "cancelled", "cancelRequested": True},
+            )
+            return process
+
+        def reap() -> None:
+            for process in started:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, 9)
+                process.wait()
+
+        self.addCleanup(reap)
+        with self.assertRaises(runner.RunnerLaunchError) as raised:
+            self.drive_launch(seal_during_launch)
+        self.assertIsNone(self.published, "a pid was published over the sealed record")
+        self.assertEqual(raised.exception.error, "cancelled_by_user")
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll(), "the started child was left running")
+        state = self.record()
+        self.assertEqual(state["status"], "cancelled")
+        self.assertNotIn("pid", state)
+
+    def test_the_seal_waits_for_a_live_launcher(self) -> None:
+        self.write_unlaunched(launcher_pid=os.getpid(), started_at=datetime.now(UTC))
+        self.assertFalse(wait_cancel_commands.seal_unlaunched_run(self.registry_root, self.run_id))
+        self.assertEqual(self.record()["status"], "creating_isolation")
+
+    def test_the_seal_proceeds_when_the_launcher_pid_was_reused(self) -> None:
+        # This process is alive but started long after the run's startedAt, so
+        # it cannot be the launcher that wrote the record.
+        self.write_unlaunched(launcher_pid=os.getpid(), started_at=datetime(2000, 1, 1, tzinfo=UTC))
+        self.assertTrue(wait_cancel_commands.seal_unlaunched_run(self.registry_root, self.run_id))
+        self.assertEqual(self.record()["status"], "cancelled")
+
+    def test_the_seal_proceeds_when_the_launcher_is_dead(self) -> None:
+        self.write_unlaunched(launcher_pid=_dead_pid(), started_at=datetime.now(UTC))
+        self.assertTrue(wait_cancel_commands.seal_unlaunched_run(self.registry_root, self.run_id))
 
 
 class DryRunCwdTests(_WorkflowFixture):

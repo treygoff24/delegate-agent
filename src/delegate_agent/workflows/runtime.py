@@ -3641,6 +3641,11 @@ class WorkflowDsl:
         if run_id is None:
             return _MISSING
         unadoptable = _unadoptable_run_reason(self.state.workspace, run_id)
+        if unadoptable == "never_launched" and key in self.state.lifetime_started_keys:
+            # This lifetime started that run, so its launcher is a sibling
+            # thread of this supervisor, not a dead predecessor. Sealing it and
+            # relaunching could leave two children for one step; wait instead.
+            unadoptable = None
         if unadoptable is not None:
             # A cancelled, stale, or never-launched run holds no answer and no
             # live process to wait on. Seal what is sealable and relaunch;
@@ -5529,21 +5534,22 @@ def _unadoptable_run_reason(workspace: Path, run_id: str) -> str | None:
     root = _run_registry_root(workspace)
     try:
         state = run_registry.load_run_state_or_none(root, run_id)
-        run_path = run_registry.run_directory(root, run_id)
+        fields = run_registry.status_fields(state)
+        effective = fields.get("effectiveStatus")
+        if effective == run_registry.STATUS_CANCELLED:
+            return "cancelled"
+        reason = fields.get("staleReason")
+        if effective == run_registry.STATUS_STALE and reason != "missing_pid":
+            return f"stale:{reason}" if isinstance(reason, str) else "stale"
+        # A record with no pid may be a launch still in flight. It is only
+        # abandoned once its launcher is verifiably gone and the grace window
+        # has passed; relaunching sooner could run two children for one step.
+        if wait_cancel_commands.unlaunched_run_sealable(root, run_id, state):
+            return "never_launched"
     except (ValueError, OSError):
         # An unreadable record is not evidence of a dead run; let the normal
         # wait-and-read path decide.
         return None
-    fields = run_registry.status_fields(state)
-    effective = fields.get("effectiveStatus")
-    if effective == run_registry.STATUS_CANCELLED:
-        return "cancelled"
-    if effective == run_registry.STATUS_STALE:
-        reason = fields.get("staleReason")
-        return f"stale:{reason}" if isinstance(reason, str) else "stale"
-    age = wait_cancel_commands.unlaunched_run_age(state, run_path)
-    if age is not None and age >= wait_cancel_commands.UNLAUNCHED_SEAL_GRACE_SECONDS:
-        return "never_launched"
     return None
 
 

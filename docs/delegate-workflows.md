@@ -254,11 +254,25 @@ siblings from starting after a human checkpoint has requested control.
 A child record that never published a pid (a launch whose isolation or
 process start never completed, so it sits at `running` or
 `creating_isolation` with no pid) is refused while it may still be launching.
-After 300 seconds without activity, resume seals it as `cancelled` with
-`staleReason: missing_pid` instead of failing with `workflow_children_unsealed`.
+Resume seals it as `cancelled` with `staleReason: missing_pid`, instead of
+failing with `workflow_children_unsealed`, only when both hold: it has shown no
+activity for 300 seconds, and its launcher is verifiably gone. A
+`creating_isolation` record names its launcher (`launcherPid`); the launcher
+counts as gone when that pid is dead or now belongs to a process that started
+after the run. A record that names no launcher relies on the 300-second window
+alone. The seal also stamps `cancelRequested`, and the runner re-reads the
+record under the registry lock before every process start and before publishing
+a pid, so a launcher that outlives the seal refuses to start a child for it
+(`cancelled_by_user`) rather than running a second child for the step.
+A sealed record reads as `cancelled`, never as `failureKind: runner_lost`;
+`runner_lost` is what `wait` reports for a running record whose pid is missing or
+dead and that nobody has sealed.
+
 Adoption follows the same rule: when a key's latest child run is cancelled,
-stale, or never launched, the call journals `agent_adopt_skipped` with the
-reason and relaunches instead of waiting on it or failing.
+stale (dead pid), or sealable as never launched, the call journals
+`agent_adopt_skipped` with the reason and relaunches instead of waiting on it or
+failing. A never-launched run that this supervisor lifetime started is a
+sibling still launching, so adoption waits on it instead of sealing it.
 
 ### Gate actions
 
