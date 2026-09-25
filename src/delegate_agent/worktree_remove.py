@@ -420,6 +420,7 @@ def remove_worktree(
     force: bool = False,
     include_detached: bool = False,
     retirement_ignore_globs: tuple[str, ...] | None = None,
+    workspace: Path | None = None,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -435,7 +436,7 @@ def remove_worktree(
         force=force,
     )
     with run_registry.registry_lock(registry_root):
-        record = wm.resolve_record(registry_root, handle=handle)
+        record = wm.resolve_record(registry_root, handle=handle, workspace=workspace)
         alias = str(record.get("alias") or handle)
         inspection = wm.inspect_worktree(
             registry_root,

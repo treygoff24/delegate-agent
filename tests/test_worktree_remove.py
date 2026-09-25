@@ -467,6 +467,32 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertTrue(json.loads(out)["pathRemoved"])
             self.assertFalse(Path(wt_path).exists())
 
+    def test_relative_path_resolves_against_the_workspace_not_the_process_cwd(self):
+        """dlg-qd1: `--cwd /repo worktree remove ./.delegate/worktrees/x` from elsewhere."""
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-relative"
+            relative = Path(".delegate") / "worktrees" / "cursor-relative"
+            wt_path = str(Path(path) / relative)
+            self._seed_persistent_run(path, alias="cursor-4", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+            elsewhere = Path(fake_home) / "elsewhere"
+            elsewhere.mkdir()
+            original = os.getcwd()
+            os.chdir(elsewhere)
+            try:
+                code, out, err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "remove", f"./{relative}"],
+                    home=fake_home,
+                )
+            finally:
+                os.chdir(original)
+
+            self.assertEqual(code, 0, out + err)
+            payload = json.loads(out)
+            self.assertEqual(payload["alias"], "cursor-4")
+            self.assertFalse(Path(wt_path).exists())
+
     def test_unknown_path_and_vanished_handle_point_at_scope_and_reap(self):
         _repo, path = self._make_repo()
         registry_api.ensure_registry(Path(path), workspace_kind="git")
