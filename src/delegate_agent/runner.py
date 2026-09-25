@@ -172,6 +172,9 @@ class RunContext:
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
     stall_seconds: float = STALL_SECONDS_DEFAULT
+    # --stall-minutes pinned this run's threshold; DELEGATE_STALL_MINUTES does
+    # not override a per-run choice.
+    stall_seconds_pinned: bool = False
     process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
     tracked_stream_max_bytes: int | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
@@ -1973,7 +1976,59 @@ class StreamLimitSignal:
             self.event.set()
 
 
+def _worktree_head_probe(cwd: str | None) -> Callable[[], str | None] | None:
+    """A stall-watchdog probe returning the execution checkout's HEAD commit.
+
+    A commit is durable progress even when the child's stdout says nothing, so
+    a changed HEAD restarts the idle clock. Outside a Git checkout the probe
+    answers None and never counts as progress.
+    """
+    if not cwd:
+        return None
+
+    def probe() -> str | None:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env["LC_ALL"] = "C"
+        try:
+            result = subprocess.run(  # nosec B603 B607 - fixed Git argv, no shell.
+                ["git", "-C", cwd, "rev-parse", "--verify", "--quiet", "HEAD"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        head = result.stdout.strip()
+        return head if result.returncode == 0 and head else None
+
+    return probe
+
+
 def _stall_message(detail: JsonObject) -> str:
+    reason = detail.get("stallReason")
+    if reason == stall_watchdog.STALL_REASON_RUNAWAY_OUTPUT:
+        return (
+            f"Child produced {detail.get('outputChars')} characters of model output with no "
+            f"tool activity (limit {detail.get('outputCharLimit')}); the run was cancelled "
+            "by the stall watchdog as runaway output."
+        )
+    if reason == stall_watchdog.STALL_REASON_REPEATED_TOOL_FAILURE:
+        return (
+            f"Child failed the same {detail.get('tool')} call on the same target "
+            f"{detail.get('failures')} times in a row; the run was cancelled by the stall "
+            "watchdog as a repeated tool failure."
+        )
+    activity = detail.get("childActivity")
+    activity_text = {
+        "cpu_active": " The child was still using CPU (working or looping silently).",
+        "waiting": (
+            " The child was alive but idle on CPU (waiting on its provider, the "
+            "network, or a hung read)."
+        ),
+        "no_processes": " No process was left in the child's process group.",
+    }.get(activity if isinstance(activity, str) else "", "")
     idle = detail.get("idleSeconds")
     threshold = detail.get("thresholdSeconds")
     idle_text = f"{float(idle):.0f}s" if isinstance(idle, (int, float)) else "the stall window"
@@ -1983,6 +2038,7 @@ def _stall_message(detail: JsonObject) -> str:
     return (
         f"Child produced no new output and no tool activity for {idle_text} "
         f"(stall threshold {threshold_text}); the run was cancelled by the stall watchdog."
+        f"{activity_text}"
     )
 
 
@@ -2440,9 +2496,15 @@ def _capture_tracked_process(
         continuity_mode=ctx.continuity_mode,
     )
     watchdog = stall_watchdog.StallWatchdog(
-        stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
+        stall_seconds=(
+            ctx.stall_seconds
+            if ctx.stall_seconds_pinned
+            else _stall_seconds_from_env(ctx.stall_seconds)
+        ),
         harness=ctx.harness,
+        progress_probe=_worktree_head_probe(ctx.execution_cwd),
     )
+    watchdog.prime_probe()
     pgid = process_group_pgid or _process_group_for_process(process)
     # The live generation (status/pid/pgid) is already durable: it was published
     # under the launch-generation lock once Popen returned and before this
@@ -2541,8 +2603,15 @@ def _capture_tracked_process(
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
                 prior_session_id = accumulator.session_id
+                events_before = accumulator.events.total
                 accumulator.ingest_line(line)
-                watchdog.observe_line(line, now=time.monotonic())
+                watchdog.observe_line(
+                    line,
+                    now=time.monotonic(),
+                    tool_events=stall_watchdog.tool_events_from(
+                        accumulator.events.last(accumulator.events.total - events_before)
+                    ),
+                )
                 if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
                 elif accumulator.harness in {"pi", "omp"}:
@@ -2720,6 +2789,32 @@ def _capture_tracked_process(
                 idle_seconds = watchdog.stalled_for(now)
                 if idle_seconds is not None:
                     stall_detail = watchdog.stall_detail(idle_seconds)
+                    if (
+                        stall_detail.get("stallReason") == stall_watchdog.STALL_REASON_IDLE
+                        and stall_watchdog.reports_completion_by_text(ctx.harness)
+                        and stall_watchdog.completion_report_status(accumulator.assistant_text)
+                        is not None
+                    ):
+                        # A text-stream child (Devin) that already wrote its
+                        # completion report and then went quiet finished its
+                        # work; only its exit is missing. Stop it the way a
+                        # terminal event followed by a lingering child is
+                        # stopped, not as a stall.
+                        _terminate_call_process(
+                            process,
+                            pgid=pgid,
+                            grace_seconds=process_group_grace_seconds,
+                            identity_ctx=ctx,
+                        )
+                        stall_detail = None
+                        stopped_after_completion = True
+                        exit_code = 0
+                        break
+                    # Idle stdout cannot say whether the child is waiting on its
+                    # provider, spinning silently, or gone; sample the group
+                    # before it is signalled so the record can.
+                    with contextlib.suppress(Exception):
+                        stall_detail.update(stall_watchdog.process_group_activity(pgid))
                     _terminate_call_process(
                         process,
                         pgid=pgid,

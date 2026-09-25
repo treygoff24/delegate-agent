@@ -33,14 +33,32 @@ costs far more than letting a stalled one reach its stage timeout:
 Unrecognized structured events fall back to whole-line deduplication, so an
 engine whose vocabulary is not modeled here still gets the "identical output
 forever" check without any risk of being misread as idle.
+
+Idle time is not the only way a run stops making progress, so the watchdog can
+also *trip* on a named reason (``stall_reason`` in the detail):
+
+- ``runaway_output``: novel model output keeps arriving but no tool runs. A
+  stream of unique-looking text resets the idle clock forever and used to run
+  until the provider rate-limited it; past a generous character budget with no
+  tool activity the run is stopped.
+- ``repeated_tool_failure``: the same tool call on the same target fails the
+  same way several times in a row with nothing else succeeding in between.
+
+A repeated identical tool call (same tool, same target, same outcome as the
+call just before it) is also not progress: a model re-running the same failing
+or no-op command must not keep resetting the idle clock. And an external probe
+(the execution worktree's HEAD) counts as progress when a silent child commits.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess  # nosec B404 - fixed ps argv for a stall diagnostic.
 import threading
+import time
 from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -60,6 +78,26 @@ RECENT_DELTA_MEMORY = 8
 DELTA_SIGNATURE_LIMIT = 512
 
 _WHITESPACE = re.compile(r"\s+")
+
+# Characters of novel model output (text and thinking deltas) a run may produce
+# with no tool activity at all before it is stopped as runaway output. About
+# 100k tokens: far past any real final report, well short of the multi-hour
+# unique-looking stream that previously ran until the provider returned 429.
+RUNAWAY_OUTPUT_CHARS_DEFAULT = 400_000
+# Consecutive identical failures of one tool call on one target, with no other
+# tool completing in between, before the run is stopped. A model retrying the
+# same broken command a few times is normal; this many is a loop.
+REPEATED_TOOL_FAILURE_LIMIT = 5
+
+STALL_REASON_IDLE = "idle"
+STALL_REASON_RUNAWAY_OUTPUT = "runaway_output"
+STALL_REASON_REPEATED_TOOL_FAILURE = "repeated_tool_failure"
+
+_TOOL_FAILURE_STATUSES = frozenset({"error", "failed", "failure"})
+# `ps` process states that mean "on CPU or runnable" on Linux and macOS.
+_RUNNING_PROCESS_STATES = frozenset({"R"})
+PROCESS_SNAPSHOT_LIMIT = 16
+PROCESS_SAMPLE_INTERVAL_SEC = 1.0
 
 # Codex item types that represent work in flight rather than model output.
 # agent_message is the model talking, so it is classified as a delta instead.
@@ -515,6 +553,11 @@ class StallWatchdog:
     stall_seconds: float
     harness: str | None = None
     recent_delta_memory: int = RECENT_DELTA_MEMORY
+    runaway_output_chars: int = RUNAWAY_OUTPUT_CHARS_DEFAULT
+    repeated_failure_limit: int = REPEATED_TOOL_FAILURE_LIMIT
+    # Returns an opaque token that changes when the child made durable progress
+    # outside its stdout (the execution worktree's HEAD), or None when unknown.
+    progress_probe: Callable[[], str | None] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _armed: bool = field(default=False, repr=False)
     _last_progress_at: float | None = field(default=None, repr=False)
@@ -522,6 +565,17 @@ class StallWatchdog:
     _pending_tools: list[str] = field(default_factory=list, repr=False)
     _last_progress_label: str | None = field(default=None, repr=False)
     _lines_seen: int = field(default=0, repr=False)
+    _output_chars_since_tool: int = field(default=0, repr=False)
+    _last_completion: tuple[str, str, str] | None = field(default=None, repr=False)
+    _failure_signature: tuple[str, str] | None = field(default=None, repr=False)
+    _failure_count: int = field(default=0, repr=False)
+    _trip: JsonObject | None = field(default=None, repr=False)
+    # Time spent inside tool calls since the last progress. Idle time excludes
+    # it, so a slow polling loop that repeats one call is not killed while a
+    # fast loop of instant no-op calls still accumulates idle time.
+    _tool_seconds_since_progress: float = field(default=0.0, repr=False)
+    _tool_started_at: float | None = field(default=None, repr=False)
+    _probe_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._recent_deltas = deque(maxlen=max(self.recent_delta_memory, 1))
@@ -540,7 +594,36 @@ class StallWatchdog:
         with self._lock:
             return len(self._pending_tools)
 
-    def observe_line(self, line: str, *, now: float) -> None:
+    def prime_probe(self) -> None:
+        """Record the external progress baseline before the child can act."""
+        if not self.enabled or self.progress_probe is None:
+            return
+        token = self._run_probe()
+        with self._lock:
+            self._probe_token = token
+
+    def _run_probe(self) -> str | None:
+        probe = self.progress_probe
+        if probe is None:
+            return None
+        try:
+            return probe()
+        except Exception:  # a diagnostic probe never breaks capture
+            return None
+
+    def observe_line(
+        self,
+        line: str,
+        *,
+        now: float,
+        tool_events: Iterable[ToolEvent] = (),
+    ) -> None:
+        """Account one stdout line.
+
+        ``tool_events`` are the normalized tool starts/completions the stream
+        accumulator derived from this same line; they carry the tool name,
+        target, and outcome the raw line classification cannot see.
+        """
         if not self.enabled or not line.strip():
             return
         signals = classify_line(line, harness=self.harness)
@@ -549,10 +632,70 @@ class StallWatchdog:
             if not self._armed:
                 self._armed = True
                 self._last_progress_at = now
-            self._apply_locked(signals, now)
+            self._apply_locked(signals, now, tuple(tool_events))
 
-    def _apply_locked(self, signals: LineSignals, now: float) -> None:
+    def _repeats_locked(self, tool_events: tuple[ToolEvent, ...]) -> bool:
+        """Whether every tool event on this line repeats the previous call.
+
+        A start repeats when it names the tool and target that last completed;
+        a completion repeats when its tool, target, and outcome all match the
+        previous completion. Events with no target are never repeats: without
+        one, distinct calls of the same tool are indistinguishable.
+        """
+        if not tool_events:
+            return False
+        last = self._last_completion
+        repeated = True
+        for event in tool_events:
+            if event.target is None:
+                return False
+            if event.completed:
+                signature = (event.tool, event.target, event.status or "")
+                if signature != last:
+                    repeated = False
+                last = signature
+            elif last is None or (event.tool, event.target) != last[:2]:
+                repeated = False
+        return repeated
+
+    def _record_outcomes_locked(self, tool_events: tuple[ToolEvent, ...]) -> None:
+        for event in tool_events:
+            if not event.completed:
+                continue
+            if event.target is not None:
+                self._last_completion = (event.tool, event.target, event.status or "")
+            else:
+                self._last_completion = None
+            failed = (event.status or "").lower() in _TOOL_FAILURE_STATUSES
+            if not failed or event.target is None:
+                self._failure_signature = None
+                self._failure_count = 0
+                continue
+            signature = (event.tool, event.target)
+            if signature == self._failure_signature:
+                self._failure_count += 1
+            else:
+                self._failure_signature = signature
+                self._failure_count = 1
+            if self._trip is None and self._failure_count >= max(self.repeated_failure_limit, 1):
+                self._trip = {
+                    "stallReason": STALL_REASON_REPEATED_TOOL_FAILURE,
+                    "tool": event.tool,
+                    "target": event.target[:DELTA_SIGNATURE_LIMIT],
+                    "failures": self._failure_count,
+                }
+
+    def _apply_locked(
+        self,
+        signals: LineSignals,
+        now: float,
+        tool_events: tuple[ToolEvent, ...] = (),
+    ) -> None:
+        tool_activity = bool(signals.tools_started or signals.tools_finished)
+        repeated_call = tool_activity and self._repeats_locked(tool_events)
+        self._record_outcomes_locked(tool_events)
         progressed = False
+        had_pending = bool(self._pending_tools)
         for key in signals.tools_started:
             self._pending_tools.append(key)
             progressed = True
@@ -565,6 +708,18 @@ class StallWatchdog:
                 # would disable the watchdog for the rest of the run.
                 self._pending_tools.pop(0)
             progressed = True
+        if not had_pending and self._pending_tools:
+            self._tool_started_at = now
+        elif had_pending and not self._pending_tools and self._tool_started_at is not None:
+            self._tool_seconds_since_progress += max(now - self._tool_started_at, 0.0)
+            self._tool_started_at = None
+        if tool_activity:
+            self._output_chars_since_tool = 0
+        if repeated_call:
+            # Re-running the call that just finished, or finishing it the same
+            # way again, is activity but not progress: the idle clock and the
+            # repeated-content memory both carry on from the previous phase.
+            progressed = False
         if signals.progress:
             progressed = True
         if progressed:
@@ -578,30 +733,213 @@ class StallWatchdog:
             if normalized in self._recent_deltas:
                 continue
             self._recent_deltas.append(normalized)
+            self._output_chars_since_tool += len(delta)
             progressed = True
+        if (
+            self._trip is None
+            and self.runaway_output_chars > 0
+            and self._output_chars_since_tool > self.runaway_output_chars
+        ):
+            self._trip = {
+                "stallReason": STALL_REASON_RUNAWAY_OUTPUT,
+                "outputChars": self._output_chars_since_tool,
+                "outputCharLimit": self.runaway_output_chars,
+            }
         if progressed:
             self._last_progress_at = now
             self._last_progress_label = signals.label
+            self._tool_seconds_since_progress = 0.0
+            if self._pending_tools:
+                self._tool_started_at = now
 
     def stalled_for(self, now: float) -> float | None:
-        """Seconds of no progress if this run is stalled, else None."""
+        """Seconds of no progress if this run is stalled, else None.
+
+        A tripped detector (runaway output, repeated tool failure) is stalled
+        immediately, whatever the idle clock says.
+        """
         if not self.enabled:
             return None
         with self._lock:
             if not self._armed or self._last_progress_at is None:
                 return None
+            idle = now - self._last_progress_at - self._tool_seconds_since_progress
+            if self._trip is not None:
+                return max(idle, 0.0)
             if self._pending_tools:
                 return None
-            idle = now - self._last_progress_at
             if idle < self.stall_seconds:
                 return None
-            return idle
+        # Idle past the threshold. A silent child may still be committing in
+        # its worktree; that counts as progress and restarts the clock.
+        if self.progress_probe is not None:
+            token = self._run_probe()
+            with self._lock:
+                if token is not None and token != self._probe_token:
+                    self._probe_token = token
+                    self._last_progress_at = now
+                    self._last_progress_label = "worktree_commit"
+                    self._tool_seconds_since_progress = 0.0
+                    self._recent_deltas.clear()
+                    return None
+        return idle
 
     def stall_detail(self, idle_seconds: float) -> JsonObject:
         with self._lock:
-            return {
+            detail: JsonObject = {
+                "stallReason": STALL_REASON_IDLE,
                 "idleSeconds": round(idle_seconds, 3),
                 "thresholdSeconds": round(self.stall_seconds, 3),
                 "lastProgress": self._last_progress_label,
                 "linesSeen": self._lines_seen,
             }
+            if self._trip is not None:
+                detail.update(self._trip)
+            return detail
+
+
+@dataclass(frozen=True)
+class ToolEvent:
+    """One normalized tool start or completion, as the stream accumulator saw it."""
+
+    tool: str
+    target: str | None
+    status: str | None
+    completed: bool
+
+
+def tool_events_from(events: Iterable[object]) -> tuple[ToolEvent, ...]:
+    """Pick tool starts/completions out of normalized stream events."""
+    picked: list[ToolEvent] = []
+    for event in events:
+        kind = getattr(event, "kind", None)
+        if kind not in {"tool.started", "tool.completed"}:
+            continue
+        tool = getattr(event, "tool", None)
+        target = getattr(event, "target", None)
+        status = getattr(event, "status", None)
+        picked.append(
+            ToolEvent(
+                tool=tool if isinstance(tool, str) else "tool",
+                target=target if isinstance(target, str) and target.strip() else None,
+                status=status if isinstance(status, str) else None,
+                completed=kind == "tool.completed",
+            )
+        )
+    return tuple(picked)
+
+
+_COMPLETION_REPORT_STATUS_RE = re.compile(
+    r"^[ \t>*_-]*\**status\**\s*:\s*\**\s*(completed|blocked|failed)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+# How far from the end of the output a completion report's status line may sit
+# and still count as the run's final word.
+COMPLETION_REPORT_TAIL_CHARS = 6000
+
+
+def completion_report_status(text: str) -> str | None:
+    """The status a trailing Delegate completion report declares, if any.
+
+    Delegate asks every child to end with a report whose first item is
+    ``Status: completed / blocked / failed``. A text-stream harness (Devin)
+    has no terminal event, so this line near the end of its output is the only
+    evidence that it finished before it went quiet.
+    """
+    tail = text[-COMPLETION_REPORT_TAIL_CHARS:]
+    matches = list(_COMPLETION_REPORT_STATUS_RE.finditer(tail))
+    if not matches:
+        return None
+    return matches[-1].group(1).lower()
+
+
+def reports_completion_by_text(harness: str | None) -> bool:
+    """Harnesses whose only completion evidence is a report in the output text."""
+    return harness in _TEXT_STREAM_HARNESSES
+
+
+def _ps_group_rows(pgid: int) -> list[tuple[int, str, float, str]]:
+    try:
+        completed = subprocess.run(  # nosec B603 B607 - fixed argv, no shell.
+            ["ps", "-A", "-o", "pid=,pgid=,stat=,time=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    rows: list[tuple[int, str, float, str]] = []
+    for raw in completed.stdout.splitlines():
+        parts = raw.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            pid, group = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if group != pgid:
+            continue
+        rows.append((pid, parts[2], _cpu_seconds(parts[3]), parts[4].strip()))
+    return rows
+
+
+def _cpu_seconds(value: str) -> float:
+    """Parse ps ``time`` ([[dd-]hh:]mm:ss[.cc]) into seconds; 0 when unparseable."""
+    days = 0
+    if "-" in value:
+        day_text, value = value.split("-", 1)
+        try:
+            days = int(day_text)
+        except ValueError:
+            return 0.0
+    total = 0.0
+    try:
+        for part in value.split(":"):
+            total = total * 60 + float(part)
+    except ValueError:
+        return 0.0
+    return days * 86400 + total
+
+
+def process_group_activity(
+    pgid: int | None,
+    *,
+    sample_interval: float | None = None,
+    rows: Callable[[int], list[tuple[int, str, float, str]]] = _ps_group_rows,
+    sleep: Callable[[float], None] = time.sleep,
+) -> JsonObject:
+    """What the stalled child's process group was doing when the stall fired.
+
+    Idle stdout alone cannot tell a child waiting on its provider from one
+    that is spinning silently or has died, so the group is sampled twice:
+
+    - ``cpu_active``: CPU time grew between samples (working or looping without
+      output),
+    - ``waiting``: alive with no CPU growth (blocked on I/O: a provider queue,
+      a network stall, or a hung read),
+    - ``no_processes``: nothing left in the group,
+    - ``unknown``: the group could not be inspected.
+    """
+    if pgid is None or pgid <= 1:
+        return {"childActivity": "unknown"}
+    first = rows(pgid)
+    if not first:
+        return {"childActivity": "no_processes"}
+    sleep(PROCESS_SAMPLE_INTERVAL_SEC if sample_interval is None else sample_interval)
+    second = rows(pgid)
+    if not second:
+        return {"childActivity": "no_processes"}
+    before = {pid: cpu for pid, _stat, cpu, _cmd in first}
+    grew = any(cpu > before.get(pid, 0.0) for pid, _stat, cpu, _cmd in second)
+    running = any(stat[:1] in _RUNNING_PROCESS_STATES for _pid, stat, _cpu, _cmd in second)
+    activity = "cpu_active" if grew or running else "waiting"
+    return {
+        "childActivity": activity,
+        "processes": [
+            {"pid": pid, "stat": stat, "cpuSeconds": round(cpu, 2), "command": cmd[:120]}
+            for pid, stat, cpu, cmd in second[:PROCESS_SNAPSHOT_LIMIT]
+        ],
+    }
