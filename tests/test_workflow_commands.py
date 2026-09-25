@@ -4766,13 +4766,11 @@ class WorkflowCommandTests(unittest.TestCase):
 
     def test_structured_retry_relaunches_unsupported_engine_in_same_worktree(self) -> None:
         subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
-        # The fixture's HOME and fake binaries live inside this repo. Seeded
-        # into the child's worktree, `git status --untracked-files=normal`
-        # reports them as collapsed `home/` and `bin/` entries that the
-        # per-file seeded filter never matches, so the work summary would
-        # claim changes this child never made and the changed-tree guard would
-        # (correctly) refuse the relaunch this test is about.
-        (self.workspace / ".git" / "info" / "exclude").write_text("home/\nbin/\n", encoding="utf-8")
+        # The fixture's HOME and fake binaries live inside this repo and are
+        # seeded into the child's worktree as untracked directories. The work
+        # summary must still report no child changes (`git status` lists the
+        # seeded files individually), or the changed-tree guard refuses the
+        # relaunch this test is about.
         (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
         subprocess.run(
@@ -5403,6 +5401,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_retry", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_structured_retry", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_structured_retry_refused", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_structured_exhausted", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("item_parked", workflow_registry.DURABLE_EVENT_TYPES)
@@ -5431,6 +5430,7 @@ class WorkflowCommandTests(unittest.TestCase):
             {"seq": 10, "type": "agent_structured_exhausted", "key": "k"},
             {"seq": 11, "type": "item_parked", "name": "parked"},
             {"seq": 12, "type": "item_unparked", "name": "parked"},
+            {"seq": 13, "type": "agent_structured_retry_refused", "key": "k"},
         ]
         try:
             for event in events:

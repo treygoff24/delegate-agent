@@ -199,7 +199,10 @@ def compute_outcome(
     ``work_changed`` says a tracked work run's work summary shows file changes
     or commits. Such a run that exits 0 without assistant text succeeded with a
     warning (its work landed and an orchestrator must be able to adopt it);
-    without changes it fails as ``no_assistant_text``.
+    without changes it fails as ``no_assistant_text``. ``missing_deliverables``
+    is checked before the no-output rules: a run with a missing ``--expect-file``
+    deliverable fails as ``deliverable_missing`` even when it also produced no
+    assistant text, because that is the verdict the caller asked for.
     """
     warnings: list[str] = []
     if orphaned_processes:
@@ -243,7 +246,12 @@ def compute_outcome(
     if unrecovered_error and child_failures.is_usage_limit(unrecovered_error):
         evidence.append("provider's last unrecovered error was a quota or usage limit")
         return done(STATUS_FAILED, FAILURE_PROVIDER_QUOTA, 1)
-    if result_quality in NO_OUTPUT_RESULT_QUALITIES and work_changed and not missing_deliverables:
+    # The deliverable verdict outranks the result-quality one: a caller that
+    # passed ``--expect-file`` asked whether the deliverable exists, and an
+    # exit-0 run with no assistant text and a missing file is both.
+    if missing_deliverables:
+        return done(STATUS_FAILED, FAILURE_DELIVERABLE_MISSING, 1)
+    if result_quality in NO_OUTPUT_RESULT_QUALITIES and work_changed:
         evidence.append(f"child exited 0 with resultQuality={result_quality}")
         evidence.append("work summary shows file changes or commits")
         warnings.append(NO_ASSISTANT_TEXT_WITH_CHANGES_WARNING)
@@ -257,6 +265,4 @@ def compute_outcome(
             else FAILURE_NO_ASSISTANT_TEXT
         )
         return done(STATUS_FAILED, kind, 1)
-    if missing_deliverables:
-        return done(STATUS_FAILED, FAILURE_DELIVERABLE_MISSING, 1)
     return done(STATUS_SUCCEEDED, None, 0)
