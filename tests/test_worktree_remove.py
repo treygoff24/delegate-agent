@@ -445,6 +445,88 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(code, errors_api.EXIT_USAGE)
             self.assertEqual(json.loads(out)["code"], "not_worktree_run")
 
+    def test_worktree_remove_accepts_the_worktree_path(self):
+        """dlg-qd1: agents hold the path; remove and show accept it as the handle."""
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-by-path"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-by-path")
+            self._seed_persistent_run(path, alias="cursor-4", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+
+            code, out, err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "show", wt_path + "/"], home=fake_home
+            )
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["alias"], "cursor-4")
+
+            code, out, err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", wt_path], home=fake_home
+            )
+            self.assertEqual(code, 0, err)
+            self.assertTrue(json.loads(out)["pathRemoved"])
+            self.assertFalse(Path(wt_path).exists())
+
+    def test_unknown_path_and_vanished_handle_point_at_scope_and_reap(self):
+        _repo, path = self._make_repo()
+        registry_api.ensure_registry(Path(path), workspace_kind="git")
+        with tempfile.TemporaryDirectory() as fake_home:
+            stray = str(Path(fake_home) / "wt" / "nobody-owns-this")
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", stray], home=fake_home
+            )
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "unknown_worktree_path")
+            self.assertIn("--cwd SOURCE_REPO", payload["message"])
+            canonical = str(Path(stray).resolve(strict=False))
+            self.assertIn(f"delegate worktree reap --path {canonical}", payload["nextActions"])
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "zzz-99"], home=fake_home
+            )
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "unknown_handle")
+            self.assertIn("workspace's Registry", payload["message"])
+            self.assertIn("worktree reap --path PATH", payload["message"])
+
+    def test_not_worktree_run_names_the_run_that_owns_the_worktree(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            wt_path = str(Path(fake_home) / "wt" / "cursor-owner")
+            owner_id, owner = self._seed_persistent_run(
+                path, alias="cursor-4", branch="delegate/cursor-owner", execution_cwd=wt_path
+            )
+            registry_root = self._registry_root(path)
+            run_id, alias = registry_api.register_run(
+                registry_root, harness="cursor", metadata={"mode": "work", "cwd": wt_path}
+            )
+            registry_api.write_json_atomic(
+                registry_api.run_directory(registry_root, run_id) / registry_api.MANIFEST_FILE,
+                {
+                    "schema": registry_api.MANIFEST_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "harness": "cursor",
+                    "mode": "work",
+                    "cwd": wt_path,
+                    "resumedFrom": {"runId": owner_id, "alias": owner},
+                    "worktreeAttachment": {
+                        "sourceRunId": owner_id,
+                        "sourceAlias": owner,
+                        "path": wt_path,
+                    },
+                },
+            )
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "show", alias], home=fake_home
+            )
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "not_worktree_run")
+            self.assertIn(f"ran attached to {owner}", payload["message"])
+            self.assertEqual(payload["nextActions"][0], f"delegate worktree show {owner}")
+
     def test_branch_collision_does_not_delete_preexisting_branch(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

@@ -50,7 +50,31 @@ class WaitCommand:
     timeout_seconds: int = WAIT_DEFAULT_TIMEOUT_SECONDS
     interval_seconds: int = WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report: bool = False
+    structural: bool = False
     json_mode: bool = False
+
+
+# `wait --json --structural`: what a caller needs to decide its next step
+# (identity, terminal status, and why a run failed), without the full view.
+WAIT_STRUCTURAL_KEYS = (
+    "runId",
+    "alias",
+    "harness",
+    "group",
+    "mode",
+    "rawStatus",
+    "effectiveStatus",
+    "status",
+    "terminalState",
+    "resultQuality",
+    "failureKind",
+    "failureReason",
+    "staleReason",
+    "exitCode",
+    "startedAt",
+    "finishedAt",
+    "completionReportContent",
+)
 
 
 @dataclass(frozen=True)
@@ -306,7 +330,9 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
             "ok": not timed_out and all(_run_succeeded(run) for run in runs),
             "schema": WAIT_SCHEMA,
             "timedOut": timed_out,
-            "runs": runs,
+            "runs": [{key: run[key] for key in WAIT_STRUCTURAL_KEYS if key in run} for run in runs]
+            if command.structural
+            else runs,
         }
         if warnings:
             payload["warnings"] = warnings

@@ -136,6 +136,33 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertFalse(payload["timedOut"])
         self.assertEqual(payload["runs"][0]["status"], "succeeded")
 
+    def test_wait_structural_json_keeps_only_decision_fields(self):
+        """dlg-qd1: a compact wait view for callers that only branch on the outcome."""
+        _ok_id, ok_alias = self.write_run(status="succeeded", result_quality="complete")
+        dead_id, dead_alias = self.write_run(status="running", pid=999999999)
+
+        code, out, err = self.run_cli(
+            ["--json", "wait", ok_alias, dead_alias, "--structural", "--interval", "1"]
+        )
+
+        self.assertEqual(code, 1, err)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["timedOut"])
+        for run in payload["runs"]:
+            self.assertLessEqual(set(run), set(wait_cancel_commands.WAIT_STRUCTURAL_KEYS))
+        ok_run, dead_run = payload["runs"]
+        self.assertEqual((ok_run["alias"], ok_run["status"]), (ok_alias, "succeeded"))
+        self.assertEqual(ok_run["resultQuality"], "complete")
+        self.assertEqual(dead_run["runId"], dead_id)
+        self.assertEqual(dead_run["status"], "failed")
+        self.assertEqual(dead_run["staleReason"], "dead_pid")
+        self.assertIn("failureKind", dead_run)
+        _code, full_out, _err = self.run_cli(["--json", "wait", ok_alias, "--interval", "1"])
+        self.assertGreater(
+            len(json.loads(full_out)["runs"][0]), len(ok_run), "structural must be smaller"
+        )
+
     def test_wait_dead_pid_is_terminal_failure_not_timeout(self):
         _run_id, alias = self.write_run(status="running", pid=999999999)
         code, out, err = self.run_cli(

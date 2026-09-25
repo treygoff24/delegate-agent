@@ -2770,6 +2770,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     timeout = wait_cancel_commands.WAIT_DEFAULT_TIMEOUT_SECONDS
     interval = wait_cancel_commands.WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report = False
+    structural = False
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -2810,6 +2811,10 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             completion_report = True
             i += 1
             continue
+        if token == "--structural":
+            structural = True
+            i += 1
+            continue
         if token.startswith("-"):
             raise DelegateError("unknown_option", unknown_option_message("wait", token))
         handles.append(token)
@@ -2828,6 +2833,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             timeout_seconds=timeout,
             interval_seconds=interval,
             completion_report=completion_report,
+            structural=structural,
             json_mode=json_mode,
         ),
     )

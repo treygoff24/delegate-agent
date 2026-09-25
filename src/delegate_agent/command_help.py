@@ -1409,7 +1409,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Wait for tracked runs to finish and report terminal states.",
         usage=(
             "delegate [--json] wait <handle>... [--latest HARNESS] [--group NAME] "
-            "[--timeout SEC] [--interval SEC] [--completion-report]",
+            "[--timeout SEC] [--interval SEC] [--completion-report] [--structural]",
         ),
         arguments=(
             ArgSpec(
@@ -1428,12 +1428,18 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--group", "NAME", "Wait for all runs tagged with this group."),
             OptionSpec("--interval", "SEC", "Polling interval in seconds (default 3; min 1)."),
             OptionSpec("--completion-report", None, "Append each run's completion report."),
+            OptionSpec(
+                "--structural",
+                None,
+                "JSON: reduce each run to identity, terminal status, and failure fields.",
+            ),
         ),
         examples=(
             "delegate wait codex-1 cursor-2",
             "delegate wait --latest droid:glm --timeout 600 --interval 1",
             "delegate wait --group wave4",
             "delegate --json wait cursor --completion-report",
+            "delegate --json wait --group wave4 --structural",
         ),
         notes=(
             "Exit codes: 0 all succeeded; 1 any failed/cancelled; 124 timeout.",
@@ -1984,7 +1990,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ArgSpec(
                 "<handle>",
                 False,
-                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
+                "Worktree run ID, numbered alias, bare harness latest-worktree selector, or the worktree path.",
             ),
         ),
         options=(
@@ -2017,7 +2023,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ArgSpec(
                 "<handle>",
                 True,
-                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
+                "Worktree run ID, numbered alias, bare harness latest-worktree selector, or the worktree path.",
             ),
         ),
         options=(
