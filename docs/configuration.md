@@ -473,6 +473,29 @@ fallback.
 - `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
   `run --input-json`, `delegate profiles`, `models`, `capabilities`, and
   `setup`. Unknown names fail closed with `unknown_profile`.
+
+#### Profile and config precedence
+
+One order applies to every choice: an explicit flag beats the environment, and
+the environment beats a config default.
+
+| Layer | Config file (profile shim) | Active profile (Python) |
+| --- | --- | --- |
+| 1. Flag: `--auth-profile NAME` | `config.NAME.json` when that overlay exists; `AI_PROFILE` and the realm keys follow it for the child | `NAME` |
+| 2. Environment | `DELEGATE_CONFIG`, else `config.$AI_PROFILE.json` | first defined `profiles.detectFrom` variable |
+| 3. Config default | `~/.delegate/config.json` | `profiles.default` of the loaded config |
+
+A higher layer never wins silently over a lower layer that names something
+different. Delegate warns when:
+
+- `--auth-profile NAME` replaces an ambient `DELEGATE_CONFIG` or a different
+  `AI_PROFILE` (shim), or a different detected profile (Python);
+- `--auth-profile NAME` names `work` or `personal` but `config.NAME.json` is
+  missing, so only the definition changes while the environment's config and
+  keys stay in effect;
+- an inherited detection variable such as `DELEGATE_PROFILE` overrides the
+  loaded config's `profiles.default`. Pass `--auth-profile` with the default's
+  name to use it.
 - `delegate profiles` reports the detected profile, source, and resolved env
   keys. JSON output includes redacted values and never emits unredacted
   secret-keyed values.

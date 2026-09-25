@@ -34,6 +34,30 @@ _delegate_subcommand() {
   done
 }
 
+# Print the value of a leading global --auth-profile, or nothing. Mirrors the
+# global-option walk above: once the subcommand starts, later tokens belong to
+# it and never select a profile here.
+_delegate_flag_profile() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json|--pass-through|--no-completion-report)
+        shift
+        ;;
+      --auth-profile)
+        [ "$#" -ge 2 ] && printf '%s\n' "$2"
+        return 0
+        ;;
+      --cwd|--isolation|--completion-report|--group|--notify)
+        [ "$#" -ge 2 ] || return 0
+        shift 2
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done
+}
+
 _delegate_launch_help_request() {
   _delegate_launch_cmd="${1:-}"
   [ "$#" -gt 0 ] && shift
@@ -237,6 +261,32 @@ Fix: create the profile config from config.example.json, or run 'env -u AI_PROFI
 Temporary bypass: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, ambient Codex).
 EOF
 }
+
+# Precedence, one order for config file, keys, and profile (the table lives in
+# docs/configuration.md, "Profile and config precedence"):
+#   --auth-profile NAME  >  DELEGATE_CONFIG / AI_PROFILE environment  >  base config.
+# A flag naming a profile with an overlay selects that overlay, its keys, and
+# AI_PROFILE for the child. Every time the flag overrides or loses to the
+# environment, say so on stderr.
+_delegate_flag="$(_delegate_flag_profile "$@")"
+case "$_delegate_flag" in
+  work|personal)
+    _delegate_flag_config="${HOME}/.delegate/config.${_delegate_flag}.json"
+    if [ -r "$_delegate_flag_config" ]; then
+      if [ -n "$_delegate_incoming_config" ] && [ "$_delegate_incoming_config" != "$_delegate_flag_config" ]; then
+        echo "delegate: warning: --auth-profile ${_delegate_flag} selects ${_delegate_flag_config} over DELEGATE_CONFIG=${_delegate_incoming_config} (flag > env). Drop the flag to use that config." >&2
+      fi
+      if [ -n "${AI_PROFILE:-}" ] && [ "${AI_PROFILE}" != "$_delegate_flag" ]; then
+        echo "delegate: warning: --auth-profile ${_delegate_flag} overrides AI_PROFILE=${AI_PROFILE} for this command and its child (flag > env)." >&2
+      fi
+      export AI_PROFILE="$_delegate_flag"
+      _delegate_profile_config="$_delegate_flag_config"
+      _delegate_incoming_config=""
+    elif [ -n "$_delegate_incoming_config" ] || { [ -n "${AI_PROFILE:-}" ] && [ "${AI_PROFILE}" != "$_delegate_flag" ]; }; then
+      echo "delegate: warning: --auth-profile ${_delegate_flag} has no ${_delegate_flag_config}, so the flag selects only the profiles.definitions entry; config and keys stay with ${_delegate_incoming_config:-AI_PROFILE=${AI_PROFILE:-}}. Fix: 'env -u AI_PROFILE delegate config sync-profiles' creates the overlay." >&2
+    fi
+    ;;
+esac
 
 if [ -n "${AI_PROFILE:-}" ]; then
   case "${AI_PROFILE}" in

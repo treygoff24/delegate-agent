@@ -422,6 +422,70 @@ class LauncherShimTests(unittest.TestCase):
         self.assertEqual(payload["delegateConfig"], str(explicit_config))
         self.assertEqual(result.stderr, "")
 
+    def test_auth_profile_flag_beats_ambient_delegate_config_and_warns(self):
+        # flag > env: an inherited DELEGATE_CONFIG/AI_PROFILE must not silently
+        # keep the other realm's config when --auth-profile names an overlay.
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            personal_config = root / "config.personal.json"
+            personal_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            argv = ["--json", "--auth-profile", "personal", "profiles"]
+            result = self.run_shim(argv, env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["argv"], argv)
+        self.assertEqual(payload["delegateConfig"], str(personal_config))
+        self.assertEqual(payload["aiProfile"], "personal")
+        self.assertIn(
+            f"--auth-profile personal selects {personal_config} over "
+            f"DELEGATE_CONFIG={work_config}",
+            result.stderr,
+        )
+        self.assertIn("overrides AI_PROFILE=work", result.stderr)
+
+    def test_auth_profile_flag_matching_environment_is_silent(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            result = self.run_shim(["--auth-profile", "work", "profiles"], env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(work_config))
+        self.assertEqual(result.stderr, "")
+
+    def test_auth_profile_flag_without_overlay_warns_that_env_config_stays(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            result = self.run_shim(
+                ["--auth-profile", "personal", "profiles"],
+                env=self.shim_env(home, probe, "work"),
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(work_config))
+        self.assertEqual(payload["aiProfile"], "work")
+        self.assertIn("--auth-profile personal has no", result.stderr)
+        self.assertIn("config.personal.json", result.stderr)
+        self.assertIn("config sync-profiles", result.stderr)
+
     def test_explicit_delegate_config_does_not_bypass_missing_profile_overlay(self):
         with tempfile.TemporaryDirectory() as home:
             explicit_config = Path(home) / "explicit.json"
