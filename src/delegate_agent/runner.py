@@ -83,6 +83,17 @@ STALL_SECONDS_DEFAULT = stall_watchdog.stall_seconds_from_minutes(
     stall_watchdog.STALL_MINUTES_DEFAULT
 )
 STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
+NO_PAGE_ASK_ENV = "DELEGATE_CHILD_NO_PAGE_ASK"
+NO_PAGE_ASK_DIRNAME = "no-page-bin"
+# Exit 2 is ask's own "relay down" code, so a caller that handles an
+# unreachable human already does the right thing with the stub.
+NO_PAGE_ASK_EXIT = 2
+NO_PAGE_ASK_SCRIPT = (
+    "#!/bin/sh\n"
+    "echo 'ask: paging the human is disabled for Delegate child runs "
+    f"({NO_PAGE_ASK_ENV}=1). Put the question in your final report instead.' >&2\n"
+    f"exit {NO_PAGE_ASK_EXIT}\n"
+)
 ZERO_COMMIT_BUDGET_FRACTION_DEFAULT = 0.5
 ZERO_COMMIT_BUDGET_FRACTION_ENV = "DELEGATE_ZERO_COMMIT_BUDGET_FRACTION"
 ZERO_COMMIT_HEALTH_EVENT_KIND = "run.zero_commits_at_half_budget"
@@ -2360,6 +2371,32 @@ def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
     return [str(scratch_root)] if scratch_root.is_dir() else []
 
 
+def _no_page_ask_requested() -> bool:
+    return os.environ.get(NO_PAGE_ASK_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _install_no_page_ask(env: dict[str, str], root: Path | None) -> None:
+    """Opt-in: shadow ``ask`` on the child's PATH with a stub that never pages.
+
+    Children inherit ``~/.local/bin`` on PATH, where the real ``ask`` pages the
+    human's phone and blocks. With ``DELEGATE_CHILD_NO_PAGE_ASK=1`` in the
+    launching environment, a stub in this run's own private directory goes
+    first on PATH and exits with ask's relay-down code. Nothing under ``$HOME``
+    is written, and the stub dir is inside a root that is already writable to
+    (and, under bwrap, bound for) this run.
+    """
+    if root is None or not _no_page_ask_requested():
+        return
+    stub_dir = root / NO_PAGE_ASK_DIRNAME
+    stub_dir.mkdir(mode=0o700, exist_ok=True)
+    stub = stub_dir / "ask"
+    if not stub.exists():
+        stub.write_text(NO_PAGE_ASK_SCRIPT, encoding="utf-8")
+        stub.chmod(0o700)
+    path = env.get("PATH", "")
+    env["PATH"] = f"{stub_dir}{os.pathsep}{path}" if path else str(stub_dir)
+
+
 def _launch_tracked_process(
     argv: list[str],
     cwd: str,
@@ -2372,12 +2409,14 @@ def _launch_tracked_process(
     sandbox: sandbox_bwrap.SandboxPlan | None = None,
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
+    run_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_temp_dir(env_overrides, temp_dir)
     )
     for key in drop_env:
         env.pop(key, None)
+    _install_no_page_ask(env, temp_dir or scratch_dir or run_path)
     if sandbox is not None:
         if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
             raise DelegateError(
@@ -3894,6 +3933,7 @@ def _run_single_tracked_attempt(
                 sandbox=ctx.sandbox,
                 engine=ctx.engine,
                 extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
+                run_path=files.run_path,
             )
         except OSError as exc:
             launch_exc = exc
