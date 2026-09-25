@@ -1968,7 +1968,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(state["resultQuality"], "no_assistant_text")
             self.assertTrue(payload["completionReportWritten"])
 
-    def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
+    def test_tracked_codex_progress_message_before_command_fails_with_synthesized_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "codex"
@@ -5516,6 +5516,8 @@ class RunnerCaptureTests(unittest.TestCase):
                 'if [[ "$*" == *"Delegate retry instruction"* ]]; then\n'
                 '  printf "retry\\n" >&2\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                # Real Codex always closes a turn with turn.completed.
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "else\n"
                 '  printf "fallback\\n" >&2\n'
                 "fi\n",
@@ -5555,12 +5557,11 @@ class RunnerCaptureTests(unittest.TestCase):
                     manifest_argv=[str(script), "<prompt>"],
                 )
 
-            # The retry's short "ok" is not a completion report, so the run
-            # ends without usable output: a failed outcome, not exit 0. The
+            # The retry answered and closed its turn, so the run succeeded. The
             # primary attempt's quota error was handled by the auth fallback
-            # and must not name this failure.
-            self.assertEqual(code, 1)
-            self.assertEqual(payload["failureKind"], "no_assistant_text")
+            # and must not name the outcome.
+            self.assertEqual(code, 0)
+            self.assertIsNone(payload["failureKind"])
             self.assertEqual(
                 payload["stderrBytes"], len(b"usage limit\n") + len(b"fallback\n") + len(b"retry\n")
             )

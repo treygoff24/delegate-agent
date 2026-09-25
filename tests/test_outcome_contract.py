@@ -263,6 +263,39 @@ class CallOutcomeTests(unittest.TestCase):
         self.assertFalse(payload["assistantTextTruncated"])
         self.assertEqual(payload["text"], payload["assistantText"])
 
+    def test_call_retry_classifies_only_the_final_attempt_stderr(self) -> None:
+        # The first attempt hit a usage limit; the retried attempt exited 0,
+        # empty, with a clean stderr. The merged stderr keeps both for
+        # diagnosis, but only the final attempt's may name the failure.
+        first = runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=5,
+            stdout_bytes=0,
+            stderr_bytes=40,
+            text_chars=0,
+            text_truncated=False,
+            stderr_tail="ERROR: 429 Too Many Requests: You have hit your usage limit.",
+            result_quality="empty",
+        )
+        last = runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=5,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            stderr_tail="",
+            result_quality="empty",
+        )
+        merged = runner._merge_call_attempts(first, last, "delegate empty-retry attempt")
+        self.assertIn("usage limit", merged.stderr_tail)
+        self.assertEqual(merged.final_attempt_stderr_tail, "")
+        code, payload = self._execute(merged)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failureKind"], "no_assistant_text")
+
 
 class ComputeOutcomeTests(unittest.TestCase):
     def test_precedence_and_failure_kinds(self) -> None:
@@ -431,3 +464,166 @@ class ExpectFileParsingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _pi_line(payload: dict[str, object]) -> str:
+    return f"printf '%s\\n' {shlex.quote(json.dumps(payload))}\n"
+
+
+_PI_QUOTA_NOTICE = {
+    "type": "notice",
+    "level": "error",
+    "message": "429 RESOURCE_EXHAUSTED: quota exceeded for this model",
+}
+_PI_TEXT = {
+    "type": "message_end",
+    "message": {"role": "assistant", "content": [{"type": "text", "text": REPORT}]},
+}
+
+
+class FinalAttemptClassificationTests(unittest.TestCase):
+    """Provider signals classify a run only from its final attempt (dlg-5kl)."""
+
+    def _run_pi(self, workspace: str, attempts: list[str]) -> tuple[int, dict[str, object]]:
+        # Each invocation runs the next attempt body; the counter file keeps
+        # the fake's state across the runner's retry.
+        counter = Path(workspace) / "attempt-count"
+        cases = "".join(f"  {index}) {body.strip()} ;;\n" for index, body in enumerate(attempts, 1))
+        script = Path(workspace) / "pi"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            f"n=$(( $(cat {shlex.quote(str(counter))} 2>/dev/null || echo 0) + 1 ))\n"
+            f"echo $n > {shlex.quote(str(counter))}\n"
+            'case "$n" in\n' + cases + "esac\nexit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = run_registry.register_run(root, harness="pi")
+        ctx = runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="pi",
+            engine="pi",
+            mode="safe",
+            model=None,
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-24T00:00:00Z",
+        )
+        code, payload = runner.execute_tracked(
+            [str(script), "original prompt"],
+            workspace,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            # A manifest argv makes the empty-result retry available.
+            manifest_argv=[str(script), "<prompt>"],
+        )
+        assert payload is not None
+        return code, payload
+
+    def test_unrecovered_quota_notice_fails_a_run_that_produced_text(self) -> None:
+        # pi/omp report a session-layer quota refusal as an error notice; with
+        # no later successful turn_end it is the provider's last word.
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload = self._run_pi(
+                workspace, [_pi_line(_PI_QUOTA_NOTICE) + _pi_line(_PI_TEXT)]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failureKind"], "provider_quota")
+        self.assertEqual(payload["resultQuality"], "ok")
+
+    def test_final_attempt_unrecovered_quota_survives_the_retry_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload = self._run_pi(
+                workspace,
+                [":", _pi_line(_PI_QUOTA_NOTICE) + _pi_line(_PI_TEXT)],
+            )
+        self.assertEqual(payload["emptyRetry"]["attempted"], True)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failureKind"], "provider_quota")
+
+    def test_earlier_attempt_quota_does_not_label_a_clean_empty_final_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload = self._run_pi(
+                workspace,
+                # An attempt with no stdout at all is what the empty-result retry
+                # retries, so the first attempt's quota refusal is on stderr.
+                [
+                    "printf 'ERROR: 429 Too Many Requests: You have hit your usage limit.\\n' >&2",
+                    ":",
+                ],
+            )
+        self.assertEqual(payload["emptyRetry"]["attempted"], True)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failureKind"], "no_assistant_text")
+        self.assertNotEqual(payload.get("failureReason"), "usage_limit")
+
+    def test_failed_over_attempt_quota_event_does_not_label_a_clean_empty_final_attempt(
+        self,
+    ) -> None:
+        # The primary attempt's structured 429 drives an auth failover; the
+        # fallback exits 0 with no text and a clean stderr. The primary's error event stays in the record but must
+        # not make the outcome a quota failure (which would also skip the
+        # workflow's structured correction retry).
+        error = shlex.quote(
+            json.dumps({"type": "error", "message": "429 RESOURCE_EXHAUSTED: usage limit reached"})
+        )
+        turn = shlex.quote(json.dumps({"type": "turn.completed"}))
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                f"  printf '%s\\n' {error}\n"
+                '  printf "usage limit\\n" >&2\n'
+                "  exit 1\n"
+                "fi\n"
+                'if [[ "$*" == *"Delegate retry instruction"* ]]; then\n'
+                f"  printf '%s\\n' {turn}\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="codex")
+            ctx = runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-24T00:00:00Z",
+                group="workflow",
+                call_read_only=True,
+                env_overrides={"ATTEMPT": "primary"},
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+            with mock.patch.dict("os.environ", {"HOME": home}, clear=False):
+                code, payload = runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=[str(script), "<prompt>"],
+                )
+        assert payload is not None
+        self.assertTrue(payload["codexAuthFallback"]["triggered"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failureKind"], "no_assistant_text")
+        self.assertNotEqual(payload.get("failureReason"), "usage_limit")

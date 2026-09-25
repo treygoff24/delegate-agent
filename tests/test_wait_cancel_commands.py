@@ -147,6 +147,23 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["runs"][0]["status"], "failed")
         self.assertEqual(payload["runs"][0]["staleReason"], "dead_pid")
 
+    def test_wait_lost_runner_reports_runner_lost_not_stalled(self):
+        # A dead or missing runner pid is a lost runner, not the stall
+        # watchdog's verdict; workflows retry "stalled" as transient.
+        for label, pid, reason in (
+            ("dead", 999999999, "dead_pid"),
+            ("missing", None, "missing_pid"),
+        ):
+            with self.subTest(label):
+                _run_id, alias = self.write_run(status="running", pid=pid)
+                code, out, err = self.run_cli(
+                    ["--json", "wait", alias, "--timeout", "10", "--interval", "1"]
+                )
+                self.assertEqual(code, 1, err)
+                run = json.loads(out)["runs"][0]
+                self.assertEqual(run["staleReason"], reason)
+                self.assertEqual(run["failureKind"], "runner_lost")
+
     def test_wait_timeout_returns_124(self):
         _run_id, alias = self.write_run(status="running", pid=os.getpid())
         code, out, err = self.run_cli(

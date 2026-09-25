@@ -276,6 +276,19 @@ class AgentFailure:
         )
 
 
+def _changed_tree_needs_resume(child: _DelegateChildResult, outcome: ChildAttemptOutcome) -> bool:
+    """Must a structured retry of this attempt resume rather than relaunch?
+
+    True when the attempt changed its worktree and the retry is a correction
+    for missing or invalid structured output (an ``empty_result`` child, or a
+    child that exited cleanly with unparseable text). Transient watchdog
+    failures keep their existing retry.
+    """
+    if not child.work_changed:
+        return False
+    return child.outcome is None or outcome.failure_reason == "empty_result"
+
+
 def _exhaustion_failure_kind(child_outcome: ChildAttemptOutcome | None) -> str:
     """A structured call's failure kind: the last child's, else invalid output."""
     if child_outcome is None:
@@ -314,6 +327,14 @@ class _DelegateChildResult:
     outcome: ChildAttemptOutcome | None = None
     completion_report_source: str | None = None
     completion_report_path: str | None = None
+    # The child envelope's workSummary (persistent or attached work worktrees
+    # only). A summary with changes or commits means a fresh child launched into
+    # that tree would redo or collide with work that already landed.
+    work_summary: JsonObject | None = None
+
+    @property
+    def work_changed(self) -> bool:
+        return run_outcome.work_summary_shows_changes(self.work_summary)
 
 
 def _delegate_child_result(value: object) -> _DelegateChildResult:
@@ -423,6 +444,9 @@ def _child_result_from_payload(
             if isinstance(result.get("completionReportPath"), str)
             else None
         ),
+        work_summary=(
+            result.get("workSummary") if isinstance(result.get("workSummary"), dict) else None
+        ),
     )
 
 
@@ -509,6 +533,7 @@ def _failed_child_result(
         outcome=outcome,
         completion_report_source=prior.completion_report_source,
         completion_report_path=prior.completion_report_path,
+        work_summary=prior.work_summary,
     )
 
 
@@ -3947,6 +3972,7 @@ class WorkflowDsl:
         first_child_run_id: str | None = None
         child: _DelegateChildResult | None = None
         demoted_schema_prompt_pending = False
+        changed_tree_refused = False
         for attempt in range(attempts + 1):
             resume_session_id = (
                 prior_child.session_id
@@ -4123,6 +4149,26 @@ class WorkflowDsl:
                     and outcome.failure_reason not in WORKFLOW_STRUCTURED_RETRYABLE_FAILURES
                 ):
                     break
+                if _changed_tree_needs_resume(child, outcome) and not (
+                    child.session_id is not None and engine in STRUCTURED_RESUME_ENGINES
+                ):
+                    # The attempt's work already changed its worktree. A fresh
+                    # correction child launched into that tree would redo the
+                    # task on top of landed work, so only a resumed session
+                    # asking for the structured result alone may retry it.
+                    changed_tree_refused = True
+                    self.state.append_event(
+                        "agent_structured_retry_refused",
+                        key=key,
+                        label=label,
+                        engine=engine,
+                        attempt=attempt,
+                        reason="work_changed_without_resumable_session",
+                        runId=child.run_id,
+                        workSummary=child.work_summary,
+                        childAttemptOutcome=outcome.as_json(),
+                    )
+                    break
                 if (
                     native_schema is not None
                     and child.outcome is not None
@@ -4185,7 +4231,11 @@ class WorkflowDsl:
             validation_error=prior_error,
             candidate_present=candidate_present,
             attempts=attempt + 1 if child is not None else 0,
-            failure_kind=_exhaustion_failure_kind(child.outcome if child is not None else None),
+            failure_kind=(
+                run_outcome.FAILURE_STRUCTURED_INVALID
+                if changed_tree_refused
+                else _exhaustion_failure_kind(child.outcome if child is not None else None)
+            ),
         )
         self._record_structured_attempt(key, outcome)
         self.state.append_durable_event(
@@ -4196,6 +4246,11 @@ class WorkflowDsl:
             engine=engine,
             runId=child.run_id if child is not None else None,
             **outcome.as_json(),
+            **(
+                {"workSummary": child.work_summary}
+                if child is not None and child.work_summary is not None
+                else {}
+            ),
         )
         _cleanup_structured_retry_workspace(workspace_cleanup)
         if first_child_run_id is not None:
