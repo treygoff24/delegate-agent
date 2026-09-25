@@ -56,6 +56,7 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
+    CLAUDE_FAMILY_ALIASES,
     CLAUDE_UNPINNABLE_ALIASES,
     DRY_RUN_HINT,
     ENGINES_PROSE,
@@ -2784,6 +2785,30 @@ def _cursor_fixed_reasoning_effort_error(
     )
 
 
+def _resolve_cursor_family_name(
+    selector: str, discovery: JsonObject | None
+) -> tuple[str, str | None]:
+    """Resolve a bare family name (``grok``) to the newest catalog selector.
+
+    cursor-agent rejects a family word outright ("Cannot use this model: grok"),
+    so a pin that is not itself a catalog selector but names a family the
+    catalog carries resolves to that family's newest selector, with a warning
+    naming the choice. Configured ``cursor.models`` aliases were already
+    applied, so an operator's own alias always wins.
+    """
+    catalog, source = model_discovery.launch_catalog(discovery, "cursor")
+    if selector in catalog:
+        return selector, None
+    newest = model_discovery.newest_family_selector(selector, catalog)
+    if newest is None:
+        return selector, None
+    return newest, (
+        f"cursor model {selector!r} is a family name cursor-agent rejects; resolved it to "
+        f"{newest!r}, the newest {source} {selector} selector. Pin a concrete id to choose "
+        "another version, effort, or speed."
+    )
+
+
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     cursor = build.config["cursor"]
@@ -2794,6 +2819,10 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pinned = resolve_model_selection(cursor, build.model_alias)
 
     warnings: list[str] = []
+    if pinned is not None:
+        pinned, family_warning = _resolve_cursor_family_name(pinned, build.discovery)
+        if family_warning is not None:
+            warnings.append(family_warning)
     capability: reasoning.ReasoningCapability | None = None
     mappings = cursor.get("reasoningEffortModels")
     discovered_routes: dict[str, str] = {}
@@ -3459,6 +3488,29 @@ def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mo
     )
 
 
+# Engines whose request builder already checks its resolved selector against
+# the catalog, with engine-specific wording.
+_ENGINES_WITH_OWN_CATALOG_CHECK = frozenset({"cursor", "omp"})
+
+
+def _launch_model_catalog_warnings(
+    engine: str, model: str | None, discovery: JsonObject | None
+) -> tuple[str, ...]:
+    """Launch-time catalog check for every engine without its own.
+
+    Claude family and provider-chosen aliases are not concrete ids, so they are
+    never compared against a catalog of dated ids.
+    """
+    if engine in _ENGINES_WITH_OWN_CATALOG_CHECK or not model:
+        return ()
+    if engine == "claude" and claude_alias_base(model).lower() in (
+        *CLAUDE_FAMILY_ALIASES,
+        *CLAUDE_UNPINNABLE_ALIASES,
+    ):
+        return ()
+    return model_discovery.launch_model_absence_warning(engine, model, discovery)
+
+
 def _omp_catalog_absence_warning(
     model: str | None, discovery: JsonObject | None
 ) -> tuple[str, ...]:
@@ -3814,6 +3866,7 @@ def _build_request_for_workspace(
         ),
     )
     _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
+    catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})
     if isolation_context is not None and isolation_context.isolation_lifecycle == "persistent":
@@ -3872,7 +3925,7 @@ def _build_request_for_workspace(
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,
-            warnings=(*warnings, *parts.warnings),
+            warnings=(*warnings, *parts.warnings, *catalog_warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
             agent_config_text=parts.agent_config_text,
