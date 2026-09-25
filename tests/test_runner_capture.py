@@ -400,9 +400,7 @@ class RunnerCaptureTests(unittest.TestCase):
 
         self.assertEqual(code, 7)
         self.assertEqual(payload["failureReason"], "auth_failed")
-        self.assertEqual(
-            [w for w in payload.get("warnings", []) if "safe mode may block" in w], []
-        )
+        self.assertEqual([w for w in payload.get("warnings", []) if "safe mode may block" in w], [])
 
     def test_dns_hint_gate_reads_the_failure_kind(self):
         # The end-to-end cases above cover the wiring; this covers the kinds that
