@@ -48,9 +48,15 @@ def _parse_porcelain_line(line: str) -> JsonObject:
 
 
 def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonObject], int]:
+    # ``--untracked-files=all``: the launch-seeded digests are per file (the
+    # sync lists untracked files with ``git ls-files --others``), so a collapsed
+    # ``?? seeded-dir/`` entry could never match the seeded filter and counted as
+    # a change the child never made -- a quiet work run then reported success on
+    # phantom changes, and a structured child with unparseable output was
+    # refused as changed rather than relaunched.
     stdout = _git_stdout(
         execution_cwd,
-        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
         warnings,
     )
     if stdout is None:

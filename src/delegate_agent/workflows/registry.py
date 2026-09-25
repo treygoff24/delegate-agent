@@ -42,6 +42,7 @@ DURABLE_EVENT_TYPES = {
     "agent_rejected",
     "agent_retry",
     "agent_structured_retry",
+    "agent_structured_retry_refused",
     "agent_structured_exhausted",
     "workflow_watchdog_fired",
     "budget",
