@@ -8,6 +8,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The stall watchdog stops runs for named reasons besides idle time. A run
+  that streams roughly 100k tokens of model output with no tool activity stops
+  as `runaway_output`; only model-output payload characters count, and
+  text-stream harnesses such as Devin are exempt. The same tool call failing
+  the same way five times in a row, with nothing else completing in between,
+  stops as `repeated_tool_failure`; each failure counts in exactly one streak,
+  and targets compare whole. A repeated identical call no longer resets the
+  idle clock and time spent inside tool calls no longer counts as idle, so a
+  fast no-op loop is caught while a slow polling loop is left alone. A changed
+  `HEAD` in the execution checkout counts as progress. Every idle stall samples
+  the child's process group and records `childActivity` (`cpu_active`,
+  `waiting`, or `no_processes`) with a process snapshot, and a pending stall
+  kill is re-validated after those blocking diagnostics.
+- A Devin child whose output already ends in a Delegate completion report and
+  then goes quiet is stopped as finished (`stoppedAfterCompletion`) instead of
+  stalled. Only a `Status: completed` report records exit 0; `failed` or
+  `blocked` records a failed run, and a child that echoes the prompt's own
+  template line (`Status: completed / blocked / failed`) stalls as before.
+- Tracked launches take `--stall-minutes`, which pins the stall threshold over
+  config, the silent-harness default, and `DELEGATE_STALL_MINUTES`. The
+  manifest records a pinned value as `stallMinutes`, and `resume` and
+  `followup` pass it to the continuation (config and environment defaults are
+  still re-resolved). Resume refuses an invalid recorded value and followup
+  ignores one, as each already treats `timeoutSeconds`. `describe` lists the
+  flag with the other tracked-only launch options.
+- With `DELEGATE_CHILD_NO_PAGE_ASK=1` in the launching environment, each
+  tracked child finds a stub `ask` first on its `PATH`. The stub prints a
+  refusal and exits 2 (the real `ask`'s relay-down code) instead of paging the
+  operator's phone and blocking. It is written into the run's own private temp,
+  scratch, or run directory; nothing under `$HOME` is written.
+- An `--isolation none` run whose cwd is strictly inside a git work tree
+  records the files it changed elsewhere in that repository as
+  `outsideCwdChanges` (repository, count, examples) with a warning. The before
+  and after snapshots key each path by status, size, and mtime, skip
+  Delegate's own registry, and run git with `--no-optional-locks` so they never
+  rewrite the user's index. A repo-root cwd, a non-git cwd, and paths outside
+  the repository stay undetected, and the warning says so.
+- Safe and dirty-synced workspace copies name, in a run warning, the paths
+  they withhold only because `.git/info/exclude` ignores them. The files are
+  still not copied, since `info/exclude` is where private scratch usually
+  lives.
+- An omp prompt that names image paths warns that omp will not attach them
+  (omp attaches files only from `@path` argv, and Delegate sends the prompt on
+  stdin) and points at omp's read tool. The scan runs in linear time.
+- `runs --summary` and `ps --summary` print counts by status, harness, and
+  group for every matching run, without rows or manifest loads. Each run is
+  counted once across registry roots, the listing's empty-scope and
+  status-filter warnings apply, and `--limit` and `--structural` are refused.
+- `wait --json --structural` reduces each run to identity, terminal status,
+  result quality, and failure fields, and moves the handle-resolution warnings
+  (`bare_handle_stale`, `bare_handle_ambiguous`, `run_target_stale`) to the top
+  level. `ok` and the exit code still come from the full view; text output
+  ignores the flag.
+- `worktree show` and `worktree remove` accept the worktree path as the
+  handle, matched canonically against the records' `executionCwd`; a relative
+  path resolves against the `--cwd` workspace. An unknown path fails with
+  `unknown_worktree_path` and, like an unknown handle, points at
+  `worktree reap --path`. `not_worktree_run` names the run that owns the
+  worktree and puts `worktree show` on it first in `nextActions`.
+- A bare harness handle warns `bare_handle_ambiguous`, naming up to five other
+  runs, when other runs of that harness share its group or are still running.
+- A cursor model that is a bare family word such as `grok`, and is neither a
+  configured `cursor.models` alias nor a catalog selector, resolves to the
+  family's newest selector (highest version, non-fast, balanced tier) from the
+  discovered catalog, or from the bundled table when discovery has none, with
+  a warning. Configured defaults and routes resolve the same way before effort
+  routing.
+- Launches warn when the resolved model id is absent from the discovered
+  catalog, or from the bundled table when discovery is empty; bundled-table
+  warnings fire only for a selector that resembles a listed id. Cursor now
+  uses this shared check, so a misspelled id warns without a discovery
+  snapshot. A Claude `[1m]` suffix compares by its base, and Claude family
+  aliases are exempt. The launch is never refused and the selector never
+  rewritten.
+- The `--forbid-commit` implied-worktree note and a missing `codex.profile`
+  overlay print to stderr when a run launches, not only in the finalization
+  report or `doctor`.
+- A failed safe-mode run whose child reports resolver or reachability errors
+  (`getaddrinfo`, `ENOTFOUND`, `EAI_AGAIN`, and similar) warns that safe mode
+  may block network access and that research belongs in work mode. Only a
+  generic nonzero exit gets the hint; status and failure kind are unchanged.
+- `followup` on a run that a later resume or followup already continued prints
+  a note naming that run and the command that continues from it, unless the
+  later run shares the source's native session.
+- `describe` and `models --json` report `binary` for every engine, droid
+  included. The `models` text view omits a retired droid row that has no
+  configured or discovered models and no configured default.
 - Workspace spec for work lanes in a persistent worktree: `--base REF` cuts the
   worktree from REF, `--env NAME=VALUE`/`--env-file PATH` set child variables
   that are recorded privately and re-applied on resume and followup, and
@@ -62,6 +149,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- `describe --full` documents the workflow DSL the runtime actually injects.
+  Its `globals` list is read from the runtime's new `WORKFLOW_DSL_GLOBALS`,
+  which the injector also checks, so it now names `park_gate`, `reject`,
+  `soft_park` and its helpers, `structured_attempt`, and `dry_run` (aliases in
+  `globalAliases`). `capabilities` is derived from the runtime's capability
+  table, adding the `agentKey`, `scopeKey`, `gateActions`, and `workspaceSpec`
+  entries the old literal lacked, and is also given structured as
+  `capabilityVersions`. The `agent()` signature is rendered from the runtime
+  method, so it gains `resumable`, `on_failure`, `key`, `base`, `env`, and
+  `setup`; the `pipeline`, `parallel`, and `workflow` entries document `key=`,
+  and `judges` documents per-entry dicts.
+- A stdout or stderr line handler that raises (a registry lock timeout while
+  persisting progress, a parser bug) no longer kills the drain thread, which
+  stopped consuming the child's pipe and could strand the child. The drain
+  keeps reading to EOF, logs a `stream.handler_failed` event, and surfaces a
+  run warning that retried attempts carry forward.
+- `cancel` no longer fails with a raw `TimeoutError` while another process
+  holds the registry lock. When the lock wait runs out it reads the record
+  unlocked, re-reads it with any pending finalize WAL overlaid just before
+  signalling, and signals only a launched child generation whose start identity
+  matches the run; a terminal result refuses as `run_already_terminal` and a
+  changed generation as `cancel_target_changed`. It then makes one bounded
+  attempt to record the cancelled outcome, reporting `registryLockBypassed`
+  with an unrecorded warning if the lock is still held, and refuses with
+  `registry_lock_busy` for an unlaunched record, a setup group, or a stale
+  seal.
+- A bwrap safe child in a uv project without a `.venv` gets
+  `UV_PROJECT_ENVIRONMENT` pointed inside the run's own writable temp
+  directory, so `uv run` no longer fails creating `.venv` under the read-only
+  workspace bind. An existing `.venv` or an explicit `UV_PROJECT_ENVIRONMENT`
+  is left alone.
+- Resume keeps the source run's `resumable` opt-in when the new engine is
+  codex or claude, so `followup` on the resumed alias works; a cross-engine
+  resume that cannot keep it drops the opt-in and says so.
+- Resume and followup that reuse the source run's auth profile now say the
+  profile was inherited from the source run instead of warning about an
+  `--auth-profile` flag the user never typed.
+- The suite resolves the production compact-temp root the way runs do. On
+  macOS it named `/var/tmp` where runs record `/private/var/tmp`, so six tests
+  failed and every subprocess run's temp directory leaked.
 - A workflow no longer cancels its own live children as stale. Two `agent()`
   calls from plain script threads could share one positional scope, and the
   second call cancelled the first's running child. Stale-scope cancellation now
@@ -183,6 +310,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendUnavailable`. The isolated build path is unchanged.
 
 ### Changed
+- A mail send that reaches no inbox fails with `mail_not_delivered` (exit 1)
+  instead of returning `ok` with exit 0. The message names each recipient's
+  outcome and reason and states the eligibility rule, the diagnostics carry the
+  `msgId` and ledger rows, and the sent ledger is still written.
+- `--auth-profile` precedence (flag, then environment, then config default)
+  now selects the config file as well as the profile: `--auth-profile
+  work|personal` with an existing overlay selects `config.NAME.json`, its keys,
+  and the child's `AI_PROFILE`, and warns when that replaces an ambient
+  `DELEGATE_CONFIG` or a different `AI_PROFILE`. A flag whose overlay is
+  missing warns that the environment's config and keys stay in effect, and the
+  resolver warns when an inherited detection variable overrides the config's
+  `profiles.default`. The profile shim now finds the flag anywhere before `--`,
+  keeps the last occurrence, and strips whitespace, as the Python parser does.
+- Errors point at the command that does what was asked. `runs`/`ps` given a
+  run id, harness alias, `--id`, or `--alias` point at `snapshot` and
+  `run-output`; unknown `show`, `status`, `info`, `inspect`, `logs`, and
+  `output` subcommands suggest the per-run commands; `mail send --body`,
+  `--message`, and `-m` explain that the body is positional, `--file`, or `-`
+  (a bare `-` now reads stdin, as help already promised); and `followup` given
+  a resume-only option says the option belongs to `resume` and shows the
+  resume form.
 - **Exit-code semantics: a child's exit code 0 no longer means success on its
   own.** One outcome function now decides every run's `ok`, `status`, exit code,
   persisted record, `wait` result, and workflow `agent()` result, so these can

@@ -222,7 +222,8 @@ class PersonaWorkflowTests(unittest.TestCase):
             signature,
             "agent(prompt, engine=None, mode=None, model=None, effort=None, "
             "schema=None, label=None, phase=None, isolation=None, passthrough=False, "
-            "timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False)",
+            "timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, "
+            "resumable=False, on_failure='none', key=None, base=None, env=None, setup=None)",
         )
         self.assertIn("persona=None", signature)
         self.assertIn("allow_repo_persona=False", signature)
