@@ -1264,10 +1264,31 @@ class WaitCancelCommandTests(unittest.TestCase):
 
     def test_cancel_refuses_stale_missing_pid_run(self):
         """A running run with no pid is stale (missing_pid) and cancel refuses."""
-        _run_id, alias = self.write_run(status="running")
+        run_id, alias = self.write_run(status="running")
         code, out, err = self.run_cli(["cancel", alias])
         self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(run_registry.status_fields(state)["staleReason"], "missing_pid")
+        self.assertNotIn("cancelRequested", state)
+        # The signal selector remains fail-closed for every target-less record.
+        with self.assertRaises(wait_cancel_commands.WaitCancelError) as caught:
+            wait_cancel_commands._cancel_signal_generation(
+                state, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertEqual(caught.exception.error, "missing_pid")
+
+    def test_cancel_before_setup_publishes_a_group(self):
+        run_id, alias = self.write_run(status="creating_isolation", launcher_pid=os.getpid())
+        with unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send:
+            code, out, err = self.run_cli(["--json", "cancel", alias])
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["runs"][0]["status"], "cancelled")
+        send.assert_not_called()
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertTrue(state["cancelRequested"])
+        self.assertIsInstance(state["cancelRequestedAt"], str)
 
     def test_cancel_refuses_pid_le_one(self):
         _run_id, alias = self.write_run(status="running", pid=1, pgid=1)

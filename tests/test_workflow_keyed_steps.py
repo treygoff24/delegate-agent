@@ -800,7 +800,7 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
 
     def test_resume_seals_missing_pid_children_past_the_grace_window(self) -> None:
         run_id = self.register_child(
-            "key-c", {"status": "creating_isolation", "lastActivityAt": self.old(3600)}
+            "key-c", {"status": "running", "lastActivityAt": self.old(3600)}
         )
         cancelled = runtime.cancel_workflow_children(self.workspace, self.wf_id)
         self.assertEqual([item["runId"] for item in cancelled], [run_id])
@@ -810,6 +810,25 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         )
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["staleReason"], "missing_pid")
+
+    def test_resume_cancels_pre_setup_children_without_a_grace_window(self) -> None:
+        for age in (5, 3600):
+            with self.subTest(age=age):
+                run_id = self.register_child(
+                    f"key-setup-{age}",
+                    {"status": "creating_isolation", "lastActivityAt": self.old(age)},
+                )
+                cancelled = runtime.cancel_workflow_agent_child(
+                    self.workspace, self.wf_id, f"key-setup-{age}"
+                )
+                child = next(item for item in cancelled if item["runId"] == run_id)
+                self.assertEqual(child["status"], "cancelled")
+                self.assertNotIn("sealed", child)
+                state = run_registry.load_run_state_or_none(
+                    run_registry.registry_root(self.workspace), run_id
+                )
+                self.assertTrue(state["cancelRequested"])
+                self.assertNotIn("staleReason", state)
 
     def test_resume_still_refuses_a_missing_pid_child_inside_the_grace_window(self) -> None:
         self.register_child("key-d", {"status": "running", "lastActivityAt": self.old(5)})

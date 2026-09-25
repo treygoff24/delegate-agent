@@ -347,6 +347,92 @@ class WorkspaceSpecLaunchTests(ExecutionTestBase):
                     f"a straddling value left {fragment!r} in the recorded tail",
                 )
 
+    def test_setup_output_masks_a_value_inside_the_old_read_window(self):
+        """A tail read as a window could start inside an occurrence of a value.
+
+        The suffix of a value does not match the whole value, so masking the
+        window could not see it; when masking also shrank the window below the
+        recorded tail length, the cut reached back to that window's first
+        character and recorded the suffix. A log that repeats the value densely
+        has both.
+        """
+        token = "npm_" + "9f3a2b7c4d8e1f60ae5bc2d8f1e0"
+        self.assertEqual(len(token), 32)
+        repeats = 400
+        setup = (
+            f'i=0; while [ "$i" -lt {repeats} ]; do printf "%s\\n" "$NPM_TOKEN"; '
+            "i=$((i+1)); done; exit 1"
+        )
+        line_bytes = len(token) + 1
+        # The old read window: `(SETUP_TAIL_CHARS + longest value) * 4` bytes of
+        # the log's end, decoded, masked and cut back to SETUP_TAIL_CHARS. This
+        # log is longer than that window and placed so the window began inside
+        # an occurrence of the value rather than at a line boundary.
+        window = (workspace_spec.SETUP_TAIL_CHARS + len(token)) * 4
+        self.assertGreater(repeats * line_bytes, window)
+        offset = (repeats * line_bytes - window) % line_bytes
+        self.assertTrue(
+            0 < offset < len(token), f"the old window began at a line boundary ({offset})"
+        )
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _base_oid = self._repo_behind_a_recorded_base()
+            agent = self.write_executable("agent", RESULT_EVENT)
+            code, payload, _stderr = self._launch(
+                repo,
+                fake_home,
+                agent,
+                "--env",
+                f"NPM_TOKEN={token}",
+                "--setup",
+                setup,
+                "do the task",
+            )
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["error"], "workspace_setup_failed")
+            run_path = registry_api.run_directory(Path(repo) / ".delegate", payload["runId"])
+            state_text = (run_path / "state.json").read_text(encoding="utf-8")
+            self.assertIn("--- setup output (tail) ---", state_text)
+            for where, text in (("state.json", state_text), ("the envelope", json.dumps(payload))):
+                self.assertNotIn(token, text, where)
+                for start in range(len(token) - 7):
+                    fragment = token[start : start + 8]
+                    self.assertNotIn(fragment, text, f"{where}: a repeated value left {fragment!r}")
+
+    def test_setup_output_masks_a_value_folded_across_lines(self):
+        """A value its own writer breaks across lines has no complete occurrence.
+
+        `printf "%s" "$TOKEN" | fold -w 32` (a wrapped `set -x` trace, a
+        multi-line ``curl -v`` header) leaves pieces in the log instead, so
+        whole-value masking finds nothing to replace and both halves used to
+        reach `state.json` and the error envelope.
+        """
+        folded = "npm_9f3a2b7c4d8e1f60ae5bc2d8f1e0" + "0123456789abcdefghijklmnopqrstuv"
+        self.assertEqual(len(folded), 64)
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _base_oid = self._repo_behind_a_recorded_base()
+            agent = self.write_executable("agent", RESULT_EVENT)
+            code, payload, _stderr = self._launch(
+                repo,
+                fake_home,
+                agent,
+                "--env",
+                f"NPM_TOKEN={folded}",
+                "--setup",
+                'printf "%s" "$NPM_TOKEN" | fold -w 32; exit 1',
+                "do the task",
+            )
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["error"], "workspace_setup_failed")
+            run_path = registry_api.run_directory(Path(repo) / ".delegate", payload["runId"])
+            state_text = (run_path / "state.json").read_text(encoding="utf-8")
+            self.assertIn("--- setup output (tail) ---", state_text)
+            for where, text in (("state.json", state_text), ("the envelope", json.dumps(payload))):
+                for half in (folded[:32], folded[32:]):
+                    self.assertNotIn(half, text, f"{where}: a folded value kept {half!r}")
+                for start in range(len(folded) - 7):
+                    fragment = folded[start : start + 8]
+                    self.assertNotIn(fragment, text, f"{where}: a folded value left {fragment!r}")
+
     def test_env_file_errors_name_the_line_without_echoing_its_text(self):
         """An env file line may be key material: the error may not repeat it."""
         key_material = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCAgB+7cK9"
@@ -793,6 +879,30 @@ class SetupProcessUnitTests(unittest.TestCase):
             **kwargs,  # type: ignore[arg-type]
         )
 
+    def test_short_env_values_receive_whole_value_masking_only(self):
+        for length in range(1, 11):
+            with self.subTest(length=length):
+                value = "ABCDEFGHIJ"[:length]
+                env = {"TOKEN": value, "EMPTY": ""}
+                text = f"prefix {value} suffix"
+                whole_expected = text if length < 4 else "prefix *** suffix"
+                fragment_expected = text if length < 8 else "prefix *** suffix"
+                self.assertEqual(workspace_spec.mask_recorded_env_values(text, env), whole_expected)
+                self.assertEqual(
+                    workspace_spec.mask_recorded_env_fragments(text, env), fragment_expected
+                )
+                result = self._run_setup(f"printf '%s' {shlex.quote(text)}", mask_values=env)
+                self.assertEqual(result.output_tail, whole_expected)
+                if length > 8:
+                    fragment = f"prefix {value[:8]} suffix"
+                    self.assertEqual(
+                        workspace_spec.mask_recorded_env_values(fragment, env), fragment
+                    )
+                    result = self._run_setup(
+                        f"printf '%s' {shlex.quote(fragment)}", mask_values=env
+                    )
+                    self.assertEqual(result.output_tail, "prefix *** suffix")
+
     def test_a_sigterm_during_the_setup_pgid_clear_is_not_swallowed(self):
         """The clear waits on the registry lock, the launcher's longest window.
 
@@ -845,6 +955,72 @@ class SetupProcessUnitTests(unittest.TestCase):
             workspace_spec._group_liveness(groups[0]),
             False,
             "the setup group outlived the launcher that started it",
+        )
+
+    def test_a_second_sigterm_does_not_abort_the_final_kill(self):
+        """After the clear's recorded TERM, the kill that takes the group down runs.
+
+        That escalation waits out the same grace `delegate cancel` does, and a
+        second TERM landing in it used to raise from inside the wait: the group
+        had just been TERMed, the SIGKILL that would have ended a group
+        ignoring that TERM never ran, and setup outlived the launcher that was
+        told to stop.
+        """
+        groups: list[int] = []
+        real_kill_group = workspace_spec._kill_group
+        real_sleep = time.sleep
+        repeated_terms: list[int] = []
+
+        def publish(pgid: int | None) -> None:
+            if pgid is None:
+                # The clear, with the setup's own group still alive behind it:
+                # this TERM is what leads to the final kill.
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            groups.append(pgid)
+
+        def kill_group_then_a_second_sigterm(process: subprocess.Popen[bytes]) -> None:
+            def sleep_then_sigterm(seconds: float) -> None:
+                if not repeated_terms:
+                    repeated_terms.append(process.pid)
+                    os.kill(os.getpid(), signal.SIGTERM)
+                real_sleep(seconds)
+
+            # Inject during the grace, after the group has received its TERM.
+            with mock.patch.object(workspace_spec.time, "sleep", side_effect=sleep_then_sigterm):
+                real_kill_group(process)
+
+        def kill_group_now() -> None:
+            for pgid in groups:
+                with contextlib.suppress(OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+
+        self.addCleanup(kill_group_now)
+        with (
+            mock.patch.object(
+                workspace_spec, "_kill_group", side_effect=kill_group_then_a_second_sigterm
+            ),
+            self.assertRaises(workspace_spec.SetupInterrupted),
+        ):
+            # The leader exits at once; the grandchild it leaves behind
+            # ignores TERM, so only the escalation can take the group down.
+            self._run_setup(
+                "sh -c 'trap \"\" TERM; touch ready; exec sleep 30' & "
+                "while [ ! -e ready ]; do sleep 0.01; done; exit 1",
+                publish_pgid=publish,
+            )
+
+        self.assertEqual(len(groups), 1, groups)
+        self.assertEqual(repeated_terms, groups)
+        deadline = time.monotonic() + workspace_spec.SETUP_KILL_GRACE_SECONDS + 5.0
+        while time.monotonic() < deadline:
+            if workspace_spec._group_liveness(groups[0]) is False:
+                break
+            time.sleep(0.05)
+        self.assertIs(
+            workspace_spec._group_liveness(groups[0]),
+            False,
+            "a repeated SIGTERM left the group it had already TERMed running",
         )
 
 
@@ -995,6 +1171,30 @@ class LinkedWorktreeRegistryTests(WorktreeMgmtTestBase):
             # The rows are de-duplicated, so the totals must be too: the copy's
             # rows are the same run, and an uncorrected footer read "1 of 2".
             self.assertEqual(payload["total"], 1)
+
+            # 25 runs per root under `--limit 10`: the copy contributes the
+            # same run ids, so the page holds 10 rows and the footer must read
+            # "10 of 25". Summing the roots' pre-limit counts and subtracting
+            # only the duplicates that made it into the page read "10 of 40".
+            for number in range(24):
+                self._seed_plain_run(repo_path, last_activity_at=f"2026-05-20T12:{number:02d}:00Z")
+            shutil.rmtree(copy)
+            shutil.copytree(self._registry_root(repo_path), copy, symlinks=True)
+            code, out, err = self._run_cli(
+                ["--cwd", repo_path, "--json", "runs", "--limit", "10"], home=fake_home
+            )
+            self.assertEqual(code, 0, err)
+            payload = json.loads(out)
+            self.assertEqual(payload["total"], 25)
+            self.assertEqual(len(payload["runs"]), 10)
+            self.assertTrue(payload["truncated"])
+            self.assertEqual(payload["runs"][0]["runId"], parent_run)
+
+            code, out, err = self._run_cli(
+                ["--cwd", repo_path, "runs", "--limit", "10"], home=fake_home
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("showing 10 of 25 runs", out)
 
 
 class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
