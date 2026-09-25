@@ -36,6 +36,9 @@ PID_IDENTITY_SKEW_SECONDS = 60.0
 WAIT_DEFAULT_INTERVAL_SECONDS = 3
 WAIT_MIN_INTERVAL_SECONDS = 1
 CANCEL_GRACE_SECONDS = 5.0
+# The raw status a worktree launcher writes before its child exists, including
+# while its workspace setup command runs.
+SETUP_WINDOW_STATUS = "creating_isolation"
 # A tracked run can launch a primary attempt, an auth fallback, and an empty-
 # result retry. Four selections let cancel follow all three generation changes
 # while still failing closed if the run keeps churning unexpectedly.
@@ -454,32 +457,90 @@ def _state_int(state: JsonObject | None, key: str) -> int | None:
     return None
 
 
-def _cancel_signal_generation(
+def _cancel_signal_target(
     state: JsonObject | None,
-    target: run_registry.RunTarget,
-) -> tuple[int | None, int | None, int, bool]:
+) -> tuple[int | None, int | None, int, bool] | None:
+    """The process a record names for cancel to signal, or None when it names none.
+
+    ``None`` covers two states that used to be one error: a launch that has not
+    published its pid yet, and the window after a setup group ended and before
+    the launcher finalized the record. Only the caller knows which of those it
+    was looking at, so this helper never decides.
+    """
     pid = _state_int(state, "pid")
     pgid = _state_int(state, "pgid")
     process_group = pgid is not None
     signal_value = pgid if process_group else pid
     if signal_value is None:
-        raise WaitCancelError(
-            "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
-        )
-    if signal_value <= 1:
-        raise WaitCancelError(
-            "unsafe_signal_target", f"Refusing to signal pid/pgid <= 1: {signal_value}"
-        )
+        # Setup window: a persistent worktree launcher runs the caller's setup
+        # command in its own session before any child exists, and records that
+        # group separately (`setupPgid`) because a published pid/pgid means
+        # "the child launched" to the unlaunched-seal logic. Cancel still has
+        # to be able to stop it, so it is the signal target while recorded.
+        setup_pgid = _state_int(state, "setupPgid")
+        if setup_pgid is None:
+            return None
+        pid, pgid, signal_value, process_group = None, setup_pgid, setup_pgid, True
     return pid, pgid, signal_value, process_group
 
 
+def _signals_the_setup_group(
+    state: JsonObject | None, generation: tuple[int | None, int | None, int, bool]
+) -> bool:
+    """Whether a selected generation's target is the record's setup group."""
+    pid, pgid, _signal_value, _process_group = generation
+    return pid is None and pgid is not None and _state_int(state, "setupPgid") == pgid
+
+
+def _cancel_signal_generation(
+    state: JsonObject | None,
+    target: run_registry.RunTarget,
+) -> tuple[int | None, int | None, int, bool]:
+    generation = _cancel_signal_target(state)
+    if generation is None:
+        raise WaitCancelError(
+            "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
+        )
+    if generation[2] <= 1:
+        raise WaitCancelError(
+            "unsafe_signal_target", f"Refusing to signal pid/pgid <= 1: {generation[2]}"
+        )
+    return generation
+
+
+def _setup_window_status(state: JsonObject | None) -> bool:
+    """Whether the record still carries the status a worktree setup runs under.
+
+    A launcher writes it before the worktree exists and clears nothing until it
+    finalizes, so this is true both while setup runs (with ``setupPgid``
+    recorded) and in the window before anything has been started at all.
+    """
+    return isinstance(state, dict) and state.get("status") == SETUP_WINDOW_STATUS
+
+
+def _setup_path_taken(state: JsonObject | None) -> bool:
+    """Whether the run's signal target came from the workspace setup window.
+
+    The record is the only evidence: a setup in flight carries `setupPgid` (or
+    still reports ``creating_isolation`` once it has been cleared). A legacy
+    record with a pid but no pgid falls back to a pid signal and never took
+    this path, so it must not be described as one.
+    """
+    if _state_int(state, "setupPgid") is not None:
+        return True
+    return _setup_window_status(state)
+
+
 # A run record with no pid is normally a launch that has not published its
-# process yet, which is why cancel refuses it (missing_pid). After this long
+# process yet, which is why cancel refuses it (missing_pid). A worktree
+# launcher that is still running its setup command is the exception: it
+# publishes `setupPgid` instead, which cancel signals without making the
+# record look launched to the seal check. After this long
 # with no activity it is a launch that never produced a process: its
 # launcher died during isolation or before Popen. Workflow resume and
 # adoption may seal it instead of refusing forever.
 UNLAUNCHED_SEAL_GRACE_SECONDS = 300.0
-UNLAUNCHED_RAW_STATUSES = frozenset({run_registry.STATUS_RUNNING, "creating_isolation"})
+UNLAUNCHED_RAW_STATUSES = frozenset({run_registry.STATUS_RUNNING, SETUP_WINDOW_STATUS})
 UNLAUNCHED_SEAL_WARNING = (
     "unlaunched run sealed as cancelled: the record never published a pid/pgid "
     "within the grace window (missing_pid); nothing was signalled"
@@ -658,6 +719,47 @@ def _persist_cancelled_terminal_locked(
     run_registry.publish_terminal_record_locked(registry_root, target.run_id, updated)
 
 
+SETUP_SIGNALLED_WARNING = (
+    "run was still in workspace setup: the setup process group was signalled, "
+    "and no child had launched"
+)
+SETUP_ENDED_BEFORE_SIGNAL_WARNING = (
+    "the run's workspace setup ended before cancel could signal it: no child had "
+    "launched, and nothing was signalled"
+)
+SETUP_NOT_STARTED_WARNING = (
+    "the run was in workspace setup with no published process: "
+    "nothing was signalled, and the run was marked cancelled"
+)
+SETUP_GROUP_CLEARED_WARNING = (
+    "the run's workspace setup group was signalled and the record was cleared before "
+    "cancel finalized it: no child had launched"
+)
+SETUP_LAUNCHER_GONE_WARNING = (
+    "the launcher that owns this run's setup group is gone: the recorded setup group "
+    "was not signalled, and the run was marked cancelled"
+)
+
+
+def _stamp_cancel_marker_locked(
+    registry_root: Path,
+    target: run_registry.RunTarget,
+    state: JsonObject | None,
+    fallback: JsonObject | None,
+) -> None:
+    """Write the cancel marker while registry_lock is held.
+
+    Every launcher re-reads the marker under this same lock before each child
+    ``Popen``, so a stamped marker is what guarantees no child launches for the
+    record afterwards.
+    """
+    stamped = dict(state or fallback or {})
+    stamped["cancelRequested"] = True
+    if not isinstance(stamped.get("cancelRequestedAt"), str):
+        stamped["cancelRequestedAt"] = run_registry.utc_now_iso()
+    run_registry.write_run_state(run_registry.run_directory(registry_root, target.run_id), stamped)
+
+
 def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
     # The runner publishes each launched generation under this same lock. Take
     # the initial selection under it too, so cancel waits for a primary Popen to
@@ -705,12 +807,28 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
                 "run_already_terminal",
                 f"Run {target.alias or target.run_id} is already terminal ({effective}).",
             )
+        if _cancel_signal_target(state) is None and _setup_window_status(state):
+            # Before setup publishes its group, only the cancel marker can
+            # stop this run. Launchers check it before setup and child Popen.
+            _stamp_cancel_marker_locked(registry_root, target, state, None)
+            state = run_registry.load_run_state_or_none(registry_root, target.run_id)
+            _persist_cancelled_terminal_locked(
+                registry_root, target, state, [SETUP_NOT_STARTED_WARNING]
+            )
+            payload = _terminal_payload(registry_root, target)
+            payload["warnings"] = [SETUP_NOT_STARTED_WARNING]
+            return payload
         generation = _cancel_signal_generation(state, target)
     warnings: list[str] = []
     cancel_marker_written = False
     signal_refusal: JsonObject | None = None
     for _attempt in range(CANCEL_GENERATION_MAX_ATTEMPTS):
         pid, pgid, signal_value, process_group = generation
+        # Whether this generation's target is the run's setup group. The
+        # launcher clears that field the moment setup ends, so a re-read that
+        # now names no target at all means the setup group is gone -- not that
+        # cancel lost the run.
+        setup_generation = _signals_the_setup_group(state, generation)
 
         # PID-reuse start-identity guard: verify the tracked leader pid is not
         # older than the run. The locked reread below must still describe this
@@ -720,62 +838,93 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
 
         already_terminal = False
         generation_changed = False
+        setup_ended = False
+        launcher_gone = False
         with run_registry.registry_lock(registry_root):
             run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
             pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
             pre_fields = run_registry.status_fields(pre_signal)
             pre_effective = pre_fields.get("effectiveStatus")
+            pre_target = _cancel_signal_target(pre_signal)
             if (
                 pre_effective in run_registry.TERMINAL_STATUSES
                 or pre_effective == run_registry.STATUS_STALE
             ):
                 already_terminal = True
-            elif _cancel_signal_generation(pre_signal, target) != generation:
+            elif pre_target is None and setup_generation:
+                # Setup ended between cancel's selection and this re-read: the
+                # launcher cleared `setupPgid` and has not finalized the record
+                # yet. There is no process left to signal, so stamp the marker
+                # -- the run must not launch a child now -- and settle it as
+                # cancelled below rather than failing with missing_pid.
+                _stamp_cancel_marker_locked(registry_root, target, pre_signal, state)
+                cancel_marker_written = True
+                setup_ended = True
+            elif pre_target != generation:
                 generation_changed = True
+            elif setup_generation and (
+                unlaunched_launcher_alive(registry_root, target.run_id, pre_signal) is not True
+            ):
+                # The process that recorded this setup group is gone (killed
+                # mid-setup, so `setupPgid` was never cleared). The record is
+                # not proof of anything about the group id now: pid reuse can
+                # hand it to an unrelated process, so nothing is signalled.
+                warnings.append(SETUP_LAUNCHER_GONE_WARNING)
+                cleared = dict(pre_signal or {})
+                cleared.pop("setupPgid", None)
+                _persist_cancelled_terminal_locked(registry_root, target, cleared, warnings)
+                launcher_gone = True
             else:
-                stamped = dict(pre_signal or state or {})
-                stamped["cancelRequested"] = True
-                if not isinstance(stamped.get("cancelRequestedAt"), str):
-                    stamped["cancelRequestedAt"] = run_registry.utc_now_iso()
-                run_registry.write_run_state(
-                    run_registry.run_directory(registry_root, target.run_id), stamped
-                )
+                _stamp_cancel_marker_locked(registry_root, target, pre_signal, state)
                 cancel_marker_written = True
 
         if already_terminal:
             return _terminal_payload(registry_root, target)
+        if launcher_gone:
+            payload = _terminal_payload(registry_root, target)
+            payload["warnings"] = warnings
+            return payload
         if generation_changed:
             state = pre_signal
             generation = _cancel_signal_generation(state, target)
             continue
         state = pre_signal
         warnings.extend(generation_warnings)
-        if pgid is None:
-            warnings.append("pgid missing; fell back to pid signal for legacy run")
-        try:
-            _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
-        except ProcessLookupError:
-            warnings.append("process exited before SIGTERM; checking for a replacement generation")
-        deadline = time.monotonic() + CANCEL_GRACE_SECONDS
-        while time.monotonic() < deadline:
-            alive = _signal_target_alive(signal_value, process_group=process_group)
-            if alive is False:
-                break
-            time.sleep(0.05)
-        alive = _signal_target_alive(signal_value, process_group=process_group)
-        if alive is not False:
+        if _setup_path_taken(state):
+            setup_warning = (
+                SETUP_ENDED_BEFORE_SIGNAL_WARNING if setup_ended else SETUP_SIGNALLED_WARNING
+            )
+            if setup_warning not in warnings:
+                warnings.append(setup_warning)
+        if not setup_ended:
+            if pgid is None:
+                warnings.append("pgid missing; fell back to pid signal for legacy run")
             try:
-                _send_signal(signal_value, signal.SIGKILL, process_group=process_group)
+                _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
             except ProcessLookupError:
-                pass
-            except PermissionError:
-                signal_refusal = {
-                    "signal": "SIGKILL",
-                    "reason": "permission_denied",
-                }
                 warnings.append(
-                    "SIGKILL was not permitted after SIGTERM; run state marked cancelled"
+                    "process exited before SIGTERM; checking for a replacement generation"
                 )
+            deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                alive = _signal_target_alive(signal_value, process_group=process_group)
+                if alive is False:
+                    break
+                time.sleep(0.05)
+            alive = _signal_target_alive(signal_value, process_group=process_group)
+            if alive is not False:
+                try:
+                    _send_signal(signal_value, signal.SIGKILL, process_group=process_group)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    signal_refusal = {
+                        "signal": "SIGKILL",
+                        "reason": "permission_denied",
+                    }
+                    warnings.append(
+                        "SIGKILL was not permitted after SIGTERM; run state marked cancelled"
+                    )
 
         # A signalled attempt may immediately hand off to an auth fallback or
         # empty-result retry. Re-read under the lock before terminalizing; a new
@@ -786,14 +935,32 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
             latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
             latest_fields = run_registry.status_fields(latest)
             latest_effective = latest_fields.get("effectiveStatus")
-            if (
+            latest_target = _cancel_signal_target(latest)
+            still_running = (
                 latest_effective not in run_registry.TERMINAL_STATUSES
                 and latest_effective != run_registry.STATUS_STALE
-                and _cancel_signal_generation(latest, target) != generation
-            ):
+            )
+            if latest_target is None and still_running and not setup_generation:
+                # Refuse to guess: the generation this loop signalled named a
+                # process and this one names none, and that is not the setup
+                # window's cleared field.
+                raise WaitCancelError(
+                    "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
+                )
+            if still_running and latest_target is not None and latest_target != generation:
                 state = latest
                 follow_generation = True
             else:
+                if (
+                    latest_target is None
+                    and setup_generation
+                    and not setup_ended
+                    and SETUP_GROUP_CLEARED_WARNING not in warnings
+                ):
+                    # The setup group was signalled and the launcher cleared
+                    # `setupPgid` before cancel's reply: the marker already
+                    # guarantees no child launches.
+                    warnings.append(SETUP_GROUP_CLEARED_WARNING)
                 _persist_cancelled_terminal_locked(registry_root, target, latest or state, warnings)
         if follow_generation:
             generation = _cancel_signal_generation(state, target)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from delegate_agent import archived_logs, record_io, usage_record
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
@@ -355,6 +356,16 @@ def _source_workspace(
     ) or str(registry_root.parent)
 
 
+class RunListingIds(NamedTuple):
+    """Pre-limit ids for de-duplicating totals across registry roots.
+
+    ``scoped`` applies harness/group filters; ``matched`` adds status filters.
+    """
+
+    matched: frozenset[str]
+    scoped: frozenset[str]
+
+
 def list_run_summaries(
     registry_root: Path,
     index: JsonObject,
@@ -364,11 +375,11 @@ def list_run_summaries(
     harness: str | None = None,
     group: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
-) -> tuple[list[JsonObject], int, int]:
+) -> tuple[list[JsonObject], int, int, RunListingIds]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
     candidates: list[tuple[JsonObject, JsonObject | None, bool, JsonObject]] = []
-    scope_total = 0
+    scoped_ids: set[str] = set()
     for run_id, entry in record_io.index_run_entries(index):
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
@@ -376,7 +387,7 @@ def list_run_summaries(
         entry_group = entry.get("group")
         if group is not None and entry_group != group:
             continue
-        scope_total += 1
+        scoped_ids.add(run_id)
         from delegate_agent import run_registry
 
         projected_state = run_registry.terminal_selection_state(registry_root, run_id, entry)
@@ -439,4 +450,12 @@ def list_run_summaries(
                 warnings.append(warning)
         summary["warnings"] = warnings
         selected.append(summary)
-    return selected, total, scope_total
+    return (
+        selected,
+        total,
+        len(scoped_ids),
+        RunListingIds(
+            matched=frozenset(str(summary["runId"]) for summary, *_ in candidates),
+            scoped=frozenset(scoped_ids),
+        ),
+    )

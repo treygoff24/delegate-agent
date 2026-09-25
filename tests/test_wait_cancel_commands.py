@@ -37,6 +37,8 @@ class WaitCancelCommandTests(unittest.TestCase):
         status: str,
         pid: int | None = None,
         pgid: int | None = None,
+        setup_pgid: int | None = None,
+        launcher_pid: int | None = None,
         started_at: str | None = None,
         group: str | None = None,
         execution_cwd: str | None = None,
@@ -70,6 +72,10 @@ class WaitCancelCommandTests(unittest.TestCase):
             state["pid"] = pid
         if pgid is not None:
             state["pgid"] = pgid
+        if setup_pgid is not None:
+            state["setupPgid"] = setup_pgid
+        if launcher_pid is not None:
+            state["launcherPid"] = launcher_pid
         run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
         run_registry.write_json_atomic(
             run_path / run_registry.MANIFEST_FILE,
@@ -1258,10 +1264,31 @@ class WaitCancelCommandTests(unittest.TestCase):
 
     def test_cancel_refuses_stale_missing_pid_run(self):
         """A running run with no pid is stale (missing_pid) and cancel refuses."""
-        _run_id, alias = self.write_run(status="running")
+        run_id, alias = self.write_run(status="running")
         code, out, err = self.run_cli(["cancel", alias])
         self.assertEqual(code, errors_api.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(run_registry.status_fields(state)["staleReason"], "missing_pid")
+        self.assertNotIn("cancelRequested", state)
+        # The signal selector remains fail-closed for every target-less record.
+        with self.assertRaises(wait_cancel_commands.WaitCancelError) as caught:
+            wait_cancel_commands._cancel_signal_generation(
+                state, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertEqual(caught.exception.error, "missing_pid")
+
+    def test_cancel_before_setup_publishes_a_group(self):
+        run_id, alias = self.write_run(status="creating_isolation", launcher_pid=os.getpid())
+        with unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send:
+            code, out, err = self.run_cli(["--json", "cancel", alias])
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["runs"][0]["status"], "cancelled")
+        send.assert_not_called()
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertTrue(state["cancelRequested"])
+        self.assertIsInstance(state["cancelRequestedAt"], str)
 
     def test_cancel_refuses_pid_le_one(self):
         _run_id, alias = self.write_run(status="running", pid=1, pgid=1)
@@ -1289,6 +1316,156 @@ class WaitCancelCommandTests(unittest.TestCase):
             )
         )
         proc.wait(timeout=5)
+
+    def _setup_group(self) -> subprocess.Popen:
+        """A live process in its own group, standing in for a setup session."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        return proc
+
+    @staticmethod
+    def _record_signal(sent: list[int]) -> object:
+        def record(value: int, _sig: int, *, process_group: bool) -> None:
+            sent.append(value)
+
+        return record
+
+    def _clear_setup_pgid(self, run_id: str) -> None:
+        """Do what the launcher's `publish_pgid(None)` does when setup ends."""
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        state.pop("setupPgid", None)
+        run_registry.write_json_atomic(
+            run_registry.run_directory(self.registry_root, run_id) / run_registry.STATE_FILE, state
+        )
+
+    def test_cancel_settles_a_setup_that_ended_before_its_post_grace_read(self):
+        """The launcher clears `setupPgid` the moment setup ends.
+
+        Cancel's post-grace re-read could land exactly between that clear and
+        the launcher's own `cancelled` record: the generation it had signalled
+        now names no process, and cancel exited "has no pid/pgid" without
+        persisting its own outcome.
+        """
+        proc = self._setup_group()
+        run_id, alias = self.write_run(
+            status="creating_isolation", setup_pgid=proc.pid, launcher_pid=os.getpid()
+        )
+        real_send = wait_cancel_commands._send_signal
+
+        def send_then_setup_ends(value, sig, *, process_group):
+            real_send(value, sig, process_group=process_group)
+            self._clear_setup_pgid(run_id)
+
+        with unittest_mock.patch.object(
+            wait_cancel_commands, "_send_signal", side_effect=send_then_setup_ends
+        ):
+            code, out, err = self.run_cli(["--json", "cancel", alias])
+
+        self.assertEqual(code, 0, err or out)
+        payload = json.loads(out)["runs"][0]
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertIn(
+            wait_cancel_commands.SETUP_GROUP_CLEARED_WARNING, payload.get("warnings") or []
+        )
+        proc.wait(timeout=5)
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["cancelRequested"], True)
+
+    def test_cancel_settles_a_setup_that_ended_before_its_pre_signal_read(self):
+        """Same race, one step earlier: setup ends between selection and signal.
+
+        Nothing is signalled -- the group is already gone -- and the run is
+        still reported cancelled, because the marker stamped with this re-read
+        is what stops a child launching.
+        """
+        proc = self._setup_group()
+        run_id, alias = self.write_run(
+            status="creating_isolation", setup_pgid=proc.pid, launcher_pid=os.getpid()
+        )
+        sent: list[int] = []
+
+        def identity_then_setup_ends(*_args, **_kwargs):
+            self._clear_setup_pgid(run_id)
+            return []
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", side_effect=identity_then_setup_ends
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_send_signal", side_effect=self._record_signal(sent)
+            ),
+        ):
+            code, out, err = self.run_cli(["--json", "cancel", alias])
+
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(sent, [], "the setup group was already gone: nothing to signal")
+        self.assertEqual(json.loads(out)["runs"][0]["status"], "cancelled")
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertTrue(state["cancelRequested"])
+        self.assertIsNone(proc.poll(), "cancel must not signal a group the record no longer names")
+        proc.kill()
+        proc.wait(timeout=5)
+
+    def test_cancel_does_not_signal_a_setup_group_whose_launcher_is_gone(self):
+        """A killed launcher leaves `setupPgid` behind on a live record.
+
+        The recorded group id may already belong to an unrelated process (the
+        pid-reuse guard only rejects processes older than the run), so cancel
+        must not signal it: it clears the field and finalizes as cancelled.
+        """
+        unrelated = self._setup_group()
+        run_id, alias = self.write_run(
+            status="creating_isolation",
+            setup_pgid=unrelated.pid,
+            launcher_pid=self._dead_pid(),
+        )
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        sent: list[int] = []
+
+        with unittest_mock.patch.object(
+            wait_cancel_commands, "_send_signal", side_effect=self._record_signal(sent)
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(sent, [], "a group whose launcher is gone is not this run's to signal")
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertIsNone(unrelated.poll(), "the unrelated group must survive")
+        state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertNotIn("setupPgid", state)
+        self.assertIn(
+            wait_cancel_commands.SETUP_LAUNCHER_GONE_WARNING, payload.get("warnings") or []
+        )
+        unrelated.kill()
+        unrelated.wait(timeout=5)
+
+    def test_legacy_pid_only_run_is_not_described_as_a_setup(self):
+        """The setup warning is keyed on the setup path, not on a missing pid."""
+        proc = self._setup_group()
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=proc.pid)
+        with unittest_mock.patch.object(
+            wait_cancel_commands, "_check_pid_identity", return_value=[]
+        ):
+            payload = wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertNotIn(
+            wait_cancel_commands.SETUP_SIGNALLED_WARNING, payload.get("warnings") or []
+        )
+        proc.wait(timeout=5)
+
+    @staticmethod
+    def _dead_pid() -> int:
+        process = subprocess.Popen(["true"])  # fixed argv, reaped at once
+        process.wait()
+        return process.pid
 
     def test_wait_multi_handle_one_failed_returns_one(self):
         _run_id1, alias1 = self.write_run(status="succeeded")

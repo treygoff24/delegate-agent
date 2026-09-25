@@ -45,6 +45,7 @@ from delegate_agent import (
     stall_watchdog,
     stream_capture,
     terminal_states,
+    workspace_spec,
     worktree_summary,
 )
 from delegate_agent import config as delegate_config
@@ -218,6 +219,15 @@ class RunContext:
     # Bounded wait for registry mutations. Finalization writes a WAL when this
     # budget expires; launch admission fails before spawning a child.
     registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
+    # Workspace spec: the keys-only manifest record, and the env values that
+    # are written only to the run's private workspace-env.json.
+    workspace_spec: JsonObject | None = None
+    workspace_env: dict[str, str] = field(default_factory=dict)
+    # The process that owns this run from registration to its terminal record.
+    # On a worktree-holding run it is the worktree lease holder: while the
+    # record is non-terminal and this process is verifiably alive, no prune
+    # path reaps the worktree, whatever the child pid shows.
+    launcher_pid: int | None = None
 
 
 def _process_group_grace_seconds(ctx: RunContext) -> float:
@@ -443,6 +453,10 @@ def _revision_binding(ctx: RunContext) -> JsonObject:
         "sourceGitRoot": ctx.source_git_root,
         "sourceHeadOid": creation.get("sourceHeadOid"),
         "sourceHeadRef": creation.get("sourceHeadRef"),
+        # `sourceHeadOid` is the creation base (which `--base` may move off the
+        # checkout HEAD); these two name where the source actually was.
+        "sourceCheckoutHeadOid": creation.get("sourceCheckoutHeadOid"),
+        "baseRef": creation.get("baseRef"),
     }
 
 
@@ -704,6 +718,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["structuredRetryWorkspace"] = True
     if ctx.worktree_attachment is not None:
         payload["worktreeAttachment"] = ctx.worktree_attachment
+    if ctx.workspace_spec is not None:
+        payload["workspaceSpec"] = ctx.workspace_spec
     return payload
 
 
@@ -809,6 +825,8 @@ def build_run_record(
                 record["pgid"] = os.getpgid(pid)
     if ctx.group is not None:
         record["group"] = ctx.group
+    if ctx.launcher_pid is not None:
+        record["launcherPid"] = ctx.launcher_pid
     if ctx.include_dirty:
         record["includeDirty"] = True
         record["syncedFiles"] = ctx.synced_files
@@ -1813,14 +1831,22 @@ def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
 
 
 def _source_commits_missed(summary: JsonObject | None) -> int | None:
-    """Commits on the source branch that this worktree's base predates."""
+    """Commits that landed on the source checkout after this lane was dispatched.
+
+    Read from ``sourceDrift``, which is measured from the dispatch point (the
+    checkout HEAD at launch) rather than from the creation base: with
+    ``--base <older commit>`` a base-relative count is positive by construction
+    and would warn on every completion. The lane's own HEAD is excluded from the
+    count as well, so a child that merged the source branch mid-run -- and so
+    did see those commits -- is not warned about work it already read.
+    """
     if not isinstance(summary, dict):
         return None
-    pair = summary.get("branchAheadOfSource")
-    if not isinstance(pair, dict):
+    drift = summary.get("sourceDrift")
+    if not isinstance(drift, dict):
         return None
-    behind = pair.get("behind")
-    return behind if isinstance(behind, int) and behind > 0 else None
+    commits = drift.get("commits")
+    return commits if isinstance(commits, int) and commits > 0 else None
 
 
 def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObject]:
@@ -1850,12 +1876,26 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
     behind = _source_commits_missed(summary)
     if behind:
         warnings = list(extra.get("warnings") or [])
-        _append_unique(
-            warnings,
-            f"Worktree base is {behind} commit(s) behind the source branch: "
-            "the child never saw work that landed after it was dispatched. "
-            "Re-run against a current base if this run's conclusions depend on it.",
-        )
+        creation = ctx.creation_context if isinstance(ctx.creation_context, dict) else {}
+        base_ref = creation.get("baseRef")
+        if isinstance(base_ref, str) and base_ref:
+            # A based lane is cut from the ref, not from the checkout HEAD, so
+            # the warning has to say which ref it was cut from: the reader's
+            # remedy is to re-run against a current base or to rebase onto the
+            # source branch, and neither is obvious from a bare count.
+            message = (
+                f"Worktree was cut from {base_ref}; {behind} commit(s) landed on the "
+                "source checkout after dispatch: the child never saw that work. "
+                "Rebase the lane onto the source branch, or re-run against a current "
+                "base, if this run's conclusions depend on it."
+            )
+        else:
+            message = (
+                f"Worktree base is {behind} commit(s) behind the source branch: "
+                "the child never saw work that landed after it was dispatched. "
+                "Re-run against a current base if this run's conclusions depend on it."
+            )
+        _append_unique(warnings, message)
         extra["warnings"] = warnings
 
     commits_created = worktree_summary.commits_created_count(summary)
@@ -1865,9 +1905,11 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         and commits_created > 0
         and not ctx.forbid_commit
     ):
-        extra["warnings"] = [
-            "Child command created commits; review the persistent worktree before integration."
-        ]
+        extra["warnings"] = list(extra.get("warnings") or [])
+        _append_unique(
+            extra["warnings"],
+            "Child command created commits; review the persistent worktree before integration.",
+        )
         # Attached resume runs have no worktree record of their own; point
         # inspection commands at the owning run's alias.
         attachment = ctx.worktree_attachment or {}
@@ -2134,6 +2176,9 @@ def _prepare_tracked_run(
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
     if ctx.persona_text is not None:
         run_registry.write_private_text(run_path / PERSONA_TXT_FILE, ctx.persona_text)
+    if ctx.workspace_env:
+        # Values stay out of the manifest; resume/followup replay this file.
+        workspace_spec.write_run_env(run_path, ctx.workspace_env)
     manifest = build_manifest(ctx, manifest_argv or argv)
     if scratch_dir is not None:
         manifest["scratchPath"] = str(scratch_dir)

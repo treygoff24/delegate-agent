@@ -794,7 +794,7 @@ class InspectionCommandTests(unittest.TestCase):
 
         # scope_total semantics: group matches N runs, status filter excludes all
         index = run_registry.load_index(self.registry_root)
-        summaries, total, scope_total = run_registry.list_run_summaries(
+        summaries, total, scope_total, _ids = run_registry.list_run_summaries(
             self.registry_root,
             index,
             active=True,
@@ -848,7 +848,7 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertNotIn("No active runs matched", empty_payload["warnings"][0])
 
         index = run_registry.load_index(self.registry_root)
-        _summaries, _total, scope_total = run_registry.list_run_summaries(
+        _summaries, _total, scope_total, _ids = run_registry.list_run_summaries(
             self.registry_root,
             index,
             active=True,

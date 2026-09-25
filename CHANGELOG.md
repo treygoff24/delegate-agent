@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Workspace spec for work lanes in a persistent worktree: `--base REF` cuts the
+  worktree from REF, `--env NAME=VALUE`/`--env-file PATH` set child variables
+  that are recorded privately and re-applied on resume and followup, and
+  `--setup CMD` runs in the fresh worktree before the child. A failed setup is
+  a typed `workspace_setup_failed` error (`failureKind: workspace_setup`) and no
+  child launches. `run --input-json` takes `base`, `env`, and `setup`, and
+  workflow `agent()` takes `base=`, `env=`, and `setup=` (capability
+  `workspaceSpec`). `workflow run --env/--env-file` records a launch env that
+  every resume re-applies.
+- A worktree whose run is not terminal while its launching Delegate process is
+  alive is leased: prune, auto-prune, reap, and remove skip it with
+  `worktree_leased` even when the child pid is dead.
+- `delegate runs` in a repository's main worktree also lists runs registered in
+  its linked worktrees, tagged with `registryWorkspace`.
 - Workflow steps can carry a stable caller-supplied identity. `agent(..., key="...")`
   replays by that key inside the enclosing named scope instead of by position and
   prompt text, so a resumed script that skips settled work or embeds new git heads

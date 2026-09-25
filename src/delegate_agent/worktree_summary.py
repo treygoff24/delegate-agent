@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from delegate_agent.git_utils import (
@@ -188,14 +189,15 @@ def _rev_parse(cwd: str, rev: str, warnings: list[str]) -> str | None:
     )
 
 
-def _rev_list_count(cwd: str, rev_range: str, warnings: list[str]) -> int | None:
-    stdout = _git_stdout(cwd, ["rev-list", "--count", rev_range], warnings)
+def _rev_list_count(cwd: str, revs: Sequence[str], warnings: list[str]) -> int | None:
+    argv = ["rev-list", "--count", *revs]
+    stdout = _git_stdout(cwd, argv, warnings)
     if stdout is None:
         return None
     try:
         return int(stdout.strip())
     except ValueError:
-        warnings.append(f"git rev-list returned non-integer count for {rev_range!r}: {stdout}")
+        warnings.append(f"git rev-list returned non-integer count for {' '.join(revs)!r}: {stdout}")
         return None
 
 
@@ -287,8 +289,8 @@ def build_work_summary(
     branch_ahead_of_base: JsonObject | None = None
     diff_stat_vs_base: JsonObject | None = None
     if base is not None:
-        commits_count = _rev_list_count(execution_cwd, f"{base}..HEAD", warnings)
-        behind_base = _rev_list_count(execution_cwd, f"HEAD..{base}", warnings)
+        commits_count = _rev_list_count(execution_cwd, [f"{base}..HEAD"], warnings)
+        behind_base = _rev_list_count(execution_cwd, [f"HEAD..{base}"], warnings)
         if commits_count is not None and behind_base is not None:
             branch_ahead_of_base = {
                 "ahead": commits_count,
@@ -305,6 +307,27 @@ def build_work_summary(
     branch_ahead_of_source = (
         _ahead_behind(execution_cwd, source_head, "HEAD", warnings) if source_head else None
     )
+
+    # Work that landed on the source checkout after this lane was dispatched,
+    # measured from the dispatch point rather than from the creation base. With
+    # `--base <older commit>` the creation base is an ancestor of the checkout's
+    # HEAD by construction, so a base-relative comparison reports drift on every
+    # completion; the checkout HEAD at launch is the only honest reference. Old
+    # records predate the field, and there the two are the same commit.
+    #
+    # What the child never saw is the count that matters, so the lane's own HEAD
+    # is excluded too: a child that merged the source branch mid-run saw those
+    # commits, and counting them made the completion warning claim work it had
+    # already read.
+    dispatch_base = _str(creation.get("sourceCheckoutHeadOid")) or base
+    source_drift: JsonObject | None = None
+    if dispatch_base is not None:
+        drift_revs = ["HEAD", f"^{dispatch_base}"]
+        if head_commit is not None:
+            drift_revs.append(f"^{head_commit}")
+        drift_commits = _rev_list_count(source_git_root, drift_revs, warnings)
+        if drift_commits is not None:
+            source_drift = {"baseOid": dispatch_base, "commits": drift_commits}
 
     summary: JsonObject = {
         "dirty": dirty,
@@ -332,6 +355,8 @@ def build_work_summary(
         summary["branchAheadOfBase"] = branch_ahead_of_base
     if branch_ahead_of_source is not None:
         summary["branchAheadOfSource"] = branch_ahead_of_source
+    if source_drift is not None:
+        summary["sourceDrift"] = source_drift
     if diff_stat_vs_base is not None:
         summary["diffStatVsBase"] = diff_stat_vs_base
     if warnings:

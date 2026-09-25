@@ -537,6 +537,7 @@ class WorkflowAgentFailureTests(unittest.TestCase):
                     "agentKey": 1,
                     "scopeKey": 1,
                     "gateActions": 1,
+                    "workspaceSpec": 1,
                 },
                 "typed": "AgentFailure",
             },

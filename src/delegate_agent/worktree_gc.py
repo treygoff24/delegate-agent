@@ -366,6 +366,7 @@ def _reap_block_code(
         "run_active",
         "run_not_terminal",
         "process_group_alive",
+        "worktree_leased",
         "live_attachment",
     }:
         return decision.reason
