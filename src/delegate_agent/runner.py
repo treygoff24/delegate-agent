@@ -2912,6 +2912,12 @@ def _capture_tracked_process(
                     # before it is signalled so the record can.
                     with contextlib.suppress(Exception):
                         stall_detail.update(stall_watchdog.process_group_activity(pgid))
+                    # Sampling blocks while the stdout thread keeps reading: a
+                    # tool that started, new output, or a terminal event in that
+                    # window means the child is not stalled after all.
+                    if terminal_signal.is_set() or watchdog.confirm_stall(time.monotonic()) is None:
+                        stall_detail = None
+                        continue
                     _terminate_call_process(
                         process,
                         pgid=pgid,
