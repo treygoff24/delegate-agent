@@ -3768,10 +3768,10 @@ class WorkflowDsl:
             # A cancelled, stale, or never-launched run holds no answer and no
             # live process to wait on. Seal what is sealable and relaunch;
             # never fail the call over a dead predecessor. A dry run neither
-            # seals nor cancels the predecessor and launches nothing, but the
-            # cleanup below still reaps its leftover temporary structured-retry
-            # workspace: the same reap the live respawn path performs, and a
-            # no-op once that scratch is gone.
+            # seals, cancels, reaps, nor launches anything: it only journals
+            # what the live path would do. The predecessor's leftover temporary
+            # structured-retry workspace is what an operator dry-running an
+            # adoption came to read, and the live respawn reaps it anyway.
             if not self.state.dry_run:
                 with contextlib.suppress(WorkflowChildCancellationError):
                     cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
@@ -3783,7 +3783,8 @@ class WorkflowDsl:
                 label=label,
                 reason=unadoptable,
             )
-            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if not _workflow_run_terminal(self.state.workspace, run_id):
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
@@ -3791,7 +3792,10 @@ class WorkflowDsl:
                 # Match live-path timeout: cancel the child; timeout is definitive.
                 # The terminal re-check closes the race where the child finished
                 # between the wait deadline and the cancel — adopt that instead.
-                cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
+                # A dry run reports the same timeout and cancels nothing: the
+                # child it could not wait out may still be live work.
+                if not self.state.dry_run:
+                    cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
                 # The adoption path recorded key/scope/runId but not the label a
                 # human reads, nor the bound that expired, and it never notified
                 # at all -- so a lane adopted from a prior run could time out in
@@ -3807,10 +3811,14 @@ class WorkflowDsl:
                     label=label,
                     timeout=timeout,
                 )
-                self.state.notify_event(
-                    "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
-                )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    # A notification carries no simulated marker, so a dry run
+                    # must not send one: it would read as a timeout the operator
+                    # never waited out. Neither does it reap the scratch.
+                    self.state.notify_event(
+                        "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
+                    )
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return None
         text = _workflow_agent_run_result(
             self.state.workspace,
@@ -3819,7 +3827,10 @@ class WorkflowDsl:
         )
         if text is None:
             # Failed/cancelled/unparseable children are not definitive — respawn.
-            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            # A dry run leaves the dead child's scratch where a live respawn
+            # would reap it.
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if schema is None:
             result: JsonValue = text
@@ -3837,9 +3848,13 @@ class WorkflowDsl:
                     runId=run_id,
                     error=str(exc),
                 )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return _MISSING
-        _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+        if not self.state.dry_run:
+            # The adoption is the reuse; a dry run copies the answer out of the
+            # run and leaves its scratch for the live path to reap.
+            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
         resumable = _workflow_agent_run_resumable(self.state.workspace, run_id)
         self._emit_adopted_child_identity(run_id, key=key, label=label, resumable=resumable)
         if label is not None:

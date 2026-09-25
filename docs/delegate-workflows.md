@@ -341,7 +341,11 @@ the script's relative paths out from under it.
 A workflow dry-run stubs **agent calls only**. Filesystem writes made by the
 script itself are live and can change the checkout or other state. Scripts that
 write state should branch on `dry_run` (or its `is_dry_run` alias), or run from a
-disposable checkout. The CLI includes this warning in dry-run output.
+disposable checkout. The CLI includes this warning in dry-run output. The
+runtime's own dry-run bookkeeping writes nothing but its journal: a predecessor
+adoption that a dry run skips, refuses, or completes leaves that run's
+temporary structured-retry workspace in place for the live path to reap, so the
+scratch tree an operator is reading survives the dry run.
 
 ## Limits
 
