@@ -1156,7 +1156,12 @@ def execute_request(
                     else None
                 ),
                 result_quality=result.result_quality,
-                signal_text=result.stderr_tail,
+                # Only the final attempt's own stderr classifies the outcome.
+                signal_text=(
+                    result.final_attempt_stderr_tail
+                    if result.final_attempt_stderr_tail is not None
+                    else result.stderr_tail
+                ),
                 unrecovered_error=result.unrecovered_error,
             )
             status = call_outcome.status

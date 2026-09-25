@@ -4766,6 +4766,13 @@ class WorkflowCommandTests(unittest.TestCase):
 
     def test_structured_retry_relaunches_unsupported_engine_in_same_worktree(self) -> None:
         subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        # The fixture's HOME and fake binaries live inside this repo. Seeded
+        # into the child's worktree, `git status --untracked-files=normal`
+        # reports them as collapsed `home/` and `bin/` entries that the
+        # per-file seeded filter never matches, so the work summary would
+        # claim changes this child never made and the changed-tree guard would
+        # (correctly) refuse the relaunch this test is about.
+        (self.workspace / ".git" / "info" / "exclude").write_text("home/\nbin/\n", encoding="utf-8")
         (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
         subprocess.run(
