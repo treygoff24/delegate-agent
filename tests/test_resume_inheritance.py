@@ -16,6 +16,7 @@ from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
 from delegate_agent import resume_command as resume_api
 from delegate_agent import run_registry as registry_api
+from delegate_agent import runner as runner_api
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -439,6 +440,52 @@ class ResumeInheritanceTests(ResumeFixture):
                 )
                 self.assertEqual(code, errors_api.EXIT_USAGE)
                 self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
+
+    def test_resume_inherits_an_explicit_stall_threshold_and_refuses_invalid_values(self):
+        self.write_config({})
+        for minutes in (7.5, 0):
+            with self.subTest(minutes=minutes):
+                _run_id, alias, _run_path = self.seed_run(
+                    manifest={"stallMinutes": minutes, "isolationMode": "none"}
+                )
+                payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
+                self.assertEqual(payload["stallMinutes"], minutes)
+        # A source that ran on the configured default records nothing and the
+        # target re-resolves its own default: nothing is pinned.
+        _run_id, alias, _run_path = self.seed_run(manifest={"isolationMode": "none"})
+        payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
+        self.assertNotIn("stallMinutes", payload)
+
+        for minutes in (-1, True, "5", None):
+            with self.subTest(minutes=minutes):
+                _run_id, alias, _run_path = self.seed_run(
+                    manifest={"stallMinutes": minutes, "isolationMode": "none"}
+                )
+                code, stdout, _stderr = self.run_main(
+                    ["--json", "--cwd", str(self.workspace), "resume", "--dry-run", alias, "go"]
+                )
+                self.assertEqual(code, errors_api.EXIT_USAGE)
+                self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
+
+    def test_the_manifest_records_only_an_explicit_stall_threshold(self):
+        base = {
+            "registry_root": self.registry_root,
+            "run_id": "r",
+            "alias": "a",
+            "harness": "codex",
+            "engine": "codex",
+            "mode": "work",
+            "model": None,
+            "source_cwd": str(self.workspace),
+            "execution_cwd": str(self.workspace),
+            "workspace_kind": "directory",
+            "isolated_workspace": False,
+            "started_at": "2026-09-25T00:00:00Z",
+        }
+        pinned = runner_api.RunContext(**base, stall_seconds=450.0, stall_seconds_pinned=True)
+        self.assertEqual(runner_api.build_manifest(pinned, ["codex"])["stallMinutes"], 7.5)
+        default = runner_api.RunContext(**base, stall_seconds=450.0)
+        self.assertNotIn("stallMinutes", runner_api.build_manifest(default, ["codex"]))
 
     def test_runs_prune_removes_only_old_dead_legacy_resume_schema(self):
         self.write_config({})

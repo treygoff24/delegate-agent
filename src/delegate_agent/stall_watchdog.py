@@ -53,6 +53,7 @@ or no-op command must not keep resetting the idle clock. And an external probe
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess  # nosec B404 - fixed ps argv for a stall diagnostic.
 import threading
@@ -127,6 +128,15 @@ _TOOL_RUNNING_STATUSES = frozenset({"pending", "running", "in_progress", "starte
 _TOOL_FINISHED_STATUSES = frozenset(
     {"cancelled", "canceled", "completed", "error", "failed", "success", "succeeded"}
 )
+
+
+def stall_minutes_value(value: object) -> float | None:
+    """A valid stall threshold in minutes (finite, >= 0; 0 disables), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
 
 
 def stall_seconds_from_minutes(minutes: float) -> float:

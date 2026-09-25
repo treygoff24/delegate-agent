@@ -718,6 +718,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["progressRequested"] = ctx.progress_requested
     if ctx.timeout_seconds is not None:
         payload["timeoutSeconds"] = ctx.timeout_seconds
+    if ctx.stall_seconds_pinned:
+        # Only an explicit --stall-minutes is recorded, so resume and followup
+        # inherit operator intent; a config or env default is re-resolved.
+        payload["stallMinutes"] = ctx.stall_seconds / stall_watchdog.SECONDS_PER_MINUTE
     if ctx.tracked_stream_max_bytes is not None:
         payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes
     if ctx.output_schema_text is not None:
