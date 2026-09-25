@@ -1214,6 +1214,44 @@ def _gate_event(events: list[JsonObject], gate_key: str, result_hash: object) ->
     return latest
 
 
+# A gate label that may be interpolated into a suggested approve command. The
+# name is script-authored; anything else falls back to the journal key, which
+# ``approve --gate`` also matches.
+_GATE_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+/-]*")
+
+
+def _paused_gate_commands(
+    root: Path, wf_id: str, gate_key: str, result_hash: object
+) -> list[list[str]]:
+    """Suggested commands for a paused gate, built from its declared actions.
+
+    ``approve`` refuses a bare approval on a gate whose actions exclude
+    ``approve``, so a suggestion that names no action can be a dead end. The
+    pending gate's own list is suggested instead, one command per action; when
+    the gate cannot be read from the journal, the events view is the honest
+    fallback.
+    """
+    event = _gate_event(
+        list(registry.iter_journal(root / registry.JOURNAL_FILE)),
+        gate_key,
+        result_hash,
+    )
+    if event is None:
+        return [["workflow", "events", wf_id]]
+    label = gate_key
+    name = event.get("gateName")
+    if isinstance(name, str) and _GATE_LABEL_RE.fullmatch(name):
+        label = name
+    commands: list[list[str]] = []
+    for action in runtime._declared_gate_actions(event):
+        if action == "approve":
+            commands.append(["workflow", "approve", wf_id])
+        else:
+            commands.append(["workflow", "approve", wf_id, "--gate", label, "--action", action])
+    commands.append(["workflow", "events", wf_id])
+    return commands
+
+
 def _pending_gate_names(
     root: Path, approval: JsonObject | None, events: list[JsonObject]
 ) -> list[str]:
@@ -1242,12 +1280,7 @@ def _gate_decision(
     Returns the decision fields to store, or None for a bare approval (which
     stores exactly what approvals always stored).
     """
-    declared = event.get("actions") if isinstance(event, dict) else None
-    allowed = (
-        [item for item in declared if isinstance(item, str)]
-        if isinstance(declared, list) and declared
-        else ["approve"]
-    )
+    allowed = runtime._declared_gate_actions(event if isinstance(event, dict) else None)
     name = event.get("gateName") if isinstance(event, dict) else None
     label = name if isinstance(name, str) else gate_key
     action = choice.action if choice is not None else None
@@ -1612,18 +1645,21 @@ def _status_view(root: Path, payload: JsonObject) -> JsonObject:
     # The directory was selected through validated workflow targeting. Do not
     # interpolate a child-written status field into a suggested shell command.
     wf_id = root.name
-    actions: list[str] = []
-    if status == "paused" and isinstance(view.get("gateKey"), str):
-        actions = [f"workflow approve {wf_id}", f"workflow events {wf_id}"]
+    gate_key = view.get("gateKey")
+    suggested: list[list[str]]
+    if status == "paused" and isinstance(gate_key, str):
+        suggested = _paused_gate_commands(root, wf_id, gate_key, view.get("gateResultHash"))
     elif status in {"stalled", "failed", "killed", "paused"}:
-        actions = [f"workflow events {wf_id}", f"workflow run --resume {wf_id}"]
+        suggested = [["workflow", "events", wf_id], ["workflow", "run", "--resume", wf_id]]
     elif status in LIVE_WORKFLOW_STATUSES:
-        actions = [f"workflow wait {wf_id}"]
+        suggested = [["workflow", "wait", wf_id]]
     elif status in {"succeeded", "dry_run"}:
-        actions = [f"workflow result {wf_id}"]
+        suggested = [["workflow", "result", wf_id]]
+    else:
+        suggested = []
     actions = [
-        shlex.join(["delegate", "--cwd", str(root.parent.parent.parent), *action.split()])
-        for action in actions
+        shlex.join(["delegate", "--cwd", str(root.parent.parent.parent), *command])
+        for command in suggested
     ]
     view["decision"] = {
         "status": status,
