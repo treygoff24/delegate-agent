@@ -1290,6 +1290,7 @@ class WorkflowState:
     # mapped to the caller key, and the subset whose call is still running.
     lifetime_caller_keys: dict[str, str] = field(default_factory=dict)
     live_caller_keys: set[str] = field(default_factory=set)
+    live_gate_keys: set[str] = field(default_factory=set)
     # Keyed parallel/pipeline/workflow scopes entered in this lifetime.
     lifetime_scope_keys: set[str] = field(default_factory=set)
     # Prompt/options digests recorded on each key's latest agent_started.
@@ -1658,15 +1659,18 @@ class WorkflowState:
         result: JsonValue,
         gate_name: str | None = None,
         actions: list[str] | None = None,
+        result_hash: str | None = None,
     ) -> GateExit:
         """Durably record a gate before closing admission and draining agents.
 
         The journal is the authority.  ``status.json`` is only a recoverable
         projection, so a supervisor death while draining cannot lose the gate
         identity. Re-parking the same key and result reuses its journal event
-        and never appends a duplicate.
+        and never appends a duplicate. ``result_hash`` overrides the hash of
+        ``result`` for a gate that asks a derived question about it.
         """
-        result_hash = _gate_result_hash(result)
+        if result_hash is None:
+            result_hash = _gate_result_hash(result)
         with self.journal_lock:
             status = registry.read_json(self.status_path) or {}
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
@@ -2031,6 +2035,25 @@ class WorkflowState:
     def release_caller_key(self, key: str) -> None:
         with self.journal_lock:
             self.live_caller_keys.discard(key)
+
+    def claim_gate_key(self, gate_key: str, caller_key: str) -> None:
+        """Reserve a park_gate() key while its call is in flight.
+
+        Two live calls with one key in one named scope would ask one question
+        and share one answer, so the second is refused rather than merged.
+        """
+        with self.journal_lock:
+            if gate_key in self.live_gate_keys:
+                raise WorkflowKeyConflict(
+                    f"park_gate(key={caller_key!r}) is already held by a live park_gate() "
+                    f"call in scope {self.current_named_scope()!r}; a gate key names one "
+                    "question. Make the key unique (for example include the item id)."
+                )
+            self.live_gate_keys.add(gate_key)
+
+    def release_gate_key(self, gate_key: str) -> None:
+        with self.journal_lock:
+            self.live_gate_keys.discard(gate_key)
 
     def current_invocation(self) -> _WorkflowInvocation:
         current = getattr(self.thread_local, "invocation", None)
@@ -3083,12 +3106,28 @@ class WorkflowDsl:
         [--note TEXT] [--data JSON]`` records the choice; the resumed script
         reaches this call again and receives ``{"gate", "action", "note",
         "data"}``. The approval is bound to ``result``, as for workflow gates:
-        a different result is a new question and parks again.
+        a different result is a new question and parks again, and so does a
+        recorded action this call no longer declares. A second live call with
+        the same key in one named scope raises ``WorkflowKeyConflict``.
         """
         caller_key = _validate_caller_key(key, what="park_gate()")
         allowed = _validate_gate_actions(actions)
         named_scope = self.state.current_named_scope()
         gate_key = _caller_gate_key(named_scope, caller_key)
+        self.state.claim_gate_key(gate_key, caller_key)
+        try:
+            return self._park_gate_claimed(caller_key, gate_key, named_scope, result, allowed)
+        finally:
+            self.state.release_gate_key(gate_key)
+
+    def _park_gate_claimed(
+        self,
+        caller_key: str,
+        gate_key: str,
+        named_scope: str,
+        result: JsonValue,
+        allowed: list[str],
+    ) -> JsonObject:
         if self.state.dry_run:
             self.state.dry_runs.append(
                 {
@@ -3111,24 +3150,34 @@ class WorkflowDsl:
             }
         result_hash = _gate_result_hash(result)
         decision = registry.approval_decision(self.state.root, gate_key, result_hash)
+        if decision is not None and _decision_action(decision) not in allowed:
+            # The operator answered the gate as it parked, and the script has
+            # since stopped declaring that action. Like a changed result, that
+            # is a new question: ask it under a hash bound to the result and
+            # the actions now on offer, so the stale answer cannot satisfy it
+            # and the approve command sees it as pending.
+            self.state.append_event(
+                "gate_action_undeclared",
+                gate=caller_key,
+                gateKey=gate_key,
+                action=_decision_action(decision),
+                actions=allowed,
+            )
+            # approve validated any answer to this hash against these actions.
+            result_hash = _gate_reask_hash(result, allowed)
+            decision = registry.approval_decision(self.state.root, gate_key, result_hash)
         if decision is not None:
-            action = decision.get("action")
-            action = action if isinstance(action, str) and action else "approve"
+            action = _decision_action(decision)
             note = decision.get("note")
-            outcome: JsonObject = {
+            self.state.append_event(
+                "gate_decided", gate=caller_key, gateKey=gate_key, action=action
+            )
+            return {
                 "gate": caller_key,
                 "action": action,
                 "note": note if isinstance(note, str) else None,
                 "data": decision.get("data"),
             }
-            event: JsonObject = {"gate": caller_key, "gateKey": gate_key, "action": action}
-            if action not in allowed:
-                # The approval was validated against the gate as it parked;
-                # the script has since changed its declared actions.
-                event["warning"] = "action_not_declared"
-                event["actions"] = allowed
-            self.state.append_event("gate_decided", **event)
-            return outcome
         # Same admission settle as workflow(gate=...): let admitted siblings
         # reach their child seam before stop_admitting becomes visible.
         time.sleep(0.01)
@@ -3138,6 +3187,7 @@ class WorkflowDsl:
             result=result,
             gate_name=caller_key,
             actions=allowed,
+            result_hash=result_hash,
         )
 
     def _finish_child(
@@ -5220,6 +5270,16 @@ def _canonical_json(value: object) -> str:
 
 def _gate_result_hash(result: object) -> str:
     return _stable_hash(_canonical_json(result))
+
+
+def _gate_reask_hash(result: object, actions: list[str]) -> str:
+    """Hash of a park_gate() question re-asked because its answer lapsed."""
+    return _stable_hash(_canonical_json({"reask": {"result": result, "actions": actions}}))
+
+
+def _decision_action(decision: JsonObject) -> str:
+    action = decision.get("action")
+    return action if isinstance(action, str) and action else "approve"
 
 
 def _gate_failed(result: object) -> bool:

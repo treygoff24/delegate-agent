@@ -302,6 +302,53 @@ class GateActionTests(_WorkflowFixture):
         except runtime.GateExit as exc:
             return exc
 
+    def test_an_answer_the_gate_no_longer_offers_is_asked_again(self) -> None:
+        result = {"task": 8}
+        self.assertIsInstance(self.park("task-8", result, ["retry", "accept"]), runtime.GateExit)
+        choice = commands.GateChoice(
+            gate="task-8", action="accept", note=None, data=None, has_data=False
+        )
+        self.assertEqual(self.resume(gate_choice=choice), 0)
+        # The script stops offering "accept": the recorded answer lapses.
+        reparked = self.park("task-8", result, ["retry", "skip"])
+        self.assertIsInstance(reparked, runtime.GateExit, "an undeclared action was returned")
+        gates = self.events("gate")
+        self.assertEqual(gates[-1]["actions"], ["retry", "skip"])
+        self.assertNotEqual(gates[-1]["gateResultHash"], gates[0]["gateResultHash"])
+        self.assertEqual(self.events("gate_action_undeclared")[-1]["action"], "accept")
+        skip = commands.GateChoice(
+            gate="task-8", action="skip", note=None, data=None, has_data=False
+        )
+        self.assertEqual(self.resume(gate_choice=skip), 0)
+        decision = self.park("task-8", result, ["retry", "skip"])
+        self.assertEqual(decision["action"], "skip")
+
+    def test_a_second_live_park_gate_with_one_key_is_refused(self) -> None:
+        dsl = runtime.WorkflowDsl(self.state(), {})
+        nested: list[object] = []
+        calls: list[str] = []
+
+        def decide(root: Path, gate_key: str, result_hash: str, **_: object) -> dict:
+            calls.append(gate_key)
+            if len(calls) == 1:
+                # While the first call is live, a sibling asks with the same key.
+                try:
+                    nested.append(dsl.park_gate("review", {"n": 2}))
+                except runtime.WorkflowKeyConflict as exc:
+                    nested.append(exc)
+                nested.append(dsl.park_gate("other", {"n": 3}))
+            return {"action": "approve"}
+
+        with mock.patch.object(runtime.registry, "approval_decision", decide):
+            first = dsl.park_gate("review", {"n": 1})
+            self.assertEqual(first["action"], "approve")
+            self.assertIsInstance(nested[0], runtime.WorkflowKeyConflict)
+            self.assertIn("park_gate(key='review') is already held", str(nested[0]))
+            self.assertIn("Make the key unique", str(nested[0]))
+            self.assertEqual(nested[1]["action"], "approve")
+            # A settled call releases its key: the same key may ask again.
+            self.assertEqual(dsl.park_gate("review", {"n": 4})["action"], "approve")
+
     def test_action_round_trips_into_the_script(self) -> None:
         result = {"task": 7, "failure": "fixture drift"}
         parked = self.park("task-7", result, ["retry", "accept"])
