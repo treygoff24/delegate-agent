@@ -1230,15 +1230,28 @@ class EndToEndBwrapRunTests(CommandTestBase):
         fake_dir = tempfile.TemporaryDirectory()
         self.addCleanup(fake_dir.cleanup)
         fake = Path(fake_dir.name) / "omp"
+        # The fake reads its prompt from stdin as omp does, probes the boundary,
+        # and reports the results as its assistant text in omp's JSON event
+        # stream (the agent_start ... turn_end/agent_end shape the omp script in
+        # test_stall_watchdog_runner.py emits). A result reaches the assertions
+        # only through omp's own assistant-text extraction.
         fake.write_text(
             "#!/bin/sh\n"
-            "if touch leak.txt 2>/dev/null; then echo write=allowed; else echo write=denied; fi\n"
-            'if touch "$TMPDIR/bwrap-temp" 2>/dev/null; then echo temp=allowed; else echo temp=denied; fi\n'
-            "if [ -e .delegate/runs/del_old/prompt.txt ]; then echo registry=visible; "
-            "else echo registry=hidden; fi\n"
-            "if grep -q OLD-PROMPT-CANARY .delegate/runs/*/prompt.txt 2>/dev/null; then echo canary=leaked; "
-            "else echo canary=clean; fi\n"
-            "git status --short >/dev/null 2>&1 && echo git=ok || echo git=error\n",
+            "cat >/dev/null\n"
+            "if touch leak.txt 2>/dev/null; then write=allowed; else write=denied; fi\n"
+            'if touch "$TMPDIR/bwrap-temp" 2>/dev/null; then temp=allowed; else temp=denied; fi\n'
+            "if [ -e .delegate/runs/del_old/prompt.txt ]; then registry=visible; "
+            "else registry=hidden; fi\n"
+            "if grep -q OLD-PROMPT-CANARY .delegate/runs/*/prompt.txt 2>/dev/null; "
+            "then canary=leaked; else canary=clean; fi\n"
+            "if git status --short >/dev/null 2>&1; then gitstatus=ok; else gitstatus=error; fi\n"
+            'report="write=$write temp=$temp registry=$registry canary=$canary git=$gitstatus"\n'
+            'echo \'{"type":"agent_start"}\'\n'
+            'echo \'{"type":"turn_start"}\'\n'
+            'printf \'{"type":"turn_end","message":{"role":"assistant","content":'
+            '[{"type":"text","text":"%s"}],"stopReason":"stop"},"toolResults":[]}\\n\' '
+            '"$report"\n'
+            'echo \'{"type":"agent_end","messages":[],"willRetry":false}\'\n',
             encoding="utf-8",
         )
         fake.chmod(0o755)
@@ -1254,17 +1267,15 @@ class EndToEndBwrapRunTests(CommandTestBase):
         payload = json.loads(out)
         self.assertEqual(payload["status"], "succeeded", payload)
         self.assertEqual(payload["safeWorkspaceMethod"], sandbox_bwrap.BWRAP_METHOD)
-        # The fake engine's raw stdout is captured verbatim in the run registry
-        # (omp's assistant-text extraction expects its own event stream).
-        raw = (workspace / ".delegate" / "runs" / payload["runId"] / "stdout.log").read_text(
-            encoding="utf-8"
-        )
-        observed = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
-        self.assertEqual(observed.get("write"), "denied", raw)
-        self.assertEqual(observed.get("temp"), "allowed", raw)
-        self.assertEqual(observed.get("registry"), "hidden")
-        self.assertEqual(observed.get("canary"), "clean")
-        self.assertEqual(observed.get("git"), "ok")
+        report = payload["assistantText"]
+        observed = dict(field.split("=", 1) for field in report.split() if "=" in field)
+        # Precondition: every probe reported, so no check below passes on absence.
+        self.assertEqual(set(observed), {"write", "temp", "registry", "canary", "git"}, report)
+        self.assertEqual(observed["write"], "denied", report)
+        self.assertEqual(observed["temp"], "allowed", report)
+        self.assertEqual(observed["registry"], "hidden", report)
+        self.assertEqual(observed["canary"], "clean", report)
+        self.assertEqual(observed["git"], "ok", report)
         self.assertFalse((workspace / "leak.txt").exists())
         manifest = run_registry.load_run_manifest(workspace / ".delegate", payload["runId"])
         # The child's temp writes land under its own TMPDIR (the compact temp
