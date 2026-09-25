@@ -126,7 +126,9 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
     OptionSpec(
         "--auth-profile",
         "NAME",
-        "Select an already-defined profiles.definitions environment for a supported command.",
+        "Select an already-defined profiles.definitions environment for a supported command. "
+        "Precedence: flag > environment (DELEGATE_CONFIG, AI_PROFILE, profiles.detectFrom) > "
+        "config default; delegate warns whenever one layer overrides another.",
     ),
     OptionSpec(
         "--group",
@@ -1717,6 +1719,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "Selection is read-only: flag > profiles.detectFrom environment order > profiles.default.",
+            "A layer that overrides a different lower-layer choice warns (for example, an inherited "
+            "DELEGATE_PROFILE over the loaded config's profiles.default); the profile shim applies the "
+            "same order to config files, so --auth-profile NAME selects config.NAME.json over "
+            "DELEGATE_CONFIG when that overlay exists.",
             "Env values are key-aware redacted; inline profile env must not contain secrets.",
         ),
         see_also=("describe", "codex", "models"),

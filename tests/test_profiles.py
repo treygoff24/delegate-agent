@@ -197,6 +197,40 @@ class ProfileResolutionTests(unittest.TestCase):
         self.assertIsNone(resolved.source)
         self.assertEqual(resolved.env, {})
 
+    def test_inherited_detect_var_over_config_default_warns(self):
+        # A lane inherits DELEGATE_PROFILE=work while its selected config pins
+        # profiles.default=personal. env > config default still holds, but the
+        # override must be said out loud.
+        config = base_config(personal="/tmp/personal", work="/tmp/work")
+        config["profiles"]["default"] = "personal"
+        resolved = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "work"})
+        self.assertEqual(resolved.name, "work")
+        self.assertEqual(resolved.source, "DELEGATE_PROFILE")
+        self.assertEqual(len(resolved.warnings), 1)
+        self.assertIn("DELEGATE_PROFILE=work overrides", resolved.warnings[0])
+        self.assertIn("profiles.default=personal", resolved.warnings[0])
+        self.assertIn("--auth-profile personal", resolved.warnings[0])
+
+        # Agreement is silent.
+        resolved = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "personal"})
+        self.assertEqual(resolved.warnings, ())
+
+    def test_flag_over_different_detected_profile_warns(self):
+        config = base_config(personal="/tmp/personal", work="/tmp/work")
+        resolved = self.profiles.resolve_active_profile(
+            config, {"AI_PROFILE": "work"}, cli_override="personal"
+        )
+        self.assertEqual(resolved.name, "personal")
+        self.assertEqual(resolved.source, "flag")
+        self.assertEqual(
+            resolved.warnings, ("--auth-profile personal overrides AI_PROFILE=work (flag > env).",)
+        )
+
+        resolved = self.profiles.resolve_active_profile(
+            config, {"AI_PROFILE": "personal"}, cli_override="personal"
+        )
+        self.assertEqual(resolved.warnings, ())
+
     def test_unknown_explicit_override_hard_errors(self):
         config = base_config(work="/tmp/work")
         with self.assertRaises(DelegateError) as ctx:
