@@ -110,9 +110,13 @@ PI_FAMILY_SAFE_LOCKDOWN = {
 }
 
 
-OMP_IMAGE_PATH_PATTERN = re.compile(
-    r"(?<![\w@])@?[^\s'\"`()<>]+\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic)(?![\w.])",
-    re.IGNORECASE,
+# A path token is a run of characters outside this class. Matching is split in
+# two linear passes (tokenize, then find the last image extension in each token)
+# because a single ``[^...]+\.(ext)`` pattern backtracks quadratically on one
+# long token with no whitespace: a 1 MB run of dots took minutes.
+OMP_IMAGE_TOKEN_SEPARATORS = re.compile(r"[\s'\"`()<>]+")
+OMP_IMAGE_EXTENSION_PATTERN = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic)(?![\w.])", re.IGNORECASE
 )
 OMP_IMAGE_PATH_WARNING = (
     "omp attaches images only from @path command-line arguments, and Delegate sends the "
@@ -132,10 +136,15 @@ def omp_image_path_warnings(engine: str, prompt: str, *, limit: int = 3) -> tupl
     if engine != "omp":
         return ()
     found: list[str] = []
-    for match in OMP_IMAGE_PATH_PATTERN.finditer(prompt):
-        token = match.group(0)
-        if token not in found:
-            found.append(token)
+    for token in OMP_IMAGE_TOKEN_SEPARATORS.split(prompt):
+        # The path runs from the token start (an optional @ included) to its last
+        # image extension, and needs at least one character before that dot.
+        extensions = list(OMP_IMAGE_EXTENSION_PATTERN.finditer(token))
+        if not extensions or extensions[-1].start() < 1:
+            continue
+        path = token[: extensions[-1].end()]
+        if path not in found:
+            found.append(path)
     if not found:
         return ()
     shown = ", ".join(found[:limit]) + (
