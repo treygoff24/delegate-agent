@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate actions: `park_gate(key, result, actions=[...])` pauses for an operator
   decision, and `workflow approve <wfId> --gate KEY --action NAME [--note TEXT]
   [--data JSON]` returns that choice to the script. Undeclared actions are
-  refused with the allowed list. A bare `approve` behaves as before.
+  refused with the allowed list. A bare `approve` behaves as before. A recorded
+  action the resumed script no longer declares is not returned: the gate parks
+  again (`gate_action_undeclared`) and asks under the current actions. A second
+  live `park_gate()` with the same key in one named scope raises
+  `WorkflowKeyConflict`.
 - The workflow `capabilities` global adds `agentKey`, `scopeKey`, and
   `gateActions`.
 - Tracked runs persist the harness-reported token `usage` on the run record, so

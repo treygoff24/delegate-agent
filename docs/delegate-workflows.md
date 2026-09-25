@@ -295,6 +295,15 @@ it, approve takes the latest unapproved gate as before. A bare approve stores
 exactly what approvals always stored, and the call returns action `approve`.
 As with every gate, the approval is bound to the gate's result hash: if the
 resumed script parks the same key with a different result, it pauses again.
+The same holds when the recorded action is one the resumed script no longer
+declares: the call journals `gate_action_undeclared` and parks again under a
+new question bound to the result and the actions now offered, so
+`approve --gate KEY` sees it as pending and validates against the current list.
+Two live `park_gate()` calls with one key in one named scope (for example two
+parallel items that both ask `"review"`) would share one answer, so the second
+raises `WorkflowKeyConflict` with the same guidance as a reused `agent(key=)`:
+include the item id in the key. A call that has returned releases its key, so a
+loop may ask the same key again with a new result.
 In a dry run, `park_gate()` returns its first declared action with
 `dryRun: true`.
 
