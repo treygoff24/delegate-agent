@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,103 @@ class KeyedReplayTests(_WorkflowFixture):
                 dsl.agent("p", key=bad)
 
 
+class ItemHandlerRefusalTests(_WorkflowFixture):
+    """A key refusal reaches the script from every per-item handler."""
+
+    def test_a_duplicate_live_key_in_parallel_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "dupes", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def step(name):\n"
+            "    try:\n"
+            "        return agent(name, key='impl')\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "parallel([lambda: step('a'), lambda: step('b')])\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def launch(_self: object, _engine: str, prompt: str, **_kw: object) -> str:
+            # Hold the winner's key live until its peer has been refused.
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate key")
+            return f"done:{prompt}"
+
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live"):
+            self.run_script(script, {"refused": refused}, launch)
+        self.assertEqual(self.events("thunk_failed"), [], "the refusal became a failed item slot")
+        self.assertEqual(len(self.events("agent_started")), 1)
+
+    def test_an_invalid_key_in_parallel_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "bad-key", "defaults": {"engine": "codex"}}\n'
+            'parallel([lambda: agent("a", key=7)])\n'
+            "return True\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            self.run_script(script, {}, lambda *_a, **_k: self.fail("launched an invalid key"))
+        self.assertIsInstance(caught.exception, runtime.WorkflowKeyError)
+        self.assertIn("agent() key must be a non-empty printable string", str(caught.exception))
+        self.assertEqual(self.events("thunk_failed"), [])
+
+    def test_a_duplicate_live_key_in_pipeline_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "dupes", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def stage(prev, item, index):\n"
+            "    try:\n"
+            "        return agent(item, key='impl')\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "pipeline(['a', 'b'], stage)\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def launch(_self: object, _engine: str, prompt: str, **_kw: object) -> str:
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate key")
+            return f"done:{prompt}"
+
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live"):
+            self.run_script(script, {"refused": refused}, launch)
+        self.assertEqual(self.events("stage_failed"), [], "the refusal dropped an item")
+        self.assertEqual(len(self.events("agent_started")), 1)
+
+    def test_a_duplicate_live_gate_key_in_soft_park_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "gates", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def ask(name):\n"
+            "    try:\n"
+            "        return park_gate('review', {'item': name}, actions=['retry', 'accept'])\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "def worker():\n"
+            "    return parallel([lambda: ask('a'), lambda: ask('b')])\n"
+            "soft_park([('job', worker)])\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def decide(_root: Path, _gate_key: str, _result_hash: str, **_: object) -> dict:
+            # Hold the winner's gate key live until its peer has been refused.
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate gate key")
+            return {"action": "accept"}
+
+        with (
+            mock.patch.object(runtime.registry, "approval_decision", decide),
+            self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live park_gate"),
+        ):
+            self.run_script(script, {"refused": refused}, lambda *_a, **_k: None)
+        self.assertEqual(
+            self.events("soft_park_item_failed"), [], "the refusal became a failed item slot"
+        )
+        self.assertEqual(self.events("thunk_failed"), [], "the refusal became a failed item slot")
+
+
 class LifetimeStaleCancelTests(_WorkflowFixture):
     def test_plain_threads_sharing_a_scope_both_complete(self) -> None:
         """Two agent() calls on plain threads mint the same positional scope."""
@@ -323,6 +421,103 @@ class GateActionTests(_WorkflowFixture):
         decision = self.park("task-8", result, ["retry", "skip"])
         self.assertEqual(decision["action"], "skip")
 
+    def test_a_reask_question_is_not_answered_by_a_result_hash(self) -> None:
+        """A result shaped like the old re-ask payload must not satisfy a re-ask."""
+        result = {"task": 11}
+        collision = {"reask": {"result": result, "actions": ["retry"]}}
+        # Pass 1: the script parks this key on a result that is exactly what a
+        # later re-ask would have hashed, and the operator answers it.
+        self.assertIsInstance(
+            self.park("task-11", collision, ["retry", "accept"]), runtime.GateExit
+        )
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="accept", note="pass 1")
+            ),
+            0,
+        )
+        # Pass 2: the plain result, still offering "accept", and answered.
+        self.assertIsInstance(self.park("task-11", result, ["retry", "accept"]), runtime.GateExit)
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="accept", note="pass 2")
+            ),
+            0,
+        )
+        # Pass 3: only "retry" is offered now, so the recorded "accept" lapses
+        # and the question is asked again under a hash of its own.
+        reparked = self.park("task-11", result, ["retry"])
+        self.assertIsInstance(reparked, runtime.GateExit, "the re-ask consumed another answer")
+        self.assertEqual(self.events("gate_action_undeclared")[-1]["action"], "accept")
+        self.assertEqual(self.events("gate")[-1]["actions"], ["retry"])
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="retry", note="pass 3")
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-11", result, ["retry"])["action"], "retry")
+
+    def test_a_reparked_gate_carries_the_actions_now_on_offer(self) -> None:
+        result = {"task": 9}
+        self.assertIsInstance(self.park("task-9", result, ["retry", "accept"]), runtime.GateExit)
+        # The resumed script offers a different list for the same result: the
+        # pending question must show the new one, or approve refuses an action
+        # the script now declares.
+        self.assertIsInstance(self.park("task-9", result, ["retry", "skip"]), runtime.GateExit)
+        self.assertEqual(self.events("gate")[-1]["actions"], ["retry", "skip"])
+        self.assertEqual(
+            self.events("gate")[-1]["gateResultHash"], self.events("gate")[0]["gateResultHash"]
+        )
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-9", action="skip", note="new list")
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-9", result, ["retry", "skip"])["action"], "skip")
+
+    def test_status_suggests_an_approve_the_gate_accepts(self) -> None:
+        result = {"task": 12}
+        self.assertIsInstance(self.park("task-12", result, ["retry", "accept"]), runtime.GateExit)
+        view = commands._status_view(
+            self.root, registry.read_json(self.root / registry.STATUS_FILE) or {}
+        )
+        argvs = [shlex.split(action) for action in view["decision"]["nextActions"]]
+        approves = [argv for argv in argvs if "approve" in argv]
+        self.assertEqual(
+            [argv[-2:] for argv in approves],
+            [["--action", "retry"], ["--action", "accept"]],
+            "a paused gate's suggestions must name the actions it declares",
+        )
+        for argv in approves:
+            self.assertEqual(argv[:4], ["delegate", "--cwd", str(self.workspace), "workflow"])
+            self.assertEqual(argv[4:6], ["approve", self.wf_id])
+        self.assertIn(
+            ["delegate", "--cwd", str(self.workspace), "workflow", "events", self.wf_id], argvs
+        )
+        # The suggested command is one the gate accepts.
+        parsed = parse_cli(approves[0][1:]).payload
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate=parsed.gate, action=parsed.gate_action)
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-12", result, ["retry", "accept"])["action"], "retry")
+
+    def test_status_keeps_the_bare_approve_for_a_default_gate(self) -> None:
+        self.assertIsInstance(self.park("plain-9", {"n": 1}, None), runtime.GateExit)
+        view = commands._status_view(
+            self.root, registry.read_json(self.root / registry.STATUS_FILE) or {}
+        )
+        self.assertEqual(
+            view["decision"]["nextActions"][0],
+            shlex.join(
+                ["delegate", "--cwd", str(self.workspace), "workflow", "approve", self.wf_id]
+            ),
+        )
+
     def test_a_second_live_park_gate_with_one_key_is_refused(self) -> None:
         dsl = runtime.WorkflowDsl(self.state(), {})
         nested: list[object] = []
@@ -440,12 +635,15 @@ class GateActionTests(_WorkflowFixture):
 
 
 class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
-    def register_child(self, key: str, state: dict) -> str:
+    def register_child(self, key: str, state: dict, cleanup: dict | None = None) -> str:
         registry_root = run_registry.registry_root(self.workspace)
+        metadata: dict = {"group": self.wf_id, "workflowAgentKey": key}
+        if cleanup is not None:
+            metadata["temporaryWorkspaceCleanup"] = cleanup
         run_id, alias = run_registry.register_run(
             registry_root,
             harness="codex",
-            metadata={"group": self.wf_id, "workflowAgentKey": key},
+            metadata=metadata,
         )
         run_registry.write_run_state(
             run_registry.run_directory(registry_root, run_id),
@@ -510,6 +708,95 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         )
         self.assertIs(adopted, runtime._MISSING)
         self.assertEqual(self.events("agent_adopt_skipped")[-1]["reason"], "cancelled")
+
+    def scratch(self) -> tuple[dict, Path]:
+        """A live temporary structured-retry workspace plus its cleanup descriptor."""
+        temp_base = self.workspace / "structured-retry-scratch"
+        isolated = temp_base / "isolated"
+        isolated.mkdir(parents=True)
+        (isolated / "child-artifact.txt").write_text("evidence\n", encoding="utf-8")
+        return (
+            {
+                "gitRoot": None,
+                "isolatedWorkspace": str(isolated),
+                "tempBase": str(temp_base),
+                "sourceRoot": str(self.workspace),
+            },
+            temp_base,
+        )
+
+    def adopt_over_scratch(
+        self,
+        key: str,
+        run_state: dict,
+        *,
+        dry_run: bool,
+        schema: dict | None = None,
+    ) -> tuple[object, Path]:
+        """Adopt a predecessor whose index entry carries a live scratch tree."""
+        cleanup, temp_base = self.scratch()
+        self.register_child(key, run_state, cleanup=cleanup)
+        state = self.state()
+        state.dry_run = dry_run
+        dsl = runtime.WorkflowDsl(state, {})
+        adopted = dsl._adopt_existing_agent_run(
+            key,
+            scope="root/seq#0",
+            phase=None,
+            schema=schema,
+            prefer_assistant=False,
+            timeout=1,
+        )
+        return adopted, temp_base
+
+    def test_a_dry_run_adoption_leaves_the_predecessors_scratch_alone(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-cancelled", {"status": "cancelled"}, dry_run=True
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        skipped = self.events("agent_adopt_skipped")[-1]
+        self.assertEqual(skipped["reason"], "cancelled")
+        self.assertTrue(skipped["simulated"])
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch tree it was reading")
+
+    def test_a_live_adoption_still_reaps_the_predecessors_scratch(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-live-cancelled", {"status": "cancelled"}, dry_run=False
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        self.assertEqual(self.events("agent_adopt_skipped")[-1]["reason"], "cancelled")
+        self.assertFalse(temp_base.exists(), "the live respawn path must still reap it")
+
+    def test_a_dry_run_adoption_leaves_a_failed_childs_scratch_alone(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-failed", {"status": "failed"}, dry_run=True
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        self.assertTrue(temp_base.exists(), "a dry run reaped a dead child's scratch")
+
+    def test_a_dry_run_adoption_leaves_the_scratch_of_a_rejected_answer(self) -> None:
+        rejected, temp_base = self.adopt_over_scratch(
+            "key-dry-rejected",
+            {"status": "succeeded", "assistantText": "not an object"},
+            dry_run=True,
+            schema={
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+        )
+        self.assertIs(rejected, runtime._MISSING)
+        self.assertEqual(self.events("agent_adopt_rejected")[-1]["key"], "key-dry-rejected")
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch of the run it refused")
+
+    def test_a_dry_run_adoption_takes_the_answer_and_leaves_the_scratch(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-succeeded",
+            {"status": "succeeded", "assistantText": "adopted answer"},
+            dry_run=True,
+        )
+        self.assertEqual(adopted, "adopted answer")
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch of the run it adopted")
 
     def test_resume_seals_missing_pid_children_past_the_grace_window(self) -> None:
         run_id = self.register_child(
