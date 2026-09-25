@@ -1,6 +1,29 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-22 (GPT-6 Sol/Luna + Claude Opus 5.5 bump; no new public release)
+Updated: 2026-09-25 (describe DSL derived from the runtime; bwrap e2e fixture; devbox promoted)
+
+- `b8d40b9` makes `describe --full` report the workflow DSL the runtime
+  actually injects: globals from the new `WORKFLOW_DSL_GLOBALS` (26 names,
+  checked by the injector), capabilities from `WORKFLOW_CAPABILITIES` (all
+  seven, also as `capabilityVersions`), and the `agent()` signature rendered
+  from the method. CHANGELOG [Unreleased] now carries the D4 and D5 entries.
+- `b235b54` fixes `test_tracked_safe_run_hides_registry_and_denies_writes`,
+  which failed wherever bubblewrap works (at `37628e4` too) because its fake
+  omp predated the one-outcome contract. Gate at `b235b54`: 3,760 passed,
+  0 failed, 15 skipped, 2,943 subtests, pinned Ruff check and format clean,
+  compileall clean.
+- Devbox runtime promoted by `delegate-promote-checkout` to
+  `~/.delegate/releases/b235b54474c194c4-d4da89bf37ff0ad5` (was the `37628e4`
+  release). `promotionMatchesRuntime: true`, capabilities refresh clean, and
+  the installed `describe --full` lists all seven capabilities and 26 globals.
+- **The Mac is not promoted yet**; the steps went to the writing-plans agent
+  (Taproot) on `#night-porch` on 2026-09-25.
+- The estate launcher (`~/.local/bin/delegate`, a linux-devbox agent-env row)
+  keeps an incoming `DELEGATE_CONFIG` over `--auth-profile`; this repo's
+  `bin/delegate-profile-shim` gained flag-over-environment config selection in
+  D4. The two launchers now disagree; aligning them is a linux-devbox change.
+
+## Previous record (2026-09-22)
 
 - `908abd6` moves the bundled Codex rows to the GPT-6 line and the bundled
   Claude row to `claude-opus-5-5`. `gpt-6-sol` and `gpt-6-luna` replace the
