@@ -750,6 +750,7 @@ def _run_workspace_setup_or_record_failure(
     print(
         f"delegate: running workspace setup in {registration.worktree_path}", file=execution.stderr
     )
+    recorded_env = pre_ctx.workspace_env
     try:
         result = workspace_spec.run_setup(
             command,
@@ -758,6 +759,11 @@ def _run_workspace_setup_or_record_failure(
             log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
             timeout=float(request.timeout) if request.timeout is not None else None,
             publish_pgid=lambda pgid: _publish_setup_pgid(registration, pgid),
+            # The tail is the child-shaped environment's own output: `set -x`
+            # traces and `npm ci` progress lines print expanded values, so the
+            # recorded --env values are masked out of it inside run_setup,
+            # before it is cut to its recorded length.
+            mask_values=recorded_env,
         )
     except workspace_spec.SetupInterrupted as exc:
         # The operator terminated this launcher mid-setup. run_setup has already
@@ -775,7 +781,6 @@ def _run_workspace_setup_or_record_failure(
             log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
             output_tail=f"setup could not start: {exc.strerror or exc}",
         )
-    recorded_env = pre_ctx.workspace_env
     spec_record = registration.creation_context.get("workspaceSpec")
     if isinstance(spec_record, dict):
         spec_record["setupResult"] = result.as_json()
@@ -803,10 +808,10 @@ def _run_workspace_setup_or_record_failure(
     message = (
         f"Workspace setup {reason}; the child was not launched. Setup output: {result.log_path}"
     )
-    # The tail is the child-shaped environment's own output: `set -x` traces and
-    # `npm ci` progress lines print expanded values, so every recorded --env
-    # value is masked before the tail enters a message that state.json and the
-    # error envelope both carry.
+    # run_setup masks every recorded --env value out of the tail *before* it
+    # cuts the tail to its recorded length (masking a cut tail would miss a
+    # value that straddled the cut), so this pass is the record-level guarantee:
+    # whatever tail reaches this message is masked here as well.
     tail = workspace_spec.mask_recorded_env_values(result.output_tail, recorded_env)
     if tail.strip():
         message = f"{message}\n--- setup output (tail) ---\n{tail}"

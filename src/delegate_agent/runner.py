@@ -1836,7 +1836,9 @@ def _source_commits_missed(summary: JsonObject | None) -> int | None:
     Read from ``sourceDrift``, which is measured from the dispatch point (the
     checkout HEAD at launch) rather than from the creation base: with
     ``--base <older commit>`` a base-relative count is positive by construction
-    and would warn on every completion.
+    and would warn on every completion. The lane's own HEAD is excluded from the
+    count as well, so a child that merged the source branch mid-run -- and so
+    did see those commits -- is not warned about work it already read.
     """
     if not isinstance(summary, dict):
         return None

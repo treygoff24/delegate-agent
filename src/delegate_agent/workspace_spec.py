@@ -39,6 +39,10 @@ WORKSPACE_ENV_SCHEMA = "delegate.workspace-env.v1"
 SETUP_LOG_FILE = "setup.log"
 SETUP_FAILED = "workspace_setup_failed"
 SETUP_TAIL_CHARS = 2000
+# How long the setup process group gets to exit on SIGTERM before escalation to
+# SIGKILL, and how often the group is probed in between.
+SETUP_KILL_GRACE_SECONDS = 5.0
+SETUP_KILL_POLL_SECONDS = 0.05
 ENV_FILE_MAX_BYTES = 256 * 1024
 
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -113,16 +117,17 @@ def parse_env_assignment(token: str, *, origin: str = "--env") -> tuple[str, str
         # quoted value split across an env file's lines) rather than a name.
         raise _env_error(f"{origin} expects NAME=VALUE; this entry has no '='.")
     validate_env_name(name, origin=origin)
-    reject_unclosed_quote(value, origin=origin)
     return name, validate_env_value(name, value, origin=origin)
 
 
 def reject_unclosed_quote(value: str, *, origin: str) -> None:
     """Refuse a value that opens a quote with no matching close on its line.
 
-    The reader splits on newlines, so it cannot honor a quoted value that runs
-    onto the next line; keeping the stray quote as part of the value instead
-    handed the child a truncated secret-shaped string.
+    Only :func:`read_env_file` applies this. Its reader splits on newlines, so
+    it cannot honor a quoted value that runs onto the next line, and keeping
+    the stray quote as part of the value instead handed the child a truncated
+    secret-shaped string. A ``--env`` token is literal: the shell already
+    resolved its quoting, so a quote character inside the value is data.
     """
     stripped = value.strip()
     quote = stripped[:1]
@@ -165,6 +170,7 @@ def read_env_file(path_text: str) -> dict[str, str]:
         if stripped.startswith("export "):
             stripped = stripped[len("export ") :].lstrip()
         name, value = parse_env_assignment(stripped, origin=f"{origin} line {number}")
+        reject_unclosed_quote(value, origin=f"{origin} line {number}")
         result[name] = _unquote(value.strip())
     return result
 
@@ -301,17 +307,51 @@ class SetupResult:
         }
 
 
-def _kill_group(process: subprocess.Popen[bytes]) -> None:
+def _group_liveness(pgid: int) -> bool | None:
+    """Whether a setup group still has members; None when it is not ours.
+
+    ``PermissionError`` means the group exists but is not Delegate's to signal:
+    the caller stops instead of escalating, so a group whose id has moved on is
+    never SIGKILLed.
+    """
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    except OSError:
+        return False
+    return True
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """TERM the setup group, then SIGKILL whatever of it outlives the grace.
+
+    Waiting on the group *leader* is not enough: ``--setup 'npm ci && npm run
+    build'`` leads with ``/bin/sh``, which dies at once on TERM while npm keeps
+    running and keeps writing into the worktree the launcher is leaving behind.
+    Setup owns the whole group, so the grace is measured against the group --
+    the same escalation ``delegate cancel`` does.
+    """
+    pgid = process.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
     except OSError:
         return
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + SETUP_KILL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        # Reap the leader first: an unreaped leader is still a member of the
+        # group, so the probe below would wait out the whole grace around a
+        # setup that is already gone.
+        process.poll()
+        if _group_liveness(pgid) is not True:
+            break
+        time.sleep(SETUP_KILL_POLL_SECONDS)
+    if _group_liveness(pgid) is True:
         with contextlib.suppress(OSError):
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+            os.killpg(pgid, signal.SIGKILL)
+    process.wait()
 
 
 class SetupInterrupted(Exception):
@@ -354,6 +394,60 @@ def terminate_as_exception() -> Iterator[None]:
             signal.signal(signal.SIGTERM, previous)
 
 
+class _PendingInterrupt:
+    """The SIGTERM a deferred window recorded, replayed when the window ends."""
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+
+    def replay(self) -> None:
+        signum = self.signum
+        if signum is not None:
+            self.signum = None
+            raise SetupInterrupted(signum)
+
+
+@contextlib.contextmanager
+def _deferred_sigterm(pending: _PendingInterrupt) -> Iterator[None]:
+    """Record SIGTERM instead of raising it, for a window that cannot take it.
+
+    :func:`terminate_as_exception` raises from whatever bytecode the signal
+    lands on, which is wrong in two windows: the fork inside ``Popen``, before
+    ``process`` is bound, where nothing could take the new group down; and the
+    ``setupPgid`` clear, where cleanup would swallow the exception and the
+    launcher would go on to launch the child. Here the handler only records the
+    signum, and :meth:`_PendingInterrupt.replay` raises it as the window ends --
+    with the process in hand -- so the interruption still takes setup down.
+
+    SIGTERM is deliberately *not* blocked across these windows:
+    ``signal.pthread_sigmask`` is inherited across ``fork`` *and* ``execve``, so
+    a setup child started with SIGTERM blocked ignores the TERM that is meant to
+    stop it, and every kill of it (cancel's included) would wait out the grace
+    before escalating.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # The handler is only installed on the main thread; anywhere else the
+        # previous behavior is kept.
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def _handler(signum: int, _frame: object) -> None:
+        pending.signum = signum
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+    except (ValueError, OSError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal.SIGTERM, previous)
+        pending.replay()
+
+
 def run_setup(
     command: str,
     *,
@@ -362,6 +456,7 @@ def run_setup(
     log_path: Path,
     timeout: float | None = None,
     publish_pgid: Callable[[int | None], None] | None = None,
+    mask_values: Mapping[str, str] | None = None,
 ) -> SetupResult:
     """Run ``command`` via ``/bin/sh -c`` in ``cwd``; output goes to ``log_path``.
 
@@ -373,21 +468,32 @@ def run_setup(
     stop a setup that would otherwise run unbounded. That identity must never
     be published as the run's ``pid``/``pgid``: a published pid means "the
     child launched" to the unlaunched-seal logic.
+
+    ``mask_values`` is the run's recorded ``--env`` set: setup output shows
+    expanded values, so ``output_tail`` is masked before it is cut to
+    :data:`SETUP_TAIL_CHARS` and never carries one.
     """
     fd = run_registry.open_private_file(log_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
     started = time.monotonic()
     timed_out = False
     with os.fdopen(fd, "wb") as log, terminate_as_exception():
-        process = subprocess.Popen(  # nosec B603 - fixed /bin/sh argv; command is the caller's.
-            ["/bin/sh", "-c", command],
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        pending = _PendingInterrupt()
+        process: subprocess.Popen[bytes] | None = None
         try:
+            # The interruption is recorded rather than raised across the fork
+            # inside Popen: `process` does not exist yet there, so nothing could
+            # take the new group down. It is replayed as the window ends, with
+            # the process in hand.
+            with _deferred_sigterm(pending):
+                process = subprocess.Popen(  # nosec B603 - fixed /bin/sh argv; command is the caller's.
+                    ["/bin/sh", "-c", command],
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
             if publish_pgid is not None:
                 # start_new_session makes this pid the setup group's leader.
                 publish_pgid(process.pid)
@@ -400,19 +506,43 @@ def run_setup(
         except BaseException:
             # A terminated or interrupted launcher takes its setup down with
             # it: whatever it started must not outlive the process that owns
-            # the worktree lease.
-            _kill_group(process)
+            # the worktree lease. Nothing to take down when the fork never
+            # happened (Popen's own OSError).
+            if process is not None:
+                _kill_group(process)
             raise
         finally:
-            if publish_pgid is not None:
-                with contextlib.suppress(Exception):
-                    publish_pgid(None)
+            # The clear waits on the registry lock, so it is the launcher's
+            # longest window: the interruption is recorded there too, instead of
+            # raising into cleanup that would swallow it and let the child
+            # launch, and replayed with the group unrecorded.
+            try:
+                with _deferred_sigterm(pending):
+                    if publish_pgid is not None:
+                        publish_pgid(None)
+            except SetupInterrupted:
+                if process is not None:
+                    _kill_group(process)
+                raise
+            except Exception:
+                # Annotating the record must not fail the setup itself.
+                pass
     duration_ms = int((time.monotonic() - started) * 1000)
     try:
         data = log_path.read_bytes()
     except OSError:
         data = b""
-    tail = data[-SETUP_TAIL_CHARS * 4 :].decode("utf-8", errors="replace")[-SETUP_TAIL_CHARS:]
+    # Mask before cutting. A value that straddles the tail boundary would
+    # otherwise reach `state.json` and the error envelope as its suffix: the
+    # suffix does not match the whole value, so masking the cut tail cannot
+    # catch it. Read back far enough for any crossing value to be complete, and
+    # 4 bytes per character covers the worst-case UTF-8 encoding of the window.
+    overlap = max(
+        (len(value) for value in (mask_values or {}).values() if isinstance(value, str)),
+        default=0,
+    )
+    text = data[-(SETUP_TAIL_CHARS + overlap) * 4 :].decode("utf-8", errors="replace")
+    tail = mask_recorded_env_values(text, mask_values)[-SETUP_TAIL_CHARS:]
     return SetupResult(
         exit_code=exit_code,
         duration_ms=duration_ms,

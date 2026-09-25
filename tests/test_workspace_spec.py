@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -204,6 +205,60 @@ class WorkspaceSpecLaunchTests(ExecutionTestBase):
             self.assertIsNotNone(commands["reviewDiffVsCreationBase"])
             self.assertIsNotNone(commands["cherryPickRange"])
 
+    def test_a_lane_that_merged_the_new_source_commits_is_not_warned_about_them(self):
+        """The drift count is work the child never saw, not work it lacks.
+
+        An ordinary lane (no `--base`) whose child picks up commits that landed
+        after dispatch saw that work; counting the dispatch range alone told the
+        reader it never saw it.
+        """
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo_dir, _ = self._make_git_repo_with_commit()
+            repo = repo_dir.name
+            branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
+            agent = self.write_executable(
+                "agent",
+                f"{self._land_source_commits(3)}\ngit merge --ff-only {branch}\n" + RESULT_EVENT,
+            )
+            code, payload, stderr = self._launch(repo, fake_home, agent, "do the task")
+            self.assertEqual(code, 0, stderr)
+            summary = payload["workSummary"]
+            self.assertEqual(summary["headCommit"], summary["sourceHead"])
+            self.assertEqual(summary["sourceDrift"]["commits"], 0)
+            self.assertEqual(self._drift_warnings(payload.get("warnings") or []), [])
+
+    def test_a_lane_that_did_not_merge_them_reports_the_count(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo_dir, _ = self._make_git_repo_with_commit()
+            repo = repo_dir.name
+            agent = self.write_executable(
+                "agent", self._land_source_commits(3) + "\n" + RESULT_EVENT
+            )
+            code, payload, stderr = self._launch(repo, fake_home, agent, "do the task")
+            self.assertEqual(code, 0, stderr)
+            summary = payload["workSummary"]
+            self.assertNotEqual(summary["headCommit"], summary["sourceHead"])
+            self.assertEqual(summary["sourceDrift"]["commits"], 3)
+            drift = self._drift_warnings(payload.get("warnings") or [])
+            self.assertEqual(len(drift), 1, payload.get("warnings"))
+            self.assertIn("3 commit(s)", drift[0])
+            self.assertIn("behind the source branch", drift[0])
+
+    @staticmethod
+    def _land_source_commits(count: int) -> str:
+        """Shell lines for the child: commits that land on the source checkout."""
+        lines: list[str] = []
+        for index in range(count):
+            name = f"landed-{index}.txt"
+            lines += [
+                f'printf "landed\\n" > "$DELEGATE_SOURCE_ROOT/{name}"',
+                f'git -C "$DELEGATE_SOURCE_ROOT" add {name}',
+                'git -C "$DELEGATE_SOURCE_ROOT" -c user.name="Delegate Test" '
+                "-c user.email=delegate-test@example.com commit -q "
+                f'-m "landed after dispatch {index}"',
+            ]
+        return "\n".join(lines)
+
     def test_worktree_show_labels_a_based_lane_with_its_base_ref(self):
         """The creation line pairs a ref with the oid that ref names.
 
@@ -257,6 +312,40 @@ class WorkspaceSpecLaunchTests(ExecutionTestBase):
             state_text = (run_path / "state.json").read_text(encoding="utf-8")
             self.assertNotIn(secret, state_text)
             self.assertIn("***", state_text)
+
+        # A value that straddles the 2,000-character tail boundary used to
+        # survive as its own suffix: the tail's first characters are the end of
+        # the token and do not match the whole value, so masking the *cut* tail
+        # could not see it. The value is placed so the boundary falls inside it.
+        padding = workspace_spec.SETUP_TAIL_CHARS - len(secret) // 2
+        straddle = len(secret) + padding - workspace_spec.SETUP_TAIL_CHARS
+        self.assertTrue(0 < straddle < len(secret), f"not a straddle: {straddle}")
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _base_oid = self._repo_behind_a_recorded_base()
+            agent = self.write_executable("agent", RESULT_EVENT)
+            code, payload, _stderr = self._launch(
+                repo,
+                fake_home,
+                agent,
+                "--env",
+                f"NPM_TOKEN={secret}",
+                "--setup",
+                f'printf "%s" "$NPM_TOKEN"; printf "%*s" {padding} ""; exit 1',
+                "do the task",
+            )
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["error"], "workspace_setup_failed")
+            run_path = registry_api.run_directory(Path(repo) / ".delegate", payload["runId"])
+            state_text = (run_path / "state.json").read_text(encoding="utf-8")
+            self.assertIn("--- setup output (tail) ---", state_text)
+            self.assertNotIn(secret, state_text)
+            for start in range(len(secret) - 7):
+                fragment = secret[start : start + 8]
+                self.assertNotIn(
+                    fragment,
+                    state_text,
+                    f"a straddling value left {fragment!r} in the recorded tail",
+                )
 
     def test_env_file_errors_name_the_line_without_echoing_its_text(self):
         """An env file line may be key material: the error may not repeat it."""
@@ -353,6 +442,26 @@ class WorkspaceSpecLaunchTests(ExecutionTestBase):
             self.assertNotIn("from-launch", json.dumps(manifest))
             self.assertEqual(workspace_spec.read_run_env(run_path), {"SPEC_VAR": "from-launch"})
             self.assertEqual((run_path / "workspace-env.json").stat().st_mode & 0o777, 0o600)
+
+    def test_a_quote_in_a_cli_env_value_is_literal_data(self):
+        """The unclosed-quote refusal belongs to the env *file* reader only.
+
+        A `--env` token is literal: the shell already resolved its quoting, so a
+        value with one quote character is data (`DB_PASS="x9k`), and refusing it
+        turned an accepted launch into a usage error.
+        """
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _base_oid = self._repo_behind_a_recorded_base()
+            agent = self.write_executable("agent", RESULT_EVENT)
+            code, payload, stderr = self._launch(
+                repo, fake_home, agent, "--env", 'DB_PASS="x9k', "do the task"
+            )
+            self.assertEqual(code, 0, stderr)
+            run_path = registry_api.run_directory(Path(repo) / ".delegate", payload["runId"])
+            self.assertEqual(workspace_spec.read_run_env(run_path), {"DB_PASS": '"x9k'})
+            self.assertEqual(
+                workspace_spec.parse_env_assignment('DB_PASS="x9k'), ("DB_PASS", '"x9k')
+            )
 
     def test_setup_failure_is_typed_and_launches_no_child(self):
         with tempfile.TemporaryDirectory() as fake_home:
@@ -634,6 +743,24 @@ class SetupWindowControlTests(ExecutionTestBase):
             launcher.wait(timeout=30)
             self._await_group_gone(pgid)
 
+    def test_a_setup_grandchild_that_ignores_term_is_killed(self):
+        """The group leader is not the whole setup: `--setup 'npm ci && npm run
+        build'` leads with `/bin/sh`, which dies at once on TERM while npm keeps
+        writing into the worktree the launcher is leaving behind."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo_dir, _ = self._make_git_repo_with_commit()
+            repo = repo_dir.name
+            agent = self.write_executable("agent", RESULT_EVENT)
+            launcher = self._spawn_launcher(
+                repo, fake_home, agent, "sh -c 'trap \"\" TERM; sleep 30' & wait"
+            )
+            _run_id, pgid = self._await_setup_pgid(repo)
+            launcher.send_signal(signal.SIGTERM)
+            self.assertEqual(launcher.wait(timeout=30), -signal.SIGTERM)
+            # The grandchild ignores TERM, so only the escalation after the
+            # grace window can take it down.
+            self._await_group_gone(pgid, timeout=workspace_spec.SETUP_KILL_GRACE_SECONDS + 5.0)
+
     def _run_cancel(
         self, repo: str, fake_home: str, agent: Path, target: str
     ) -> tuple[int, str, str]:
@@ -646,6 +773,79 @@ class SetupWindowControlTests(ExecutionTestBase):
                 ["--cwd", repo, "--json", "cancel", target], stdout=stdout, stderr=stderr
             )
         return code, stdout.getvalue(), stderr.getvalue()
+
+
+class SetupProcessUnitTests(unittest.TestCase):
+    """`run_setup`'s own contract: the SIGTERM windows it must not swallow."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.cwd = self.temp.name
+
+    def _run_setup(self, command: str, **kwargs: object) -> workspace_spec.SetupResult:
+        return workspace_spec.run_setup(
+            command,
+            cwd=self.cwd,
+            env=dict(os.environ),
+            log_path=Path(self.cwd) / workspace_spec.SETUP_LOG_FILE,
+            timeout=30.0,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_a_sigterm_during_the_setup_pgid_clear_is_not_swallowed(self):
+        """The clear waits on the registry lock, the launcher's longest window.
+
+        `SetupInterrupted` used to raise inside the cleanup's `suppress(Exception)`
+        there, so the interruption vanished, `run_setup` returned the setup's
+        zero exit, and the launcher went on to launch the child.
+        """
+        published: list[int | None] = []
+
+        def publish(pgid: int | None) -> None:
+            published.append(pgid)
+            if pgid is None:
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        with self.assertRaises(workspace_spec.SetupInterrupted) as caught:
+            self._run_setup("true", publish_pgid=publish)
+
+        self.assertEqual(caught.exception.signum, int(signal.SIGTERM))
+        self.assertEqual(len(published), 2, published)
+        self.assertIsNone(published[-1], "the group is unrecorded before the signal lands")
+
+    def test_a_sigterm_before_the_setup_process_is_bound_still_stops_it(self):
+        """The fork inside `Popen` is the other window: nothing held `process`.
+
+        The handler fired between the fork and the assignment, so the launcher
+        died under a setup group it never learned the pid of and orphaned it.
+        """
+        real_popen = workspace_spec.subprocess.Popen
+        groups: list[int] = []
+
+        def popen_then_sigterm(*args: object, **kwargs: object) -> object:
+            process = real_popen(*args, **kwargs)  # type: ignore[arg-type]
+            groups.append(process.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        with (
+            mock.patch.object(workspace_spec.subprocess, "Popen", side_effect=popen_then_sigterm),
+            self.assertRaises(workspace_spec.SetupInterrupted),
+        ):
+            self._run_setup("sleep 30")
+
+        self.assertEqual(len(groups), 1)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if workspace_spec._group_liveness(groups[0]) is False:
+                break
+            time.sleep(0.05)
+        self.assertIs(
+            workspace_spec._group_liveness(groups[0]),
+            False,
+            "the setup group outlived the launcher that started it",
+        )
 
 
 class WorktreeLeaseTests(WorktreeMgmtTestBase):
@@ -790,7 +990,11 @@ class LinkedWorktreeRegistryTests(WorktreeMgmtTestBase):
             shutil.copytree(self._registry_root(repo_path), copy, symlinks=True)
             code, out, err = self._run_cli(["--cwd", repo_path, "--json", "runs"], home=fake_home)
             self.assertEqual(code, 0, err)
-            self.assertEqual([item["runId"] for item in json.loads(out)["runs"]], [parent_run])
+            payload = json.loads(out)
+            self.assertEqual([item["runId"] for item in payload["runs"]], [parent_run])
+            # The rows are de-duplicated, so the totals must be too: the copy's
+            # rows are the same run, and an uncorrected footer read "1 of 2".
+            self.assertEqual(payload["total"], 1)
 
 
 class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
@@ -887,16 +1091,25 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
             launch_env=dict(launch_env or {}),
         )
 
-    def _fake_child_delegate(self, workspace: Path) -> tuple[Path, Path, Path, Path]:
-        """A child Delegate stand-in: records its argv's input JSON and its env."""
+    def _fake_child_delegate(self, workspace: Path) -> tuple[Path, Path, Path, Path, Path]:
+        """A child Delegate stand-in: records its argv's input JSON and its env.
+
+        Returns the fake, the last call's input payload, a log of every call's
+        payload (one JSON object per line), and the two env probes.
+        """
         captured = workspace / "captured-input.json"
+        payload_log = workspace / "captured-inputs.jsonl"
         spec_probe = workspace / "spec-probe.txt"
         git_probe = workspace / "git-probe.txt"
         fake = workspace / "fake-delegate"
         fake.write_text(
             "#!/usr/bin/env bash\n"
             "while [ $# -gt 0 ]; do\n"
-            '  if [ "$1" = "--input-json" ]; then cp "$2" ' + shlex.quote(str(captured)) + "; fi\n"
+            '  if [ "$1" = "--input-json" ]; then\n'
+            '    cp "$2" ' + shlex.quote(str(captured)) + "\n"
+            '    cat "$2" >> ' + shlex.quote(str(payload_log)) + "\n"
+            '    printf "\\n" >> ' + shlex.quote(str(payload_log)) + "\n"
+            "  fi\n"
             "  shift\n"
             "done\n"
             f'printf "%s\\n" "${{SPEC_VAR:-unset}}" > {shlex.quote(str(spec_probe))}\n'
@@ -906,7 +1119,7 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
             encoding="utf-8",
         )
         fake.chmod(0o755)
-        return fake, captured, spec_probe, git_probe
+        return fake, captured, payload_log, spec_probe, git_probe
 
     def _agent_keys(self, root: Path) -> list[str]:
         return [
@@ -932,7 +1145,9 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
             workspace_spec.write_run_env(
                 workspace / ".delegate" / "workflows" / "wf_333333333333", launch_env
             )
-            fake, captured, spec_probe, git_probe = self._fake_child_delegate(workspace)
+            fake, captured, payload_log, spec_probe, git_probe = self._fake_child_delegate(
+                workspace
+            )
             state = self._workflow_state(workspace, launch_env=launch_env, cli_argv=[str(fake)])
             dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex"}})
             self.assertEqual(dsl.agent("do the task", mode="work", isolation="worktree"), "done")
@@ -953,6 +1168,58 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
             self.assertEqual(
                 payload["env"], {"GIT_DIR": "/elsewhere/.git", "SPEC_VAR": "from-call"}
             )
+            # Both calls carry it: the first has no env= of its own, and the
+            # launch env is a default that stands alone.
+            first, second = [
+                json.loads(line)
+                for line in payload_log.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(first["env"], launch_env)
+            self.assertEqual(second["env"], {"GIT_DIR": "/elsewhere/.git", "SPEC_VAR": "from-call"})
+
+    def test_the_supervisor_reads_the_recorded_launch_env_for_agent_calls(self):
+        """`run_supervisor` is what puts the recorded env on the state.
+
+        The lane tests build `WorkflowState(launch_env=...)` themselves, which
+        skips the `read_run_env(root)` wiring between `workflow run --env` and an
+        `agent()` call: a launch env on disk that never reached the state would
+        pass all of them.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            wf_id = "wf_444444444444"
+            root = workspace / ".delegate" / "workflows" / wf_id
+            registry_api.ensure_private_dir(root)
+            (root / workflow_registry.SCRIPT_FILE).write_text(
+                'meta = {"name": "env-lane"}\n'
+                'return {"ok": agent("do the task", mode="work", isolation="worktree") == "done"}\n',
+                encoding="utf-8",
+            )
+            workflow_registry.write_json(
+                root / workflow_registry.STATUS_FILE,
+                {
+                    "wfId": wf_id,
+                    "status": "created",
+                    "workflowKeyVersion": workflow_runtime.WORKFLOW_KEY_VERSION,
+                    "budget": {"total": None, "spent": 0, "remaining": None},
+                },
+            )
+            launch_env = {"SPEC_VAR": "from-launch", "GIT_DIR": "/elsewhere/.git"}
+            workspace_spec.write_run_env(root, launch_env)
+            fake, captured, _payload_log, _spec_probe, _git_probe = self._fake_child_delegate(
+                workspace
+            )
+            with mock.patch.dict(os.environ, {"DELEGATE_WORKFLOW_NO_DAEMON": "1"}):
+                code = workflow_runtime.run_supervisor(
+                    workspace=workspace,
+                    wf_id=wf_id,
+                    cli_argv=[str(fake)],
+                    config={},
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(captured.read_text(encoding="utf-8"))
+            self.assertEqual(payload["env"], launch_env)
 
     def test_a_lane_that_cannot_take_env_keeps_its_spec_less_key(self):
         """The launch env is a default, not a demand: it cannot fail a call.
@@ -965,7 +1232,9 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
         for launch_env in ({}, {"SPEC_VAR": "from-launch"}):
             with tempfile.TemporaryDirectory() as temp:
                 workspace = Path(temp)
-                fake, captured, spec_probe, _git_probe = self._fake_child_delegate(workspace)
+                fake, captured, _payload_log, spec_probe, _git_probe = self._fake_child_delegate(
+                    workspace
+                )
                 state = self._workflow_state(workspace, launch_env=launch_env, cli_argv=[str(fake)])
                 dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex"}})
                 self.assertEqual(dsl.agent("judge it", mode="safe"), "done")
