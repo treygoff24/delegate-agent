@@ -970,10 +970,39 @@ def _codex_file_change(index: int, *, status: str) -> list[str]:
     ]
 
 
-def _codex_error_item(index: int) -> str:
+def _codex_error_item(index: int, message: str = "patch rejected: context mismatch") -> str:
     """A codex error item: a bare item.completed carrying only a message."""
-    item = {"id": f"item_{index}", "type": "error", "message": "patch rejected: context mismatch"}
+    item = {"id": f"item_{index}", "type": "error", "message": message}
     return json.dumps({"type": "item.completed", "item": item})
+
+
+# The one error item seen across 95 real codex logs, at most twice per log.
+HOOK_TRUST_NOTICE = (
+    "`--dangerously-bypass-hook-trust` is enabled. "
+    "Enabled hooks may run without review for this invocation."
+)
+
+
+def _codex_real_command(item_id: str, command: str, status: str) -> list[str]:
+    """A command_execution start/end pair in the shape of
+    tests/fixtures/codex_real_stream.jsonl."""
+    started = _fixture_line(
+        "codex_real_stream.jsonl",
+        lambda p: (
+            p.get("type") == "item.started" and p.get("item", {}).get("type") == "command_execution"
+        ),
+    )
+    item = {**started["item"], "id": item_id, "command": command}
+    ended = {**item, "exit_code": 0 if status == "completed" else 1, "status": status}
+    return [
+        json.dumps({**started, "item": item}),
+        json.dumps({"type": "item.completed", "item": ended}),
+    ]
+
+
+def _long_command(index: int) -> str:
+    """Commands that agree on their first 512+ characters (Astra's repro)."""
+    return "printf " + "x" * 505 + "; pytest tests/test_" + str(index) + ".py"
 
 
 def _opencode_tool_use(call_id: str, command: str, status: str, timestamp: int) -> str:
@@ -1150,6 +1179,22 @@ class PiCompletionTargetTests(unittest.TestCase):
                 self.assertEqual(detail["target"], FIX_LOOP_COMMAND)
                 self.assertEqual(detail["failures"], stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
 
+    def test_abandoned_starts_stay_bounded_and_a_later_start_keeps_its_target(self):
+        accumulator = harness_events.StreamAccumulator(harness="pi")
+        for index in range(10_000):
+            accumulator.ingest_line(_pi_tool_start(f"call_{index}|fc_{index}", "sleep 1"))
+        self.assertLessEqual(
+            len(accumulator._pending_tool_uses), harness_events.PI_PENDING_TOOL_LIMIT
+        )
+        for line in _pi_fix_loop(99_999, False):
+            accumulator.ingest_line(line)
+        completed = accumulator.events.last(1)[0]
+        self.assertEqual(completed.kind, "tool.completed")
+        self.assertEqual(completed.target, FIX_LOOP_COMMAND)
+        self.assertLessEqual(
+            len(accumulator._pending_tool_uses), harness_events.PI_PENDING_TOOL_LIMIT
+        )
+
     def test_the_start_target_is_forgotten_once_the_tool_completes(self):
         accumulator = harness_events.StreamAccumulator(harness="pi")
         for line in _pi_fix_loop(0, False):
@@ -1222,6 +1267,128 @@ class FailedCodexFinishTests(unittest.TestCase):
             ]
         ]
         self.assertEqual(self.run_lines(lines), "idle")
+
+
+class FailureIdentityTests(unittest.TestCase):
+    """Streaks compare whole targets, and a command counts in one streak only."""
+
+    def feed_all(self, lines: list[str]) -> stall_watchdog.StallWatchdog:
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        for now, line in enumerate(lines, start=1):
+            fed.feed(line, float(now))
+        return fed.watchdog
+
+    def test_distinct_long_failing_commands_do_not_trip(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+            for line in _codex_real_command(f"item_{index}", _long_command(index), "failed")
+        ]
+        detail = self.feed_all(lines).stall_detail(0.0)
+        self.assertNotEqual(detail["stallReason"], "repeated_tool_failure")
+
+    def test_identical_long_failing_commands_trip_once_through_the_command_streak(self):
+        limit = stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT
+        command = _long_command(0)
+        lines = [
+            line
+            for index in range(limit)
+            for line in _codex_real_command(f"item_{index}", command, "failed")
+        ]
+        watchdog = self.feed_all(lines)
+        detail = watchdog.stall_detail(0.0)
+        self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+        self.assertEqual(detail["tool"], "command_execution")
+        self.assertEqual(detail["target"], command[: stall_watchdog.DELTA_SIGNATURE_LIMIT])
+        self.assertEqual(detail["failures"], limit)
+        self.assertEqual(watchdog._failure_count, limit)
+        # The same five failures were not counted a second time elsewhere.
+        self.assertEqual(watchdog._unmatched_failure_count, 0)
+
+    def test_error_items_that_differ_past_the_limit_do_not_trip(self):
+        lines = [
+            _codex_error_item(index, "x" * 600 + f" failure {index}")
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+        ]
+        detail = self.feed_all(lines).stall_detail(0.0)
+        self.assertNotEqual(detail["stallReason"], "repeated_tool_failure")
+
+    def test_failed_patches_to_long_distinct_paths_do_not_trip(self):
+        lines = []
+        for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT):
+            path = "/repo/" + "d" * 520 + f"/file_{index}.py"
+            item = {"id": f"item_{index}", "type": "file_change", "changes": [{"path": path}]}
+            lines.append(
+                json.dumps({"type": "item.started", "item": {**item, "status": "in_progress"}})
+            )
+            lines.append(
+                json.dumps({"type": "item.completed", "item": {**item, "status": "failed"}})
+            )
+        detail = self.feed_all(lines).stall_detail(0.0)
+        self.assertNotEqual(detail["stallReason"], "repeated_tool_failure")
+
+    def test_failed_mcp_calls_with_long_distinct_arguments_do_not_trip(self):
+        lines = []
+        for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT):
+            item = {
+                "id": f"item_{index}",
+                "type": "mcp_tool_call",
+                "server": "docs",
+                "tool": "search",
+                "arguments": {"query": "q" * 520 + f" {index}"},
+            }
+            lines.append(
+                json.dumps({"type": "item.started", "item": {**item, "status": "in_progress"}})
+            )
+            ended = {**item, "result": None, "error": {"message": "timeout"}, "status": "failed"}
+            lines.append(json.dumps({"type": "item.completed", "item": ended}))
+        detail = self.feed_all(lines).stall_detail(0.0)
+        self.assertNotEqual(detail["stallReason"], "repeated_tool_failure")
+
+
+class ErrorItemStreakTests(unittest.TestCase):
+    """Error items count on their own, and the real hook-trust notice does not trip."""
+
+    def feed_all(self, lines: list[str]) -> dict:
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        for now, line in enumerate(lines, start=1):
+            fed.feed(line, float(now))
+        return fed.watchdog.stall_detail(0.0)
+
+    def test_identical_error_items_alone_trip(self):
+        limit = stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT
+        detail = self.feed_all([_codex_error_item(index) for index in range(limit)])
+        self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+        self.assertEqual(detail["tool"], "error")
+        self.assertEqual(detail["failures"], limit)
+
+    def test_identical_error_items_between_distinct_failing_commands_trip(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+            for line in [
+                *_codex_real_command(f"c{index}", f"pytest tests/test_{index}.py", "failed"),
+                _codex_error_item(100 + index),
+            ]
+        ]
+        detail = self.feed_all(lines)
+        self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+        self.assertEqual(detail["tool"], "error")
+
+    def test_the_hook_trust_notice_twice_then_normal_work_does_not_trip(self):
+        lines = [
+            json.dumps({"type": "turn.started"}),
+            _codex_error_item(0, HOOK_TRUST_NOTICE),
+            _codex_error_item(1, HOOK_TRUST_NOTICE),
+        ]
+        for index in range(8):
+            lines.extend(
+                _codex_real_command(f"c{index}", f"sed -n '1,40p' f{index}.py", "completed")
+            )
+        lines.extend(_codex_real_command("c_fail", "pytest tests/test_x.py", "failed"))
+        detail = self.feed_all(lines)
+        self.assertNotIn("failures", detail)
+        self.assertNotEqual(detail["stallReason"], "repeated_tool_failure")
 
 
 class OpencodeRunningStatusTests(unittest.TestCase):
