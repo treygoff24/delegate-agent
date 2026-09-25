@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -431,6 +434,86 @@ class WaitCancelCommandTests(unittest.TestCase):
         )
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
+
+    def _hold_registry_lock(self) -> int:
+        """Hold the registry lock on a separate open file, the way another process would."""
+        lock_path = run_registry.registry_lock_path(self.registry_root)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    @staticmethod
+    def _release_registry_lock(fd: int) -> None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def test_cancel_signals_a_live_child_through_a_held_registry_lock(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        fd = self._hold_registry_lock()
+        self.addCleanup(self._release_registry_lock, fd)
+        with (
+            unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "URGENT_CANCEL_RECORD_WAIT_SECONDS", 0.2
+            ),
+        ):
+            payload = wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+        self.assertTrue(payload["registryLockBypassed"])
+        self.assertIn(wait_cancel_commands.URGENT_CANCEL_WARNING, payload["warnings"])
+        # The lock never freed, so the outcome is honestly reported as unrecorded.
+        self.assertIn(wait_cancel_commands.URGENT_CANCEL_UNRECORDED_WARNING, payload["warnings"])
+
+    def test_urgent_cancel_records_the_outcome_once_the_lock_frees(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        fd = self._hold_registry_lock()
+        self.addCleanup(self._release_registry_lock, fd)
+
+        def release_when_child_exits() -> None:
+            proc.wait(timeout=20)
+            self._release_registry_lock(fd)
+
+        releaser = threading.Thread(target=release_when_child_exits, daemon=True)
+        releaser.start()
+        self.addCleanup(releaser.join, 21)
+        with unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}):
+            payload = wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertTrue(payload["registryLockBypassed"])
+        self.assertNotIn(wait_cancel_commands.URGENT_CANCEL_UNRECORDED_WARNING, payload["warnings"])
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertTrue(state["cancelRequested"])
+
+    def test_cancel_under_a_held_lock_never_signals_an_unlaunched_record(self):
+        run_id, alias = self.write_run(status="running")
+        fd = self._hold_registry_lock()
+        self.addCleanup(self._release_registry_lock, fd)
+        with (
+            unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send,
+            self.assertRaises(wait_cancel_commands.WaitCancelError) as raised,
+        ):
+            wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertEqual(raised.exception.error, "registry_lock_busy")
+        send.assert_not_called()
 
     def test_external_sigterm_cancel_uses_exit_one_everywhere(self):
         run_id, alias = run_registry.register_run(self.registry_root, harness="codex")

@@ -3295,6 +3295,39 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(byte_counter.total, len(b"line\n"))
 
+    def test_drain_keeps_reading_when_the_line_handler_raises(self):
+        payload = b"".join(f"line {index}\n".encode() for index in range(200))
+        seen: list[str] = []
+        failures: list[str] = []
+
+        def flaky(text: str) -> None:
+            seen.append(text)
+            raise TimeoutError("timed out waiting for lock at registry.lock")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "stdout.log"
+            counter = self.runner.ByteCounter()
+            self.runner._drain_stream(
+                io.BytesIO(payload),
+                log_path,
+                counter,
+                on_line=flaky,
+                max_bytes=self.runner.TRACKED_STREAM_MAX_BYTES,
+                limit_signal=self.runner.StreamLimitSignal(),
+                stream="stdout",
+                handler_failures=failures,
+            )
+            self.assertEqual(log_path.read_bytes(), payload)
+        self.assertEqual(counter.total, len(payload))
+        # Every chunk still reached the handler after the first one raised.
+        self.assertEqual("".join(seen), payload.decode())
+        self.assertEqual(
+            failures,
+            [
+                "stdout stream handler failed: TimeoutError: timed out waiting for lock at registry.lock"
+            ],
+        )
+
     def test_drain_stream_preserves_utf8_across_read_chunks(self):
         payload = b"x" * (self.runner.STREAM_READ_CHUNK_BYTES - 1) + "😀\n".encode()
         decoded: list[str] = []

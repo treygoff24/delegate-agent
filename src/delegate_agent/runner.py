@@ -1566,8 +1566,39 @@ def _drain_stream(
     stream: str,
     capture_info: JsonObject | None = None,
     on_omitted: Callable[[str], None] | None = None,
+    handler_failures: list[str] | None = None,
 ) -> None:
+    """Copy one child pipe to its log until EOF, feeding decoded text to ``on_line``.
+
+    The pipe is drained no matter what the handlers do. A handler exception
+    (a registry lock timeout while persisting progress, a parser bug) is
+    recorded in ``handler_failures`` and the drain keeps reading: a drain
+    thread that died on it would stop consuming the pipe, and a child blocked
+    on a full pipe would then hang until the deadline or the stall watchdog.
+    """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
+
+    def guarded(handler: Callable[[str], None] | None) -> Callable[[str], None] | None:
+        if handler is None:
+            return None
+
+        def call(text: str) -> None:
+            try:
+                handler(text)
+            except Exception as exc:  # keep draining; the failure is reported.
+                if handler_failures is None:
+                    return
+                detail = f"{stream} stream handler failed: {type(exc).__name__}: {exc}"[:500]
+                if (
+                    len(handler_failures) < STREAM_HANDLER_FAILURE_LIMIT
+                    and detail not in handler_failures
+                ):
+                    handler_failures.append(detail)
+
+        return call
+
+    on_line = guarded(on_line)
+    on_omitted = guarded(on_omitted)
     with log_path.open("ab") as log_handle:
 
         def write(captured: bytes) -> None:
@@ -1596,6 +1627,11 @@ def _drain_stream(
             decoded = decoder.decode(b"", final=True)
             if decoded:
                 on_line(decoded)
+
+
+# Distinct handler failures kept per stream; one is enough to act on, a few
+# show whether it was one bug or several.
+STREAM_HANDLER_FAILURE_LIMIT = 3
 
 
 def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
@@ -1780,6 +1816,8 @@ class TrackedCaptureResult:
     final_attempt_accumulator: harness_events.StreamAccumulator | None = None
     zero_commit_health: JsonObject | None = None
     stdout_capture: JsonObject | None = None
+    # Exceptions the stdout/stderr line handlers raised; the drains kept reading.
+    stream_handler_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2577,6 +2615,7 @@ def _capture_tracked_process(
             "missing_child_stream",
             "Child process did not expose stdout/stderr pipes for tracking.",
         )
+    stream_handler_failures: list[str] = []
     with open_events_log(files.run_path) as events_handle:
 
         def append_stdout_line_event(line: str) -> bool:
@@ -2658,6 +2697,7 @@ def _capture_tracked_process(
                 "stream": "stdout",
                 "capture_info": stdout_capture,
                 "on_omitted": observe_omitted_thinking,
+                "handler_failures": stream_handler_failures,
             },
             daemon=True,
         )
@@ -2669,6 +2709,7 @@ def _capture_tracked_process(
                 "max_bytes": tracked_stream_max_bytes,
                 "limit_signal": limit_signal,
                 "stream": "stderr",
+                "handler_failures": stream_handler_failures,
             },
             daemon=True,
         )
@@ -2881,6 +2922,8 @@ def _capture_tracked_process(
             accumulator.ingest_line(line_buffer)
             append_stdout_line_event(line_buffer)
         accumulator.finish_stream()
+        for failure in stream_handler_failures:
+            append_event(events_handle, {"kind": "stream.handler_failed", "message": failure})
         error: str | None = None
         message: str | None = None
         if stall_detail is not None:
@@ -2938,6 +2981,7 @@ def _capture_tracked_process(
         zero_commit_health=zero_commit_health,
         stdout_capture=stdout_capture,
         orphaned_processes=orphaned_processes,
+        stream_handler_failures=tuple(stream_handler_failures),
     )
 
 
@@ -4066,6 +4110,11 @@ def _merge_tracked_attempt_captures(
         stdin_failures=tuple(
             dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
         ),
+        stream_handler_failures=tuple(
+            dict.fromkeys(
+                [*prior_capture.stream_handler_failures, *current_capture.stream_handler_failures]
+            )
+        ),
         mail_push_failure_reason=(
             current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
         ),
@@ -4681,6 +4730,11 @@ def _execute_tracked(
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
+    for failure in capture.stream_handler_failures:
+        _append_unique(
+            final_warnings,
+            f"{failure} (the pipe kept draining; progress records may lag the stream)",
+        )
     if scratch_permissions is not None:
         final_extra["scratchPermissions"] = scratch_permissions
         diagnostic = profiles.read_bounded_stderr_tail(files.stderr_log).lower()
