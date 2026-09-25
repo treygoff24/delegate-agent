@@ -3767,8 +3767,11 @@ class WorkflowDsl:
         if unadoptable is not None:
             # A cancelled, stale, or never-launched run holds no answer and no
             # live process to wait on. Seal what is sealable and relaunch;
-            # never fail the call over a dead predecessor. A dry run only
-            # plans: it leaves the predecessor exactly as it found it.
+            # never fail the call over a dead predecessor. A dry run neither
+            # seals nor cancels the predecessor and launches nothing, but the
+            # cleanup below still reaps its leftover temporary structured-retry
+            # workspace: the same reap the live respawn path performs, and a
+            # no-op once that scratch is gone.
             if not self.state.dry_run:
                 with contextlib.suppress(WorkflowChildCancellationError):
                     cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
