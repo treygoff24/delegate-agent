@@ -258,13 +258,16 @@ _WORKSPACE_SPEC_OPTIONS = (
         "Repeatable, work + --isolation worktree only: set NAME for the child. Recorded in "
         "the run's private workspace-env.json and re-applied on resume and followup, "
         "whatever the resuming shell exports. Output shows names only. DELEGATE_*, "
-        "WORKSPACE_ROOT, TMPDIR/TMP/TEMP, CODEX_HOME, and CLAUDE_CONFIG_DIR are reserved.",
+        "WORKSPACE_ROOT, TMPDIR/TMP/TEMP, CODEX_HOME, CLAUDE_CONFIG_DIR, and "
+        "KIMI_CODE_HOME are reserved.",
     ),
     OptionSpec(
         "--env-file",
         "PATH",
         "Repeatable: read NAME=VALUE lines (# comments, optional export, one pair of "
-        "surrounding quotes) into the run's env; --env wins over files.",
+        "surrounding quotes) into the run's env; --env wins over files. Errors name the "
+        "file and line, never the line's content; a quoted value cannot continue onto "
+        "the next line.",
     ),
     OptionSpec(
         "--setup",
@@ -272,7 +275,8 @@ _WORKSPACE_SPEC_OPTIONS = (
         "work + --isolation worktree only: run CMD with /bin/sh in the fresh worktree "
         "before the child starts, bounded by --timeout. A nonzero exit fails the run with "
         "error workspace_setup_failed (failureKind=workspace_setup), keeps the worktree, "
-        "and launches no child; output goes to the run's setup.log.",
+        "and launches no child; output goes to the run's setup.log. delegate cancel stops "
+        "a setup that is still running.",
     ),
 )
 WORKSPACE_SPEC_FLAGS = tuple(option.flag for option in _WORKSPACE_SPEC_OPTIONS)
@@ -1517,9 +1521,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--env",
                 "NAME=VALUE",
-                "Repeatable, launch only: set NAME for every agent() child. Recorded once in "
-                "the workflow directory and re-applied on every resume instead of the "
-                "resuming shell's value.",
+                "Repeatable, launch only: set NAME for every agent() child that can take "
+                "workspace env (mode='work' with isolation='worktree'). Recorded once in the "
+                "workflow directory and re-applied on every resume instead of the resuming "
+                "shell's value. It reaches children as workspace-spec data, never as the child "
+                "Delegate process's own environment, so a call that cannot take env simply "
+                "does not receive it.",
             ),
             OptionSpec("--env-file", "PATH", "Repeatable, launch only: read NAME=VALUE lines."),
             OptionSpec("--reason", "TEXT", "Non-empty reason for rejecting an agent result."),
@@ -1562,9 +1569,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--env",
                 "NAME=VALUE",
-                "Repeatable, launch only: set NAME for every agent() child. Recorded once in "
-                "the workflow directory and re-applied on every resume instead of the "
-                "resuming shell's value.",
+                "Repeatable, launch only: set NAME for every agent() child that can take "
+                "workspace env (mode='work' with isolation='worktree'). Recorded once in the "
+                "workflow directory and re-applied on every resume instead of the resuming "
+                "shell's value. It reaches children as workspace-spec data, never as the child "
+                "Delegate process's own environment, so a call that cannot take env simply "
+                "does not receive it.",
             ),
             OptionSpec("--env-file", "PATH", "Repeatable, launch only: read NAME=VALUE lines."),
         ),
