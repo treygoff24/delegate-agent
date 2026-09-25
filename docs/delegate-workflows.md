@@ -72,8 +72,8 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 - `agent_meta(label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no label, that of the most recent `agent()` call on the calling thread.
 - `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
-- `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
-- `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
+- `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item; a key refusal propagates to the script instead (see [Stable step keys](#stable-step-keys)).
+- `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints and key refusals propagate to the supervisor.
 - `phase(title)` emits a progress event.
 - `log(message)` emits a JSON-safe log event.
 - `workflow(name_or_path, args=None, gate=False, key=None)` nests another workflow. Use `gate=True` or `gate="on-failure"` for approval checkpoints.
@@ -125,10 +125,14 @@ A key names one step per run lifetime (one supervisor process). Reusing a
 key in the same named scope raises `WorkflowKeyConflict`: while the first call
 is live ("held by a live agent() call"), or after it settled ("already used
 by an earlier agent() call"), because the second call would silently receive
-the first's result. Inside a per-item `pipeline()` or `parallel()`, include the
-item id in the key or key the enclosing primitive. `reject()` of a keyed step
-moves it to the next retry identity, so reject-and-rerun works in one lifetime
-and replays the same way on resume.
+the first's result. Inside a per-item `pipeline()`, `parallel()`, or
+`soft_park()` item, include the item id in the key or key the enclosing
+primitive. The refusal reaches the script from inside those handlers, the same
+way a gate checkpoint does, rather than being reported as a failed item, so a
+script-authoring mistake is never silent. An unusable key or
+`park_gate(actions=...)` list is refused the same way. `reject()` of a keyed
+step moves it to the next retry identity, so reject-and-rerun works in one
+lifetime and replays the same way on resume.
 
 Unkeyed calls keep their positional keys exactly, so existing journals replay
 unchanged.

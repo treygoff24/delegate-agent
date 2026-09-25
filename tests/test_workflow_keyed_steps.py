@@ -180,6 +180,103 @@ class KeyedReplayTests(_WorkflowFixture):
                 dsl.agent("p", key=bad)
 
 
+class ItemHandlerRefusalTests(_WorkflowFixture):
+    """A key refusal reaches the script from every per-item handler."""
+
+    def test_a_duplicate_live_key_in_parallel_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "dupes", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def step(name):\n"
+            "    try:\n"
+            "        return agent(name, key='impl')\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "parallel([lambda: step('a'), lambda: step('b')])\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def launch(_self: object, _engine: str, prompt: str, **_kw: object) -> str:
+            # Hold the winner's key live until its peer has been refused.
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate key")
+            return f"done:{prompt}"
+
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live"):
+            self.run_script(script, {"refused": refused}, launch)
+        self.assertEqual(self.events("thunk_failed"), [], "the refusal became a failed item slot")
+        self.assertEqual(len(self.events("agent_started")), 1)
+
+    def test_an_invalid_key_in_parallel_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "bad-key", "defaults": {"engine": "codex"}}\n'
+            'parallel([lambda: agent("a", key=7)])\n'
+            "return True\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            self.run_script(script, {}, lambda *_a, **_k: self.fail("launched an invalid key"))
+        self.assertIsInstance(caught.exception, runtime.WorkflowKeyError)
+        self.assertIn("agent() key must be a non-empty printable string", str(caught.exception))
+        self.assertEqual(self.events("thunk_failed"), [])
+
+    def test_a_duplicate_live_key_in_pipeline_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "dupes", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def stage(prev, item, index):\n"
+            "    try:\n"
+            "        return agent(item, key='impl')\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "pipeline(['a', 'b'], stage)\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def launch(_self: object, _engine: str, prompt: str, **_kw: object) -> str:
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate key")
+            return f"done:{prompt}"
+
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live"):
+            self.run_script(script, {"refused": refused}, launch)
+        self.assertEqual(self.events("stage_failed"), [], "the refusal dropped an item")
+        self.assertEqual(len(self.events("agent_started")), 1)
+
+    def test_a_duplicate_live_gate_key_in_soft_park_reaches_the_script(self) -> None:
+        script = (
+            'meta = {"name": "gates", "defaults": {"engine": "codex"}}\n'
+            "refused = args['refused']\n"
+            "def ask(name):\n"
+            "    try:\n"
+            "        return park_gate('review', {'item': name}, actions=['retry', 'accept'])\n"
+            "    except Exception:\n"
+            "        refused.set()\n"
+            "        raise\n"
+            "def worker():\n"
+            "    return parallel([lambda: ask('a'), lambda: ask('b')])\n"
+            "soft_park([('job', worker)])\n"
+            "return True\n"
+        )
+        refused = threading.Event()
+
+        def decide(_root: Path, _gate_key: str, _result_hash: str, **_: object) -> dict:
+            # Hold the winner's gate key live until its peer has been refused.
+            self.assertTrue(refused.wait(5), "the peer never refused the duplicate gate key")
+            return {"action": "accept"}
+
+        with (
+            mock.patch.object(runtime.registry, "approval_decision", decide),
+            self.assertRaisesRegex(runtime.WorkflowKeyConflict, "held by a live park_gate"),
+        ):
+            self.run_script(script, {"refused": refused}, lambda *_a, **_k: None)
+        self.assertEqual(
+            self.events("soft_park_item_failed"), [], "the refusal became a failed item slot"
+        )
+        self.assertEqual(self.events("thunk_failed"), [], "the refusal became a failed item slot")
+
+
 class LifetimeStaleCancelTests(_WorkflowFixture):
     def test_plain_threads_sharing_a_scope_both_complete(self) -> None:
         """Two agent() calls on plain threads mint the same positional scope."""
