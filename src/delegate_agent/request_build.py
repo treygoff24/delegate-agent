@@ -1739,7 +1739,23 @@ def _build_normalized_launch(
     if launch.expect_files:
         request.expect_files = tuple(launch.expect_files)
     _apply_workspace_spec(request, launch)
+    if stderr is not None and not launch.dry_run:
+        _print_launch_notices(request, spec.forbid_commit_note, stderr)
     return request
+
+
+def _print_launch_notices(request: Request, forbid_commit_note: str | None, stderr: TextIO) -> None:
+    """Say at launch what the finalization report would otherwise say too late.
+
+    The implied worktree and a missing Codex overlay both change what the child
+    runs against; a caller reading stderr at launch can still stop the run.
+    """
+    if forbid_commit_note is not None:
+        print(f"delegate: {forbid_commit_note}", file=stderr)
+    if request.engine == "codex":
+        for warning in request.warnings:
+            if warning.startswith("codex.profile "):
+                print(f"delegate: warning: {warning}", file=stderr)
 
 
 def _workspace_spec_declared(launch: LaunchOptions) -> bool:
@@ -4009,7 +4025,13 @@ def _apply_profile_resolution(
             )
     auth_profile = resolution.name
     fallback_profile = None
+    launch_warnings: tuple[str, ...] = ()
     if request.engine == "codex":
+        # doctor reports a missing codex.profile overlay; a launch repeats it
+        # because Codex accepts the missing file silently on every run.
+        overlay_warning = profiles.codex_profile_overlay_warning(config, resolution)
+        if overlay_warning is not None:
+            launch_warnings = (overlay_warning,)
         if resolution.name is not None and resolution.codex_home is None:
             raise DelegateError(
                 "profile_missing_codex_home",
@@ -4019,7 +4041,7 @@ def _apply_profile_resolution(
             fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
-        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),
+        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings, *launch_warnings)),
         env_overrides=env_overrides or None,
         auth_profile=auth_profile,
         fallback_auth_profile=fallback_profile,

@@ -308,6 +308,52 @@ class RunnerCaptureTests(unittest.TestCase):
                 payload.get("warnings"),
             )
 
+    def test_safe_mode_dns_failure_points_at_work_mode(self):
+        """dlg-qd1: a sandboxed resolver failure reads like an outage without this hint."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "no-dns"
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        for mode, expected in (("safe", True), ("work", False)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as workspace:
+                root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+                run_id, alias = self.registry.register_run(root, harness="codex")
+                ctx = self.runner.RunContext(
+                    registry_root=root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="codex",
+                    engine="codex",
+                    mode=mode,
+                    model="model-id",
+                    source_cwd=workspace,
+                    execution_cwd=workspace,
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at="2026-08-25T00:00:00Z",
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script)],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    stdin_text="prompt",
+                )
+                self.assertNotEqual(code, 0)
+                hints = [w for w in payload.get("warnings", []) if "safe mode may block" in w]
+                if expected:
+                    self.assertEqual(len(hints), 1, payload.get("warnings"))
+                    self.assertIn("delegate codex work", hints[0])
+                else:
+                    self.assertEqual(hints, [])
+
     def test_successful_run_carries_no_stderr_tail(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
