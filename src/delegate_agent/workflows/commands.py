@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import private_io, rendering, run_registry, workflow_attempts, workflow_pinning
+from delegate_agent import (
+    private_io,
+    rendering,
+    run_registry,
+    workflow_attempts,
+    workflow_pinning,
+    workspace_spec,
+)
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -168,6 +175,10 @@ class WorkflowCommand:
     gate_action: str | None = None
     gate_note: str | None = None
     gate_data_json: str | None = None
+    # workflow run --env/--env-file: recorded once at launch in the workflow
+    # directory and applied to every child on every attempt, resume included.
+    env: tuple[tuple[str, str], ...] = ()
+    env_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -555,8 +566,11 @@ def emit_run(
         source = _script_path_for_command(command)
         check_result = check_script(source)
         warnings = list(check_result.warnings)
+        launch_env = workspace_spec.resolve_env(dict(command.env), command.env_files)
         wf_id = registry.generate_workflow_id()
         root = registry.ensure_workflow_dir(workspace, wf_id)
+        if launch_env:
+            workspace_spec.write_run_env(root, launch_env)
         data = source.read_bytes()
         script_path = root / registry.SCRIPT_FILE
         source_script = str(source)

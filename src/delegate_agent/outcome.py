@@ -45,6 +45,9 @@ FAILURE_STALLED = "stalled"
 FAILURE_RUNNER_LOST = "runner_lost"
 FAILURE_TIMEOUT = "timeout"
 FAILURE_CANCELLED = "cancelled"
+# A declared workspace setup command (--setup) failed in the fresh worktree;
+# no child was launched. Deterministic, so never retried as transient.
+FAILURE_WORKSPACE_SETUP = "workspace_setup"
 
 FAILURE_KINDS = frozenset(
     {
@@ -65,6 +68,7 @@ FAILURE_KINDS = frozenset(
         FAILURE_RUNNER_LOST,
         FAILURE_TIMEOUT,
         FAILURE_CANCELLED,
+        FAILURE_WORKSPACE_SETUP,
     }
 )
 
@@ -99,6 +103,7 @@ _REASON_KINDS: dict[str, str] = {
     "cancelled_by_user": FAILURE_CANCELLED,
     "harness_cancelled": FAILURE_CANCELLED,
     "cancelled": FAILURE_CANCELLED,
+    "workspace_setup_failed": FAILURE_WORKSPACE_SETUP,
 }
 
 NO_ASSISTANT_TEXT_WITH_CHANGES_WARNING = (

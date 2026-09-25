@@ -29,16 +29,19 @@ from delegate_agent import (
     run_registry,
     structured_output,
     wait_cancel_commands,
+    workspace_spec,
 )
 from delegate_agent import outcome as run_outcome
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
     MODE_SAFE,
+    MODE_WORK,
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
 )
+from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
@@ -138,6 +141,9 @@ WORKFLOW_CAPABILITIES: dict[str, int] = {
     # park_gate(key, result, actions=[...]) returns the operator's chosen
     # action from ``workflow approve --gate KEY --action NAME``.
     "gateActions": 1,
+    # agent(base=, env=, setup=) and ``workflow run --env/--env-file``: a work
+    # lane's worktree base ref, recorded env, and setup command.
+    "workspaceSpec": 1,
 }
 
 # Caller-supplied step and gate keys are identities an operator types
@@ -2343,6 +2349,47 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
         return globals_dict["__delegate_workflow__"]()
 
 
+def with_launch_environment(
+    root: Path, attempt_environment: dict[str, str] | None
+) -> dict[str, str] | None:
+    """Layer the env recorded by ``workflow run --env`` under an attempt's env.
+
+    Children inherit the supervisor's environment and then this mapping, so
+    the launch values win over whatever the resuming shell exports, while the
+    pinned operational variables still win over the launch values.
+    """
+    launch_env = workspace_spec.read_run_env(root)
+    if not launch_env:
+        return attempt_environment
+    return {**launch_env, **(attempt_environment or {})}
+
+
+def _agent_workspace_spec(
+    *,
+    base: str | None,
+    env: dict[str, str] | None,
+    setup: str | None,
+    mode: str,
+    isolation: str | None,
+) -> JsonObject | None:
+    """Validate agent(base=, env=, setup=) and return the run-input fields."""
+    if base is None and not env and setup is None:
+        return None
+    if mode != MODE_WORK or isolation != "worktree":
+        raise ValueError("base=, env=, and setup= require mode='work' with isolation='worktree'")
+    spec: JsonObject = {}
+    try:
+        if base is not None:
+            spec["base"] = workspace_spec.validate_base(base, origin="agent(base=)")
+        if env:
+            spec["env"] = dict(workspace_spec.validate_env(env, origin="agent(env=)"))
+        if setup is not None:
+            spec["setup"] = workspace_spec.validate_setup(setup, origin="agent(setup=)")
+    except DelegateError as exc:
+        raise ValueError(exc.message) from exc
+    return spec
+
+
 class WorkflowDsl:
     def __init__(self, state: WorkflowState, meta: workflow_script.WorkflowMeta) -> None:
         self.state = state
@@ -3404,6 +3451,9 @@ class WorkflowDsl:
         resumable: bool = False,
         on_failure: str = "none",
         key: str | None = None,
+        base: str | None = None,
+        env: dict[str, str] | None = None,
+        setup: str | None = None,
     ) -> JsonValue | AgentFailure:
         if on_failure not in {"none", "typed"}:
             raise ValueError('on_failure must be "none" or "typed"')
@@ -3467,6 +3517,9 @@ class WorkflowDsl:
             raise ValueError("timeout must be a positive number of seconds")
         resolved_isolation = isolation or self.defaults.get("isolation")
         resolved_phase = phase or self.current_phase
+        workspace = _agent_workspace_spec(
+            base=base, env=env, setup=setup, mode=resolved_mode, isolation=resolved_isolation
+        )
         opts = {
             "engine": engines if len(engines) > 1 else engines[0],
             "mode": resolved_mode,
@@ -3481,6 +3534,14 @@ class WorkflowDsl:
             opts["resumable"] = True
         if timeout is not None:
             opts["timeout"] = timeout
+        if workspace:
+            # Replay identity covers the spec, but env values enter it only as a
+            # digest so a secret never lands in a key or journal in the clear.
+            opts["workspace"] = {
+                "base": workspace.get("base"),
+                "envDigest": _stable_hash(_canonical_json(workspace.get("env") or {})),
+                "setup": workspace.get("setup"),
+            }
         key_digests: JsonObject = {}
         if caller_key is not None:
             # A keyed call consumes no positional counter, so skipping it (or
@@ -3518,6 +3579,12 @@ class WorkflowDsl:
         }
         if caller_key is not None:
             dry_run_entry["key"] = caller_key
+        if workspace:
+            dry_run_entry["workspace"] = {
+                "base": workspace.get("base"),
+                "envKeys": sorted(workspace.get("env") or {}),
+                "setup": workspace.get("setup") is not None,
+            }
         if resumable:
             dry_run_entry["resumable"] = True
         if persona_resolution is not None:
@@ -3555,6 +3622,7 @@ class WorkflowDsl:
                         persona=persona_resolution,
                         allow_repo_persona=allow_repo_persona,
                         resumable=resumable,
+                        workspace=workspace,
                     )
                 except SupervisorWatchdogExit:
                     raise
@@ -3825,6 +3893,7 @@ class WorkflowDsl:
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         resumable: bool = False,
+        workspace: JsonObject | None = None,
     ) -> JsonValue | _StructuredNullType:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
@@ -3859,6 +3928,7 @@ class WorkflowDsl:
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
                     resumable=resumable,
+                    workspace=workspace,
                 )
             with engine_sem:
                 return self._run_structured_or_text(
@@ -3878,6 +3948,7 @@ class WorkflowDsl:
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
                     resumable=resumable,
+                    workspace=workspace,
                 )
 
     def _run_structured_or_text(
@@ -3899,6 +3970,7 @@ class WorkflowDsl:
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         resumable: bool = False,
+        workspace: JsonObject | None = None,
     ) -> JsonValue | _StructuredNullType:
         if schema is None:
             # Retry attachment is a child-run concern, not a structured-output
@@ -3933,6 +4005,7 @@ class WorkflowDsl:
                         preserve_retry_workspace=attempts > 0,
                         structured_retry_backend=retry_backend,
                         resumable=resumable,
+                        workspace=workspace,
                     )
                 except BaseException:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -4095,6 +4168,7 @@ class WorkflowDsl:
                             preserve_retry_workspace=True,
                             structured_retry_backend=structured_retry_backend,
                             resumable=resumable,
+                            workspace=workspace,
                         )
                     except BaseException:
                         _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -4133,6 +4207,7 @@ class WorkflowDsl:
                         preserve_retry_workspace=True,
                         structured_retry_backend=structured_retry_backend,
                         resumable=resumable,
+                        workspace=workspace,
                     )
                 except BaseException:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -4372,6 +4447,7 @@ class WorkflowDsl:
         preserve_retry_workspace: bool = False,
         structured_retry_backend: str | None = None,
         resumable: bool = False,
+        workspace: JsonObject | None = None,
     ) -> str | _DelegateChildResult | None:
         payload: JsonObject = {
             "engine": engine,
@@ -4415,6 +4491,12 @@ class WorkflowDsl:
             payload["readOnly"] = True
         if resumable:
             payload["resumable"] = True
+        if workspace:
+            # base/setup are creation-only; a structured retry re-enters the
+            # first attempt's worktree, so only env is carried onto it.
+            for spec_key in ("base", "env", "setup"):
+                if spec_key in workspace and (spec_key == "env" or structured_retry_run_id is None):
+                    payload[spec_key] = workspace[spec_key]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
             json.dump(payload, handle)
             input_path = handle.name
@@ -5907,6 +5989,7 @@ def run_supervisor(
         notify_spec = status.get("notify")
         script_path = root / registry.SCRIPT_FILE
         args = load_args(root)
+        attempt_environment = with_launch_environment(root, attempt_environment)
         budget_payload = status.get("budget")
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None

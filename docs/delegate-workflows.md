@@ -68,9 +68,9 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)).
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None, base=None, env=None, setup=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)). `base=`, `env=` (a dict of names to strings), and `setup=` pass a [workspace spec](worktrees.md#workspace-spec-base-env-setup) to a `mode="work"`, `isolation="worktree"` child; other lanes raise `ValueError`. They join the call's replay identity with env values reduced to a digest. A structured retry that re-enters the first attempt's worktree carries `env` only.
 - `agent_meta(label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no label, that of the most recent `agent()` call on the calling thread.
-- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
 - `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
@@ -501,6 +501,14 @@ python3 bin/delegate.py workflow approve wf_0123abcdef45 --gate task-7-park --ac
 python3 bin/delegate.py workflow kill wf_0123abcdef45
 python3 bin/delegate.py workflow save review.py --name review-changes
 ```
+
+`workflow run --env NAME=VALUE` and `--env-file PATH` (both repeatable, launch
+only) record a workflow-level env in the workflow directory's private
+`workspace-env.json`. Every `agent()` child of every attempt receives it,
+beneath Delegate's pinned operational variables, so a resume uses the launch
+values rather than whatever the resuming shell exports. `workflow resume` and
+`workflow run --resume` refuse `--env`. The script's own process does not see
+these variables.
 
 `workflow run` detaches its supervisor and returns, so the invoking process ends
 immediately. Run it under a systemd unit only with `KillMode=process`

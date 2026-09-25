@@ -55,6 +55,7 @@ from delegate_agent.resume_command import (
     RESUMABLE_STATUSES,
     _attachment_owner_target,
     _validate_attach_target,
+    recorded_workspace_env,
 )
 
 FOLLOWUP_RECORD_READ_MAX_BYTES = PRIVATE_RECORD_READ_MAX_BYTES
@@ -348,6 +349,7 @@ def build_followup_plan(
 
     attach: JsonObject | None = None
     isolation: str | None = None
+    workspace_env: dict[str, str] | None = None
     persistent_source = worktree_records._is_persistent_worktree_run(
         source_state,
         manifest,
@@ -368,6 +370,7 @@ def build_followup_plan(
             )
         )
         isolation = "none"
+        workspace_env = recorded_workspace_env(run_path, manifest, verb="followup", notes=notes)
     else:
         isolation_mode = _manifest_str(manifest, "isolationMode")
         if isolation_mode in ("auto", "none", "worktree"):
@@ -388,6 +391,8 @@ def build_followup_plan(
         resume_session_id=session_id,
         continuity_mode=continuity_mode,
         warnings=opts.warnings,
+        workspace_env=workspace_env,
+        workspace_env_recorded=workspace_env is not None,
     )
     synthetic = ParsedCommand(
         source_engine,

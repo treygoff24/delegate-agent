@@ -336,6 +336,25 @@ def _canonical_path(path: str) -> str:
         return path
 
 
+def launcher_lease_held(registry_root: Path, run_id: str, state: JsonObject | None) -> bool:
+    """Whether a run still holds its worktree through its live launcher.
+
+    Persistent and attached runs name the Delegate process that launched them
+    (``launcherPid``). While that record is not terminal and the launcher is
+    verifiably the same live process (D2's pid-plus-start-time check), the
+    worktree is leased: no prune path may reap it, whatever the child pid
+    heuristics say. The lease ends when the run turns terminal, so a run's own
+    completion retirement is never blocked by it. It only ever adds a block.
+    """
+    if not isinstance(state, dict):
+        return False
+    if state.get("status") in run_registry.TERMINAL_STATUSES:
+        return False
+    from delegate_agent import wait_cancel_commands  # local: avoids an import cycle
+
+    return wait_cancel_commands.unlaunched_launcher_alive(registry_root, run_id, state) is True
+
+
 def live_attachments_for_path(registry_root: Path, execution_cwd: str) -> list[JsonObject]:
     """Return {runId, alias} for effectively-running resume runs attached to a path.
 
@@ -372,7 +391,7 @@ def live_attachments_for_path(registry_root: Path, execution_cwd: str) -> list[J
         if run_registry.effective_status(state) in {
             run_registry.STATUS_RUNNING,
             run_registry.STATUS_UNKNOWN,
-        }:
+        } or launcher_lease_held(registry_root, run_id, state):
             item: JsonObject = {"runId": run_id, "alias": _get_str(entry, "alias")}
             if len(claims) == 2 and _canonical_path(
                 str(claims[0].get("path", ""))

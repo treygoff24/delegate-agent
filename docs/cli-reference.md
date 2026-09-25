@@ -1036,6 +1036,7 @@ Supported input keys:
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
 - `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
+- `base`, `env`, `setup`: optional workspace spec for `mode: "work"` with `isolation: "worktree"`, the same as `--base`, `--env`, and `--setup`. `env` is an object of names to strings. See [Workspace spec](worktrees.md#workspace-spec-base-env-setup).
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config
@@ -1307,7 +1308,7 @@ creating a Run or writing a prompt record.
 | Forbid commit | `commitPolicy.forbidCommit` when exactly `true` | None | Omitted or any other value leaves commit prohibition off. | Retained. |
 | Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
 
-`delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
+`delegate runs` defaults to recent runs. In a repository's main worktree it also lists runs registered in linked worktrees, tagged with `registryWorkspace` (see [Worktrees](worktrees.md#prune-many-worktrees)). `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
@@ -1395,8 +1396,9 @@ and the workflow `agent()` return path. `status` is `succeeded`, `failed`, or
 callers can branch on: `exit_nonzero`, `no_assistant_text`, `provider_quota`,
 `provider_auth`, `provider_error`, `provider_refusal`, `provider_max_turns`,
 `session_lost`, `deliverable_missing`, `structured_invalid`, `policy_violation`,
-`model_continuity`, `output_limit`, `stalled`, `runner_lost`, `timeout`, or
-`cancelled`. `wait` reports `runner_lost` when a running record's runner
+`model_continuity`, `output_limit`, `stalled`, `runner_lost`, `workspace_setup`,
+`timeout`, or `cancelled`. `workspace_setup` means a `--setup` command failed or
+timed out before any child launched. `wait` reports `runner_lost` when a running record's runner
 process is gone (`staleReason` `dead_pid` or `missing_pid`); `stalled` is kept
 for the stall watchdog.
 `failureReason` keeps the more specific remediation code, and
@@ -1622,6 +1624,8 @@ delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-
 delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
 delegate worktree gc [--dry-run] [--all] [--pool PATH]
 ```
+
+Work runs in a persistent worktree accept `--base REF`, `--env NAME=VALUE`, `--env-file PATH`, and `--setup CMD` (see [Workspace spec](worktrees.md#workspace-spec-base-env-setup)). Prune paths skip a worktree whose run is not terminal while its launcher is alive (`worktree_leased`).
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` / `--group` filters (pre-status-filter) and `statusCounts` to the visible entries. `worktree remove --group NAME` removes all matching persistent worktrees with the same safety checks as single-handle removal. `worktree prune --group NAME` limits prune candidates to the group. `worktree gc --dry-run` reports `wouldPruneSourceRoots` and structured orphan reasons; `worktree gc` JSON also includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields. `gc` never deletes worktree directories.
 

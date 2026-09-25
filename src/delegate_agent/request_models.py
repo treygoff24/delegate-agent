@@ -72,6 +72,17 @@ class LaunchOptions:
     # Parse-time advisories that only the parser can see (token positions are
     # gone by the time the prompt is one joined string).
     warnings: tuple[str, ...] = ()
+    # Workspace spec (work + worktree isolation). ``workspace_env`` holds
+    # explicit NAME=VALUE assignments (or a resumed run's recorded env);
+    # ``workspace_env_files`` are read at request-build time, beneath them.
+    workspace_base: str | None = None
+    workspace_env: dict[str, str] | None = None
+    workspace_env_files: tuple[str, ...] = ()
+    workspace_setup: str | None = None
+    # True when workspace_env is a source run's recorded env replayed by
+    # resume/followup; those launches attach to the source worktree only after
+    # request build, so the worktree-lifecycle check does not apply to it.
+    workspace_env_recorded: bool = False
 
 
 @dataclass
@@ -205,6 +216,10 @@ class PromptTail(NamedTuple):
     continuity_mode: str | None = None
     warnings: tuple[str, ...] = ()
     expect_files: tuple[str, ...] = ()
+    workspace_base: str | None = None
+    workspace_env: dict[str, str] | None = None
+    workspace_env_files: tuple[str, ...] = ()
+    workspace_setup: str | None = None
 
 
 @dataclass
@@ -312,6 +327,12 @@ class Request:
     # child spawns there, its engine cwd argv and WORKSPACE_ROOT point there,
     # while `workspace` stays the repository root.
     launch_cwd: str | None = None
+    # Workspace spec. ``workspace_env`` values are already merged into
+    # env_overrides beneath Delegate's own variables; the separate copy is what
+    # the run records privately so resume/followup can replay it.
+    workspace_base: str | None = None
+    workspace_env: dict[str, str] | None = None
+    workspace_setup: str | None = None
 
 
 @dataclass(frozen=True)

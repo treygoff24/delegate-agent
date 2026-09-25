@@ -233,7 +233,7 @@ def safety_error_payload(
             record=record,
             next_actions=[f"delegate wait {first}", f"delegate cancel {first}"],
         )
-    if reason in {"run_active", "run_not_terminal", "process_group_alive"}:
+    if reason in {"run_active", "run_not_terminal", "process_group_alive", "worktree_leased"}:
         return _error_payload(
             reason,
             "Worktree owner is still active; wait for the run to finish before removing.",
@@ -305,6 +305,10 @@ def _owner_run_block_reason(
     state = run_registry.load_run_state_or_none(registry_root, run_id)
     fields = run_status.status_fields(state)
     status = fields["effectiveStatus"]
+    if status != run_status.STATUS_RUNNING and worktree_records.launcher_lease_held(
+        registry_root, run_id, state
+    ):
+        return "worktree_leased"
     if status == run_status.STATUS_STALE:
         stale_reason = fields.get("staleReason")
         if stale_reason not in (None, "dead_pid"):
