@@ -146,16 +146,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Exit-code semantics: a child's exit code 0 no longer means success on its
   own.** One outcome function now decides every run's `ok`, `status`, exit code,
   persisted record, `wait` result, and workflow `agent()` result, so these can
-  no longer disagree. A tracked or call run now fails with a nonzero exit, and
-  `ok: false`, in three cases where it used to report success. The first is a
-  child that exits 0 without assistant text (`failureKind: no_assistant_text`).
-  Before this change the envelope said `ok: true` with exit 0 while state.json
-  said `ok: false`. The second is a child whose provider's last unrecovered
-  error was a quota or 429 refusal (`provider_quota`). The third is a tracked
-  run whose `--expect-file PATH` deliverable is missing (`deliverable_missing`).
-  Scripts that treated exit 0 from an empty run as success will now see exit 1.
-  Every failed or cancelled run carries `failureKind`, a closed enum listed in
+  no longer disagree. A run now fails with a nonzero exit, and `ok: false`, in
+  three cases where it used to report success. The first is a tracked child
+  that exits 0 without assistant text (`failureKind: no_assistant_text`).
+  Before this change the tracked envelope said `ok: true` with exit 0 while
+  state.json said `ok: false`; call runs already failed this case and still do,
+  now with the same `failureKind`. The second is a tracked or call child whose
+  provider's last unrecovered error was a quota or 429 refusal
+  (`provider_quota`). The third is a tracked run whose `--expect-file PATH`
+  deliverable is missing (`deliverable_missing`). Scripts that treated exit 0
+  from an empty tracked run as success will now see exit 1. Every failed or
+  cancelled run carries `failureKind`, a closed enum listed in
   `docs/cli-reference.md`.
+- **A work run that changed files but ended quietly still succeeds.** A
+  tracked `work` or `followup` run that exits 0 without assistant text, while
+  its work summary shows changed files or commits, is `succeeded` with a
+  `no_assistant_text` warning, and the envelope carries the `workSummary` so an
+  orchestrator can adopt the work. Without changes the same run fails as
+  `no_assistant_text`. Safe and call runs are unaffected. Only persistent or
+  attached worktrees record a work summary, so a quiet run in any other
+  isolation still fails. Pass `--expect-file` for a stricter check.
+- Provider signals are classified from the final attempt only. On the tracked
+  and call paths, quota, provider-error, and unrecovered-error verdicts read
+  only the last attempt's own error events, last error message, and stderr, so
+  an earlier attempt's 429 no longer labels a later attempt that failed for a
+  different reason, and a final attempt's unrecovered quota error survives the
+  retry merge.
+- `wait` reports a running record whose runner process is gone (`staleReason`
+  `dead_pid` or `missing_pid`) as `failureKind: runner_lost` instead of
+  `stalled`. `stalled` is kept for the stall watchdog, which workflows retry as
+  transient; a lost runner is not retried.
+- Workflows: a structured `agent()` call whose work child changed its worktree
+  but returned no valid structured result is retried only by resuming the same
+  session and asking for the structured result alone. When the engine cannot
+  resume, Delegate does not launch a fresh child into that tree; the call fails
+  as `structured_invalid` and the `agent_structured_exhausted` journal event
+  carries the child's `workSummary`. Safe-mode children and work children
+  without changes keep the existing correction retry.
 - Tracked `safe`/`work` launches accept a repeatable `--expect-file PATH`. After
   the child exits, Delegate checks the child's process group for members that
   are still alive and records an `orphanedProcesses` warning before it

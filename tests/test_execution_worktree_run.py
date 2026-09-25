@@ -1353,6 +1353,88 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertIn("Child command created commits", payload["warnings"][0])
             self.assertIn("delegate worktree show", payload["nextActions"][0])
 
+    def _run_quiet_persistent_work(self, *, commit: bool):
+        """A cursor work child in a persistent worktree that exits 0 and prints nothing."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fake_bin = Path(temp.name)
+        body = "#!/usr/bin/env bash\nset -euo pipefail\n"
+        if commit:
+            body += (
+                "printf 'committed\\n' > committed-by-agent.txt\n"
+                "git add committed-by-agent.txt\n"
+                "git commit -m 'agent commit' >/dev/null\n"
+            )
+        (fake_bin / "agent").write_text(body + "exit 0\n")
+        (fake_bin / "agent").chmod(0o755)
+        repo, _git_cd = self._make_git_repo_with_commit()
+        workspace = request_api.resolve_workspace(repo.name)
+        request = self._make_persistent_worktree_request(
+            "cursor", "work", repo.name, config_api.embedded_default_config()
+        )
+        request = request_types.Request(
+            request.engine,
+            request.mode,
+            request.workspace,
+            request.prompt,
+            [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "--trust", "hello"],
+            request.model,
+            dry_run=False,
+            workspace_kind=request.workspace_kind,
+            isolation_context=request.isolation_context,
+        )
+        with mock.patch.dict(
+            os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config_api.embedded_default_config(),
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        run_dirs = list((Path(repo.name) / ".delegate" / "runs").glob("del_*"))
+        self.assertEqual(len(run_dirs), 1)
+        state = json.loads((run_dirs[0] / "state.json").read_text())
+        return code, payload, state
+
+    def test_quiet_work_run_with_commits_succeeds_with_warning(self):
+        # dlg-5kl ruling: a work run that landed changes but ended without
+        # assistant text succeeded, so an orchestrator adopts rather than
+        # re-dispatches the work; the missing text is a warning.
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            code, payload, state = self._run_quiet_persistent_work(commit=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIsNone(payload["failureKind"])
+        self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+        self.assertTrue(
+            any(str(w).startswith("no_assistant_text:") for w in payload["warnings"]),
+            payload["warnings"],
+        )
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["status"], "succeeded")
+
+    def test_quiet_work_run_without_changes_fails_as_no_assistant_text(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            code, payload, state = self._run_quiet_persistent_work(commit=False)
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["failureKind"], "no_assistant_text")
+        self.assertTrue(payload["workSummary"]["noChanges"])
+        self.assertFalse(state["ok"])
+        self.assertEqual(state["failureKind"], "no_assistant_text")
+
     def test_forbid_commit_prompt_context_reaches_child(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

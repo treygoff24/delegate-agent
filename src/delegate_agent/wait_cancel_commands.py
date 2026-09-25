@@ -12,6 +12,7 @@ from typing import TextIO
 
 from delegate_agent import (
     command_errors,
+    outcome,
     profiles,
     redaction,
     run_registry,
@@ -20,6 +21,10 @@ from delegate_agent import (
 )
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
+
+# staleReason values from run_status.status_fields that mean the runner process
+# is gone, as opposed to the stall watchdog's idle-child verdict.
+_RUNNER_LOST_STALE_REASONS = frozenset({"dead_pid", "missing_pid"})
 
 WAIT_SCHEMA = "delegate.wait.v1"
 CANCEL_SCHEMA = "delegate.cancel.v1"
@@ -163,7 +168,13 @@ def _terminal_payload(registry_root: Path, target: run_registry.RunTarget) -> Js
     if wait_state.get("staleReason"):
         payload["staleReason"] = wait_state["staleReason"]
         payload.setdefault("failureReason", wait_state.get("failureReason"))
-        payload["failureKind"] = "stalled"
+        # A stale run's runner is gone (dead or missing pid); that is not the
+        # stall watchdog's "stalled", which workflows retry as transient.
+        payload["failureKind"] = (
+            outcome.FAILURE_RUNNER_LOST
+            if wait_state["staleReason"] in _RUNNER_LOST_STALE_REASONS
+            else outcome.FAILURE_STALLED
+        )
     return payload
 
 
@@ -177,6 +188,7 @@ def _run_succeeded(payload: JsonObject) -> bool:
         _status_label(payload),
         quality if isinstance(quality, str) else None,
         payload.get("terminalState"),
+        failure_kind=run_registry.record_failure_kind(payload),
     )
 
 

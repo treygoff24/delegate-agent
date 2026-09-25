@@ -12,6 +12,8 @@ from delegate_agent import run_registry
 from delegate_agent.workflows import registry, runtime
 from delegate_agent.workflows import schema as workflow_schema
 
+_CHANGED_SUMMARY = {"changedFilesCount": 2, "commitsCreatedCount": 1, "noChanges": False}
+
 
 class ChildAttemptOutcomeTests(unittest.TestCase):
     def test_provider_terminal_reasons_keep_their_names(self) -> None:
@@ -220,6 +222,128 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         retry_prompt = calls[1].args[1]
         self.assertIn(json.dumps(schema, sort_keys=True), retry_prompt)
         self.assertIn("failed validation", retry_prompt)
+
+    def _work_retry(
+        self, first: runtime._DelegateChildResult
+    ) -> tuple[object, list[mock._Call], runtime.WorkflowDsl]:
+        dsl = self._dsl()
+        calls: list[mock._Call] = []
+
+        def run(*args: object, **kwargs: object) -> runtime._DelegateChildResult:
+            calls.append(mock.call(*args, **kwargs))
+            if len(calls) == 1:
+                return first
+            return runtime._DelegateChildResult(
+                text=json.dumps({"ok": True}),
+                run_id="del_20260925T040000Z_work2",
+                execution_cwd="/tmp/work-worktree",
+                session_id=first.session_id,
+            )
+
+        with (
+            mock.patch.object(dsl, "_run_delegate", side_effect=run),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+            mock.patch.object(dsl, "_wait_retry_backoff"),
+        ):
+            value = dsl._run_structured_or_text(
+                "codex",
+                "perform the implementation",
+                mode="work",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                isolation="worktree",
+                passthrough=False,
+                timeout=1,
+                retries=1,
+                key="work-key",
+            )
+        return value, calls, dsl
+
+    def _quiet_work_children(
+        self, *, session_id: str | None, work_summary: dict[str, object]
+    ) -> dict[str, runtime._DelegateChildResult]:
+        """The two shapes a work child that landed changes but no answer takes."""
+        run_id = "del_20260925T040000Z_work1"
+        return {
+            # Exit 0, no text, changes: succeeded with a warning (outcome None).
+            "succeeded_without_text": runtime._DelegateChildResult(
+                text=None,
+                run_id=run_id,
+                execution_cwd="/tmp/work-worktree",
+                session_id=session_id,
+                work_summary=work_summary,
+            ),
+            "empty_result": runtime._DelegateChildResult(
+                text=None,
+                run_id=run_id,
+                execution_cwd="/tmp/work-worktree",
+                session_id=session_id,
+                work_summary=work_summary,
+                outcome=runtime.ChildAttemptOutcome(
+                    run_id=run_id, failure_reason="empty_result", session_id=session_id
+                ),
+            ),
+        }
+
+    def test_work_child_with_changes_is_not_relaunched_fresh_into_its_tree(self) -> None:
+        children = self._quiet_work_children(session_id=None, work_summary=_CHANGED_SUMMARY)
+        for shape, first in children.items():
+            with self.subTest(shape):
+                self.setUp()
+                value, calls, dsl = self._work_retry(first)
+                self.assertIsNone(value)
+                self.assertEqual(len(calls), 1, "a fresh child was launched into a changed tree")
+                events = list(runtime.registry.iter_journal(dsl.state.journal_path))
+                self.assertFalse(any(e.get("type") == "agent_structured_retry" for e in events))
+                refused = next(
+                    e for e in events if e.get("type") == "agent_structured_retry_refused"
+                )
+                self.assertEqual(refused["workSummary"], _CHANGED_SUMMARY)
+                exhausted = next(e for e in events if e.get("type") == "agent_structured_exhausted")
+                self.assertEqual(exhausted["failureKind"], "structured_invalid")
+                self.assertEqual(exhausted["workSummary"], _CHANGED_SUMMARY)
+                self.assertEqual(exhausted["runId"], first.run_id)
+
+    def test_work_child_with_changes_resumes_its_session_for_the_structured_result(
+        self,
+    ) -> None:
+        children = self._quiet_work_children(
+            session_id="session-work", work_summary=_CHANGED_SUMMARY
+        )
+        for shape, first in children.items():
+            with self.subTest(shape):
+                self.setUp()
+                value, calls, _dsl = self._work_retry(first)
+                self.assertEqual(value, {"ok": True})
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1].kwargs["resume_session_id"], "session-work")
+                retry_prompt = calls[1].args[1]
+                self.assertIn("Re-emit the StructuredOutput now.", retry_prompt)
+                self.assertNotIn("perform the implementation", retry_prompt)
+
+    def test_work_child_without_changes_keeps_the_fresh_relaunch(self) -> None:
+        unchanged = {"changedFilesCount": 0, "commitsCreatedCount": 0, "noChanges": True}
+        children = self._quiet_work_children(session_id=None, work_summary=unchanged)
+        for shape, first in children.items():
+            with self.subTest(shape):
+                self.setUp()
+                value, calls, _dsl = self._work_retry(first)
+                self.assertEqual(value, {"ok": True})
+                self.assertEqual(len(calls), 2)
+                self.assertIsNone(calls[1].kwargs["resume_session_id"])
+                self.assertIn("perform the implementation", calls[1].args[1])
+
+    def test_child_result_reads_the_envelope_work_summary(self) -> None:
+        child = runtime._child_result_from_payload(
+            {"ok": True, "runId": "del_x", "workSummary": dict(_CHANGED_SUMMARY)},
+            text=None,
+        )
+        self.assertTrue(child.work_changed)
+        failed = runtime._failed_child_result(child, reason="empty_result")
+        self.assertEqual(failed.work_summary, _CHANGED_SUMMARY)
+        self.assertFalse(runtime._child_result_from_payload({"ok": True}, text=None).work_changed)
 
     def test_a_failed_child_launch_records_its_stderr_and_exit_code(self) -> None:
         """A child that dies before publishing JSON must still say why.
