@@ -303,11 +303,7 @@ def resolve_process_group_termination_grace_sec(config: JsonObject) -> float:
 
 
 def _stall_minutes_value(value: JsonValue) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value) or value < 0:
-        return None
-    return float(value)
+    return stall_watchdog.stall_minutes_value(value)
 
 
 def resolve_stall_minutes(config: JsonObject) -> float:

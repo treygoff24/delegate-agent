@@ -323,7 +323,8 @@ _STALL_MINUTES_OPTION = OptionSpec(
     "MINUTES",
     "This run's stall-watchdog threshold: minutes of no new output and no tool activity "
     "before the child is cancelled with failureReason stalled; 0 disables. Overrides "
-    "stallMinutes config and DELEGATE_STALL_MINUTES. Not supported with pass-through launches.",
+    "stallMinutes config and DELEGATE_STALL_MINUTES; resume and followup inherit it. Not "
+    "supported with pass-through launches.",
 )
 _PROMPT_ARG = ArgSpec(
     "prompt",
