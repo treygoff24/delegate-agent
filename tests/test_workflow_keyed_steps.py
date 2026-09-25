@@ -635,12 +635,15 @@ class GateActionTests(_WorkflowFixture):
 
 
 class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
-    def register_child(self, key: str, state: dict) -> str:
+    def register_child(self, key: str, state: dict, cleanup: dict | None = None) -> str:
         registry_root = run_registry.registry_root(self.workspace)
+        metadata: dict = {"group": self.wf_id, "workflowAgentKey": key}
+        if cleanup is not None:
+            metadata["temporaryWorkspaceCleanup"] = cleanup
         run_id, alias = run_registry.register_run(
             registry_root,
             harness="codex",
-            metadata={"group": self.wf_id, "workflowAgentKey": key},
+            metadata=metadata,
         )
         run_registry.write_run_state(
             run_registry.run_directory(registry_root, run_id),
@@ -705,6 +708,95 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         )
         self.assertIs(adopted, runtime._MISSING)
         self.assertEqual(self.events("agent_adopt_skipped")[-1]["reason"], "cancelled")
+
+    def scratch(self) -> tuple[dict, Path]:
+        """A live temporary structured-retry workspace plus its cleanup descriptor."""
+        temp_base = self.workspace / "structured-retry-scratch"
+        isolated = temp_base / "isolated"
+        isolated.mkdir(parents=True)
+        (isolated / "child-artifact.txt").write_text("evidence\n", encoding="utf-8")
+        return (
+            {
+                "gitRoot": None,
+                "isolatedWorkspace": str(isolated),
+                "tempBase": str(temp_base),
+                "sourceRoot": str(self.workspace),
+            },
+            temp_base,
+        )
+
+    def adopt_over_scratch(
+        self,
+        key: str,
+        run_state: dict,
+        *,
+        dry_run: bool,
+        schema: dict | None = None,
+    ) -> tuple[object, Path]:
+        """Adopt a predecessor whose index entry carries a live scratch tree."""
+        cleanup, temp_base = self.scratch()
+        self.register_child(key, run_state, cleanup=cleanup)
+        state = self.state()
+        state.dry_run = dry_run
+        dsl = runtime.WorkflowDsl(state, {})
+        adopted = dsl._adopt_existing_agent_run(
+            key,
+            scope="root/seq#0",
+            phase=None,
+            schema=schema,
+            prefer_assistant=False,
+            timeout=1,
+        )
+        return adopted, temp_base
+
+    def test_a_dry_run_adoption_leaves_the_predecessors_scratch_alone(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-cancelled", {"status": "cancelled"}, dry_run=True
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        skipped = self.events("agent_adopt_skipped")[-1]
+        self.assertEqual(skipped["reason"], "cancelled")
+        self.assertTrue(skipped["simulated"])
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch tree it was reading")
+
+    def test_a_live_adoption_still_reaps_the_predecessors_scratch(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-live-cancelled", {"status": "cancelled"}, dry_run=False
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        self.assertEqual(self.events("agent_adopt_skipped")[-1]["reason"], "cancelled")
+        self.assertFalse(temp_base.exists(), "the live respawn path must still reap it")
+
+    def test_a_dry_run_adoption_leaves_a_failed_childs_scratch_alone(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-failed", {"status": "failed"}, dry_run=True
+        )
+        self.assertIs(adopted, runtime._MISSING)
+        self.assertTrue(temp_base.exists(), "a dry run reaped a dead child's scratch")
+
+    def test_a_dry_run_adoption_leaves_the_scratch_of_a_rejected_answer(self) -> None:
+        rejected, temp_base = self.adopt_over_scratch(
+            "key-dry-rejected",
+            {"status": "succeeded", "assistantText": "not an object"},
+            dry_run=True,
+            schema={
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+        )
+        self.assertIs(rejected, runtime._MISSING)
+        self.assertEqual(self.events("agent_adopt_rejected")[-1]["key"], "key-dry-rejected")
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch of the run it refused")
+
+    def test_a_dry_run_adoption_takes_the_answer_and_leaves_the_scratch(self) -> None:
+        adopted, temp_base = self.adopt_over_scratch(
+            "key-dry-succeeded",
+            {"status": "succeeded", "assistantText": "adopted answer"},
+            dry_run=True,
+        )
+        self.assertEqual(adopted, "adopted answer")
+        self.assertTrue(temp_base.exists(), "a dry run reaped the scratch of the run it adopted")
 
     def test_resume_seals_missing_pid_children_past_the_grace_window(self) -> None:
         run_id = self.register_child(
