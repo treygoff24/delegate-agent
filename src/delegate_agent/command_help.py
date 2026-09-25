@@ -931,6 +931,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "are continuation instructions, including flag-like text.",
             "For native harness session re-entry with preserved conversation context, "
             "use `delegate followup`.",
+            "Resuming a --resumable source keeps that opt-in when the new engine is codex or "
+            "claude: the resumed Run records its own native session, so continue it with "
+            "`delegate followup <new alias>`. A followup of the original resumes the "
+            "original session and does not see the resumed Run's work.",
         ),
         see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
         unsupported_global_options=("--isolation",),

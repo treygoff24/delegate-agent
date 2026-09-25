@@ -444,3 +444,30 @@ class ResumeInheritanceTests(ResumeFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
+    """dlg-qd1: a resumed Run could never be followed up; it recorded no session."""
+
+    def test_resume_of_a_resumable_run_is_resumable(self):
+        _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertTrue(payload.get("resumable"), payload)
+        self.assertNotIn("--ephemeral", payload["argv"])
+
+    def test_resume_of_a_plain_run_stays_plain(self):
+        _run_id, alias, _run_path = self.seed_run()
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+
+    def test_cross_engine_resume_drops_the_opt_in_and_says_so(self):
+        _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
+
+        payload, stderr = self.run_resume(["--dry-run", "--engine", "grok", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+        self.assertIn("resumable dropped: grok work runs cannot record a native session", stderr)

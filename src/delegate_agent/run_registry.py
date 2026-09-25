@@ -806,13 +806,24 @@ def _run_target_resolution_details(
     if group is not None:
         details["resolvedGroup"] = group
     warning = None
-    if warning_kind == "bare" and age_seconds is not None and age_seconds > 24 * 60 * 60:
+    if warning_kind == "bare":
         resolved = alias or run_id
-        warning = (
-            f"bare_handle_stale: resolved {resolved} in {workspace or 'an unknown workspace'} "
-            f"({_format_age(timestamp)}). Use --cwd for the intended workspace or the explicit "
-            f"handle {resolved}."
-        )
+        parts: list[str] = []
+        if age_seconds is not None and age_seconds > 24 * 60 * 60:
+            parts.append(
+                f"bare_handle_stale: resolved {resolved} in {workspace or 'an unknown workspace'} "
+                f"({_format_age(timestamp)}). Use --cwd for the intended workspace or the "
+                f"explicit handle {resolved}."
+            )
+        siblings = _bare_handle_siblings(registry_root, index, run_id, harness, group)
+        if siblings:
+            shown = ", ".join(siblings[:5]) + (", ..." if len(siblings) > 5 else "")
+            scope = f"in group {group} or still running" if group else "still running"
+            parts.append(
+                f"bare_handle_ambiguous: {harness} resolved the newest {harness} run {resolved}, "
+                f"but other {harness} runs are {scope}: {shown}. Pass the explicit handle."
+            )
+        warning = " ".join(parts) or None
     elif warning_kind == "numbered_alias" and newer_count == 0:
         return {}, None
     elif (
@@ -838,6 +849,34 @@ def _run_target_resolution_details(
             f"Review {runs_command}."
         )
     return details, warning
+
+
+def _bare_handle_siblings(
+    registry_root: Path,
+    index: JsonObject,
+    run_id: str,
+    harness: str | None,
+    group: str | None,
+) -> list[str]:
+    """Other runs of the harness a bare handle could have meant, newest first.
+
+    A bare harness name picks the newest run. Runs of that harness in the same
+    group, or still running, are the ones a caller plausibly meant instead.
+    """
+    if not harness:
+        return []
+    siblings: list[tuple[int, str]] = []
+    for candidate, entry in index_run_entries(index):
+        if candidate == run_id or entry.get("harness") != harness:
+            continue
+        handle = entry.get("alias") if isinstance(entry.get("alias"), str) else candidate
+        same_group = group is not None and entry.get("group") == group
+        if not same_group:
+            state = load_run_state_or_none(registry_root, candidate)
+            if run_status.effective_status(state) != run_status.STATUS_RUNNING:
+                continue
+        siblings.append((alias_sequence_for_harness(entry.get("alias"), harness), handle))
+    return [handle for _sequence, handle in sorted(siblings, reverse=True)]
 
 
 def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:

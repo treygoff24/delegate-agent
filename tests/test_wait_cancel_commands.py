@@ -244,6 +244,28 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertGreater(resolved["resolvedAgeSeconds"], 24 * 60 * 60)
         self.assertTrue(any("bare_handle_stale" in warning for warning in resolved["warnings"]))
 
+    def test_wait_bare_harness_names_group_and_running_siblings(self):
+        """dlg-qd1: a bare harness name silently picked the newest of several lanes."""
+        _only_id, only_alias = self.write_run(status="succeeded", group="wave4")
+        code, out, err = self.run_cli(["--json", "wait", "codex", "--interval", "1"])
+        self.assertEqual(code, 0, err)
+        warnings = json.loads(out)["runs"][0].get("warnings", [])
+        self.assertFalse(any("bare_handle_ambiguous" in w for w in warnings), warnings)
+
+        _running_id, running_alias = self.write_run(status="running", pid=os.getpid())
+        _other_id, other_alias = self.write_run(status="succeeded", group="other")
+        _latest_id, latest_alias = self.write_run(status="succeeded", group="wave4")
+
+        code, out, err = self.run_cli(["--json", "wait", "codex", "--interval", "1"])
+
+        self.assertEqual(code, 0, err)
+        resolved = json.loads(out)["runs"][0]
+        self.assertEqual(resolved["resolvedAlias"], latest_alias)
+        (warning,) = [w for w in resolved["warnings"] if "bare_handle_ambiguous" in w]
+        self.assertIn(f"resolved the newest codex run {latest_alias}", warning)
+        self.assertIn(f"{running_alias}, {only_alias}", warning)
+        self.assertNotIn(other_alias, warning)
+
     def test_wait_group_selector_waits_all_matching_runs(self):
         _first_id, first_alias = self.write_run(status="succeeded", group="wave4")
         _other_id, _other_alias = self.write_run(status="failed", group="other")
