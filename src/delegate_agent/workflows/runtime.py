@@ -111,6 +111,17 @@ class WorkflowKeyConflict(RuntimeError):
     """
 
 
+class WorkflowKeyError(ValueError, WorkflowKeyConflict):
+    """A caller-supplied key or declared gate action is not usable at all.
+
+    Raised where a key or action list is validated, so a direct call keeps
+    refusing with the ``ValueError`` it always raised. It is also a
+    ``WorkflowKeyConflict``, which lets the per-item handlers of ``parallel()``,
+    ``pipeline()``, and ``soft_park()`` re-raise the script-authoring mistake
+    to the script instead of turning it into a failed item slot.
+    """
+
+
 # Provider recovery and credential rotation belong to the child harness. Only
 # workflow watchdog interruptions are transient here; unknown failures stop.
 WORKFLOW_TRANSIENT_FAILURES = frozenset(
@@ -2666,6 +2677,7 @@ class WorkflowDsl:
         gate_errors: list[GateExit] = []
         watchdog_errors: list[SupervisorWatchdogExit] = []
         validation_errors: list[ValueError] = []
+        key_errors: list[WorkflowKeyConflict] = []
         bypass_item_cap = self.state.inside_item_thread()
         cap = _item_thread_cap(self.state.config)
         owner_scope = self.state.current_scope()
@@ -2712,6 +2724,11 @@ class WorkflowDsl:
                     gate_error = exc
                 except SupervisorWatchdogExit as exc:
                     watchdog_errors.append(exc)
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error: collect it and re-raise it to the script rather
+                    # than leaving a silent None slot.
+                    key_errors.append(exc)
                 except Exception as exc:
                     self.state.append_event(
                         "soft_park_item_failed",
@@ -2728,6 +2745,7 @@ class WorkflowDsl:
                 and len(active) < cap
                 and not gate_errors
                 and not watchdog_errors
+                and not key_errors
             ):
                 index = next_index
                 name, value, callback = entries[index]
@@ -2782,6 +2800,11 @@ class WorkflowDsl:
         )
         if outstanding:
             raise SoftParkExit(outstanding)
+        if key_errors:
+            # Raised after the park and gate exits: those carry durable state
+            # an operator resolves, while the refusal is deterministic and
+            # comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def _child_scopes(self, kind: str, key: object) -> tuple[str, str]:
@@ -2817,6 +2840,7 @@ class WorkflowDsl:
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(items) + 1)
             if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
@@ -2852,6 +2876,12 @@ class WorkflowDsl:
                                 gate_errors.append(exc)
                                 previous = None
                                 break
+                            except WorkflowKeyConflict as exc:
+                                # A reused or invalid caller key is a
+                                # script-authoring error, not a failed item.
+                                key_errors.append(exc)
+                                previous = None
+                                break
                             except Exception as exc:
                                 self.state.append_event(
                                     "stage_failed",
@@ -2865,7 +2895,7 @@ class WorkflowDsl:
                 results[index] = previous
 
         for index, item in enumerate(items):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 # Gate already closed: short-circuit remaining items without
                 # spawning threads that would only block then die on admission.
                 break
@@ -2875,7 +2905,7 @@ class WorkflowDsl:
                 pre_acquired = True
                 # Re-check after acquire: with a tight item-thread cap the gate
                 # may have closed while we were blocked on the semaphore.
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -2901,6 +2931,11 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def parallel(
@@ -2937,6 +2972,7 @@ class WorkflowDsl:
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(thunks) + 1)
             if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
@@ -2964,6 +3000,12 @@ class WorkflowDsl:
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error, not a failed item: collect it and re-raise it to
+                    # the script, the way a gate or soft-park exit travels.
+                    key_errors.append(exc)
+                    results[index] = None
                 except Exception as exc:
                     self.state.append_event(
                         "thunk_failed",
@@ -2973,13 +3015,13 @@ class WorkflowDsl:
                     results[index] = None
 
         for index, thunk in enumerate(thunks):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 break
             pre_acquired = False
             if not bypass_item_cap:
                 self.state.item_semaphore.acquire()
                 pre_acquired = True
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -3005,6 +3047,11 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def judges(
@@ -5219,7 +5266,7 @@ def _validate_caller_key(value: object, *, what: str) -> str:
         or len(value) > CALLER_KEY_MAX_CHARS
         or any(ch < " " or ch == "\x7f" for ch in value)
     ):
-        raise ValueError(
+        raise WorkflowKeyError(
             f"{what} key must be a non-empty printable string of at most "
             f"{CALLER_KEY_MAX_CHARS} characters"
         )
@@ -5230,12 +5277,12 @@ def _validate_gate_actions(actions: object) -> list[str]:
     if actions is None:
         return ["approve"]
     if not isinstance(actions, (list, tuple)) or not actions:
-        raise ValueError("park_gate() actions must be a non-empty list of names")
+        raise WorkflowKeyError("park_gate() actions must be a non-empty list of names")
     names: list[str] = []
     for action in actions:
         name = _validate_caller_key(action, what="park_gate() action")
         if name in names:
-            raise ValueError(f"park_gate() action {name!r} is declared twice")
+            raise WorkflowKeyError(f"park_gate() action {name!r} is declared twice")
         names.append(name)
     return names
 
