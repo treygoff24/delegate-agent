@@ -89,6 +89,7 @@ from delegate_agent.run_status import (  # noqa: F401  # existing registry API
     process_alive,
     raw_logs_archived,
     raw_status,
+    record_failure_kind,
     run_succeeded,
     stale_next_actions,
     status_fields,

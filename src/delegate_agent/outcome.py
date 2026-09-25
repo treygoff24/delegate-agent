@@ -40,6 +40,9 @@ FAILURE_POLICY_VIOLATION = "policy_violation"
 FAILURE_MODEL_CONTINUITY = "model_continuity"
 FAILURE_OUTPUT_LIMIT = "output_limit"
 FAILURE_STALLED = "stalled"
+# The runner process that owned the child is gone (wait found a dead or
+# missing pid). Not transient: a crashed or OOM-killed runner is not an idle child.
+FAILURE_RUNNER_LOST = "runner_lost"
 FAILURE_TIMEOUT = "timeout"
 FAILURE_CANCELLED = "cancelled"
 
@@ -59,6 +62,7 @@ FAILURE_KINDS = frozenset(
         FAILURE_MODEL_CONTINUITY,
         FAILURE_OUTPUT_LIMIT,
         FAILURE_STALLED,
+        FAILURE_RUNNER_LOST,
         FAILURE_TIMEOUT,
         FAILURE_CANCELLED,
     }
@@ -96,6 +100,12 @@ _REASON_KINDS: dict[str, str] = {
     "harness_cancelled": FAILURE_CANCELLED,
     "cancelled": FAILURE_CANCELLED,
 }
+
+NO_ASSISTANT_TEXT_WITH_CHANGES_WARNING = (
+    "no_assistant_text: the work run exited 0 without assistant text but its work "
+    "summary shows file changes or commits; the run counts as succeeded so the work "
+    "can be adopted. Inspect workSummary, or pass --expect-file for a stricter check."
+)
 
 ORPHANED_PROCESSES_WARNING = (
     "orphanedProcesses: the child's process group still had live members after the "
@@ -139,6 +149,16 @@ def _failed_exit(child_exit_code: int) -> int:
     return child_exit_code if child_exit_code != 0 else 1
 
 
+def work_summary_shows_changes(summary: object) -> bool:
+    """Does a run's ``workSummary`` record file changes or commits?"""
+    if not isinstance(summary, dict):
+        return False
+    return any(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0
+        for value in (summary.get("changedFilesCount"), summary.get("commitsCreatedCount"))
+    )
+
+
 def compute_outcome(
     *,
     child_exit_code: int,
@@ -153,6 +173,7 @@ def compute_outcome(
     unrecovered_error: str | None = None,
     missing_deliverables: tuple[str, ...] = (),
     orphaned_processes: bool = False,
+    work_changed: bool = False,
 ) -> Outcome:
     """Compute the one Outcome for a finished child.
 
@@ -170,6 +191,10 @@ def compute_outcome(
     is the same trusted text restricted to the last attempt of a retried run;
     only it may turn an exit-0 empty result into a quota failure, because an
     earlier attempt's quota error was already handled by the retry.
+    ``work_changed`` says a tracked work run's work summary shows file changes
+    or commits. Such a run that exits 0 without assistant text succeeded with a
+    warning (its work landed and an orchestrator must be able to adopt it);
+    without changes it fails as ``no_assistant_text``.
     """
     warnings: list[str] = []
     if orphaned_processes:
@@ -213,6 +238,11 @@ def compute_outcome(
     if unrecovered_error and child_failures.is_usage_limit(unrecovered_error):
         evidence.append("provider's last unrecovered error was a quota or usage limit")
         return done(STATUS_FAILED, FAILURE_PROVIDER_QUOTA, 1)
+    if result_quality in NO_OUTPUT_RESULT_QUALITIES and work_changed and not missing_deliverables:
+        evidence.append(f"child exited 0 with resultQuality={result_quality}")
+        evidence.append("work summary shows file changes or commits")
+        warnings.append(NO_ASSISTANT_TEXT_WITH_CHANGES_WARNING)
+        return done(STATUS_SUCCEEDED, None, 0)
     if result_quality in NO_OUTPUT_RESULT_QUALITIES:
         evidence.append(f"child exited 0 with resultQuality={result_quality}")
         final_text = signal_text if final_attempt_signal_text is None else final_attempt_signal_text

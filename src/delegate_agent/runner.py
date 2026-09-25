@@ -511,7 +511,6 @@ def _model_provenance(
 def _terminal_state_for(
     *,
     status: str,
-    result_quality: str,
     accumulator: harness_events.StreamAccumulator,
     failure_reason: str | None,
     pinned_pause: bool,
@@ -529,8 +528,8 @@ def _terminal_state_for(
         return terminal_states.STALLED
     if status in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}:
         return terminal_states.FAILED
-    if result_quality in harness_events.NO_OUTPUT_RESULT_QUALITIES:
-        return terminal_states.FAILED
+    # status is the outcome contract's verdict, which already failed every
+    # no-output run except a quiet work run whose changes landed.
     return terminal_states.COMPLETED_UNVERIFIED
 
 
@@ -1002,6 +1001,7 @@ def _persist_final_progress(
             persisted_status,
             record.get("resultQuality"),
             record.get("terminalState"),
+            failure_kind=run_registry.record_failure_kind(record),
         )
         record = run_registry.merge_terminal_record(current, record)
         return persisted_status, persisted_extra, record
@@ -1753,6 +1753,10 @@ class TrackedCaptureResult:
     # Members of the child's process group were still alive after the harness
     # itself exited (before Delegate's cleanup pass terminated them).
     orphaned_processes: bool = False
+    # The last attempt's own accumulator. A retried run's merged accumulator
+    # keeps every attempt's events for diagnosis, but only the final attempt's
+    # errors may classify the outcome. None means the run had one attempt.
+    final_attempt_accumulator: harness_events.StreamAccumulator | None = None
     zero_commit_health: JsonObject | None = None
     stdout_capture: JsonObject | None = None
 
@@ -1780,6 +1784,10 @@ class CallResult:
     # The last provider error the stream never recovered from (trusted,
     # redacted harness event text), an input to the outcome contract.
     unrecovered_error: str | None = None
+    # A retried call's stderr_tail joins every attempt; this is the final
+    # attempt's own, the only stderr that may classify the outcome. None means
+    # the call had one attempt, so stderr_tail is already the final one.
+    final_attempt_stderr_tail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3033,9 +3041,16 @@ def _finalize_tracked_run(
     if cancel_requested:
         _clear_operator_cancel_terminal_evidence(capture.accumulator)
         _reconcile_cancel_extra(merged_extra)
+    # Provider classification reads only the final attempt: its own stderr
+    # segment, error events, and last error message. Earlier attempts stay in the
+    # record for diagnosis but never decide the failure kind.
+    final_accumulator = capture.final_attempt_accumulator or capture.accumulator
     signal_text = "\n".join(
         part
-        for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
+        for part in (
+            _final_attempt_segment(stderr_tail),
+            _accumulator_failure_signal_text(final_accumulator),
+        )
         if part
     )
     session_failure = (
@@ -3073,18 +3088,12 @@ def _finalize_tracked_run(
         result_quality=capture_quality,
         cancelled=cancel_requested,
         signal_text=signal_text,
-        final_attempt_signal_text="\n".join(
-            part
-            for part in (
-                _final_attempt_segment(stderr_tail),
-                _accumulator_failure_signal_text(capture.accumulator),
-            )
-            if part
-        ),
         diagnosed_reason=session_failure.code if session_failure is not None else None,
-        unrecovered_error=capture.accumulator.unrecovered_error_message,
+        unrecovered_error=final_accumulator.unrecovered_error_message,
         missing_deliverables=missing_deliverables,
         orphaned_processes=capture.orphaned_processes,
+        work_changed=ctx.mode == "work"
+        and outcome.work_summary_shows_changes(merged_extra.get("workSummary")),
     )
     status = run_outcome.status
     exit_code = run_outcome.exit_code
@@ -3144,7 +3153,7 @@ def _finalize_tracked_run(
         extra=merged_extra,
     )
     if failure is not None and failure.code == "child_failed":
-        failure = _unclassified_provider_failure(capture.accumulator) or failure
+        failure = _unclassified_provider_failure(final_accumulator) or failure
     if session_failure is not None:
         failure = session_failure
     failure_reason = failure.code if failure is not None else None
@@ -3210,7 +3219,6 @@ def _finalize_tracked_run(
     failure_reason_value = merged_extra.get("failureReason")
     terminal_state = _terminal_state_for(
         status=status,
-        result_quality=result_quality,
         accumulator=capture.accumulator,
         failure_reason=(
             failure_reason_value if isinstance(failure_reason_value, str) else failure_reason
@@ -3841,9 +3849,15 @@ def _merge_tracked_attempt_captures(
             merged_unhandled[name] = count
     accumulator.unhandled_event_types = merged_unhandled
     accumulator.unhandled_event_types_truncated = truncated
+    # The final attempt's unrecovered provider error stays unrecovered after the
+    # merge; an earlier attempt's never carries over.
+    accumulator._last_error_message = current_capture.accumulator.unrecovered_error_message
     return replace(
         current_capture,
         accumulator=accumulator,
+        final_attempt_accumulator=(
+            current_capture.final_attempt_accumulator or current_capture.accumulator
+        ),
         stdout_bytes=prior_capture.stdout_bytes + current_capture.stdout_bytes,
         stderr_bytes=prior_capture.stderr_bytes + current_capture.stderr_bytes,
         stdin_failures=tuple(
@@ -5299,6 +5313,11 @@ def _merge_call_attempts(first: CallResult, last: CallResult, label: str) -> Cal
         warnings=tuple(warnings),
         text_truncated=first.text_truncated or last.text_truncated,
         usage=_aggregate_usage(first.usage, last.usage),
+        final_attempt_stderr_tail=(
+            last.final_attempt_stderr_tail
+            if last.final_attempt_stderr_tail is not None
+            else last.stderr_tail
+        ),
     )
 
 

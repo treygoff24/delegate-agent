@@ -24,10 +24,15 @@ STATUS_FILTER_RUNNING = "running"
 STATUS_FILTER_STALE = "stale"
 
 
+_OUTCOME_NOT_RECORDED = object()
+
+
 def run_succeeded(
     status: str,
     result_quality: str | None,
     terminal_state: object = None,
+    *,
+    failure_kind: object = _OUTCOME_NOT_RECORDED,
 ) -> bool:
     """Did this run finish AND come back with usable work?
 
@@ -40,6 +45,12 @@ def run_succeeded(
     Only the qualities in NO_OUTPUT_RESULT_QUALITIES veto success: those record
     that no output existed, which cannot be a false positive. Heuristic judgments
     about the content of real output stay warnings.
+
+    A record that carries the outcome contract's ``failureKind`` key already
+    holds the verdict (outcome.compute_outcome weighed the result quality and,
+    for example, a quiet work run whose changes landed), so pass it as
+    ``failure_kind`` and it decides instead of the quality veto. Records written
+    before the contract have no such key and keep the veto.
     """
     if status != STATUS_SUCCEEDED:
         return False
@@ -48,7 +59,14 @@ def run_succeeded(
         COMPLETED_UNVERIFIED,
     }:
         return False
+    if failure_kind is not _OUTCOME_NOT_RECORDED:
+        return failure_kind is None
     return result_quality not in NO_OUTPUT_RESULT_QUALITIES
+
+
+def record_failure_kind(record: JsonObject) -> object:
+    """The recorded ``failureKind`` for run_succeeded, or the not-recorded marker."""
+    return record.get("failureKind", _OUTCOME_NOT_RECORDED)
 
 
 _UNSET = object()

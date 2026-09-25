@@ -1386,7 +1386,10 @@ and the workflow `agent()` return path. `status` is `succeeded`, `failed`, or
 callers can branch on: `exit_nonzero`, `no_assistant_text`, `provider_quota`,
 `provider_auth`, `provider_error`, `provider_refusal`, `provider_max_turns`,
 `session_lost`, `deliverable_missing`, `structured_invalid`, `policy_violation`,
-`model_continuity`, `output_limit`, `stalled`, `timeout`, or `cancelled`.
+`model_continuity`, `output_limit`, `stalled`, `runner_lost`, `timeout`, or
+`cancelled`. `wait` reports `runner_lost` when a running record's runner
+process is gone (`staleReason` `dead_pid` or `missing_pid`); `stalled` is kept
+for the stall watchdog.
 `failureReason` keeps the more specific remediation code, and
 `outcomeEvidence` lists what decided the outcome.
 
