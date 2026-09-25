@@ -32,7 +32,7 @@ class MailPushGatingTests(CommandTestBase):
             "    json.dump(sys.argv[1:], handle)\n"
             "with open(os.environ['FAKE_ENV_LOG'], 'w', encoding='utf-8') as handle:\n"
             "    json.dump({key: value for key, value in os.environ.items() if key.startswith('DELEGATE_')}, handle)\n"
-            "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+            "print(json.dumps({'type': 'result', 'result': 'Status: completed. ok', 'permission_denials': []}))\n",
             encoding="utf-8",
         )
         fake.chmod(0o755)

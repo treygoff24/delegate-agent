@@ -164,6 +164,21 @@ class ExecutionTestBase(unittest.TestCase):
                 "  printf 'OUT:%s\\n' \"$*\"\n"
                 "  printf 'ERR:%s\\n' \"$*\" >&2\n"
                 "fi\n"
+                # Opt-in droid stream-json assistant/result pair with genuine
+                # assistant text: droid shares the claude/cursor stream-json
+                # family (argv_builders.build_droid_argv passes
+                # --output-format stream-json), so an exit-0 child with no
+                # such text now fails under the outcome contract. Gated on an
+                # env var (rather than always-on) so tests that rely on the
+                # raw OUT:/ERR: echo lines as the call's returned text are
+                # unaffected -- the JSON lines would otherwise take over as
+                # the parsed assistant text.
+                'if [ "${FAKE_ASSISTANT_RESULT:-0}" = "1" ]; then\n'
+                '  printf \'{"type":"assistant","message":{"content":[{"type":"text",'
+                '"text":"Status: completed\\\\n- droid fake"}]}}\\n\'\n'
+                '  printf \'{"type":"result","subtype":"success","result":'
+                '"Status: completed\\\\n- droid fake"}\\n\'\n'
+                "fi\n"
                 'exit "${FAKE_EXIT:-0}"\n'
             )
             path.chmod(0o755)
@@ -180,6 +195,11 @@ class ExecutionTestBase(unittest.TestCase):
             'if [ "${FAKE_ECHO_ARGS:-0}" = "1" ]; then\n'
             "  printf 'OUT:%s\\n' \"$*\"\n"
             "fi\n"
+            # A cursor `result` event with genuine assistant text so a run's
+            # resultQuality is `ok`, not the empty-output failure the outcome
+            # contract now gives an exit-0 child with no assistant text.
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- cursor fake\"}\\n'\n"
             'exit "${FAKE_EXIT:-0}"\n'
         )
         path.chmod(0o755)

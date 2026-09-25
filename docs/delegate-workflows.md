@@ -68,7 +68,9 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`.
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below).
+- `agent_meta(label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no label, that of the most recent `agent()` call on the calling thread.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`); a script tests membership before relying on a newer feature.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ...)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
 - `parallel([lambda: ...])` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
@@ -254,12 +256,27 @@ after a terminal failure or an exhausted retry budget. The child run retains its
 partial output; `agent_attempt_failed` journal entries retain the child's exact
 `failureReason` and run identity.
 
+With `agent(..., on_failure="typed")`, an exhausted structured call returns an
+`AgentFailure` instead of `None`. It is falsy, so `if not result:` still works,
+and it carries `failure_kind`, `failure_reason`, `attempts`,
+`last_parsed_candidate` (the most recent parsed but invalid value, kept across
+a later child failure), `candidate_present`, `validation_error`, `run_id`,
+`engine`, `served_model`, and `served_provider`. The default stays `None`
+because compiled workflows test `result is None`. The
+`agent_structured_exhausted` journal event records the same `attempts`,
+`failureKind`, and candidate either way.
+
+Structured parsing accepts raw control characters inside JSON strings. When
+stray control characters make a document invalid JSON, they are stripped and the
+document is parsed again.
+
 Only `timeout`, `agent_timeout`, `call_timeout`, `stall`, and `stalled` are
 transient at the workflow layer. Provider errors, refusal, max-turns, usage/auth
 failures, cancellation, output caps, and unknown failures stop without relaunch:
 provider retries and credential rotation already belong to the child harness.
 Successful children with invalid structured output still receive correction
-retries. Each permitted retry waits `min(30, 2**retry_index)` seconds multiplied
+retries, and so does a child that exited 0 without assistant text
+(`empty_result`). Each permitted retry waits `min(30, 2**retry_index)` seconds multiplied
 by a fresh uniform factor in `[0.75, 1]`, with the first index zero; workflow
 cancellation interrupts the wait. `retries=N` is an upper bound of `N+1` child
 attempts, not a promise to repeat terminal failures.

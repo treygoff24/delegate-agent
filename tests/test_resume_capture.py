@@ -74,7 +74,12 @@ class ResumeCaptureTests(unittest.TestCase):
                 mock.patch.object(runner, "write_manifest", side_effect=write_manifest),
             ):
                 code, _payload = runner.execute_tracked(
-                    [sys.executable, "-c", "pass"],
+                    [
+                        sys.executable,
+                        "-c",
+                        "import json; print(json.dumps({'type': 'result', 'subtype': "
+                        "'success', 'result': 'Status: completed.'}))",
+                    ],
                     str(workspace),
                     context,
                     json_mode=True,

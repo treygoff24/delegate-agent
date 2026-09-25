@@ -426,7 +426,12 @@ class MailGatingTests(CommandTestBase):
             registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
             # A real filesystem obstruction, not a mocked successful child/model.
             (registry_root / "mail").write_text("occupied", encoding="utf-8")
-            fake_bin = self.write_fake_executable("agent")
+            fake_bin = self.write_fake_executable(
+                "agent",
+                stdout=json.dumps(
+                    {"type": "result", "result": "Status: completed. ok", "permission_denials": []}
+                ),
+            )
             code, stdout, stderr = self.run_main(
                 ["--json", "--cwd", str(workspace), "cursor", "work", "prompt"],
                 path_prefix=fake_bin,
@@ -462,7 +467,7 @@ class MailGatingTests(CommandTestBase):
                 "    json.dumps({key: value for key, value in os.environ.items() "
                 "if key.startswith('DELEGATE_')}), encoding='utf-8'\n"
                 ")\n"
-                "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+                "print(json.dumps({'type': 'result', 'result': 'Status: completed. ok', 'permission_denials': []}))\n",
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -555,7 +560,7 @@ class MailGatingTests(CommandTestBase):
                 "    json.dump(sys.argv[1:], handle)\n"
                 "with open(os.environ['FAKE_ENV_LOG'], 'w', encoding='utf-8') as handle:\n"
                 "    json.dump({key: value for key, value in os.environ.items() if key.startswith('DELEGATE_')}, handle)\n"
-                "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+                "print(json.dumps({'type': 'result', 'result': 'Status: completed. ok', 'permission_denials': []}))\n",
                 encoding="utf-8",
             )
             fake.chmod(0o755)

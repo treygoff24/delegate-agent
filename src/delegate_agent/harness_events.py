@@ -1075,6 +1075,11 @@ class StreamAccumulator:
             self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
             self.current = _bounded_current_line(self._last_error_message)
 
+    @property
+    def unrecovered_error_message(self) -> str | None:
+        """The last provider error no later successful terminal recovered from."""
+        return self._last_error_message
+
     def _terminal_error_reason(self, payload: JsonObject) -> str | None:
         error = payload.get("error")
         if isinstance(error, dict):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 
 from delegate_agent.json_types import JsonObject, JsonValue
 
@@ -192,13 +193,52 @@ def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
     if not _schema_requires_non_string_value(schema):
         return value
     try:
-        decoded = json.loads(value)
+        decoded = json.loads(value, strict=False)
     except (TypeError, json.JSONDecodeError):
         return value
     return decoded if not isinstance(decoded, str) else value
 
 
+# C0 control characters other than tab, newline, and carriage return. JSON
+# forbids them raw inside strings, and models emit them anyway (a literal tab
+# or form feed pasted into a quoted value); outside strings they are never
+# meaningful.
+_STRAY_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
+    """Parse structured child output, tolerating raw control characters.
+
+    Raw control characters inside JSON strings are accepted as-is (the decoder
+    runs non-strict). Only when that still finds no value are stray control
+    characters stripped and the parse retried, so a count of parse failures
+    never includes output that differed from valid JSON only by them. A
+    document that is whole JSON only once stray characters are stripped is
+    parsed stripped, so a stray byte between tokens cannot surface a decoy
+    fragment (``{"a":\\x01 1}`` is ``{"a": 1}``, not ``"a"``).
+    """
+    if _STRAY_CONTROL_CHARS.search(text):
+        cleaned = _STRAY_CONTROL_CHARS.sub("", text)
+        if not _is_whole_json(text) and _is_whole_json(cleaned):
+            return _parse_json_tolerant(cleaned, schema)
+    try:
+        return _parse_json_tolerant(text, schema)
+    except json.JSONDecodeError:
+        cleaned = _STRAY_CONTROL_CHARS.sub("", text)
+        if cleaned == text:
+            raise
+        return _parse_json_tolerant(cleaned, schema)
+
+
+def _is_whole_json(text: str) -> bool:
+    try:
+        json.loads(text.strip(), strict=False)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
     """Pull the JSON value out of child output that may be wrapped in prose.
 
     Children routinely answer with a markdown report whose final fenced block
@@ -217,7 +257,7 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=False)
     candidates: list[JsonValue] = []
     first_error: json.JSONDecodeError | None = None
     try:

@@ -37,6 +37,11 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                     "git -c user.name='Delegate Test' -c user.email=delegate-test@example.com commit -m resumed-child >/dev/null",
                 ]
             )
+        # Outcome contract (src/delegate_agent/outcome.py): an exit-0 child with
+        # no assistant text now fails the run, so emit a cursor/claude-shaped
+        # result event carrying real completion text (both owner-registered
+        # harnesses this fake stands in for read the same stream shape).
+        body.append('printf \'%s\\n\' \'{"type":"result","result":"Status: completed. ok"}\'')
         body.append("exit 0")
         agent.write_text("\n".join(body) + "\n", encoding="utf-8")
         agent.chmod(0o755)

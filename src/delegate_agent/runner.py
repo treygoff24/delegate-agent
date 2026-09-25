@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -30,6 +31,7 @@ from delegate_agent import (
     mail,
     mail_push,
     notify,
+    outcome,
     profiles,
     prompt_instructions,
     redaction,
@@ -165,6 +167,7 @@ class RunContext:
     fast: bool | None = None
     prompt_transport: str = "argv"
     forbid_commit: bool = False
+    expect_files: tuple[str, ...] = ()
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
     stall_seconds: float = STALL_SECONDS_DEFAULT
@@ -341,8 +344,17 @@ def format_duration(duration_ms: int) -> str:
     return f"{seconds}s"
 
 
-def status_from_exit(exit_code: int) -> str:
-    return run_registry.STATUS_SUCCEEDED if exit_code == 0 else run_registry.STATUS_FAILED
+def _missing_expected_files(ctx: RunContext) -> tuple[str, ...]:
+    """Declared deliverables (``--expect-file``) absent when the child exited."""
+    base = Path(ctx.execution_cwd)
+    missing: list[str] = []
+    for raw in ctx.expect_files:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        if not candidate.exists():
+            missing.append(raw)
+    return tuple(missing)
 
 
 def _requested_model(ctx: RunContext) -> str | None:
@@ -481,6 +493,7 @@ def _model_provenance(
         "resolvedModel": ctx.model_resolved or ctx.model,
         "servedModel": served_model,
         "servedModelSource": "harness_event" if served_model is not None else "unavailable",
+        "servedProvider": (accumulator.served_model_provider if accumulator is not None else None),
         "modelObservations": model_observations,
         "modelObservationsTotal": model_observations_total,
         "fallbackHops": fallback_hops,
@@ -931,9 +944,11 @@ def _persist_final_progress(
             "completionReportWritten",
             "completionReportSource",
             "error",
+            "failureKind",
             "failureReason",
             "message",
             "modelProvenance",
+            "outcomeEvidence",
             "resultQuality",
             "terminalEvent",
             "terminalRecord",
@@ -1093,6 +1108,7 @@ def _classify_result_quality(
     report_written: bool,
     report_source: str | None,
     accumulator: harness_events.StreamAccumulator,
+    completion_report_mode: str | None = None,
 ) -> str:
     if report_text.strip():
         quality = harness_events.assistant_recovery_quality_for_text(report_text)
@@ -1123,6 +1139,15 @@ def _classify_result_quality(
         and not accumulator.completion_text
     ):
         return RESULT_QUALITY_NO_ASSISTANT_TEXT
+    # With completion reports off, no report is expected, so its absence says
+    # nothing about output: assistant text is the evidence the child produced
+    # some. (EMPTY fails the run under the outcome contract.)
+    if (
+        completion_report_mode is not None
+        and completion_report_mode != delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+        and accumulator.assistant_text.strip()
+    ):
+        return RESULT_QUALITY_OK
     if exit_code == 0 and not report_written:
         return RESULT_QUALITY_EMPTY
     return RESULT_QUALITY_OK
@@ -1725,6 +1750,9 @@ class TrackedCaptureResult:
     stopped_after_completion: bool = False
     stall: JsonObject | None = None
     process_group_survived: bool = False
+    # Members of the child's process group were still alive after the harness
+    # itself exited (before Delegate's cleanup pass terminated them).
+    orphaned_processes: bool = False
     zero_commit_health: JsonObject | None = None
     stdout_capture: JsonObject | None = None
 
@@ -1749,6 +1777,9 @@ class CallResult:
     empty_retry_resolved: bool = False
     codex_thread_fallback: JsonObject | None = None
     stdout_capture: JsonObject | None = None
+    # The last provider error the stream never recovered from (trusted,
+    # redacted harness event text), an input to the outcome contract.
+    unrecovered_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2671,6 +2702,12 @@ def _capture_tracked_process(
                 )
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=wait_for)
+        # Probe for survivors before the group is reaped, so a harness that
+        # forked a background task and returned is recorded, not silently
+        # killed. Diagnostic only: a probe failure must never skip cleanup.
+        orphaned_processes = False
+        with contextlib.suppress(Exception):
+            orphaned_processes = _process_group_orphaned(process, pgid=pgid, identity_ctx=ctx)
         # Reap the whole group before joining drain threads. A grandchild that
         # inherited stdout/stderr can keep those pipes open after the leader
         # exits; waiting for the drains first would otherwise delay cleanup
@@ -2752,6 +2789,7 @@ def _capture_tracked_process(
         stall=stall_detail,
         zero_commit_health=zero_commit_health,
         stdout_capture=stdout_capture,
+        orphaned_processes=orphaned_processes,
     )
 
 
@@ -2956,7 +2994,7 @@ def _finalize_tracked_run(
     mail_warnings, stderr_tail = _finalize_mail_push_state(files, ctx, capture)
     for warning in dict.fromkeys(mail_warnings):
         _append_mail_push_event(capture.accumulator, warning)
-    exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
+    _policy_exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
     if extra:
         merged_extra = {**merged_extra, **extra}
     if mail_warnings:
@@ -2978,38 +3016,10 @@ def _finalize_tracked_run(
     terminal_extra = _terminal_override_extra(capture.accumulator)
     if terminal_extra:
         merged_extra = {**merged_extra, **terminal_extra}
-    status = status_from_exit(exit_code)
-    if capture.accumulator.terminal_status in {
-        run_registry.STATUS_FAILED,
-        run_registry.STATUS_CANCELLED,
-    }:
-        status = capture.accumulator.terminal_status
-        if status == run_registry.STATUS_CANCELLED or exit_code == 0:
-            exit_code = 1
     provider_terminal_state = capture.accumulator.provider_terminal_state
-    if provider_terminal_state is not None:
-        if capture.exit_code == 0:
-            merged_extra["childExitCode"] = 0
-        if provider_terminal_state == harness_events.PROVIDER_CANCELLED:
-            status = run_registry.STATUS_CANCELLED
-        else:
-            status = run_registry.STATUS_FAILED
-        exit_code = 1
-        merged_extra.update(
-            failureReason=provider_terminal_state,
-            error=provider_terminal_state,
-            message=(f"Child provider terminated the run with {provider_terminal_state}."),
-        )
-    if capture.accumulator.continuity_violation is not None:
-        if capture.exit_code == 0:
-            merged_extra["childExitCode"] = 0
-        status = run_registry.STATUS_FAILED
-        exit_code = 1
-        merged_extra.update(
-            failureReason="model_continuity_paused",
-            error="model_continuity_paused",
-            message="Pinned model continuity was interrupted; the run paused with a checkpoint.",
-        )
+    continuity_paused = capture.accumulator.continuity_violation is not None
+    if (provider_terminal_state is not None or continuity_paused) and capture.exit_code == 0:
+        merged_extra["childExitCode"] = 0
     # Marker protocol (finalize-first race): cancel stamps cancelRequested under
     # the registry lock BEFORE signaling. If the child exits 0 on SIGTERM and
     # the runner finalizes before cancel's post-grace terminal write, the
@@ -3020,41 +3030,114 @@ def _finalize_tracked_run(
     # decision, so a marker that disappears between reads cannot corrupt state.
     pre_state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
     cancel_requested = isinstance(pre_state, dict) and pre_state.get("cancelRequested") is True
-    empty_result = False
     if cancel_requested:
-        status = run_registry.STATUS_CANCELLED
-        exit_code = 1
         _clear_operator_cancel_terminal_evidence(capture.accumulator)
         _reconcile_cancel_extra(merged_extra)
-    elif status == run_registry.STATUS_SUCCEEDED:
-        work_summary = merged_extra.get("workSummary")
-        empty_result = (
-            isinstance(work_summary, dict)
-            and work_summary.get("noChanges") is True
-            and _tracked_capture_quality(
-                files,
-                ctx,
-                capture,
-                completion_report_mode=completion_report_mode,
-            )
-            == RESULT_QUALITY_NO_ASSISTANT_TEXT
-        )
-        if empty_result:
-            merged_extra.update(
-                childExitCode=exit_code,
-                error="empty_result",
-                message="Child harness exited without assistant text or file changes.",
-            )
-            status = run_registry.STATUS_FAILED
-            exit_code = 1
-        else:
-            for key in ("failureReason", "error", "message"):
-                merged_extra.pop(key, None)
     signal_text = "\n".join(
         part
         for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
         if part
     )
+    session_failure = (
+        child_failures.classify_followup_session_failure(signal_text, ctx.engine)
+        if ctx.followup_of is not None
+        else None
+    )
+    # Failures Delegate established on its own, independent of the child's exit
+    # code: a capture-side timeout/stall/output cap, the commit policy, and a
+    # pinned-continuity pause.
+    established_reason: str | None = None
+    if continuity_paused:
+        established_reason = "model_continuity_paused"
+    elif merged_extra.get("commitPolicyCausedFailure") is True:
+        policy_error = merged_extra.get("error")
+        established_reason = policy_error if isinstance(policy_error, str) else None
+    elif capture.error is not None:
+        established_reason = capture.error
+    capture_quality = (
+        RESULT_QUALITY_OK
+        if cancel_requested
+        else _tracked_capture_quality(
+            files,
+            ctx,
+            capture,
+            completion_report_mode=completion_report_mode,
+        )
+    )
+    missing_deliverables = _missing_expected_files(ctx)
+    run_outcome = outcome.compute_outcome(
+        child_exit_code=capture.exit_code,
+        harness_terminal_status=capture.accumulator.terminal_status,
+        provider_terminal_state=None if continuity_paused else provider_terminal_state,
+        failure_reason=established_reason,
+        result_quality=capture_quality,
+        cancelled=cancel_requested,
+        signal_text=signal_text,
+        final_attempt_signal_text="\n".join(
+            part
+            for part in (
+                _final_attempt_segment(stderr_tail),
+                _accumulator_failure_signal_text(capture.accumulator),
+            )
+            if part
+        ),
+        diagnosed_reason=session_failure.code if session_failure is not None else None,
+        unrecovered_error=capture.accumulator.unrecovered_error_message,
+        missing_deliverables=missing_deliverables,
+        orphaned_processes=capture.orphaned_processes,
+    )
+    status = run_outcome.status
+    exit_code = run_outcome.exit_code
+    no_output_failure = (
+        not run_outcome.ok
+        and run_outcome.failure_kind
+        in {outcome.FAILURE_NO_ASSISTANT_TEXT, outcome.FAILURE_PROVIDER_QUOTA}
+        and capture_quality in harness_events.NO_OUTPUT_RESULT_QUALITIES
+    )
+    if missing_deliverables:
+        merged_extra["expectedFiles"] = {
+            "expected": list(ctx.expect_files),
+            "missing": list(missing_deliverables),
+        }
+    for warning in run_outcome.warnings:
+        warnings = list(merged_extra.get("warnings") or [])
+        _append_unique(warnings, warning)
+        merged_extra["warnings"] = warnings
+    if run_outcome.warnings and capture.orphaned_processes:
+        merged_extra["orphanedProcesses"] = True
+    if cancel_requested:
+        # _reconcile_cancel_extra already wrote the operator outcome.
+        pass
+    elif provider_terminal_state is not None and not continuity_paused:
+        merged_extra.update(
+            failureReason=provider_terminal_state,
+            error=provider_terminal_state,
+            message=(f"Child provider terminated the run with {provider_terminal_state}."),
+        )
+    elif continuity_paused:
+        merged_extra.update(
+            failureReason="model_continuity_paused",
+            error="model_continuity_paused",
+            message="Pinned model continuity was interrupted; the run paused with a checkpoint.",
+        )
+    elif status == run_registry.STATUS_SUCCEEDED:
+        for key in ("failureReason", "error", "message"):
+            merged_extra.pop(key, None)
+    elif run_outcome.failure_kind == outcome.FAILURE_NO_ASSISTANT_TEXT and no_output_failure:
+        merged_extra.update(
+            childExitCode=capture.exit_code,
+            error="empty_result",
+            message="Child harness exited 0 without assistant text.",
+        )
+    elif run_outcome.failure_kind == outcome.FAILURE_DELIVERABLE_MISSING:
+        merged_extra.update(
+            childExitCode=capture.exit_code,
+            error="deliverable_missing",
+            message="Expected file(s) missing after the child exited: "
+            + ", ".join(missing_deliverables),
+        )
+    elif capture.exit_code == 0 and "childExitCode" not in merged_extra:
+        merged_extra["childExitCode"] = 0
     failure = _failure_details(
         status=status,
         signal_text=signal_text,
@@ -3062,10 +3145,8 @@ def _finalize_tracked_run(
     )
     if failure is not None and failure.code == "child_failed":
         failure = _unclassified_provider_failure(capture.accumulator) or failure
-    if ctx.followup_of is not None:
-        session_failure = child_failures.classify_followup_session_failure(signal_text, ctx.engine)
-        if session_failure is not None:
-            failure = session_failure
+    if session_failure is not None:
+        failure = session_failure
     failure_reason = failure.code if failure is not None else None
     failure_message = failure.message if failure is not None else None
     if failure_reason is not None:
@@ -3108,8 +3189,8 @@ def _finalize_tracked_run(
         report_text = f"{notice}\n\n{report_text}" if report_text.strip() else notice
     report_written = write_completion_report(files.run_path, report_text)
     result_quality = (
-        RESULT_QUALITY_NO_ASSISTANT_TEXT
-        if empty_result
+        capture_quality
+        if no_output_failure
         else _classify_result_quality(
             ctx=ctx,
             exit_code=exit_code,
@@ -3117,11 +3198,15 @@ def _finalize_tracked_run(
             report_written=report_written,
             report_source=report_source,
             accumulator=capture.accumulator,
+            completion_report_mode=completion_report_mode,
         )
     )
     merged_extra["completionReportWritten"] = report_written
     merged_extra["completionReportSource"] = report_source if report_written else None
     merged_extra["resultQuality"] = result_quality
+    merged_extra["failureKind"] = run_outcome.failure_kind
+    if run_outcome.evidence:
+        merged_extra["outcomeEvidence"] = list(run_outcome.evidence)
     failure_reason_value = merged_extra.get("failureReason")
     terminal_state = _terminal_state_for(
         status=status,
@@ -3245,7 +3330,8 @@ def _tracked_result(
     json_mode: bool,
     stdout: TextIO,
 ) -> tuple[int, JsonObject | None]:
-    ok = finalization.exit_code == 0
+    # finalization.status is the Outcome's status (outcome.compute_outcome).
+    ok = finalization.status == outcome.STATUS_SUCCEEDED
     if json_mode:
         _assistant_text, assistant_meta = capture.accumulator.bounded_assistant_text()
         extra = dict(finalization.extra)
@@ -3287,6 +3373,15 @@ def _attempt_delimiter(label: str) -> bytes:
         else "delegate attempt"
     )
     return f"\n--- {prefix}: {label} ---\n".encode()
+
+
+_ATTEMPT_DELIMITER_PATTERN = re.compile(r"\n--- delegate [a-z -]*attempt: [A-Za-z0-9_-]+ ---\n")
+
+
+def _final_attempt_segment(stderr_text: str) -> str:
+    """The stderr a retried run's last attempt wrote (everything after the last delimiter)."""
+    parts = _ATTEMPT_DELIMITER_PATTERN.split(stderr_text)
+    return parts[-1] if parts else stderr_text
 
 
 def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
@@ -3757,6 +3852,7 @@ def _merge_tracked_attempt_captures(
         mail_push_failure_reason=(
             current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
         ),
+        orphaned_processes=(prior_capture.orphaned_processes or current_capture.orphaned_processes),
         process_group_survived=(
             prior_capture.process_group_survived or current_capture.process_group_survived
         ),
@@ -3800,6 +3896,7 @@ def _tracked_capture_quality(
         report_written=bool(report_text.strip()),
         report_source=report_source,
         accumulator=capture.accumulator,
+        completion_report_mode=completion_report_mode,
     )
 
 
@@ -4565,6 +4662,38 @@ def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
         time.sleep(min(0.05, remaining))
 
 
+# How long a group member may outlive the harness leader before it counts as
+# orphaned. Short: an ordinary exit tears the group down within milliseconds,
+# and the probe only waits while something is actually still alive.
+ORPHAN_PROBE_GRACE_SEC = 0.5
+
+
+def _process_group_orphaned(
+    process: subprocess.Popen[bytes],
+    *,
+    pgid: int | None,
+    identity_ctx: RunContext | None = None,
+) -> bool:
+    """Did the harness exit while members of its process group lived on?
+
+    Probed after the leader exits and before the cleanup pass terminates the
+    group, so a harness that forked a background task and returned is visible
+    instead of silently killed. A leader that is still running (capture ended
+    on a timeout, stall, or overflow and is about to be terminated) is not an
+    orphan case.
+    """
+    if process.poll() is None:
+        return False
+    safe_pgid = _safe_process_group_id(
+        pgid if pgid is not None else _process_group_for_process(process)
+    )
+    if safe_pgid is None:
+        return False
+    if identity_ctx is not None and not _process_identity_matches(identity_ctx, process.pid):
+        return False
+    return not _wait_for_process_group_exit(safe_pgid, ORPHAN_PROBE_GRACE_SEC)
+
+
 def _terminate_call_process(
     process: subprocess.Popen[bytes],
     *,
@@ -5143,6 +5272,7 @@ def _execute_call_once(
         message=message,
         usage=accumulator.usage or {"basis": "unavailable"},
         stdout_capture=stdout_capture,
+        unrecovered_error=accumulator.unrecovered_error_message,
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0

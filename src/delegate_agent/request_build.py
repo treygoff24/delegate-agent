@@ -1342,6 +1342,12 @@ def _validate_call_cli_options(global_options: GlobalOptions, launch: LaunchOpti
     group = global_options.group
     if global_options.notify is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --notify.")
+    if launch.expect_files:
+        raise DelegateError(
+            "invalid_option_combination",
+            "call mode does not support --expect-file; call runs execute in a throwaway "
+            "workspace. Use safe or work mode.",
+        )
     # Grouped call runs may take --cwd so the run registers in the invocation
     # workspace registry; ungrouped call still rejects --cwd.
     if cwd is not None and group is None:
@@ -1660,8 +1666,14 @@ def _build_normalized_launch(
     if call:
         prompt = _call_effective_prompt(prompt, read_only=launch.read_only)
     model_alias, model_override = spec.model_selection
+    if launch.expect_files and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--expect-file is not supported with --pass-through; pass-through runs "
+            "have no tracked finalization to check deliverables in.",
+        )
     try:
-        return build_request(
+        request = build_request(
             engine,
             mode,
             model_alias,
@@ -1717,6 +1729,9 @@ def _build_normalized_launch(
         if cleanup_workspace:
             shutil.rmtree(workspace.path, ignore_errors=True)
         raise
+    if launch.expect_files:
+        request.expect_files = tuple(launch.expect_files)
+    return request
 
 
 def request_from_parsed(

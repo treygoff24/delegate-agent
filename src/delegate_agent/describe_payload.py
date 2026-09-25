@@ -134,7 +134,8 @@ def _launch_options() -> list[str]:
     ):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
-            if option.flag == "--mail-push":
+            # Tracked-only additions trail the shared launch vocabulary.
+            if option.flag in {"--mail-push", "--expect-file"}:
                 if option.flag not in deferred:
                     deferred.append(option.flag)
                 continue
@@ -1086,6 +1087,9 @@ def describe_payload(
                     "judges",
                     "args",
                     "budget",
+                    "agent_meta",
+                    "AgentFailure",
+                    "capabilities",
                 ],
                 "agent": {
                     "signature": (
@@ -1094,11 +1098,16 @@ def describe_payload(
                         "passthrough=False, timeout=None, retries=None, "
                         "fast=None, persona=None, allow_repo_persona=False)"
                     ),
-                    "returns": "parent-facing output string, schema object, or None",
+                    "returns": (
+                        "parent-facing output string, schema object, or None; with "
+                        "on_failure='typed', an exhausted structured call returns a falsy "
+                        "AgentFailure instead of None"
+                    ),
                     "notes": [
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
+                        "on_failure='typed' (keyword, default 'none') returns a falsy AgentFailure instead of None when structured retries are exhausted.",
                         f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to another engine.",
                     ],
                 },
@@ -1110,6 +1119,9 @@ def describe_payload(
                 "judges": "judges(prompt, schema, engines=[...], *, effort=None) runs call --read-only judge lanes and returns votes.",
                 "followup": "followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None) continues a resumable child run by label.",
                 "budget": "run-count budget: total, spent(), remaining().",
+                "agent_meta": "agent_meta(label=None) returns the latest agent attempt's child outcome: runId, ok, status, failureKind, failureReason, servedModel, servedProvider.",
+                "AgentFailure": "AgentFailure(failure_kind, failure_reason, attempts, last_parsed_candidate, candidate_present, validation_error, run_id, engine, served_model, served_provider) is falsy; failure_kind is the closed run failureKind enum.",
+                "capabilities": "capabilities maps feature names to versions ({'agentFailure': 1, 'agentMeta': 1, 'failureKind': 1}); test membership before using a newer feature.",
                 "schemaSubset": [
                     "type",
                     "required",

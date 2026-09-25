@@ -50,6 +50,7 @@ from delegate_agent import (
 from delegate_agent import (
     notify as notify_module,
 )
+from delegate_agent import outcome as _outcome
 from delegate_agent import (
     profile_commands as _profile_commands,
 )
@@ -1143,20 +1144,27 @@ def execute_request(
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
-            status = delegate_runner.status_from_exit(result.exit_code)
-            # Same verdict contract as tracked runs (run_status.run_succeeded):
-            # a child that exited 0 but produced no output is a failed call, not
-            # a success with a warning attached. The empty-success retry has
-            # already run inside execute_call by this point.
-            empty_failure = result.exit_code == 0 and not _run_registry.run_succeeded(
-                status, result.result_quality
+            # The one outcome contract (outcome.compute_outcome): a child that
+            # exited 0 with no output, or whose provider's last word was a quota
+            # refusal, is a failed call, not a success with a warning attached.
+            # The empty-success retry has already run inside execute_call.
+            call_outcome = _outcome.compute_outcome(
+                child_exit_code=result.exit_code,
+                failure_reason=(
+                    result.error
+                    if result.exit_code != 0 and result.error not in {None, "child_failed"}
+                    else None
+                ),
+                result_quality=result.result_quality,
+                signal_text=result.stderr_tail,
+                unrecovered_error=result.unrecovered_error,
             )
-            if empty_failure:
-                status = _run_registry.STATUS_FAILED
-            exit_code = 1 if empty_failure else result.exit_code
+            status = call_outcome.status
+            exit_code = call_outcome.exit_code
+            empty_failure = call_outcome.failure_kind == _outcome.FAILURE_NO_ASSISTANT_TEXT
             if json_mode:
                 payload: JsonObject = {
-                    "ok": exit_code == 0,
+                    "ok": call_outcome.ok,
                     "status": status,
                     "exitCode": exit_code,
                     "engine": request.engine,
@@ -1176,6 +1184,12 @@ def execute_request(
                         else None
                     ),
                     "usage": result.usage,
+                    "failureKind": call_outcome.failure_kind,
+                    "assistantText": result.text,
+                    "assistantTextChars": result.text_chars,
+                    "assistantTextTruncated": result.text_truncated,
+                    # Deprecated aliases of the assistantText* fields above, kept
+                    # for one release so existing call-mode consumers keep working.
                     "text": result.text,
                     "textChars": result.text_chars,
                     "textTruncated": result.text_truncated,
@@ -1184,10 +1198,6 @@ def execute_request(
                     "durationMs": result.duration_ms,
                 }
                 run_metadata.add_model_payload_fields(payload, request)
-                if request.engine in {"pi", "omp"}:
-                    # Keep the established call-mode `text` field while giving
-                    # Pi-family engines the same assistantText contract as tracked modes.
-                    payload["assistantText"] = result.text
                 if request.warnings:
                     payload["warnings"] = list(request.warnings)
                 if result.warnings:
@@ -1240,7 +1250,11 @@ def execute_request(
                             f"(resultQuality={result.result_quality})."
                         )
                     else:
-                        payload["error"] = result.error or "child_failed"
+                        payload["error"] = result.error or (
+                            "usage_limit"
+                            if call_outcome.failure_kind == _outcome.FAILURE_PROVIDER_QUOTA
+                            else "child_failed"
+                        )
                         if result.message:
                             payload["message"] = result.message
                         elif result.error == "call_output_invalid":

@@ -56,11 +56,17 @@ _USAGE_PATTERNS = (
     re.compile(r"\busage limit\b", re.IGNORECASE),
     re.compile(r"\binsufficient_quota\b", re.IGNORECASE),
     re.compile(r"\bexceeded your current quota\b", re.IGNORECASE),
+    # Google's canonical quota status (Gemini/Vertex surface it as 429
+    # RESOURCE_EXHAUSTED); it names quota exhaustion, never transient load.
+    re.compile(r"\bRESOURCE_EXHAUSTED\b"),
 )
-# A bare "rate limit" is often transient throttling, not an account/quota
+# A bare "rate limit" or HTTP 429 is often transient throttling, not an account/quota
 # problem, so it only classifies when account-context wording appears anywhere
 # in the same diagnostic text (before or after, any line).
-_RATE_LIMIT_PATTERN = re.compile(r"\brate limit(?:s|ed)?\b", re.IGNORECASE)
+_RATE_LIMIT_PATTERN = re.compile(
+    r"\brate limit(?:s|ed)?\b|\b(?:HTTP|status|code)[ :=]*429\b|\b429\b[^\n]{0,40}\btoo many requests\b",
+    re.IGNORECASE,
+)
 _ACCOUNT_CONTEXT_PATTERN = re.compile(
     r"\b(?:quota|usage|billing|subscription|account|credit)\b", re.IGNORECASE
 )
