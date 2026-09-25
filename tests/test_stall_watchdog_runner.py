@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -114,6 +115,67 @@ class StallWatchdogRunnerTests(unittest.TestCase):
             self.assertEqual(stall["stallReason"], "idle")
             # A sleeping child is alive with flat CPU: waiting, not dead.
             self.assertEqual(stall["childActivity"], "waiting")
+
+    def test_a_tool_that_starts_while_the_group_is_sampled_cancels_the_kill(self):
+        """Idle crosses the threshold, sampling starts, and a tool starts meanwhile.
+
+        The child waits for the sampler to open a gate, then prints a real
+        tool_execution_start (tests/fixtures/pi/tool_read.jsonl shape). The
+        sampler returns only after the watchdog has seen that line, so the
+        interleaving is fixed by barriers, not timing. The kill must be
+        cancelled and the run finish normally once the tool ends.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            gate = workspace / "gate"
+            context = self.context(workspace, harness="omp", stall_seconds=0.5, pinned=True)
+            script = (
+                "import json, pathlib, time\n"
+                f"gate = pathlib.Path({str(gate)!r})\n"
+                "def emit(p):\n"
+                "    print(json.dumps(p), flush=True)\n"
+                "emit({'type': 'agent_start'})\n"
+                "emit({'type': 'turn_start'})\n"
+                "while not gate.exists():\n"
+                "    time.sleep(0.01)\n"
+                "call = 'call_gate|fc_gate'\n"
+                "emit({'type': 'tool_execution_start', 'toolCallId': call,"
+                " 'toolName': 'bash', 'args': {'command': 'make test'}})\n"
+                "time.sleep(1.0)  # the tool running, not synchronization\n"
+                "emit({'type': 'tool_execution_end', 'toolCallId': call, 'toolName': 'bash',"
+                " 'result': {'content': [{'type': 'text', 'text': 'ok'}]}, 'isError': False})\n"
+                "emit({'type': 'turn_end', 'message': {'role': 'assistant', 'content':"
+                " [{'type': 'text', 'text': 'done'}], 'stopReason': 'stop'}, 'toolResults': []})\n"
+                "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n"
+            )
+            saw_tool = threading.Event()
+            observe = stall_watchdog.StallWatchdog.observe_line
+
+            def observe_and_signal(watchdog, line, **kwargs):
+                observe(watchdog, line, **kwargs)
+                if '"tool_execution_start"' in line:
+                    saw_tool.set()
+
+            sampled = []
+
+            def sample_while_a_tool_starts(pgid, **_kwargs):
+                sampled.append(pgid)
+                gate.touch()
+                self.assertTrue(saw_tool.wait(10), "child never started its tool")
+                return {"childActivity": "waiting"}
+
+            with (
+                mock.patch.object(stall_watchdog.StallWatchdog, "observe_line", observe_and_signal),
+                mock.patch.object(
+                    stall_watchdog, "process_group_activity", sample_while_a_tool_starts
+                ),
+            ):
+                code, _payload = self.run_child(context, workspace, script)
+            self.assertEqual(len(sampled), 1)
+            self.assertEqual(code, 0)
+            state = run_registry.load_run_state(context.registry_root, context.run_id)
+            self.assertEqual(state["status"], "succeeded")
+            self.assertNotIn("stall", state)
 
     def test_pinned_threshold_is_not_overridden_by_the_environment(self):
         with tempfile.TemporaryDirectory() as tmp:

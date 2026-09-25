@@ -195,6 +195,11 @@ class LineSignals:
     tools_started: tuple[str, ...] = ()
     tools_finished: tuple[str, ...] = ()
     label: str | None = None
+    # (tool, target) of a finish that explicitly reported failure but that the
+    # stream accumulator does not normalize into a ToolEvent: a codex
+    # ``file_change``/``mcp_tool_call`` with status failed, or an ``error``
+    # item. It is neither a reset of the failure streak nor progress.
+    failed_finish: tuple[str, str] | None = None
 
 
 _NO_SIGNALS = LineSignals()
@@ -344,6 +349,11 @@ def _classify_grok(payload: JsonObject, event_type: str) -> LineSignals | None:
         return _NO_SIGNALS
     if event_type in {"end", "error"}:
         return LineSignals(progress=True, label=event_type)
+    if event_type == "usage":
+        # Token accounting, which grows on every response: as the whole-line
+        # fallback it made a model repeating itself look like progress. Same
+        # rule as Claude's thinking-token system events.
+        return _NO_SIGNALS
     if event_type == "tool_call":
         return LineSignals(
             tools_started=(_tool_key(payload, "toolCallId", "id", "name"),),
@@ -392,6 +402,18 @@ def _classify_cursor(payload: JsonObject, event_type: str) -> LineSignals | None
     never removed. Two unresolved tools disable the watchdog for the rest of
     the run.
     """
+    if event_type == "thinking":
+        # `{"type":"thinking","subtype":"delta","text":...,"timestamp_ms":N}`:
+        # the timestamp makes every line unique, so the whole-line fallback read
+        # one thinking token repeated forever as progress and charged nothing.
+        if payload.get("subtype") != "delta":
+            return _NO_SIGNALS
+        text = payload.get("text")
+        if isinstance(text, str):
+            return LineSignals(
+                deltas=(f"thinking:{text}",), delta_chars=(len(text),), label="thinking"
+            )
+        return _NO_SIGNALS
     if event_type == "tool_call":
         tool_call = payload.get("tool_call")
         key = _string_field(payload, "call_id") or _string_field(tool_call, "toolCallId") or "tool"
@@ -411,11 +433,42 @@ def _classify_codex_item(payload: JsonObject, *, completed: bool) -> LineSignals
             return _NO_SIGNALS
         deltas = _content_deltas(item.get("text")) or _content_deltas(item.get("content"))
         return LineSignals(deltas=deltas, label=str(item_type))
-    key = _tool_key(item, "id", "command", "type")
     label = _string_field(item, "type") or "item"
+    if completed and item_type == "error":
+        # A bare `item.completed` with only a message and no start: an error
+        # the model hit, not a tool that finished, so it closes nothing.
+        message = normalize_delta(_string_field(item, "message") or "") or "error"
+        return LineSignals(failed_finish=("error", message), label=label)
+    key = _tool_key(item, "id", "command", "type")
     if completed:
+        status = (_string_field(item, "status") or "").lower()
+        if status in _TOOL_FAILURE_STATUSES:
+            return LineSignals(
+                tools_finished=(key,),
+                failed_finish=(label, _codex_item_target(item)),
+                label=label,
+            )
         return LineSignals(tools_finished=(key,), label=label)
     return LineSignals(tools_started=(key,), label=label)
+
+
+def _codex_item_target(item: JsonObject) -> str:
+    """What a failed codex item was acting on, for repeated-failure identity."""
+    changes = item.get("changes")
+    if isinstance(changes, list):
+        paths = sorted(
+            change["path"]
+            for change in changes
+            if isinstance(change, dict) and isinstance(change.get("path"), str)
+        )
+        if paths:
+            return ",".join(paths)[:DELTA_SIGNATURE_LIMIT]
+    named = [_string_field(item, name) for name in ("server", "tool", "command", "query")]
+    parts = [part for part in named if part]
+    arguments = item.get("arguments")
+    if arguments is not None:
+        parts.append(json.dumps(arguments, sort_keys=True, default=str))
+    return (":".join(parts) or _string_field(item, "type") or "item")[:DELTA_SIGNATURE_LIMIT]
 
 
 def _classify_claude_assistant(payload: JsonObject) -> LineSignals:
@@ -600,6 +653,11 @@ class StallWatchdog:
     _last_completion: tuple[str, str, str] | None = field(default=None, repr=False)
     _failure_signature: tuple[str, str] | None = field(default=None, repr=False)
     _failure_count: int = field(default=0, repr=False)
+    # The same streak for failed finishes that carry no ToolEvent (see
+    # LineSignals.failed_finish). Kept apart so the two kinds interleaving
+    # (a failing test run, then a failing patch) do not reset each other.
+    _unmatched_failure_signature: tuple[str, str] | None = field(default=None, repr=False)
+    _unmatched_failure_count: int = field(default=0, repr=False)
     _trip: JsonObject | None = field(default=None, repr=False)
     # Time spent inside tool calls since the last progress. Idle time excludes
     # it, so a slow polling loop that repeats one call is not killed while a
@@ -698,6 +756,9 @@ class StallWatchdog:
             else:
                 self._last_completion = None
             failed = (event.status or "").lower() in _TOOL_FAILURE_STATUSES
+            if not failed:
+                self._unmatched_failure_signature = None
+                self._unmatched_failure_count = 0
             if not failed or event.target is None:
                 self._failure_signature = None
                 self._failure_count = 0
@@ -708,13 +769,24 @@ class StallWatchdog:
             else:
                 self._failure_signature = signature
                 self._failure_count = 1
-            if self._trip is None and self._failure_count >= max(self.repeated_failure_limit, 1):
-                self._trip = {
-                    "stallReason": STALL_REASON_REPEATED_TOOL_FAILURE,
-                    "tool": event.tool,
-                    "target": event.target[:DELTA_SIGNATURE_LIMIT],
-                    "failures": self._failure_count,
-                }
+            self._maybe_trip_repeated_failure_locked(signature, self._failure_count)
+
+    def _record_unmatched_failure_locked(self, signature: tuple[str, str]) -> None:
+        if signature == self._unmatched_failure_signature:
+            self._unmatched_failure_count += 1
+        else:
+            self._unmatched_failure_signature = signature
+            self._unmatched_failure_count = 1
+        self._maybe_trip_repeated_failure_locked(signature, self._unmatched_failure_count)
+
+    def _maybe_trip_repeated_failure_locked(self, signature: tuple[str, str], count: int) -> None:
+        if self._trip is None and count >= max(self.repeated_failure_limit, 1):
+            self._trip = {
+                "stallReason": STALL_REASON_REPEATED_TOOL_FAILURE,
+                "tool": signature[0],
+                "target": signature[1][:DELTA_SIGNATURE_LIMIT],
+                "failures": count,
+            }
 
     def _apply_locked(
         self,
@@ -725,7 +797,11 @@ class StallWatchdog:
         tool_activity = bool(signals.tools_started or signals.tools_finished)
         repeated_call = tool_activity and self._repeats_locked(tool_events)
         completed_events = sum(1 for event in tool_events if event.completed)
-        if len(signals.tools_finished) > completed_events:
+        if signals.failed_finish is not None:
+            # An explicit failure (a failed patch, an error item) is neither a
+            # reset nor the fix loop working: it counts in its own streak.
+            self._record_unmatched_failure_locked(signals.failed_finish)
+        elif len(signals.tools_finished) > completed_events:
             # A tool finished that the stream accumulator does not normalize
             # into a ToolEvent (codex `file_change` from apply_patch, and its
             # mcp/web-search items). It cannot be the failing call, so it
@@ -734,6 +810,8 @@ class StallWatchdog:
             # again", so the next identical run counts as progress.
             self._failure_signature = None
             self._failure_count = 0
+            self._unmatched_failure_signature = None
+            self._unmatched_failure_count = 0
             self._last_completion = None
         self._record_outcomes_locked(tool_events)
         progressed = False
@@ -749,7 +827,8 @@ class StallWatchdog:
                 # start we missed) must not leak an in-flight tool forever, which
                 # would disable the watchdog for the rest of the run.
                 self._pending_tools.pop(0)
-            progressed = True
+            # A finish that reported failure is activity, not progress.
+            progressed = progressed or signals.failed_finish is None
         if not had_pending and self._pending_tools:
             self._tool_started_at = now
         elif had_pending and not self._pending_tools and self._tool_started_at is not None:
@@ -784,7 +863,6 @@ class StallWatchdog:
         if (
             self._trip is None
             and self.runaway_output_chars > 0
-            and self.harness not in _TEXT_STREAM_HARNESSES
             and self._output_chars_since_tool > self.runaway_output_chars
         ):
             self._trip = {
@@ -808,27 +886,48 @@ class StallWatchdog:
         if not self.enabled:
             return None
         with self._lock:
-            if not self._armed or self._last_progress_at is None:
-                return None
-            idle = now - self._last_progress_at - self._tool_seconds_since_progress
-            if self._trip is not None:
-                return max(idle, 0.0)
-            if self._pending_tools:
-                return None
-            if idle < self.stall_seconds:
-                return None
+            idle = self._stalled_idle_locked(now)
+            if idle is None or self._trip is not None:
+                return idle
         # Idle past the threshold. A silent child may still be committing in
         # its worktree; that counts as progress and restarts the clock.
-        if self.progress_probe is not None:
-            token = self._run_probe()
-            with self._lock:
-                if token is not None and token != self._probe_token:
-                    self._probe_token = token
-                    self._last_progress_at = now
-                    self._last_progress_label = "worktree_commit"
-                    self._tool_seconds_since_progress = 0.0
-                    self._recent_deltas.clear()
-                    return None
+        if self.progress_probe is None:
+            return idle
+        token = self._run_probe()
+        with self._lock:
+            if token is not None and token != self._probe_token:
+                self._probe_token = token
+                self._last_progress_at = max(now, self._last_progress_at or now)
+                self._last_progress_label = "worktree_commit"
+                self._tool_seconds_since_progress = 0.0
+                self._recent_deltas.clear()
+                return None
+            # The probe blocks; the stdout thread may have seen a tool start or
+            # new output meanwhile, so the answer is re-derived, not reused.
+            return self._stalled_idle_locked(now)
+
+    def confirm_stall(self, now: float) -> float | None:
+        """Re-check, immediately before signalling, that the run is still stalled.
+
+        The caller runs blocking diagnostics (process sampling) between
+        ``stalled_for`` and the kill. Progress or a tool start that landed in
+        that window cancels the kill. Never probes: this is the last read.
+        """
+        if not self.enabled:
+            return None
+        with self._lock:
+            return self._stalled_idle_locked(now)
+
+    def _stalled_idle_locked(self, now: float) -> float | None:
+        if not self._armed or self._last_progress_at is None:
+            return None
+        idle = now - self._last_progress_at - self._tool_seconds_since_progress
+        if self._trip is not None:
+            return max(idle, 0.0)
+        if self._pending_tools:
+            return None
+        if idle < self.stall_seconds:
+            return None
         return idle
 
     def stall_detail(self, idle_seconds: float) -> JsonObject:
@@ -876,11 +975,15 @@ def tool_events_from(events: Iterable[object]) -> tuple[ToolEvent, ...]:
     return tuple(picked)
 
 
-# The lookahead rejects the prompt's own template line, "Status: completed /
-# blocked / failed", which a child may echo back before doing any work: a real
-# report names one status, not the menu.
+# The status word must end its line, followed only by spaces or tabs, closing
+# markup, and terminal punctuation. That rejects prose that merely starts with a
+# status word ("Status: completed the inventory") and the prompt's own template
+# line ("Status: completed / blocked / failed") a child may echo back. Nothing
+# in the pattern crosses a newline, so the next line cannot affect the match.
+# Accepted cost: "Status: completed (with caveats)" is not a report.
 _COMPLETION_REPORT_STATUS_RE = re.compile(
-    r"^[ \t>*_-]*\**status\**\s*:\s*\**\s*(completed|blocked|failed)\b(?!\**\s*/)",
+    r"^[ \t>*_`-]*[*_`]*status[*_`]*[ \t]*:[ \t]*[*_`]*[ \t]*"
+    r"(completed|blocked|failed)[*_`.! \t]*\r?$",
     re.IGNORECASE | re.MULTILINE,
 )
 # How far from the end of the output a completion report's status line may sit

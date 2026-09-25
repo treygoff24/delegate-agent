@@ -538,11 +538,24 @@ def _claude_fix_loop(index: int, edit: bool) -> list[str]:
 
 
 def _pi_fix_loop(index: int, edit: bool) -> list[str]:
+    # The shape of tests/fixtures/pi/tool_read.jsonl: only the start carries
+    # `args`; the end has the toolCallId, toolName, result, and isError.
     name, args = ("edit", {"path": "a.py"}) if edit else ("bash", {"command": FIX_LOOP_COMMAND})
-    call = {"toolCallId": f"p{index}{edit}", "toolName": name, "args": args}
+    call_id = f"call_{index}{edit}|fc_{index}"
+    result = {"content": [{"type": "text", "text": "ok" if edit else "1 failed"}]}
     return [
-        json.dumps({"type": "tool_execution_start", **call}),
-        json.dumps({"type": "tool_execution_end", **call, "isError": not edit, "result": {}}),
+        json.dumps(
+            {"type": "tool_execution_start", "toolCallId": call_id, "toolName": name, "args": args}
+        ),
+        json.dumps(
+            {
+                "type": "tool_execution_end",
+                "toolCallId": call_id,
+                "toolName": name,
+                "result": result,
+                "isError": not edit,
+            }
+        ),
     ]
 
 
@@ -832,6 +845,33 @@ class CompletionReportTests(unittest.TestCase):
             "blocked",
         )
 
+    def test_prose_that_starts_with_a_status_word_is_not_a_report(self):
+        for line in (
+            "Status: completed the inventory",
+            "Status: failed to open the lockfile",
+            "- Status: completed | failed | blocked",
+            "Status: completed (with caveats)",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(stall_watchdog.completion_report_status(f"work\n{line}\n"))
+
+    def test_the_status_line_is_judged_on_its_own_line(self):
+        # A \s in the old lookahead crossed into the next line and rejected this.
+        text = "## Completion report\nStatus: completed\n/tmp/results.txt has the output\n"
+        self.assertEqual(stall_watchdog.completion_report_status(text), "completed")
+
+    def test_real_report_shapes_are_found(self):
+        for line, status in (
+            ("- Status: completed", "completed"),
+            ("**Status:** failed", "failed"),
+            ("Status: blocked.", "blocked"),
+            ("- **Status:** completed  ", "completed"),
+            ("> Status: `failed`!", "failed"),
+        ):
+            with self.subTest(line=line):
+                text = f"report\n{line}\n- Files: none"
+                self.assertEqual(stall_watchdog.completion_report_status(text), status)
+
     def test_trailing_report_status_is_found(self):
         text = "worked a while\n\n## Completion report\n- **Status:** completed\n- did it"
         self.assertEqual(stall_watchdog.completion_report_status(text), "completed")
@@ -882,6 +922,326 @@ class EventBufferLastTests(unittest.TestCase):
         self.assertEqual(buffer.last(0), [])
         spanning = buffer.last(7)
         self.assertEqual([e.message for e in spanning], [str(i) for i in range(total - 7, total)])
+
+
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def _fixture_line(relative: str, predicate) -> dict:
+    for raw in (FIXTURES / relative).read_text(encoding="utf-8").splitlines():
+        if raw.strip():
+            payload = json.loads(raw)
+            if predicate(payload):
+                return payload
+    raise AssertionError(f"no matching line in {relative}")
+
+
+def _cursor_thinking(text: str, timestamp_ms: int) -> str:
+    """A cursor thinking delta in the shape of tests/fixtures/cursor/tool_read.jsonl."""
+    line = _fixture_line(
+        "cursor/tool_read.jsonl",
+        lambda p: p.get("type") == "thinking" and p.get("subtype") == "delta",
+    )
+    return json.dumps({**line, "text": text, "timestamp_ms": timestamp_ms})
+
+
+def _pi_tool_start(call_id: str, command: str) -> str:
+    """tool_execution_start in the shape of tests/fixtures/pi/tool_read.jsonl."""
+    return json.dumps(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": call_id,
+            "toolName": "bash",
+            "args": {"command": command},
+        }
+    )
+
+
+def _codex_file_change(index: int, *, status: str) -> list[str]:
+    """A codex apply_patch, in the shape of real `codex exec --json` captures."""
+    item = {
+        "id": f"item_{index}",
+        "type": "file_change",
+        "changes": [{"path": "/repo/src/app.py", "kind": "update"}],
+    }
+    return [
+        json.dumps({"type": "item.started", "item": {**item, "status": "in_progress"}}),
+        json.dumps({"type": "item.completed", "item": {**item, "status": status}}),
+    ]
+
+
+def _codex_error_item(index: int) -> str:
+    """A codex error item: a bare item.completed carrying only a message."""
+    item = {"id": f"item_{index}", "type": "error", "message": "patch rejected: context mismatch"}
+    return json.dumps({"type": "item.completed", "item": item})
+
+
+def _opencode_tool_use(call_id: str, command: str, status: str, timestamp: int) -> str:
+    """A tool_use in the shape of tests/fixtures/opencode/tool_run.ndjson."""
+    line = _fixture_line("opencode/tool_run.ndjson", lambda p: p.get("type") == "tool_use")
+    part = dict(line["part"])
+    state = {**part["state"], "status": status, "input": {"command": command}}
+    if status != "completed":
+        state.pop("output", None)
+    part.update(tool="bash", callID=call_id, state=state)
+    return json.dumps({**line, "timestamp": timestamp, "part": part})
+
+
+class BlockingProbeRecheckTests(unittest.TestCase):
+    """A stall decided before a blocking step is re-derived after it (item A)."""
+
+    def probe_watchdog(self, during_probe: str) -> stall_watchdog.StallWatchdog:
+        calls = {"count": 0}
+        watchdog: stall_watchdog.StallWatchdog
+
+        def probe() -> str:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                # The stdout thread delivers a line while the HEAD probe runs.
+                watchdog.observe_line(during_probe, now=61.5)
+            return "same-head"
+
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=60.0, harness="omp", progress_probe=probe
+        )
+        watchdog.prime_probe()
+        watchdog.observe_line(json.dumps({"type": "turn_start"}), now=0.0)
+        return watchdog
+
+    def test_a_tool_that_starts_during_the_head_probe_cancels_the_stall(self):
+        watchdog = self.probe_watchdog(_pi_tool_start("call_a|fc_a", "sleep 300"))
+        self.assertIsNone(watchdog.stalled_for(61.0))
+        self.assertEqual(watchdog.tools_in_flight, 1)
+
+    def test_output_that_lands_during_the_head_probe_cancels_the_stall(self):
+        watchdog = self.probe_watchdog(omp_delta("a new thought", kind="text_delta"))
+        self.assertIsNone(watchdog.stalled_for(61.0))
+
+    def test_confirm_stall_sees_progress_that_landed_after_the_decision(self):
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="omp")
+        watchdog.observe_line(json.dumps({"type": "turn_start"}), now=0.0)
+        self.assertIsNotNone(watchdog.stalled_for(61.0))
+        watchdog.observe_line(_pi_tool_start("call_b|fc_b", "sleep 300"), now=61.5)
+        self.assertIsNone(watchdog.confirm_stall(62.0))
+
+
+MODEL_OUTPUT_EVENTS = {
+    "codex": (
+        "codex_real_stream.jsonl",
+        {"item.completed/agent_message", "item.completed/reasoning"},
+    ),
+    "droid": ("droid/simple_text.jsonl", {"message"}),
+    "cursor": ("cursor/tool_read.jsonl", {"thinking/delta", "assistant"}),
+    "claude": ("claude/structured_output.jsonl", {"assistant"}),
+    "grok": ("grok/tool_read_multi_response.jsonl", {"thought", "text"}),
+    "pi": (
+        "pi/tool_read.jsonl",
+        {"message_update/text_delta", "message_update/toolcall_delta"},
+    ),
+    "omp": (
+        "pi/tool_read.jsonl",
+        {"message_update/text_delta", "message_update/toolcall_delta"},
+    ),
+    "opencode": ("opencode/simple_text.ndjson", {"text"}),
+}
+
+
+class ModelOutputClassificationTests(unittest.TestCase):
+    """Every model-output event in a checked-in fixture is a charged delta (item B)."""
+
+    @staticmethod
+    def carries_model_text(payload: dict) -> bool:
+        """An assistant envelope holding only a tool_use block has no model text."""
+        message = payload.get("message")
+        if payload.get("type") != "assistant" or not isinstance(message, dict):
+            return True
+        content = message.get("content")
+        return isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") in {"text", "thinking"}
+            for block in content
+        )
+
+    @staticmethod
+    def event_key(payload: dict) -> str:
+        parts = [payload.get("type"), payload.get("subtype")]
+        update = payload.get("assistantMessageEvent")
+        if isinstance(update, dict):
+            parts.append(update.get("type"))
+        item = payload.get("item")
+        if isinstance(item, dict):
+            parts.append(item.get("type"))
+        return "/".join(str(part) for part in parts if part is not None)
+
+    def test_no_fixture_model_output_event_falls_back_to_the_whole_line(self):
+        for harness, (relative, keys) in MODEL_OUTPUT_EVENTS.items():
+            found: set[str] = set()
+            for raw in (FIXTURES / relative).read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                key = self.event_key(payload)
+                if key not in keys or not self.carries_model_text(payload):
+                    continue
+                found.add(key)
+                with self.subTest(harness=harness, event=key):
+                    signals = stall_watchdog.classify_line(line, harness=harness)
+                    self.assertTrue(signals.deltas)
+                    self.assertNotEqual(signals.deltas, (line,), "whole-line fallback")
+                    self.assertNotEqual(signals.delta_chars, (0,) * len(signals.deltas))
+            self.assertEqual(found, keys, f"{harness}: fixture lacks an expected event")
+
+    def test_a_repeated_cursor_thinking_token_is_not_progress(self):
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="cursor")
+        base = 1788760922776
+        for second in range(10_000):
+            watchdog.observe_line(
+                _cursor_thinking("Reading marker.txt to", base + second * 1000), now=second
+            )
+        idle = watchdog.stalled_for(10_000.0)
+        self.assertIsNotNone(idle)
+        self.assertEqual(watchdog.stall_detail(idle or 0.0)["stallReason"], "idle")
+
+    def test_cursor_thinking_charges_its_payload_toward_the_runaway_budget(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="cursor", runaway_output_chars=1000
+        )
+        total = 0
+        for index in range(60):
+            text = f"thought {index} " + "y" * 20
+            total += len(text)
+            watchdog.observe_line(_cursor_thinking(text, 1788760922776 + index), now=index)
+            if total > 1000:
+                break
+        idle = watchdog.stalled_for(float(index + 1))
+        self.assertIsNotNone(idle)
+        detail = watchdog.stall_detail(idle or 0.0)
+        self.assertEqual(detail["stallReason"], "runaway_output")
+        self.assertEqual(detail["outputChars"], total)
+
+    def test_grok_usage_accounting_is_not_progress(self):
+        usage = _fixture_line(
+            "grok/tool_read_multi_response.jsonl", lambda p: p.get("type") == "usage"
+        )
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="grok")
+        for second in range(0, 2000, 2):
+            watchdog.observe_line(json.dumps({"type": "text", "data": "same"}), now=second)
+            counters = {**usage["usage"], "output_tokens": second}
+            watchdog.observe_line(json.dumps({**usage, "usage": counters}), now=second + 1)
+        self.assertIsNotNone(watchdog.stalled_for(2000.0))
+
+
+class PiCompletionTargetTests(unittest.TestCase):
+    """Real pi/omp ends carry no args; the target comes from the start (item C)."""
+
+    def test_twenty_identical_real_shape_failures_count(self):
+        for harness in ("pi", "omp"):
+            with self.subTest(harness=harness):
+                fed = _FedWatchdog(
+                    stall_watchdog.StallWatchdog(stall_seconds=480.0, harness=harness)
+                )
+                now = 0.0
+                for index in range(20):
+                    for line in _pi_fix_loop(index, False):
+                        now += 1.0
+                        fed.feed(line, now)
+                detail = fed.watchdog.stall_detail(0.0)
+                self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+                self.assertEqual(detail["target"], FIX_LOOP_COMMAND)
+                self.assertEqual(detail["failures"], stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+
+    def test_the_start_target_is_forgotten_once_the_tool_completes(self):
+        accumulator = harness_events.StreamAccumulator(harness="pi")
+        for line in _pi_fix_loop(0, False):
+            accumulator.ingest_line(line)
+        self.assertEqual(accumulator._pending_tool_uses, {})
+
+
+class FailedCodexFinishTests(unittest.TestCase):
+    """An explicitly failed codex finish is neither a reset nor progress (item D)."""
+
+    def run_lines(self, lines: list[str]) -> str | None:
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        for now, line in enumerate(lines, start=1):
+            fed.feed(line, float(now))
+        return fed.watchdog.stall_detail(0.0).get("stallReason")
+
+    def test_repeated_failed_file_changes_alone_trip(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+            for line in _codex_file_change(index, status="failed")
+        ]
+        self.assertEqual(self.run_lines(lines), "repeated_tool_failure")
+
+    def test_failed_file_changes_between_identical_failing_commands_trip(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+            for line in [
+                *_codex_fix_loop(index, False),
+                *_codex_file_change(100 + index, status="failed"),
+            ]
+        ]
+        self.assertEqual(self.run_lines(lines), "repeated_tool_failure")
+
+    def test_error_items_between_identical_failing_commands_trip(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT)
+            for line in [*_codex_fix_loop(index, False), _codex_error_item(100 + index)]
+        ]
+        self.assertEqual(self.run_lines(lines), "repeated_tool_failure")
+
+    def test_an_error_item_is_not_progress_for_idle(self):
+        # A failed file_change's own start-to-finish time is tool time, which the
+        # idle clock already excludes; an error item has no start, so this is
+        # where "not progress" is observable.
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="codex"))
+        fed.feed(json.dumps({"type": "turn.started"}), 0.0)
+        fed.feed(_codex_error_item(1), 30.0)
+        fed.feed(_codex_error_item(2), 50.0)
+        idle = fed.watchdog.stalled_for(61.0)
+        self.assertIsNotNone(idle)
+        self.assertEqual(fed.watchdog.stall_detail(idle or 0.0)["stallReason"], "idle")
+
+    def test_a_failed_file_change_whose_start_was_missed_is_not_progress(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="codex"))
+        fed.feed(json.dumps({"type": "turn.started"}), 0.0)
+        _started, completed = _codex_file_change(1, status="failed")
+        fed.feed(completed, 50.0)
+        self.assertIsNotNone(fed.watchdog.stalled_for(61.0))
+
+    def test_a_successful_patch_still_resets(self):
+        lines = [
+            line
+            for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT + 2)
+            for line in [
+                *_codex_fix_loop(index, False),
+                *_codex_file_change(100 + index, status="completed"),
+            ]
+        ]
+        self.assertEqual(self.run_lines(lines), "idle")
+
+
+class OpencodeRunningStatusTests(unittest.TestCase):
+    """A tool that is still running has not completed (item G)."""
+
+    def test_running_then_error_pairs_trip_on_the_fifth_error(self):
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="opencode"))
+        stamp = 1783614108246
+        limit = stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT
+        for index in range(limit):
+            self.assertIsNone(fed.watchdog.stall_detail(0.0).get("failures"))
+            call_id = f"call_{index}"
+            fed.feed(_opencode_tool_use(call_id, FIX_LOOP_COMMAND, "running", stamp), index * 2.0)
+            fed.feed(
+                _opencode_tool_use(call_id, FIX_LOOP_COMMAND, "error", stamp + 1), index * 2.0 + 1
+            )
+            stamp += 2
+        detail = fed.watchdog.stall_detail(0.0)
+        self.assertEqual(detail["stallReason"], "repeated_tool_failure")
+        self.assertEqual(detail["failures"], limit)
 
 
 if __name__ == "__main__":
