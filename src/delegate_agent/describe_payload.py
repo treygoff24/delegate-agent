@@ -7,10 +7,12 @@ agent-help. Reference output only — no run execution happens here.
 
 from __future__ import annotations
 
+import inspect
 import os
 import shlex
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
@@ -872,11 +874,28 @@ def _pi_family_describe_argv(
     return build_pi_argv(section, mode, model, thinking)
 
 
+def _dsl_signature(name: str, method: Callable[..., object]) -> str:
+    """Render a workflow DSL method's call signature without ``self`` or annotations."""
+    signature = inspect.signature(method)
+    parameters = [
+        parameter.replace(annotation=inspect.Parameter.empty)
+        for parameter in list(signature.parameters.values())[1:]
+    ]
+    return name + str(
+        signature.replace(parameters=parameters, return_annotation=inspect.Signature.empty)
+    )
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
+    # Imported here rather than at module top: every CLI invocation imports
+    # this module, and only the full describe payload needs the workflow DSL.
+    from delegate_agent.workflows import runtime as workflow_runtime
+
+    workflow_capabilities = dict(workflow_runtime.WORKFLOW_CAPABILITIES)
     codex = config["codex"]
     claude = config["claude"]
     kimi = config["kimi"]
@@ -1109,28 +1128,15 @@ def describe_payload(
             ],
             "config": config.get("workflows", {}),
             "dsl": {
-                "globals": [
-                    "agent",
-                    "followup",
-                    "pipeline",
-                    "parallel",
-                    "phase",
-                    "log",
-                    "workflow",
-                    "judges",
-                    "args",
-                    "budget",
-                    "agent_meta",
-                    "AgentFailure",
-                    "capabilities",
-                ],
+                "globals": list(workflow_runtime.WORKFLOW_DSL_GLOBALS),
+                "globalAliases": {
+                    "soft_park_item": "park_item",
+                    "item_park": "park_item",
+                    "park": "park_item",
+                    "is_dry_run": "dry_run",
+                },
                 "agent": {
-                    "signature": (
-                        "agent(prompt, engine=None, mode=None, model=None, effort=None, "
-                        "schema=None, label=None, phase=None, isolation=None, "
-                        "passthrough=False, timeout=None, retries=None, "
-                        "fast=None, persona=None, allow_repo_persona=False)"
-                    ),
+                    "signature": _dsl_signature("agent", workflow_runtime.WorkflowDsl.agent),
                     "returns": (
                         "parent-facing output string, schema object, or None; with "
                         "on_failure='typed', an exhausted structured call returns a falsy "
@@ -1140,21 +1146,35 @@ def describe_payload(
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
+                        "resumable=True keeps the harness session so followup() can continue the run natively.",
                         "on_failure='typed' (keyword, default 'none') returns a falsy AgentFailure instead of None when structured retries are exhausted.",
+                        "key='...' replays by that key inside the enclosing named scope instead of by position and prompt text; a changed prompt under the same key adopts the recorded result, and reusing a key in one run raises WorkflowKeyConflict (capability agentKey).",
+                        "base=, env= (a dict of names to strings), and setup= pass a workspace spec to a mode='work', isolation='worktree' child and join its replay identity with env values reduced to a digest; other lanes raise ValueError (capability workspaceSpec).",
                         f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to another engine.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",
                 "log": "log(message) emits a log event with JSON-safe message text.",
-                "pipeline": "pipeline(items, stage1, ...) chains per item with no inter-stage barrier; stage(prev, item, index).",
-                "parallel": "parallel([lambda: ...]) is a barrier and preserves order.",
-                "workflow": "workflow(name_or_path, args=None, gate=False) nests to depth 3; gate=True pauses through resume/approve.",
-                "judges": "judges(prompt, schema, engines=[...], *, effort=None) runs call --read-only judge lanes and returns votes.",
-                "followup": "followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None) continues a resumable child run by label.",
+                "pipeline": "pipeline(items, stage1, ..., key=None) chains per item with no inter-stage barrier; stage(prev, item, index). key= names the scope so positional keys inside it stay stable across resumes (capability scopeKey).",
+                "parallel": "parallel([lambda: ...], *, key=None) is a barrier and preserves order; key= names its scope as in pipeline().",
+                "workflow": "workflow(name_or_path, args=None, gate=False, key=None) nests to depth 3; gate=True, or gate='on-failure' when the child returns None or {'ok': False}, pauses through resume/approve; key= names the child's scope.",
+                "judges": "judges(prompt, schema, engines=[...], *, effort=None) runs call --read-only judge lanes and returns votes. An engines entry is an engine name, a model selector (run on droid), or a dict {'engine', 'model', 'effort'}; a per-entry effort overrides effort=.",
+                "followup": "followup(prior_label, prompt, *, label=None, phase=None, schema=None, timeout=None, retries=None) continues a resumable child run by label.",
+                "args": "args is the JSON value from workflow run --args (None when absent); a nested workflow() sees its own args=.",
                 "budget": "run-count budget: total, spent(), remaining().",
-                "agent_meta": "agent_meta(label=None) returns the latest agent attempt's child outcome: runId, ok, status, failureKind, failureReason, servedModel, servedProvider.",
-                "AgentFailure": "AgentFailure(failure_kind, failure_reason, attempts, last_parsed_candidate, candidate_present, validation_error, run_id, engine, served_model, served_provider) is falsy; failure_kind is the closed run failureKind enum.",
-                "capabilities": "capabilities maps feature names to versions ({'agentFailure': 1, 'agentMeta': 1, 'failureKind': 1}); test membership before using a newer feature.",
+                "agent_meta": "agent_meta(key_or_label=None) returns the latest agent attempt's child outcome: key, label, runId, engine, ok, status, failureKind, failureReason, servedModel, servedProvider, modelResolved. With no argument it reads the calling thread's most recent agent() call; None when no child run was recorded.",
+                "AgentFailure": "AgentFailure(key, label, failure_kind, failure_reason, attempts, last_parsed_candidate, candidate_present, validation_error, run_id, engine, served_model, served_provider) is falsy; failure_kind is the closed run failureKind enum.",
+                "capabilities": f"capabilities maps feature names to versions ({workflow_capabilities!r}); test membership before using a newer feature.",
+                "capabilityVersions": workflow_capabilities,
+                "park_gate": "park_gate(key, result=None, *, actions=None) pauses for an operator decision and, once `workflow approve <wfId> --gate KEY --action NAME [--note TEXT] [--data JSON]` records one, returns {'gate', 'action', 'note', 'data'}. actions defaults to ['approve']. The approval binds to result: a different result, or a recorded action the call no longer declares, parks again. A dry run returns the first declared action (capability gateActions).",
+                "reject": "reject(key_or_label, reason, *, by=None) durably invalidates an agent result so a later call with that key runs fresh; by is 'seat', 'merge-gate', or 'coordinator' and lands on agent_rejected as rejectedBy.",
+                "soft_park": "soft_park(items, worker=None) admits named items and returns their results in order. items is a {name: callback} mapping, a list of (name, callback) pairs, or named dicts; with worker, worker(value, name, index) runs each item. A callback that calls park_item(name, result) or returns soft_park_request(name, result) parks durably and releases its slot; once unrelated work drains, the workflow pauses with parkedItems, and resume replays into the same named scopes.",
+                "park_item": "park_item(name, result=None) raises SoftPark to park the enclosing soft_park() item.",
+                "soft_park_request": "soft_park_request(name, result=None) returns a SoftPark marker that a soft_park() callback may return instead of raising.",
+                "parked": "parked(name) is True while the named soft_park() item is parked.",
+                "SoftPark": "SoftPark(name, result=None) is the exception park_item() raises; a soft_park() callback may raise it directly.",
+                "structured_attempt": "structured_attempt(key_or_label=None) returns the latest exhausted structured attempt of an agent call (lastParsedCandidate and validationError; attempts, candidatePresent, and failureKind when this supervisor ran it), or None. With no argument it reads the calling thread's most recent call.",
+                "dry_run": "dry_run is True under workflow run --dry-run, which stubs agent calls only; scripts that write state branch on it.",
                 "schemaSubset": [
                     "type",
                     "required",

@@ -157,6 +157,40 @@ WORKFLOW_CAPABILITIES: dict[str, int] = {
     "workspaceSpec": 1,
 }
 
+# Every name ``execute_workflow`` injects into a workflow script.
+# ``describe --full`` lists these as the DSL globals, and the injector refuses
+# to run when its bindings drift from this tuple, so a new global cannot ship
+# undocumented. ``soft_park_item``, ``item_park``, and ``park`` alias
+# ``park_item``; ``is_dry_run`` aliases ``dry_run``.
+WORKFLOW_DSL_GLOBALS: tuple[str, ...] = (
+    "agent",
+    "followup",
+    "pipeline",
+    "parallel",
+    "phase",
+    "log",
+    "workflow",
+    "judges",
+    "args",
+    "budget",
+    "agent_meta",
+    "AgentFailure",
+    "capabilities",
+    "park_gate",
+    "reject",
+    "soft_park",
+    "park_item",
+    "soft_park_item",
+    "item_park",
+    "park",
+    "soft_park_request",
+    "parked",
+    "SoftPark",
+    "structured_attempt",
+    "dry_run",
+    "is_dry_run",
+)
+
 # Caller-supplied step and gate keys are identities an operator types
 # (``approve --gate``), so they stay short and printable.
 CALLER_KEY_MAX_CHARS = 200
@@ -2371,6 +2405,11 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
             "dry_run": state.dry_run,
             "is_dry_run": state.dry_run,
         }
+        drift = set(globals_dict) ^ set(WORKFLOW_DSL_GLOBALS)
+        if drift:
+            raise RuntimeError(
+                "workflow DSL globals differ from WORKFLOW_DSL_GLOBALS: " + ", ".join(sorted(drift))
+            )
         exec(code, globals_dict)
         return globals_dict["__delegate_workflow__"]()
 
