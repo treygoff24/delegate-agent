@@ -951,7 +951,7 @@ class RunRegistryTests(unittest.TestCase):
             )
 
             index = self.registry.load_index(root)
-            summaries, total, scope_total = self.registry.list_run_summaries(
+            summaries, total, scope_total, _ids = self.registry.list_run_summaries(
                 root, index, harness="cursor", limit=10
             )
             self.assertEqual(scope_total, 3)
@@ -1028,7 +1028,10 @@ class RunRegistryTests(unittest.TestCase):
                 self.registry, "load_run_state_or_none", wraps=self.registry.load_run_state_or_none
             ) as load_state:
                 self.assertIsNone(self.registry.latest_run_id_for_harness(root, loaded, "cursor"))
-                self.assertEqual(self.registry.list_run_summaries(root, loaded), ([], 0, 0))
+                empty_rows, empty_total, empty_scope, _ids = self.registry.list_run_summaries(
+                    root, loaded
+                )
+                self.assertEqual((empty_rows, empty_total, empty_scope), ([], 0, 0))
             load_state.assert_not_called()
             with self.assertRaises(self.registry.RegistryJsonError):
                 self.registry.resolve_handle(loaded, canary, registry_root=root)

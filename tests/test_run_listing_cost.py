@@ -28,8 +28,12 @@ class RunListingCostTests(unittest.TestCase):
             with mock.patch.object(
                 run_status, "effective_log_byte_sizes", wraps=run_status.effective_log_byte_sizes
             ) as probes:
-                rows, total, scope = run_status.list_run_summaries(root, {"runs": runs}, limit=3)
+                rows, total, scope, ids = run_status.list_run_summaries(
+                    root, {"runs": runs}, limit=3
+                )
             self.assertEqual((total, scope), (50, 50))
+            self.assertEqual(ids.matched, set(runs))
+            self.assertEqual(ids.scoped, set(runs))
             self.assertEqual([row["alias"] for row in rows], ["codex-50", "codex-49", "codex-48"])
             self.assertEqual([row["stdoutBytes"] for row in rows], [3, 3, 3])
             self.assertEqual(probes.call_count, 3)
@@ -83,7 +87,7 @@ class RunListingCostTests(unittest.TestCase):
                 side_effect=counted_state_loader,
             ):
                 started = time.perf_counter()
-                rows, total, scope = run_status.list_run_summaries(root, index, limit=3)
+                rows, total, scope, _ids = run_status.list_run_summaries(root, index, limit=3)
                 elapsed = time.perf_counter() - started
 
             self.assertEqual((total, scope), (1_000, 1_000))
