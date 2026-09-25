@@ -354,6 +354,120 @@ class RunnerCaptureTests(unittest.TestCase):
                 else:
                     self.assertEqual(hints, [])
 
+    def test_successful_safe_run_with_dns_text_gets_no_hint(self):
+        """dlg-qd1: a child can print getaddrinfo while succeeding; the sandbox hint is for failures."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "chatty-resolver"
+        event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Status: completed the task."},
+            }
+        )
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
+            f"printf '%s\\n' {shlex.quote(event)}\nexit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        for mode in ("safe", "work"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as workspace:
+                code, payload = self._tracked_script_run(script, mode=mode, workspace=workspace)
+
+                self.assertEqual(code, 0, payload)
+                self.assertEqual(payload.get("error"), None)
+                self.assertEqual(
+                    [w for w in payload.get("warnings", []) if "safe mode may block" in w],
+                    [],
+                )
+
+    def test_provider_auth_failure_gets_no_dns_hint(self):
+        """The same resolver text in a provider auth failure is not the sandbox's doing."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "expired-key"
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
+            "printf 'Error 401: unauthorized request\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload = self._tracked_script_run(script, mode="safe", workspace=workspace)
+
+        self.assertEqual(code, 7)
+        self.assertEqual(payload["failureReason"], "auth_failed")
+        self.assertEqual(
+            [w for w in payload.get("warnings", []) if "safe mode may block" in w], []
+        )
+
+    def test_dns_hint_gate_reads_the_failure_kind(self):
+        # The end-to-end cases above cover the wiring; this covers the kinds that
+        # are hard to stage from a script (a pi/omp provider terminal event).
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-25T00:00:00Z",
+            )
+            signal_text = "Error: getaddrinfo ENOTFOUND api.example.com"
+            for status, reason, expected in (
+                ("failed", "child_failed", True),
+                ("failed", "exit_nonzero", True),
+                ("failed", "provider_error", False),
+                ("failed", "auth_failed", False),
+                ("succeeded", None, False),
+                ("cancelled", "harness_cancelled", False),
+            ):
+                with self.subTest(status=status, reason=reason):
+                    hint = self.runner._safe_mode_network_warning(
+                        ctx, signal_text, status=status, failure_reason=reason
+                    )
+                    self.assertEqual(hint is not None, expected, hint)
+
+    def _tracked_script_run(self, script: Path, *, mode: str, workspace: str) -> tuple[int, dict]:
+        root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = self.registry.register_run(root, harness="codex")
+        ctx = self.runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="codex",
+            engine="codex",
+            mode=mode,
+            model="model-id",
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-25T00:00:00Z",
+        )
+        return self.runner.execute_tracked(
+            [str(script)],
+            workspace,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            stdin_text="prompt",
+        )
+
     def test_successful_run_carries_no_stderr_tail(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

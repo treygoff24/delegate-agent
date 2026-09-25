@@ -3045,14 +3045,30 @@ _NETWORK_FAILURE_RE = re.compile(
 )
 
 
-def _safe_mode_network_warning(ctx: RunContext, signal_text: str) -> str | None:
-    """Point a safe-mode run whose child hit DNS/network errors at work mode.
+def _safe_mode_network_warning(
+    ctx: RunContext,
+    signal_text: str,
+    *,
+    status: str,
+    failure_reason: str | None,
+) -> str | None:
+    """Point a safe-mode run whose child failed on DNS/network errors at work mode.
 
     Safe mode's sandbox may block network access, so a child's fetch fails with
-    a resolver error that reads like an outage. The warning says where the
+    a resolver error that reads like an outage. The hint is about the sandbox, so
+    it is only for a run the network can explain: a run that succeeded may print
+    these strings for its own reasons, and a provider connection or auth failure
+    would fail exactly the same way in work mode. The warning says where the
     cause may be; it does not change the run's status or failure kind.
     """
-    if ctx.mode != "safe" or not _NETWORK_FAILURE_RE.search(signal_text):
+    if ctx.mode != "safe" or status != run_registry.STATUS_FAILED or failure_reason is None:
+        return None
+    if outcome.failure_kind_for_reason(failure_reason) in {
+        outcome.FAILURE_PROVIDER_ERROR,
+        outcome.FAILURE_PROVIDER_AUTH,
+    }:
+        return None
+    if not _NETWORK_FAILURE_RE.search(signal_text):
         return None
     return (
         "the child reported DNS/network failures, and safe mode may block network "
@@ -3241,7 +3257,9 @@ def _finalize_tracked_run(
         # already returns stderrTail on failure; tracked runs now match it.
         if stderr_tail.strip():
             merged_extra["stderrTail"] = stderr_tail
-    network_warning = _safe_mode_network_warning(ctx, signal_text)
+    network_warning = _safe_mode_network_warning(
+        ctx, signal_text, status=status, failure_reason=failure_reason
+    )
     if network_warning is not None:
         warnings = list(merged_extra.get("warnings") or [])
         _append_unique(warnings, network_warning)
