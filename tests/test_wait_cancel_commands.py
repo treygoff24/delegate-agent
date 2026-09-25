@@ -500,6 +500,78 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertTrue(state["cancelRequested"])
 
+    def _urgent_cancel_refused(self, run_id: str, alias: str, *, identity_side_effect=None):
+        fd = self._hold_registry_lock()
+        self.addCleanup(self._release_registry_lock, fd)
+        with (
+            unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}),
+            unittest_mock.patch.object(wait_cancel_commands, "CANCEL_GRACE_SECONDS", 0.1),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "URGENT_CANCEL_RECORD_WAIT_SECONDS", 0.1
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", side_effect=identity_side_effect
+            )
+            if identity_side_effect is not None
+            else contextlib.nullcontext(),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send,
+            self.assertRaises(wait_cancel_commands.WaitCancelError) as raised,
+        ):
+            wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        send.assert_not_called()
+        return raised.exception
+
+    def test_urgent_cancel_refuses_a_run_whose_terminal_wal_is_pending(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+
+        def child_finishes(*_args, **_kwargs):
+            # After cancel's first read, the child finished and its finalizer wrote
+            # the WAL, but the lock holder has not replayed it: the record itself
+            # still says running.
+            record = run_registry.load_run_state(self.registry_root, run_id)
+            record = {**record, "status": "succeeded", "ok": True, "exitCode": 0}
+            run_registry.write_finalize_wal(
+                self.registry_root, run_id, status="succeeded", record=record
+            )
+            return []
+
+        error = self._urgent_cancel_refused(run_id, alias, identity_side_effect=child_finishes)
+        self.assertEqual(error.error, "run_already_terminal")
+        self.assertIsNone(proc.poll())
+        # Read-only: the WAL is left for the lock holder to replay.
+        self.assertTrue(run_registry.finalize_wal_path(self.registry_root, run_id).exists())
+
+    def test_urgent_cancel_refuses_when_the_generation_changes_between_reads(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+        )
+        self.add_process_cleanup(proc)
+        retry = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+        )
+        self.add_process_cleanup(retry)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+
+        def retry_launches(*_args, **_kwargs):
+            # A retry attempt publishes a new generation after cancel's first read.
+            state = run_registry.load_run_state(self.registry_root, run_id)
+            state.update(pid=retry.pid, pgid=os.getpgid(retry.pid))
+            run_registry.write_run_state(run_path, state)
+            return []
+
+        error = self._urgent_cancel_refused(run_id, alias, identity_side_effect=retry_launches)
+        self.assertEqual(error.error, "cancel_target_changed")
+        self.assertIn("Retry", error.message)
+        self.assertIsNone(proc.poll())
+        self.assertIsNone(retry.poll())
+
     def test_cancel_under_a_held_lock_never_signals_an_unlaunched_record(self):
         run_id, alias = self.write_run(status="running")
         fd = self._hold_registry_lock()
