@@ -686,6 +686,51 @@ class DryRunCwdTests(_WorkflowFixture):
         self.assertEqual(os.path.realpath(payload["result"]), os.path.realpath(self.workspace))
         self.assertEqual(os.path.realpath(os.getcwd()), os.path.realpath(elsewhere.name))
 
+    def test_a_timed_out_dry_run_keeps_the_workspace_cwd_while_it_runs(self) -> None:
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        release = Path(elsewhere.name) / "release"
+        self.addCleanup(release.touch)
+        self.script.write_text(
+            "import os, time\n"
+            "deadline = time.monotonic() + 20\n"
+            "while not os.path.exists(args['release']) and time.monotonic() < deadline:\n"
+            "    time.sleep(0.02)\n"
+            "with open('marker.txt', 'w') as handle:\n"
+            "    handle.write('late write')\n"
+            "return None\n",
+            encoding="utf-8",
+        )
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(elsewhere.name)
+        with self.assertRaises(DelegateError) as raised:
+            commands.emit_dry_run(
+                wf_id=self.wf_id,
+                root=self.root,
+                script_path=self.script,
+                workspace=self.workspace,
+                config={"workflows": {"dryRunTimeoutSeconds": 1}},
+                args_value={"release": str(release)},
+                budget_total=None,
+                json_mode=True,
+                warnings=[],
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(raised.exception.error, "dry_run_timeout")
+        release.touch()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(
+            (Path(folder) / "marker.txt").exists() for folder in (self.workspace, elsewhere.name)
+        ):
+            time.sleep(0.02)
+        self.assertTrue(
+            (self.workspace / "marker.txt").exists(),
+            "the abandoned script's relative write left the workspace",
+        )
+        self.assertFalse((Path(elsewhere.name) / "marker.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

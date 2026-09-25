@@ -797,7 +797,10 @@ def emit_dry_run(
         worker.start()
         worker.join(timeout_seconds)
     finally:
-        if previous_cwd is not None:
+        # A worker still running keeps the workspace cwd. A timed-out script
+        # cannot be stopped, and restoring the process cwd under it would move
+        # every relative path it still resolves out of the workspace.
+        if previous_cwd is not None and not worker.is_alive():
             with contextlib.suppress(OSError):
                 os.chdir(previous_cwd)
     if worker.is_alive():
