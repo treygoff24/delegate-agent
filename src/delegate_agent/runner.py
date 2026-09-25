@@ -32,6 +32,7 @@ from delegate_agent import (
     mail_push,
     notify,
     outcome,
+    outside_cwd_changes,
     profiles,
     prompt_instructions,
     redaction,
@@ -4420,6 +4421,13 @@ def _execute_tracked(
         )
         else None
     )
+    # --isolation none edits the caller's real tree; a before/after status of
+    # the enclosing repo is the one cheap way to see edits that escaped cwd.
+    outside_snapshot = (
+        outside_cwd_changes.capture(cwd, own_paths=(str(ctx.registry_root),))
+        if ctx.effective_isolation == "none" and not ctx.isolated_workspace
+        else None
+    )
     fallback_extra: JsonObject | None = None
     thread_extra: JsonObject | None = None
     empty_retry_extra: JsonObject | None = None
@@ -4783,6 +4791,18 @@ def _execute_tracked(
             final_warnings,
             f"{failure} (the pipe kept draining; progress records may lag the stream)",
         )
+    if outside_snapshot is not None:
+        escaped = outside_cwd_changes.changed_outside(outside_snapshot)
+        if escaped:
+            final_extra["outsideCwdChanges"] = {
+                "repository": outside_snapshot.toplevel,
+                "count": len(escaped),
+                "examples": list(escaped[: outside_cwd_changes.EXAMPLE_LIMIT]),
+            }
+            _append_unique(
+                final_warnings,
+                outside_cwd_changes.warning(escaped, outside_snapshot.toplevel),
+            )
     if scratch_permissions is not None:
         final_extra["scratchPermissions"] = scratch_permissions
         diagnostic = profiles.read_bounded_stderr_tail(files.stderr_log).lower()
