@@ -461,6 +461,73 @@ def _cancel_signal_generation(
     return pid, pgid, signal_value, process_group
 
 
+# A run record with no pid is normally a launch that has not published its
+# process yet, which is why cancel refuses it (missing_pid). After this long
+# with no activity it is a launch that never produced a process: its
+# launcher died during isolation or before Popen. Workflow resume and
+# adoption may seal it instead of refusing forever.
+UNLAUNCHED_SEAL_GRACE_SECONDS = 300.0
+UNLAUNCHED_RAW_STATUSES = frozenset({run_registry.STATUS_RUNNING, "creating_isolation"})
+UNLAUNCHED_SEAL_WARNING = (
+    "unlaunched run sealed as cancelled: the record never published a pid/pgid "
+    "within the grace window (missing_pid); nothing was signalled"
+)
+
+
+def unlaunched_run_age(state: JsonObject | None, run_path: Path | None = None) -> float | None:
+    """Seconds since an unlaunched run last showed activity, or None if it launched."""
+    if not isinstance(state, dict):
+        return None
+    if _state_int(state, "pid") is not None or _state_int(state, "pgid") is not None:
+        return None
+    if state.get("status") not in UNLAUNCHED_RAW_STATUSES:
+        return None
+    last = run_registry.parse_utc_timestamp(state.get("lastActivityAt"))
+    if last is not None:
+        return (datetime.now(UTC) - last).total_seconds()
+    if run_path is not None:
+        try:
+            mtime = (run_path / run_registry.STATE_FILE).stat().st_mtime
+        except OSError:
+            return None
+        return time.time() - mtime
+    return None
+
+
+def seal_unlaunched_run(
+    registry_root: Path,
+    run_id: str,
+    *,
+    grace_seconds: float = UNLAUNCHED_SEAL_GRACE_SECONDS,
+) -> bool:
+    """Seal a run that never launched a process, once it is past the grace window.
+
+    Re-checked under the registry lock, so a launch that publishes its pid in
+    the meantime wins and nothing is sealed.
+    """
+    with run_registry.registry_lock(registry_root):
+        run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
+        state = run_registry.load_run_state_or_none(registry_root, run_id)
+        age = unlaunched_run_age(state, run_registry.run_directory(registry_root, run_id))
+        if age is None or age < grace_seconds:
+            return False
+        alias = state.get("alias") if isinstance(state, dict) else None
+        target = run_registry.RunTarget(run_id, alias if isinstance(alias, str) else None)
+        stamped = dict(state) if isinstance(state, dict) else {}
+        # Stamp the cancel marker too: a launcher that is somehow still alive
+        # finalizes as cancelled instead of reviving the record.
+        stamped["cancelRequested"] = True
+        stamped.setdefault("cancelRequestedAt", run_registry.utc_now_iso())
+        _persist_cancelled_terminal_locked(
+            registry_root,
+            target,
+            stamped,
+            [UNLAUNCHED_SEAL_WARNING],
+            stale_reason="missing_pid",
+        )
+    return True
+
+
 STALE_SEAL_WARNING = (
     "stale run sealed as cancelled: the tracked process was already dead (dead_pid); "
     "nothing was signalled"

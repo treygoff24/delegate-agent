@@ -602,7 +602,7 @@ delegate [--json] workflow events <wfId> [--since SEQ]
 delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]
 delegate [--json] workflow wait [<wfId>] [--timeout SEC]
 delegate [--json] workflow result [<wfId>] [--field KEY]
-delegate [--json] workflow approve <wfId>
+delegate [--json] workflow approve <wfId> [--gate KEY] [--action NAME] [--note TEXT] [--data JSON]
 delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
@@ -663,7 +663,12 @@ delegate [--json] workflow save <script.py> --name NAME
   mode prints strings directly and JSON-encodes other values; JSON mode returns
   a field/value envelope.
 - `approve` releases a paused gate (and resumes). Do not also run
-  `run --resume` for the same gate — approve already is that resume. `kill`
+  `run --resume` for the same gate — approve already is that resume. `--gate`
+  selects an unapproved gate by its `park_gate()` key (default: the latest
+  unapproved gate); `--action` picks one of the gate's declared actions, which
+  the script's `park_gate()` call returns with `--note` and `--data`. An
+  undeclared action is refused with the allowed list, and so is a bare approve
+  on a gate whose actions exclude `approve`. `kill`
   validates the supervisor process group before signaling and always attempts
   child fan-out cancellation.
 - `reject` records an agent-result rejection by structural key or unambiguous
@@ -680,11 +685,14 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | Code | Meaning |
 | --- | --- |
 | `invalid_workflow_args` | `--args` is not valid JSON. |
+| `invalid_workflow_gate_data` | `approve --data` is not valid JSON. |
+| `invalid_gate_action` | `approve --action` is not one of the gate's declared actions, or a bare approve on a gate that does not declare `approve`. |
 | `invalid_workflow_id` | `wfId` is not `wf_` + 12 hex digits. |
 | `invalid_workflow_name` | Saved-workflow `--name` is not a simple file stem. |
 | `invalid_workflow_script` | Script failed `check` / load validation. |
 | `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
 | `missing_workflow_result_field` | `result --field` was invoked without a key. |
+| `missing_workflow_approve_value` | `approve --gate/--action/--note/--data` without a value. |
 | `missing_workflow_reject_args` | Rejection is missing a workflow ID or target. |
 | `missing_workflow_reject_target` | `reject` needs a structural key or label. |
 | `missing_workflow_reject_reason` | `reject` needs a non-empty `--reason`. |
@@ -694,6 +702,7 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `workflow_execution_failed` | Dry-run (or in-process) execution raised before detach. |
 | `workflow_locked` | Another supervisor already holds the workflow flock. |
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
+| `workflow_gate_not_found` | `approve --gate KEY` names no unapproved gate; the message lists pending gates. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
 | `workflow_reject_unresolved` | Rejection target does not resolve to one agent key. |
 | `workflow_running` | Rejection was refused because the supervisor is running or locked. |

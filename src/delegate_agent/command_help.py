@@ -1583,8 +1583,41 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "workflow approve": CommandSpec(
         name="workflow approve",
         summary="Approve a paused gate and relaunch the supervisor.",
-        usage=("delegate [--json] workflow approve <wfId>",),
-        see_also=("workflow run",),
+        usage=(
+            "delegate [--json] workflow approve <wfId>",
+            "delegate [--json] workflow approve <wfId> --gate KEY --action NAME "
+            "[--note TEXT] [--data JSON]",
+        ),
+        arguments=(ArgSpec("wfId", True, "Workflow ID waiting on a gate."),),
+        options=(
+            OptionSpec(
+                "--gate",
+                "KEY",
+                "Approve this unapproved gate: a park_gate() key or a gate's journal key. "
+                "Default: the latest unapproved gate.",
+            ),
+            OptionSpec(
+                "--action",
+                "NAME",
+                "Choose one of the gate's declared actions; park_gate() returns it. "
+                "Default: approve.",
+            ),
+            OptionSpec("--note", "TEXT", "Free-text note returned to the script with the action."),
+            OptionSpec("--data", "JSON", "JSON value returned to the script with the action."),
+        ),
+        examples=(
+            "delegate workflow approve wf_0123abcdef45",
+            "delegate workflow approve wf_0123abcdef45 --gate task-7-park --action retry "
+            "--note 'fixed the fixture'",
+        ),
+        notes=(
+            "An action outside the gate's declared actions is refused with the allowed list.",
+            "A bare approve on a gate that does not declare an approve action is refused; "
+            "pass --action.",
+            "The approval is bound to the gate's result: if the resumed script parks the same "
+            "gate with a different result, it pauses again.",
+        ),
+        see_also=("workflow run", "workflow status"),
     ),
     "workflow reject": CommandSpec(
         name="workflow reject",

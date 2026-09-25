@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
@@ -164,6 +164,21 @@ class WorkflowCommand:
     json_mode: bool = False
     jsonl: bool = False
     notify: str | None = None
+    gate: str | None = None
+    gate_action: str | None = None
+    gate_note: str | None = None
+    gate_data_json: str | None = None
+
+
+@dataclass(frozen=True)
+class GateChoice:
+    """An operator's ``approve --gate/--action/--note/--data`` selection."""
+
+    gate: str | None = None
+    action: str | None = None
+    note: str | None = None
+    data: JsonValue = None
+    has_data: bool = False
 
 
 def emit(
@@ -283,8 +298,10 @@ def emit_run(
     stderr: TextIO,
     approve_gate: bool = False,
     config_source: str = "command-config",
+    gate_choice: GateChoice | None = None,
 ) -> int:
     warnings: list[str] = []
+    gate_decision: JsonObject | None = None
     operational_environment = {
         key: value for key, value in os.environ.copy().items() if key in workflow_attempts.ENV_KEYS
     }
@@ -396,16 +413,29 @@ def emit_run(
                 # Recover gate evidence only after acquiring the supervisor
                 # lock; an approval racing a draining supervisor must not
                 # publish a paused projection before its resume is admitted.
+                gate_name = gate_choice.gate if gate_choice is not None else None
                 recovered = _latest_unapproved_gate_event(
                     root,
                     load_approval(),
                     events=load_journal(),
+                    gate=gate_name,
                 )
+                if gate_name is not None and recovered is None:
+                    pending = _pending_gate_names(root, load_approval(), load_journal())
+                    raise DelegateError(
+                        "workflow_gate_not_found",
+                        f"Workflow {wf_id} has no unapproved gate named {gate_name!r}; "
+                        f"pending gates: {', '.join(pending) if pending else 'none'}.",
+                    )
                 gate_key = recovered.get("key") if recovered else status.get("gateKey")
                 if not isinstance(gate_key, str):
                     raise DelegateError(
                         "workflow_not_gated", f"Workflow is not waiting on a gate: {wf_id}"
                     )
+                gate_event = recovered or _gate_event(
+                    load_journal(), gate_key, status.get("gateResultHash")
+                )
+                gate_decision = _gate_decision(gate_choice, gate_event, gate_key)
                 status = dict(status)
                 status.update({"status": "paused", "gateKey": gate_key})
                 if recovered:
@@ -474,6 +504,7 @@ def emit_run(
                     gate_key,
                     gate_result_hash,
                     previous=load_approval(),
+                    decision=gate_decision,
                 )
             script_path = root / registry.SCRIPT_FILE
             recorded_source_script = status.get("sourceScript")
@@ -753,8 +784,22 @@ def emit_dry_run(
     # and the interpreter can exit out from under a script that parks forever
     # waiting on a human gate it will never receive.
     worker = threading.Thread(target=_execute, name="dry-run", daemon=True)
-    worker.start()
-    worker.join(timeout_seconds)
+    # A real run's supervisor is detached with cwd=workspace, so scripts read
+    # plan state and git heads relative to the --cwd workspace. The dry run
+    # executes in this process, which may sit anywhere; give the script the
+    # same working directory a real run would.
+    try:
+        previous_cwd: str | None = os.getcwd()
+    except OSError:
+        previous_cwd = None
+    os.chdir(workspace)
+    try:
+        worker.start()
+        worker.join(timeout_seconds)
+    finally:
+        if previous_cwd is not None:
+            with contextlib.suppress(OSError):
+                os.chdir(previous_cwd)
     if worker.is_alive():
         raise DelegateError(
             "dry_run_timeout",
@@ -1013,6 +1058,19 @@ def emit_approve(
     config_source: str = "command-config",
 ) -> int:
     root = _workflow_dir_for_command(command, workspace)
+    gate_choice = GateChoice(
+        gate=command.gate,
+        action=command.gate_action,
+        note=command.gate_note,
+    )
+    if command.gate_data_json is not None:
+        try:
+            data = json.loads(command.gate_data_json)
+        except json.JSONDecodeError as exc:
+            raise DelegateError(
+                "invalid_workflow_gate_data", f"workflow approve --data is not valid JSON: {exc}"
+            ) from exc
+        gate_choice = replace(gate_choice, data=data, has_data=True)
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     result = emit_run(
         resumed,
@@ -1022,6 +1080,7 @@ def emit_approve(
         stderr=stdout,
         approve_gate=True,
         config_source=config_source,
+        gate_choice=gate_choice,
     )
     # Approval is an operator-facing transition: wait for the detached
     # trampoline to publish a terminal projection when the child is already
@@ -1121,11 +1180,91 @@ def emit_reject(
     return EXIT_OK
 
 
+def _gate_matches(event: JsonObject, gate: str | None) -> bool:
+    return gate is None or event.get("gateName") == gate or event.get("key") == gate
+
+
+def _gate_event(events: list[JsonObject], gate_key: str, result_hash: object) -> JsonObject | None:
+    latest: JsonObject | None = None
+    for event in events:
+        if (
+            event.get("type") == "gate"
+            and event.get("simulated") is not True
+            and event.get("key") == gate_key
+            and (not isinstance(result_hash, str) or event.get("gateResultHash") == result_hash)
+        ):
+            latest = event
+    return latest
+
+
+def _pending_gate_names(
+    root: Path, approval: JsonObject | None, events: list[JsonObject]
+) -> list[str]:
+    names: list[str] = []
+    for event in events:
+        if event.get("type") != "gate" or event.get("simulated") is True:
+            continue
+        key = event.get("key")
+        result_hash = event.get("gateResultHash")
+        if not isinstance(key, str) or not isinstance(result_hash, str):
+            continue
+        if registry.approval_allows(root, key, result_hash, approval=approval or {}):
+            continue
+        name = event.get("gateName")
+        label = name if isinstance(name, str) else key
+        if label not in names:
+            names.append(label)
+    return names
+
+
+def _gate_decision(
+    choice: GateChoice | None, event: JsonObject | None, gate_key: str
+) -> JsonObject | None:
+    """Validate an approve choice against the gate's declared actions.
+
+    Returns the decision fields to store, or None for a bare approval (which
+    stores exactly what approvals always stored).
+    """
+    declared = event.get("actions") if isinstance(event, dict) else None
+    allowed = (
+        [item for item in declared if isinstance(item, str)]
+        if isinstance(declared, list) and declared
+        else ["approve"]
+    )
+    name = event.get("gateName") if isinstance(event, dict) else None
+    label = name if isinstance(name, str) else gate_key
+    action = choice.action if choice is not None else None
+    if action is None:
+        if "approve" not in allowed:
+            raise DelegateError(
+                "invalid_gate_action",
+                f"Gate {label!r} requires --action; allowed actions: {', '.join(allowed)}.",
+            )
+    elif action not in allowed:
+        raise DelegateError(
+            "invalid_gate_action",
+            f"Gate {label!r} does not allow action {action!r}; "
+            f"allowed actions: {', '.join(allowed)}.",
+        )
+    if choice is None or (choice.action is None and choice.note is None and not choice.has_data):
+        return None
+    decision: JsonObject = {
+        "action": action or "approve",
+        "approvedAt": run_registry.utc_now_iso(),
+    }
+    if choice.note is not None:
+        decision["note"] = choice.note
+    if choice.has_data:
+        decision["data"] = choice.data
+    return decision
+
+
 def _latest_unapproved_gate_event(
     root: Path,
     approval: JsonObject | None = None,
     *,
     events: list[JsonObject] | None = None,
+    gate: str | None = None,
 ) -> JsonObject | None:
     approval = (
         approval if approval is not None else registry.read_json(root / registry.APPROVAL_FILE)
@@ -1145,6 +1284,7 @@ def _latest_unapproved_gate_event(
         if (
             isinstance(key, str)
             and isinstance(result_hash, str)
+            and _gate_matches(event, gate)
             and not registry.approval_allows(
                 root,
                 key,
