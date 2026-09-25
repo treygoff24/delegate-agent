@@ -34,6 +34,7 @@ from delegate_agent import (
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
+    MODE_WORK,
     VALID_MODES,
 )
 from delegate_agent.errors import DelegateError
@@ -857,6 +858,18 @@ def build_resume_plan(
                     "structured output schema."
                 )
 
+    # A source that opted into native sessions keeps that opt-in, so the resumed
+    # Run records its own session and `delegate followup <new alias>` works. A
+    # cross-engine resume to an engine without native sessions cannot keep it.
+    resumable = (
+        manifest.get("resumable") is True and mode == MODE_WORK and engine in {"codex", "claude"}
+    )
+    if manifest.get("resumable") is True and not resumable:
+        notes.append(
+            f"resumable dropped: {engine} {mode} runs cannot record a native session, so "
+            "continue the resumed run with delegate resume, not followup."
+        )
+
     continuation = build_continuation(
         alias=alias,
         run_id=run_id,
@@ -892,6 +905,7 @@ def build_resume_plan(
         persona_record_path=persona_record_path,
         mail_push=opts.mail_push,
         continuity_mode=continuity_mode,
+        resumable=resumable,
         warnings=opts.warnings,
         workspace_env=workspace_env,
         workspace_env_recorded=workspace_env is not None,
