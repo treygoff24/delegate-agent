@@ -6,7 +6,12 @@ from typing import TextIO
 
 from delegate_agent import command_errors, redaction, run_registry, snapshot_view
 from delegate_agent import rendering as delegate_rendering
+from delegate_agent.errors import DelegateError
+from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
 from delegate_agent.json_types import JsonObject
+
+# Upper bound on linked-worktree registries folded into a main-worktree listing.
+LINKED_REGISTRY_LIMIT = 256
 
 STRUCTURAL_RUN_KEYS = (
     "runId",
@@ -22,7 +27,50 @@ STRUCTURAL_RUN_KEYS = (
     "terminalStatus",
     "activityAt",
     "initiatorRoot",
+    "registryWorkspace",
 )
+
+
+def linked_registry_roots(workspace_path: str) -> list[tuple[str, Path]]:
+    """Registries of this repository's linked worktrees, seen from the main one.
+
+    A run launched from inside a linked worktree (a Delegate lane's own
+    worktree, typically) is registered in that worktree's ``.delegate``. The
+    main worktree finds those registries read-only through ``git worktree
+    list`` so ``delegate runs`` there lists them; nothing is written across
+    worktrees. Returns [] when the workspace is not a repository's main
+    worktree or Git cannot answer.
+    """
+    try:
+        result = run_git(
+            workspace_path,
+            ["worktree", "list", "--porcelain"],
+            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        )
+    except OSError:  # no git binary: nothing to fold in.
+        return []
+    if result.returncode != 0:
+        return []
+    paths = [
+        line[len("worktree ") :]
+        for line in result.stdout.split("\n")
+        if line.startswith("worktree ")
+    ]
+    if not paths:
+        return []
+    try:
+        if Path(paths[0]).resolve() != Path(workspace_path).resolve():
+            return []
+    except (OSError, RuntimeError):
+        return []
+    roots: list[tuple[str, Path]] = []
+    for path in paths[1:]:
+        root = run_registry.registry_root_if_exists(Path(path))
+        if root is not None:
+            roots.append((path, root))
+        if len(roots) >= LINKED_REGISTRY_LIMIT:
+            break
+    return roots
 
 
 @dataclass(frozen=True)
@@ -128,21 +176,37 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
     else:
         mode = "recent"
         status_filter = None
-    if registry_root is None:
-        summaries: list[JsonObject] = []
-        total = 0
-        scope_total = 0
-    else:
-        index = run_registry.load_index(registry_root)
-        summaries, total, scope_total = run_registry.list_run_summaries(
-            registry_root,
-            index,
-            active=command.active,
-            status_filter=status_filter,
-            harness=command.harness,
-            group=command.group,
-            limit=limit,
-        )
+    sources: list[tuple[str | None, Path]] = [(None, registry_root)] if registry_root else []
+    sources.extend(linked_registry_roots(workspace_path))
+    summaries: list[JsonObject] = []
+    total = 0
+    scope_total = 0
+    for linked_workspace, root in sources:
+        try:
+            index = run_registry.load_index(root)
+            found, found_total, found_scope = run_registry.list_run_summaries(
+                root,
+                index,
+                active=command.active,
+                status_filter=status_filter,
+                harness=command.harness,
+                group=command.group,
+                limit=limit,
+            )
+        except (OSError, ValueError, DelegateError):
+            # One unreadable linked registry must not hide the main listing.
+            if linked_workspace is None:
+                raise
+            continue
+        if linked_workspace is not None:
+            for summary in found:
+                summary["registryWorkspace"] = linked_workspace
+        summaries.extend(found)
+        total += found_total
+        scope_total += found_scope
+    if len(sources) > 1:
+        summaries.sort(key=lambda summary: str(summary.get("activityAt") or ""), reverse=True)
+        summaries = summaries[:limit]
     if command.structural:
         summaries = [
             redaction.redact_value(

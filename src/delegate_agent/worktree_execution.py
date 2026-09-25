@@ -12,12 +12,14 @@ from delegate_agent import config as delegate_config
 from delegate_agent import (
     harness_events,
     mail,
+    outcome,
     profiles,
     retention,
     run_context,
     run_metadata,
     run_registry,
     safe_workspace,
+    workspace_spec,
     worktree_records,
 )
 from delegate_agent import runner as delegate_runner
@@ -59,11 +61,19 @@ from delegate_agent.request_models import Request, ResolvedWorkspace
 class PersistentWorktreeError(Exception):
     """User-facing error raised by the persistent worktree execution boundary."""
 
-    def __init__(self, error: str, message: str, exit_code: int = 2) -> None:
+    def __init__(
+        self,
+        error: str,
+        message: str,
+        exit_code: int = 2,
+        *,
+        diagnostics: JsonObject | None = None,
+    ) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
         self.exit_code = exit_code
+        self.diagnostics = diagnostics
 
 
 BinaryValidator = Callable[[list[str], str], None]
@@ -128,6 +138,8 @@ def execute_persistent_worktree(
     _warn_if_worktree_pool_large(execution.config, execution.stderr)
     registration = _register_persistent_worktree_run(execution, preflight)
     _create_persistent_worktree_or_record_failure(execution, preflight, registration)
+    if execution.request.workspace_setup is not None:
+        _run_workspace_setup_or_record_failure(execution, registration)
     return _launch_child_in_persistent_worktree(execution, preflight, registration)
 
 
@@ -182,9 +194,14 @@ def _validate_persistent_worktree_request(
     source_git_root = request.workspace
 
     try:
-        base_oid = require_valid_head(source_git_root)
+        source_head_oid = require_valid_head(source_git_root)
     except IsolationExecutionError as exc:
         raise PersistentWorktreeError(exc.error, exc.message) from exc
+    base_oid = (
+        _resolve_workspace_base(source_git_root, request.workspace_base)
+        if request.workspace_base is not None
+        else source_head_oid
+    )
     (
         _current_git_root,
         current_git_common_dir,
@@ -245,7 +262,7 @@ def _validate_persistent_worktree_request(
         source_git_root=source_git_root,
         base_oid=base_oid,
         source_git_common_dir=current_git_common_dir or iso_ctx.source_git_common_dir,
-        source_head_oid=base_oid,
+        source_head_oid=source_head_oid,
         source_head_ref=current_head_ref,
         source_branch=current_branch,
         registry_root=registry_root,
@@ -254,6 +271,22 @@ def _validate_persistent_worktree_request(
         dirty_example_paths=dirty_example_paths,
         dirty_snapshot=dirty_snapshot,
     )
+
+
+def _resolve_workspace_base(source_git_root: str, base: str) -> str:
+    """Resolve ``--base`` to a commit in the source repository."""
+    result = _run_git(
+        source_git_root,
+        ["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    oid = result.stdout.strip() if result.returncode == 0 else ""
+    if not oid:
+        raise PersistentWorktreeError(
+            "invalid_workspace_base",
+            f"--base {base!r} does not name a commit in {source_git_root}.",
+        )
+    return oid
 
 
 def _build_persistent_worktree_run_context(
@@ -277,7 +310,7 @@ def _build_persistent_worktree_run_context(
         if isinstance(dirty_warnings, list)
         else request.warnings
     )
-    return run_context.from_request(
+    ctx = run_context.from_request(
         request,
         registry_root=preflight.registry_root,
         run_id=run_id,
@@ -310,6 +343,10 @@ def _build_persistent_worktree_run_context(
         worktree_auto_prune_on_completion=auto_prune_enabled,
         worktree_auto_prune_merged_older_than_days=auto_prune_days,
     )
+    spec_record = creation_context.get("workspaceSpec")
+    if isinstance(spec_record, dict):
+        ctx = replace(ctx, workspace_spec=spec_record)
+    return ctx
 
 
 def _register_persistent_worktree_run(
@@ -370,7 +407,9 @@ def _register_persistent_worktree_run(
     worktree_path = str(plan_worktree_path(data_home, fingerprint, label, short_id))
 
     creation_context: JsonObject = {
-        "sourceHeadOid": preflight.source_head_oid,
+        # The worktree's starting commit: every consumer (ahead/behind, review
+        # diff, forbid-commit) reads this as the creation base.
+        "sourceHeadOid": preflight.base_oid,
         "sourceHeadRef": preflight.source_head_ref,
         "sourceBranch": preflight.source_branch,
         "sourceGitCommonDir": source_git_common_dir,
@@ -381,6 +420,17 @@ def _register_persistent_worktree_run(
         "shortRunId": short_id,
         "includeDirty": request.include_dirty,
     }
+    if request.workspace_base is not None:
+        creation_context["baseRef"] = request.workspace_base
+        creation_context["sourceCheckoutHeadOid"] = preflight.source_head_oid
+    spec_record = workspace_spec.spec_record(
+        base=request.workspace_base,
+        base_oid=preflight.base_oid if request.workspace_base is not None else None,
+        env=request.workspace_env,
+        setup=request.workspace_setup,
+    )
+    if spec_record is not None:
+        creation_context["workspaceSpec"] = spec_record
 
     pre_ctx = _build_persistent_worktree_run_context(
         execution,
@@ -441,8 +491,10 @@ def _record_persistent_worktree_failure(
     error: str,
     message: str,
     worktree_realized: bool = False,
+    extra: JsonObject | None = None,
 ) -> None:
-    extra: JsonObject = {
+    extra = {
+        **(extra or {}),
         "error": error,
         "message": message,
     }
@@ -481,8 +533,21 @@ def _create_persistent_worktree_or_record_failure(
             registration.worktree_path,
             preflight.base_oid,
         )
-        auto_include_dirty = not execution.request.include_dirty and (
-            preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
+        source_dirty = preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
+        if execution.request.workspace_base is not None and source_dirty:
+            # Dirty files are relative to the source checkout's HEAD; the
+            # caller asked for a different starting commit.
+            print(
+                "Not syncing dirty source into the persistent worktree: --base "
+                f"{execution.request.workspace_base} names its starting commit "
+                f"({preflight.tracked_dirty_files} tracked-modified and "
+                f"{preflight.untracked_files} untracked file(s) left in the source).",
+                file=execution.stderr,
+            )
+        auto_include_dirty = (
+            not execution.request.include_dirty
+            and execution.request.workspace_base is None
+            and source_dirty
         )
         if auto_include_dirty:
             examples = ", ".join(repr(path) for path in preflight.dirty_example_paths[:5])
@@ -575,6 +640,94 @@ def _create_persistent_worktree_or_record_failure(
             remove_branch=True,
         )
         raise PersistentWorktreeError(str(error), str(message)) from exc
+
+
+def _run_workspace_setup_or_record_failure(
+    execution: PersistentWorktreeExecution,
+    registration: PersistentWorktreeRegistration,
+) -> None:
+    """Run the caller's setup command in the fresh worktree, before the child.
+
+    Runs under the launcher that created the worktree (the record is still
+    ``creating_isolation`` and names this process as ``launcherPid``). A record
+    already cancelled or sealed never gains a setup process, the same rule the
+    runner applies before every child ``Popen``. A nonzero exit records a typed
+    ``workspace_setup_failed`` failure and no child is launched; the worktree is
+    kept for inspection like any failed work run's.
+    """
+    request = execution.request
+    command = request.workspace_setup
+    assert command is not None
+    pre_ctx = registration.pre_ctx
+    with delegate_runner._launch_registry_lock(pre_ctx):
+        refused = delegate_runner._launch_refused(
+            run_registry.load_run_state_or_none(pre_ctx.registry_root, registration.run_id)
+        )
+    if refused:
+        raise PersistentWorktreeError("cancelled_by_user", "Run was cancelled.", 1)
+    print(
+        f"delegate: running workspace setup in {registration.worktree_path}", file=execution.stderr
+    )
+    try:
+        result = workspace_spec.run_setup(
+            command,
+            cwd=registration.worktree_path,
+            env=profiles.child_environment(overrides=pre_ctx.env_overrides),
+            log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
+            timeout=float(request.timeout) if request.timeout is not None else None,
+        )
+    except OSError as exc:
+        result = workspace_spec.SetupResult(
+            exit_code=-1,
+            duration_ms=0,
+            timed_out=False,
+            log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
+            output_tail=f"setup could not start: {exc.strerror or exc}",
+        )
+    spec_record = registration.creation_context.get("workspaceSpec")
+    if isinstance(spec_record, dict):
+        spec_record["setupResult"] = result.as_json()
+        registration.pre_ctx = replace(registration.pre_ctx, workspace_spec=spec_record)
+        delegate_runner.write_manifest(
+            registration.run_path,
+            delegate_runner.build_manifest(registration.pre_ctx, public_argv(request)),
+        )
+    if result.ok:
+        return
+    reason = (
+        f"timed out after {request.timeout}s" if result.timed_out else f"exited {result.exit_code}"
+    )
+    message = (
+        f"Workspace setup {reason}; the child was not launched. Setup output: {result.log_path}"
+    )
+    if result.output_tail.strip():
+        message = f"{message}\n--- setup output (tail) ---\n{result.output_tail}"
+    _record_persistent_worktree_failure(
+        registration,
+        error=workspace_spec.SETUP_FAILED,
+        message=message,
+        worktree_realized=True,
+        extra={
+            "failureReason": workspace_spec.SETUP_FAILED,
+            "failureKind": outcome.FAILURE_WORKSPACE_SETUP,
+            "workspaceSetup": result.as_json(),
+        },
+    )
+    raise PersistentWorktreeError(
+        workspace_spec.SETUP_FAILED,
+        message,
+        1,
+        diagnostics={
+            "runId": registration.run_id,
+            "alias": registration.alias,
+            "status": run_registry.STATUS_FAILED,
+            "failureReason": workspace_spec.SETUP_FAILED,
+            "failureKind": outcome.FAILURE_WORKSPACE_SETUP,
+            "executionCwd": registration.worktree_path,
+            "branch": registration.branch,
+            "workspaceSetup": result.as_json(),
+        },
+    )
 
 
 def _request_for_execution_workspace(

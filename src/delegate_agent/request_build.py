@@ -34,6 +34,7 @@ from delegate_agent import (
     run_registry,
     safe_workspace,
     structured_output,
+    workspace_spec,
     wsl,
 )
 from delegate_agent import config as delegate_config
@@ -134,6 +135,9 @@ RUN_INPUT_KEYS = {
     "structuredRetryBackend",
     "resumable",
     "continuityMode",
+    "base",
+    "env",
+    "setup",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -1624,6 +1628,7 @@ def _build_normalized_launch(
                 spec.instruction_mode, prompt, engine=engine, mode=mode
             )
         )
+        _validate_workspace_spec(launch, mode=mode, isolation_context=None)
         workspace, cleanup_workspace = _call_workspace(launch.dry_run)
         effective_progress = False
         initial = delegate_runner.PROGRESS_INITIAL_DELAY_SEC
@@ -1661,6 +1666,7 @@ def _build_normalized_launch(
         workspace, isolation_context = _structured_retry_launch(
             spec, workspace, isolation_context, config
         )
+        _validate_workspace_spec(launch, mode=mode, isolation_context=isolation_context)
         effective_progress, initial, interval = spec.progress
     source_prompt = prompt
     if call:
@@ -1731,7 +1737,70 @@ def _build_normalized_launch(
         raise
     if launch.expect_files:
         request.expect_files = tuple(launch.expect_files)
+    _apply_workspace_spec(request, launch)
     return request
+
+
+def _workspace_spec_declared(launch: LaunchOptions) -> bool:
+    return bool(
+        launch.workspace_base is not None
+        or launch.workspace_setup is not None
+        or launch.workspace_env
+        or launch.workspace_env_files
+    )
+
+
+def _validate_workspace_spec(
+    launch: LaunchOptions,
+    *,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> None:
+    """Workspace specs belong to work lanes in a Delegate worktree.
+
+    ``base`` and ``setup`` describe how a worktree is created, so they need a
+    new persistent worktree. ``env`` also applies when a run re-enters an
+    existing worktree (resume, followup, structured retry).
+    """
+    if not _workspace_spec_declared(launch):
+        return
+    lifecycle = isolation_context.isolation_lifecycle if isolation_context is not None else None
+    if launch.workspace_base is not None or launch.workspace_setup is not None:
+        flag = "--base" if launch.workspace_base is not None else "--setup"
+        if mode != MODE_WORK or lifecycle != "persistent":
+            raise DelegateError(
+                "invalid_option_combination",
+                f"{flag} requires work mode with --isolation worktree "
+                "(it is creation-only: resume and followup reuse the existing worktree).",
+            )
+    if launch.workspace_base is not None and launch.include_dirty:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--base and --include-dirty cannot be combined: dirty files are relative to "
+            "the source checkout's HEAD, not to the requested base.",
+        )
+    if (
+        (launch.workspace_env or launch.workspace_env_files)
+        and not launch.workspace_env_recorded
+        and (mode != MODE_WORK or lifecycle not in {"persistent", "attached"})
+    ):
+        raise DelegateError(
+            "invalid_option_combination",
+            "--env/--env-file require work mode with --isolation worktree.",
+        )
+
+
+def _apply_workspace_spec(request: Request, launch: LaunchOptions) -> None:
+    if not _workspace_spec_declared(launch):
+        return
+    env = workspace_spec.resolve_env(launch.workspace_env, launch.workspace_env_files)
+    request.workspace_base = launch.workspace_base
+    request.workspace_setup = launch.workspace_setup
+    request.workspace_env = env or None
+    if env:
+        # Beneath Delegate's own variables: reserved names are already refused,
+        # and a profile's auth variables must keep winning.
+        request.env_overrides = {**env, **(request.env_overrides or {})}
 
 
 def request_from_parsed(
@@ -2166,6 +2235,22 @@ def request_from_input_json(
             "expectedPersonaDigest requires persona.",
         )
 
+    json_base = (
+        workspace_spec.validate_base(raw["base"], origin="base")
+        if raw.get("base") is not None
+        else None
+    )
+    json_env = (
+        workspace_spec.validate_env(raw["env"], origin="env")
+        if raw.get("env") is not None
+        else None
+    )
+    json_setup = (
+        workspace_spec.validate_setup(raw["setup"], origin="setup")
+        if raw.get("setup") is not None
+        else None
+    )
+
     launch = LaunchOptions(
         engine=str(engine),
         mode=str(mode),
@@ -2186,6 +2271,9 @@ def request_from_input_json(
         resumable=raw_resumable,
         resume_session_id=raw_structured_retry_session_id,
         continuity_mode=raw_continuity_mode,
+        workspace_base=json_base,
+        workspace_env=json_env or None,
+        workspace_setup=json_setup,
     )
     spec = _LaunchInput(
         options=launch,

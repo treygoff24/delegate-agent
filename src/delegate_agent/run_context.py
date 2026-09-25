@@ -6,10 +6,11 @@ copies arbitrary Request attributes into the runner's execution context.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Required, TypedDict, Unpack
 
-from delegate_agent import profiles, run_registry
+from delegate_agent import profiles, run_registry, workspace_spec
 from delegate_agent import runner as delegate_runner
 from delegate_agent.json_types import JsonObject
 from delegate_agent.request_models import Request
@@ -51,8 +52,16 @@ def from_request(
     **location: Unpack[RunLocation],
 ) -> delegate_runner.RunContext:
     env = dict(request.env_overrides or {}) if env_overrides is None else dict(env_overrides)
+    holds_worktree = location.get("isolation_lifecycle") in {"persistent", "attached"}
     return delegate_runner.RunContext(
         **location,
+        workspace_env=dict(request.workspace_env or {}),
+        workspace_spec=workspace_spec.spec_record(
+            base=request.workspace_base,
+            env=request.workspace_env,
+            setup=request.workspace_setup,
+        ),
+        launcher_pid=os.getpid() if holds_worktree else None,
         harness=request.engine,
         engine=request.engine,
         mode=request.mode,

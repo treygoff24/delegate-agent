@@ -45,6 +45,7 @@ from delegate_agent import (
     stall_watchdog,
     stream_capture,
     terminal_states,
+    workspace_spec,
     worktree_summary,
 )
 from delegate_agent import config as delegate_config
@@ -218,6 +219,15 @@ class RunContext:
     # Bounded wait for registry mutations. Finalization writes a WAL when this
     # budget expires; launch admission fails before spawning a child.
     registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
+    # Workspace spec: the keys-only manifest record, and the env values that
+    # are written only to the run's private workspace-env.json.
+    workspace_spec: JsonObject | None = None
+    workspace_env: dict[str, str] = field(default_factory=dict)
+    # The process that owns this run from registration to its terminal record.
+    # On a worktree-holding run it is the worktree lease holder: while the
+    # record is non-terminal and this process is verifiably alive, no prune
+    # path reaps the worktree, whatever the child pid shows.
+    launcher_pid: int | None = None
 
 
 def _process_group_grace_seconds(ctx: RunContext) -> float:
@@ -704,6 +714,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["structuredRetryWorkspace"] = True
     if ctx.worktree_attachment is not None:
         payload["worktreeAttachment"] = ctx.worktree_attachment
+    if ctx.workspace_spec is not None:
+        payload["workspaceSpec"] = ctx.workspace_spec
     return payload
 
 
@@ -809,6 +821,8 @@ def build_run_record(
                 record["pgid"] = os.getpgid(pid)
     if ctx.group is not None:
         record["group"] = ctx.group
+    if ctx.launcher_pid is not None:
+        record["launcherPid"] = ctx.launcher_pid
     if ctx.include_dirty:
         record["includeDirty"] = True
         record["syncedFiles"] = ctx.synced_files
@@ -2134,6 +2148,9 @@ def _prepare_tracked_run(
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
     if ctx.persona_text is not None:
         run_registry.write_private_text(run_path / PERSONA_TXT_FILE, ctx.persona_text)
+    if ctx.workspace_env:
+        # Values stay out of the manifest; resume/followup replay this file.
+        workspace_spec.write_run_env(run_path, ctx.workspace_env)
     manifest = build_manifest(ctx, manifest_argv or argv)
     if scratch_dir is not None:
         manifest["scratchPath"] = str(scratch_dir)

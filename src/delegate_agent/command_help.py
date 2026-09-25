@@ -242,6 +242,37 @@ _INCLUDE_DIRTY_OPTION = OptionSpec(
     "non-ignored files in the new worktree. Dirty source files are auto-included even "
     "without this flag.",
 )
+_WORKSPACE_SPEC_OPTIONS = (
+    OptionSpec(
+        "--base",
+        "REF",
+        "work + --isolation worktree only: cut the new worktree from REF (branch, tag, or "
+        "commit) instead of the source checkout's HEAD. Creation-only; not combinable with "
+        "--include-dirty, and dirty source files are not auto-included.",
+    ),
+    OptionSpec(
+        "--env",
+        "NAME=VALUE",
+        "Repeatable, work + --isolation worktree only: set NAME for the child. Recorded in "
+        "the run's private workspace-env.json and re-applied on resume and followup, "
+        "whatever the resuming shell exports. Output shows names only. DELEGATE_*, "
+        "WORKSPACE_ROOT, TMPDIR/TMP/TEMP, CODEX_HOME, and CLAUDE_CONFIG_DIR are reserved.",
+    ),
+    OptionSpec(
+        "--env-file",
+        "PATH",
+        "Repeatable: read NAME=VALUE lines (# comments, optional export, one pair of "
+        "surrounding quotes) into the run's env; --env wins over files.",
+    ),
+    OptionSpec(
+        "--setup",
+        "CMD",
+        "work + --isolation worktree only: run CMD with /bin/sh in the fresh worktree "
+        "before the child starts, bounded by --timeout. A nonzero exit fails the run with "
+        "error workspace_setup_failed (failureKind=workspace_setup), keeps the worktree, "
+        "and launches no child; output goes to the run's setup.log.",
+    ),
+)
 _EXPECT_FILE_OPTION = OptionSpec(
     "--expect-file",
     "PATH",
@@ -826,7 +857,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate run --input-json task.json",),
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
-            "reasoningEffort, fast, outputSchema, progress, forbidCommit, persona, allowRepoPersona.",
+            "reasoningEffort, fast, outputSchema, progress, forbidCommit, persona, allowRepoPersona, "
+            "base, env (object of NAME to string), setup.",
             "Use this for long prompts or programmatic invocation.",
         ),
         see_also=("cursor", "codex", "droid", "claude", "grok", "agent-help"),
@@ -889,6 +921,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "to that worktree; worktree remove/prune refuse while an attached "
             "resume run is live. Distinct from `workflow run --resume` (workflow "
             "replay).",
+            "An attached resume re-applies the source Run's recorded --env values "
+            "(workspace-env.json), not the resuming shell's; --base and --setup are "
+            "creation-only and are not re-run.",
             "Resume options must appear before the handle; tokens after the handle "
             "are continuation instructions, including flag-like text.",
             "For native harness session re-entry with preserved conversation context, "
@@ -936,6 +971,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
             "The source run must have been launched with --resumable to capture its native session ID.",
             "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",
+            "An attached followup re-applies the source Run's recorded --env values, not the "
+            "invoking shell's; --base and --setup are creation-only.",
             "Followup options may appear on either side of the handle before prompt text. Use -- to introduce literal flag-like prompt text.",
         ),
         see_also=("resume", "runs", "snapshot", "run-output", "worktree show"),
@@ -1447,6 +1484,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--budget", "N", "Maximum number of live agent() runs."),
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
+            OptionSpec(
+                "--env",
+                "NAME=VALUE",
+                "Repeatable, launch only: set NAME for every agent() child. Recorded once in "
+                "the workflow directory and re-applied on every resume instead of the "
+                "resuming shell's value.",
+            ),
+            OptionSpec("--env-file", "PATH", "Repeatable, launch only: read NAME=VALUE lines."),
             OptionSpec("--reason", "TEXT", "Non-empty reason for rejecting an agent result."),
             OptionSpec("--name", "NAME", "Use or save a user-level workflow name."),
             OptionSpec("--since", "SEQ", "For events/watch, emit events after sequence number."),
@@ -1484,6 +1529,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
             OptionSpec("--name", "NAME", "Resolve a saved user-level workflow name."),
+            OptionSpec(
+                "--env",
+                "NAME=VALUE",
+                "Repeatable, launch only: set NAME for every agent() child. Recorded once in "
+                "the workflow directory and re-applied on every resume instead of the "
+                "resuming shell's value.",
+            ),
+            OptionSpec("--env-file", "PATH", "Repeatable, launch only: read NAME=VALUE lines."),
         ),
         notes=(
             "The supervisor is detached, so the invoking process exits immediately. Under a "
@@ -2281,6 +2334,7 @@ for _engine in (*KNOWN_ENGINES, "dry-run"):
             _EXPECT_FILE_OPTION,
             _CONTINUITY_MODE_OPTION,
             *PERSONA_OPTIONS,
+            *_WORKSPACE_SPEC_OPTIONS,
         ),
     )
 
@@ -2294,6 +2348,10 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--expect-file",
         "--mail-push",
         "--resumable",
+        "--base",
+        "--env",
+        "--env-file",
+        "--setup",
     }
 )
 _CALL_UNSUPPORTED_GLOBAL_OPTIONS = (

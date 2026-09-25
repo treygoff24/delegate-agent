@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import shlex
 
-from delegate_agent import command_help, reasoning
+from delegate_agent import command_help, reasoning, workspace_spec
 from delegate_agent import config as delegate_config
 from delegate_agent import notify as notify_module
 from delegate_agent.constants import (
@@ -1302,6 +1302,10 @@ def parse_modeless_engine(
             resumable=resumable,
             continuity_mode=continuity_mode,
             warnings=tail_warnings,
+            workspace_base=tail.workspace_base,
+            workspace_env=tail.workspace_env,
+            workspace_env_files=tail.workspace_env_files,
+            workspace_setup=tail.workspace_setup,
         ),
     )
 
@@ -1449,6 +1453,10 @@ def parse_droid(
             resumable=resumable,
             continuity_mode=continuity_mode,
             warnings=tail_warnings,
+            workspace_base=tail_result.workspace_base,
+            workspace_env=tail_result.workspace_env,
+            workspace_env_files=tail_result.workspace_env_files,
+            workspace_setup=tail_result.workspace_setup,
         ),
     )
 
@@ -1906,12 +1914,48 @@ def parse_prompt_tail(
     persona: str | None = None
     no_persona = False
     allow_repo_persona = False
+    workspace_base: str | None = None
+    workspace_env: dict[str, str] = {}
+    workspace_env_files: list[str] = []
+    workspace_setup: str | None = None
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
         token = rest[i]
         # Retain compatibility for callers that invoke this command parser directly;
         # parse_cli normally extracts --json before dispatch.
+        if token in {"--base", "--env", "--env-file", "--setup"}:
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_option_value",
+                    f"{token} requires a value.",
+                )
+            value = rest[i + 1]
+            if token == "--base":
+                if workspace_base is not None:
+                    raise DelegateError("invalid_option_combination", "Only one --base is allowed.")
+                workspace_base = workspace_spec.validate_base(value, origin="--base")
+            elif token == "--setup":
+                if workspace_setup is not None:
+                    raise DelegateError(
+                        "invalid_option_combination", "Only one --setup is allowed."
+                    )
+                workspace_setup = workspace_spec.validate_setup(value, origin="--setup")
+            elif token == "--env-file":
+                if not value.strip():
+                    raise DelegateError(
+                        "invalid_workspace_env", "--env-file requires a non-empty path."
+                    )
+                workspace_env_files.append(value)
+            else:
+                name, env_value = workspace_spec.parse_env_assignment(value)
+                if name in workspace_env:
+                    raise DelegateError(
+                        "invalid_workspace_env", f"--env {name} is given more than once."
+                    )
+                workspace_env[name] = env_value
+            i += 2
+            continue
         if token == "--json":
             json_mode = True
             i += 1
@@ -2264,6 +2308,10 @@ def parse_prompt_tail(
         continuity_mode,
         tail_warnings,
         tuple(expect_files),
+        workspace_base,
+        workspace_env or None,
+        tuple(workspace_env_files),
+        workspace_setup,
     )
 
 
@@ -2779,9 +2827,30 @@ def _parse_workflow_path_action(
     dry_run = False
     resume: str | None = None
     name: str | None = None
+    env: dict[str, str] = {}
+    env_files: list[str] = []
     i = 0
     while i < len(args):
         token = args[i]
+        if token in {"--env", "--env-file"} and action == "run":
+            if i + 1 >= len(args):
+                raise DelegateError(
+                    "missing_option_value", f"workflow run {token} requires a value."
+                )
+            if token == "--env-file":
+                env_files.append(args[i + 1])
+            else:
+                env_name, env_value = workspace_spec.parse_env_assignment(
+                    args[i + 1], origin="workflow run --env"
+                )
+                if env_name in env:
+                    raise DelegateError(
+                        "invalid_workspace_env",
+                        f"workflow run --env {env_name} was given more than once.",
+                    )
+                env[env_name] = env_value
+            i += 2
+            continue
         if token == "--args" and action == "run":
             if i + 1 >= len(args):
                 raise DelegateError("missing_workflow_args", "workflow run --args requires JSON.")
@@ -2839,6 +2908,12 @@ def _parse_workflow_path_action(
                 "invalid_workflow_args",
                 "workflow run --resume does not accept --args; resume uses the pinned args.",
             )
+        if resume is not None and (env or env_files):
+            raise DelegateError(
+                "invalid_option_combination",
+                "workflow run --resume does not accept --env/--env-file; resume re-applies "
+                "the env recorded at launch.",
+            )
     if action == "run" and resume is None and script is None and name is None:
         raise DelegateError(
             "missing_workflow_script", "workflow run requires <script.py>, --name, or --resume."
@@ -2856,6 +2931,8 @@ def _parse_workflow_path_action(
             name=name,
             json_mode=json_mode,
             notify=notify,
+            env=tuple(env.items()),
+            env_files=tuple(env_files),
         ),
     )
 
