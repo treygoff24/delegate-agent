@@ -3213,6 +3213,18 @@ class WorkflowDsl:
             # approve validated any answer to this hash against these actions.
             result_hash = _gate_reask_hash(result, allowed)
             decision = registry.approval_decision(self.state.root, gate_key, result_hash)
+            if decision is not None and _decision_action(decision) not in allowed:
+                # An approval written against some other list must not hand
+                # this call an action it did not declare.
+                self.state.append_event(
+                    "gate_action_undeclared",
+                    gate=caller_key,
+                    gateKey=gate_key,
+                    action=_decision_action(decision),
+                    actions=allowed,
+                    reask=True,
+                )
+                decision = None
         if decision is not None:
             action = _decision_action(decision)
             note = decision.get("note")
@@ -5320,8 +5332,14 @@ def _gate_result_hash(result: object) -> str:
 
 
 def _gate_reask_hash(result: object, actions: list[str]) -> str:
-    """Hash of a park_gate() question re-asked because its answer lapsed."""
-    return _stable_hash(_canonical_json({"reask": {"result": result, "actions": actions}}))
+    """Hash of a park_gate() question re-asked because its answer lapsed.
+
+    The ``gate-reask-v1:`` prefix keeps this out of the domain of
+    ``_gate_result_hash``, which hashes the canonical JSON of any result: a
+    script whose result happens to look like a re-ask payload must not be able
+    to satisfy a re-ask with the approval for that result.
+    """
+    return _stable_hash(f"gate-reask-v1:{_canonical_json(result)}\x00{_canonical_json(actions)}")
 
 
 def _decision_action(decision: JsonObject) -> str:
