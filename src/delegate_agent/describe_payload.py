@@ -14,7 +14,15 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help, harness_discovery, profiles, reasoning, redaction
+from delegate_agent import (
+    VERSION,
+    command_help,
+    harness_discovery,
+    model_discovery,
+    profiles,
+    reasoning,
+    redaction,
+)
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -234,6 +242,23 @@ def _nonempty_engine_models(section: JsonObject) -> JsonObject | None:
     return None
 
 
+def _droid_row_has_content(section: JsonObject, discovery: JsonObject | None) -> bool:
+    """Whether the models listing has anything to say about droid.
+
+    droid is the one engine whose row carries no binary field, so a retired
+    harness — config section kept, its binary possibly still on PATH — prints a
+    bare ``droid:`` line that no config edit removes. Configured models, a
+    configured default model, or a discovered catalog all keep the row; a
+    ``models: null`` section with no default and no discovery omits it.
+    """
+    if _nonempty_engine_models(section) is not None:
+        return True
+    default_model = section.get("defaultModel")
+    if isinstance(default_model, str) and default_model:
+        return True
+    return bool(model_discovery.discovered_model_ids(discovery, "droid"))
+
+
 def binary_missing(binary: object) -> bool:
     """True when a configured harness binary does not resolve from this process.
 
@@ -344,9 +369,11 @@ def models_payload(
         ),
         "cursor": cursor,
         "droid": {
+            "binary": config["droid"]["binary"],
             "models": config["droid"]["models"],
             "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
+            "binaryMissing": binary_missing(config["droid"]["binary"]),
         },
         "codex": codex,
         "claude": claude,
@@ -1420,7 +1447,13 @@ def _print_engine_aliases(section: JsonObject, stdout: TextIO) -> None:
             print(f"  {alias} -> {_text_or_none(fields.get('model'))}{suffix}", file=stdout)
 
 
-def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
+def _emit_models_text(
+    payload: JsonObject,
+    config_source: str,
+    stdout: TextIO,
+    *,
+    discovery: JsonObject | None = None,
+) -> None:
     if config_source == "embedded-default":
         print("warning: using embedded default config", file=stdout)
     cursor = payload.get("cursor")
@@ -1433,12 +1466,12 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
         )
         _print_engine_aliases(cursor, stdout)
     droid = payload.get("droid")
-    droid_default = droid.get("defaultModel") if isinstance(droid, dict) else None
-    if isinstance(droid_default, str) and droid_default:
-        print(f"droid: defaultModel={droid_default}", file=stdout)
-    else:
-        print("droid:", file=stdout)
-    if isinstance(droid, dict):
+    if isinstance(droid, dict) and _droid_row_has_content(droid, discovery):
+        droid_default = droid.get("defaultModel")
+        if isinstance(droid_default, str) and droid_default:
+            print(f"droid: defaultModel={droid_default}", file=stdout)
+        else:
+            print("droid:", file=stdout)
         _print_engine_aliases(droid, stdout)
     codex = payload.get("codex")
     if isinstance(codex, dict):
@@ -1602,7 +1635,7 @@ def emit_models(
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
-    _emit_models_text(payload, config_source, stdout)
+    _emit_models_text(payload, config_source, stdout, discovery=discovery)
     return EXIT_OK
 
 

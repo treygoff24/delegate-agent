@@ -62,5 +62,62 @@ class ModelsBinaryMissingTests(unittest.TestCase):
                 self.assertFalse(describe_payload.binary_missing(str(exe)))
 
 
+class ModelsDroidRowTests(unittest.TestCase):
+    """dlg-qd1: a retired droid printed a bare `droid:` row no config edit removed."""
+
+    def _text(self, config, *, discovery=None):
+        payload = describe_payload.models_payload(config, "test", discovery=discovery)
+        out = io.StringIO()
+        describe_payload._emit_models_text(payload, "test", out, discovery=discovery)
+        rows = [line for line in out.getvalue().splitlines() if line.startswith("droid")]
+        return payload, rows
+
+    def test_retired_droid_prints_no_row_but_stays_in_the_payload(self):
+        config = embedded_default_config()
+        config["droid"]["models"] = None
+        with mock.patch.dict(os.environ, {"PATH": "/definitely/not/on/path"}):
+            payload, rows = self._text(config)
+
+        self.assertEqual(rows, [])
+        # Display-only omission: a compact consumer still learns droid is
+        # configured and that its binary does not resolve here.
+        self.assertIsNone(payload["droid"]["models"])
+        self.assertEqual(payload["droid"]["binary"], "droid")
+        self.assertIs(payload["droid"]["binaryMissing"], True)
+
+    def test_configured_droid_models_keep_the_row(self):
+        config = embedded_default_config()
+        config["droid"]["models"] = {"glm": "glm-5.1"}
+        payload, rows = self._text(config)
+
+        self.assertEqual(rows, ["droid:"])
+        self.assertEqual(payload["droid"]["models"], {"glm": "glm-5.1"})
+
+    def test_discovered_droid_models_keep_the_row(self):
+        # A discovery snapshot that knows droid is a live harness, even when the
+        # config lists nothing: the row is not noise about a retired engine.
+        config = embedded_default_config()
+        config["droid"]["models"] = None
+        discovery = {
+            "schema": 1,
+            "profile": "default",
+            "harnesses": {"droid": {"models": {"glm-5.1": {"displayName": "GLM 5.1"}}}},
+        }
+        _payload, rows = self._text(config, discovery=discovery)
+
+        self.assertEqual(rows, ["droid:"])
+
+    def test_droid_reports_its_binary_like_the_other_engines(self):
+        config = embedded_default_config()
+        config["droid"]["binary"] = "delegate-test-missing-binary-xyz"
+        payload = describe_payload.models_payload(config, "test")
+        self.assertEqual(payload["droid"]["binary"], "delegate-test-missing-binary-xyz")
+        self.assertIs(payload["droid"]["binaryMissing"], True)
+
+        config["droid"]["binary"] = sys.executable
+        payload = describe_payload.models_payload(config, "test")
+        self.assertIs(payload["droid"]["binaryMissing"], False)
+
+
 if __name__ == "__main__":
     unittest.main()
