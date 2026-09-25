@@ -206,6 +206,35 @@ def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
 _STRAY_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+def _raw_index_for_cleaned_end(segment: str, cleaned_end: int) -> int:
+    """Index in ``segment`` that matches ``cleaned_end`` after stray-stripping."""
+    cleaned_seen = 0
+    for index, char in enumerate(segment):
+        if cleaned_seen == cleaned_end:
+            return index
+        if not _STRAY_CONTROL_CHARS.match(char):
+            cleaned_seen += 1
+    return len(segment)
+
+
+def _stray_stripped_candidate(
+    decoder: json.JSONDecoder, segment: str
+) -> tuple[JsonValue, int] | None:
+    """Decode a candidate whose only defect is stray control characters.
+
+    Returns the value and the index just past it in ``segment``, or ``None``
+    when stripping does not make the segment's leading value decodable.
+    """
+    if not _STRAY_CONTROL_CHARS.search(segment):
+        return None
+    cleaned = _STRAY_CONTROL_CHARS.sub("", segment)
+    try:
+        value, cleaned_end = decoder.raw_decode(cleaned)
+    except json.JSONDecodeError:
+        return None
+    return value, _raw_index_for_cleaned_end(segment, cleaned_end)
+
+
 def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
     """Parse structured child output, tolerating raw control characters.
 
@@ -215,7 +244,9 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     never includes output that differed from valid JSON only by them. A
     document that is whole JSON only once stray characters are stripped is
     parsed stripped, so a stray byte between tokens cannot surface a decoy
-    fragment (``{"a":\\x01 1}`` is ``{"a": 1}``, not ``"a"``).
+    fragment (``{"a":\\x01 1}`` is ``{"a": 1}``, not ``"a"``); a candidate the
+    scanner finds inside prose gets the same treatment, so a damaged fenced
+    block is not answered with a quoted fragment of it.
     """
     if _STRAY_CONTROL_CHARS.search(text):
         cleaned = _STRAY_CONTROL_CHARS.sub("", text)
@@ -294,8 +325,11 @@ def _parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonVal
         try:
             value, end = decoder.raw_decode(stripped[start:])
         except json.JSONDecodeError:
-            position = start + 1
-            continue
+            recovered = _stray_stripped_candidate(decoder, stripped[start:])
+            if recovered is None:
+                position = start + 1
+                continue
+            value, end = recovered
         candidates.append(
             _decode_string_payload(value, schema) if isinstance(value, str) else value
         )

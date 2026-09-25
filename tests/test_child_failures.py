@@ -70,16 +70,32 @@ class ChildFailureClassifierTests(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.code, "codex_thread_lost")
 
-    def test_rate_limit_with_account_context_anywhere_is_usage_limit(self):
+    def test_rate_limit_with_account_context_on_the_same_line_is_usage_limit(self):
         for text in (
-            "Quota exceeded for this billing period.\nRate limit response from upstream.",
-            "You were rate limited.\nCheck your subscription for details.",
             "rate limit reached; account credit exhausted",
+            "HTTP 429 Too Many Requests: quota exceeded",
+            "You were rate limited; check your subscription for details.",
+            "billing period ended: rate limit response from upstream",
+            "code 429: usage limit for this key",
         ):
             with self.subTest(text=text):
                 failure = child_failures.classify(text)
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.code, "usage_limit")
+
+    def test_account_context_on_another_line_is_not_quota(self):
+        # The pairing window stays inside one line: a transient 429 next to an
+        # unrelated `usage:`/`memory usage:` line is throttling, not an account
+        # quota, and calling it quota suppresses the structured correction retry
+        # and sends an operator to credential rotation.
+        for text in (
+            "Quota exceeded for this billing period.\nRate limit response from upstream.",
+            "You were rate limited.\nCheck your subscription for details.",
+            "HTTP 429 Too Many Requests, backing off\nmemory usage: 82%",
+            "rate limit exceeded, retrying\nusage: mytool [-h] [--flag]",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(child_failures.classify(text))
 
     def test_bare_rate_limit_without_account_context_is_not_usage_limit(self):
         self.assertIsNone(child_failures.classify("429 rate limit exceeded, retrying in 3s"))

@@ -81,6 +81,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `--cwd` workspace, as a real run's supervisor does. A dry run that times
   out leaves the workspace as the working directory, because its abandoned
   script thread may still be resolving relative paths.
+- Persistent-worktree change accounting lists untracked files individually
+  (`git status --untracked-files=all`), matching the per-file launch-seeded
+  digest map. A seeded untracked directory used to be reported as one collapsed
+  entry the seeded filter could never match, so a quiet `work` run claimed a
+  change the child never made and reported success, a structured child with
+  unparseable output was refused as changed instead of relaunched, and the
+  worktree was retained as dirty. `workSummary.changedFiles` and
+  `rawChangedFilesCount` count files rather than directories for untracked
+  trees.
+- A bare `429`/`rate limit` diagnostic classifies as `usage_limit` only when
+  account-context wording (`quota`, `usage`, `billing`, `subscription`,
+  `account`, `credit`) appears on the same line within 80 characters of it, in
+  either order. An unrelated `memory usage: 82%` line or a wrapped command's
+  `usage:` help text no longer pairs with a transient 429, which had marked the
+  run a quota failure, suppressed the structured correction retry, and pointed
+  operators at credential rotation.
 - Codex work runs recover the last substantive agent message as the completion
   report when the stream never sealed `turn.completed`, instead of classifying a
   complete report as `resultQuality=empty`. A progress preamble is still not
@@ -181,7 +197,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliverable is missing (`deliverable_missing`). Scripts that treated exit 0
   from an empty tracked run as success will now see exit 1. Every failed or
   cancelled run carries `failureKind`, a closed enum listed in
-  `docs/cli-reference.md`.
+  `docs/cli-reference.md`. A missing `--expect-file` deliverable is reported as
+  `deliverable_missing` even when the run also produced no assistant text: the
+  verdict the caller asked for outranks the no-output label, and both fail the
+  run. Summaries from `runs`/`ps`/`wait` carry `failureKind` whenever the record
+  holds the key, `null` included, so a consumer that derives its verdict from a
+  summary agrees with the envelope instead of falling back to the older
+  result-quality veto (a quiet work run whose changes landed succeeded).
 - **A work run that changed files but ended quietly still succeeds.** A
   tracked `work` or `followup` run that exits 0 without assistant text, while
   its work summary shows changed files or commits, is `succeeded` with a
@@ -195,7 +217,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the last attempt's own error events, last error message, and stderr, so
   an earlier attempt's 429 no longer labels a later attempt that failed for a
   different reason, and a final attempt's unrecovered quota error survives the
-  retry merge.
+  retry merge. The final attempt owns the provider terminal state as well: an
+  earlier attempt's `turn.cancelled`, max-turns stop, or refusal-coded failure
+  no longer decides a merged run whose retry or failover answered with text and
+  exited 0. The call path's empty-success retry now joins the thread-retry and
+  auth-fallback merges, so a first attempt's quota line cannot classify a clean
+  retry as `provider_quota`.
 - `wait` reports a running record whose runner process is gone (`staleReason`
   `dead_pid` or `missing_pid`) as `failureKind: runner_lost` instead of
   `stalled`. `stalled` is kept for the stall watchdog, which workflows retry as
@@ -223,7 +250,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `capabilities`, which lets a script detect these features. A failed child no
   longer erases an earlier attempt's parsed candidate. A child that exits 0
   without text now receives a structured correction retry. Structured parsing
-  tolerates raw control characters.
+  tolerates raw control characters, including inside a prose-wrapped or fenced
+  answer: a candidate the scanner finds is decoded again with the stray
+  characters stripped before a quoted fragment of the damaged document can be
+  returned in its place.
 - Bundled Codex declarations move to the GPT-6 line. `gpt-6-sol` and
   `gpt-6-luna` replace the `gpt-5.6-sol`/`gpt-5.6-luna` rows and `gpt-5.6-terra`
   is dropped outright, verified against live `codex` enumeration on both the
