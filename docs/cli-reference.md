@@ -1262,13 +1262,13 @@ persistent-worktree isolation semantics are unchanged.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]
 delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
 delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
-delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
+delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
 ```
 
@@ -1446,7 +1446,7 @@ remembers temporary blocks by hashed credential namespace (`CODEX_HOME/auth.json
 also mirror compatible legacy alias keys so existing launchers share blocks;
 remapped aliases remain isolated.
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. Bare harness, stale numbered-alias, and explicit `--latest` resolutions report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, `resolvedAgeSeconds`, `resolvedStartedAt`, and `newerRunCount`; `resolvedGroup` is included when recorded. Bare-harness resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle. Stale numbered aliases and old explicit `--latest` results add `run_target_stale`; these warnings are advisory and never change which run resolves.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. Bare harness, stale numbered-alias, and explicit `--latest` resolutions report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, `resolvedAgeSeconds`, `resolvedStartedAt`, and `newerRunCount`; `resolvedGroup` is included when recorded. Bare-harness resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle, and one whose newest pick has sibling runs still running (or in the same group) adds `bare_handle_ambiguous` naming them. Stale numbered aliases and old explicit `--latest` results add `run_target_stale`; these warnings are advisory and never change which run resolves.
 
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
