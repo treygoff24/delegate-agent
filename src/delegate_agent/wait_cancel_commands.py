@@ -463,9 +463,17 @@ def _cancel_signal_generation(
     process_group = pgid is not None
     signal_value = pgid if process_group else pid
     if signal_value is None:
-        raise WaitCancelError(
-            "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
-        )
+        # Setup window: a persistent worktree launcher runs the caller's setup
+        # command in its own session before any child exists, and records that
+        # group separately (`setupPgid`) because a published pid/pgid means
+        # "the child launched" to the unlaunched-seal logic. Cancel still has
+        # to be able to stop it, so it is the signal target while recorded.
+        setup_pgid = _state_int(state, "setupPgid")
+        if setup_pgid is None:
+            raise WaitCancelError(
+                "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
+            )
+        pid, pgid, signal_value, process_group = None, setup_pgid, setup_pgid, True
     if signal_value <= 1:
         raise WaitCancelError(
             "unsafe_signal_target", f"Refusing to signal pid/pgid <= 1: {signal_value}"
@@ -474,7 +482,10 @@ def _cancel_signal_generation(
 
 
 # A run record with no pid is normally a launch that has not published its
-# process yet, which is why cancel refuses it (missing_pid). After this long
+# process yet, which is why cancel refuses it (missing_pid). A worktree
+# launcher that is still running its setup command is the exception: it
+# publishes `setupPgid` instead, which cancel signals without making the
+# record look launched to the seal check. After this long
 # with no activity it is a launch that never produced a process: its
 # launcher died during isolation or before Popen. Workflow resume and
 # adoption may seal it instead of refusing forever.
@@ -750,6 +761,13 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
             continue
         state = pre_signal
         warnings.extend(generation_warnings)
+        if pid is None:
+            setup_warning = (
+                "run was still in workspace setup: the setup process group was signalled, "
+                "and no child had launched"
+            )
+            if setup_warning not in warnings:
+                warnings.append(setup_warning)
         if pgid is None:
             warnings.append("pgid missing; fell back to pid signal for legacy run")
         try:

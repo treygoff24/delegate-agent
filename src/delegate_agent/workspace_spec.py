@@ -24,8 +24,9 @@ import os
 import re
 import signal
 import subprocess  # nosec B404 - setup runs the caller's own declared command.
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,8 +46,21 @@ ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # would either be silently overwritten or would break run isolation, so the
 # spec refuses them instead of ranking them.
 RESERVED_ENV_PREFIXES = ("DELEGATE_",)
+# The engine home variables (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+# `KIMI_CODE_HOME`) move a harness's config, credentials, and session store.
 RESERVED_ENV_NAMES = frozenset(
-    {"WORKSPACE_ROOT", "TMPDIR", "TMP", "TEMP", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    {
+        "WORKSPACE_ROOT",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "KIMI_CODE_HOME",
+    }
+)
+RESERVED_ENV_LIST = (
+    "DELEGATE_*, WORKSPACE_ROOT, TMPDIR/TMP/TEMP, CODEX_HOME, CLAUDE_CONFIG_DIR, KIMI_CODE_HOME"
 )
 
 
@@ -56,11 +70,18 @@ def _env_error(message: str) -> DelegateError:
 
 def validate_env_name(name: object, *, origin: str) -> str:
     if not isinstance(name, str) or not ENV_NAME_RE.match(name):
-        raise _env_error(f"{origin}: {name!r} is not a valid environment variable name.")
+        # The rejected text is never echoed: an env file line or a --env token
+        # that fails this check may be key material (a multi-line quoted value
+        # split across lines is exactly that shape), and only names are allowed
+        # in human-facing output.
+        raise _env_error(
+            f"{origin}: the name before '=' is not a valid environment variable name "
+            "(letters, digits, and underscores, not starting with a digit)."
+        )
     if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES):
         raise _env_error(
             f"{origin}: {name} is reserved; Delegate sets it for every tracked child "
-            "(DELEGATE_*, WORKSPACE_ROOT, TMPDIR/TMP/TEMP, CODEX_HOME, CLAUDE_CONFIG_DIR)."
+            f"({RESERVED_ENV_LIST})."
         )
     return name
 
@@ -88,9 +109,28 @@ def parse_env_assignment(token: str, *, origin: str = "--env") -> tuple[str, str
     """Parse ``NAME=VALUE`` (the value may be empty and may contain ``=``)."""
     name, sep, value = token.partition("=")
     if not sep:
-        raise _env_error(f"{origin} expects NAME=VALUE, got {redaction.redact_string(token)!r}.")
+        # Never echo the token: it may hold a value fragment (a multi-line
+        # quoted value split across an env file's lines) rather than a name.
+        raise _env_error(f"{origin} expects NAME=VALUE; this entry has no '='.")
     validate_env_name(name, origin=origin)
+    reject_unclosed_quote(value, origin=origin)
     return name, validate_env_value(name, value, origin=origin)
+
+
+def reject_unclosed_quote(value: str, *, origin: str) -> None:
+    """Refuse a value that opens a quote with no matching close on its line.
+
+    The reader splits on newlines, so it cannot honor a quoted value that runs
+    onto the next line; keeping the stray quote as part of the value instead
+    handed the child a truncated secret-shaped string.
+    """
+    stripped = value.strip()
+    quote = stripped[:1]
+    if quote in {"'", '"'} and stripped.count(quote) < 2:
+        raise _env_error(
+            f"{origin}: the value opens a quote that is not closed on the same line; "
+            "multi-line quoted values are not supported."
+        )
 
 
 def _unquote(value: str) -> str:
@@ -139,6 +179,28 @@ def resolve_env(
     if assignments:
         merged.update(validate_env(assignments, origin="--env"))
     return merged
+
+
+def mask_recorded_env_values(text: str, env: Mapping[str, str] | None) -> str:
+    """Replace every recorded env value in ``text`` with ``***``.
+
+    Setup output is the child-shaped environment's own output and it prints
+    expanded values (`set -x`, package-manager traces), so a message that
+    carries its tail into ``state.json`` or an error envelope has to mask them
+    first. Values shorter than four characters are left alone: masking them
+    would shred ordinary output without hiding anything a reader could not
+    guess.
+    """
+    if not text or not env:
+        return text
+    values = sorted(
+        (value for value in env.values() if isinstance(value, str) and len(value) >= 4),
+        key=len,
+        reverse=True,
+    )
+    for value in values:
+        text = text.replace(value, "***")
+    return text
 
 
 def validate_setup(value: object, *, origin: str) -> str:
@@ -252,6 +314,46 @@ def _kill_group(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+class SetupInterrupted(Exception):
+    """Raised inside :func:`run_setup` when the launcher is terminated mid-setup.
+
+    Converting SIGTERM to an exception for the setup window only is what lets
+    the launcher kill the setup process group on its way out; the default
+    disposition would end the launcher under the child and orphan it.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"workspace setup interrupted by signal {signum}")
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def terminate_as_exception() -> Iterator[None]:
+    """Turn SIGTERM into :class:`SetupInterrupted` for the enclosed window.
+
+    Only the main thread may install a handler; anywhere else the previous
+    behavior (default disposition) is kept rather than failing the launch.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def _handler(signum: int, _frame: object) -> None:
+        raise SetupInterrupted(signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+    except (ValueError, OSError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal.SIGTERM, previous)
+
+
 def run_setup(
     command: str,
     *,
@@ -259,16 +361,23 @@ def run_setup(
     env: dict[str, str],
     log_path: Path,
     timeout: float | None = None,
+    publish_pgid: Callable[[int | None], None] | None = None,
 ) -> SetupResult:
     """Run ``command`` via ``/bin/sh -c`` in ``cwd``; output goes to ``log_path``.
 
     The process runs in its own session so a timeout terminates everything it
     started. Output is captured to a private log, not echoed.
+
+    ``publish_pgid`` is told the setup process group (its session-leader pid)
+    while setup runs and ``None`` when it ends, so ``delegate cancel`` can
+    stop a setup that would otherwise run unbounded. That identity must never
+    be published as the run's ``pid``/``pgid``: a published pid means "the
+    child launched" to the unlaunched-seal logic.
     """
     fd = run_registry.open_private_file(log_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
     started = time.monotonic()
     timed_out = False
-    with os.fdopen(fd, "wb") as log:
+    with os.fdopen(fd, "wb") as log, terminate_as_exception():
         process = subprocess.Popen(  # nosec B603 - fixed /bin/sh argv; command is the caller's.
             ["/bin/sh", "-c", command],
             cwd=cwd,
@@ -279,11 +388,25 @@ def run_setup(
             start_new_session=True,
         )
         try:
-            exit_code = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            if publish_pgid is not None:
+                # start_new_session makes this pid the setup group's leader.
+                publish_pgid(process.pid)
+            try:
+                exit_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_group(process)
+                exit_code = process.returncode if process.returncode is not None else -1
+        except BaseException:
+            # A terminated or interrupted launcher takes its setup down with
+            # it: whatever it started must not outlive the process that owns
+            # the worktree lease.
             _kill_group(process)
-            exit_code = process.returncode if process.returncode is not None else -1
+            raise
+        finally:
+            if publish_pgid is not None:
+                with contextlib.suppress(Exception):
+                    publish_pgid(None)
     duration_ms = int((time.monotonic() - started) * 1000)
     try:
         data = log_path.read_bytes()

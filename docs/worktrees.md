@@ -132,19 +132,29 @@ delegate --isolation worktree codex work \
   variables for the child. `--env` wins over files. Values are written only to
   the run's private `workspace-env.json`; the manifest and output show names
   (`workspaceSpec.envKeys`). Names Delegate sets itself (`DELEGATE_*`,
-  `WORKSPACE_ROOT`, `TMPDIR`/`TMP`/`TEMP`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`)
-  are refused. Delegate and auth-profile variables still take precedence.
+  `WORKSPACE_ROOT`, `TMPDIR`/`TMP`/`TEMP`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `KIMI_CODE_HOME`) are refused. Delegate and auth-profile variables still take
+  precedence. Errors name the file and line, never the content: an env file
+  cannot carry a quoted value across lines, and a line that opens a quote it
+  does not close on the same line is refused rather than truncated.
 - `--setup CMD` runs CMD with `/bin/sh` in the fresh worktree, under the
   launching Delegate process, before the child starts, with the run's env and
   bounded by `--timeout`. Output goes to the run's `setup.log`. A nonzero exit
   or timeout fails the run with error `workspace_setup_failed` and
   `failureKind: workspace_setup`, keeps the worktree for inspection, and
-  launches no child. Delegate never guesses a setup command.
+  launches no child. Setup runs in its own process group: `delegate cancel`
+  stops a run whose setup is still running (the record names the setup group
+  under `setupPgid`, never as the child `pid`/`pgid`), and a launcher that is
+  terminated or interrupted stops that group with it. Delegate never guesses a
+  setup command. Setup output embedded in the failure message has every
+  recorded `--env` value masked.
 
 `run --input-json` accepts the same spec as `base`, `env` (an object of names
 to strings), and `setup`. `resume` and `followup` re-apply the recorded env
 when they attach to the worktree, whatever the resuming shell exports; `base`
-and `setup` are creation-only and are not re-run.
+and `setup` are creation-only and are not re-run. A run that failed in setup is
+resumable on those terms: `resume` attaches to the kept worktree without
+re-running setup.
 
 ### Resume attachment
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
+import signal
 import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -443,6 +445,12 @@ def _register_persistent_worktree_run(
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
     run_registry.ensure_private_dir(run_path)
+    if request.workspace_env:
+        # Recorded here, before the worktree is created and before setup runs:
+        # a run that fails in setup is still resumable, and its env has to be
+        # on disk for the resuming run to replay. _prepare_tracked_run writes
+        # the same file again for a launch that reaches the child.
+        workspace_spec.write_run_env(run_path, request.workspace_env)
     if pre_ctx.source_prompt is not None:
         # Written here as well as in _prepare_tracked_run so a worktree-creation
         # failure still leaves a resumable prompt record.
@@ -642,6 +650,75 @@ def _create_persistent_worktree_or_record_failure(
         raise PersistentWorktreeError(str(error), str(message)) from exc
 
 
+def _publish_setup_pgid(
+    registration: PersistentWorktreeRegistration,
+    pgid: int | None,
+) -> None:
+    """Record (or clear) the setup process group on the run's state record.
+
+    ``setupPgid`` is deliberately not ``pid``/``pgid``: the unlaunched-seal
+    logic reads a published ``pid``/``pgid`` as "the child launched", and no
+    child exists yet. The field is cleared as soon as setup ends, so a record
+    that outlives its setup never points at a recycled group.
+    """
+    run_path = registration.run_path
+    try:
+        state = run_registry.load_run_state_or_none(
+            registration.pre_ctx.registry_root, registration.run_id
+        )
+        if not isinstance(state, dict):
+            return
+        if pgid is None:
+            if "setupPgid" not in state:
+                return
+            state.pop("setupPgid", None)
+        else:
+            state["setupPgid"] = pgid
+        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
+    except OSError:
+        # The setup itself must not fail because the record could not be
+        # annotated; `delegate cancel` then refuses this window as it did before.
+        return
+
+
+def _die_by_signal(signum: int) -> None:
+    """Restore the default disposition for ``signum`` and re-raise it here."""
+    with contextlib.suppress(ValueError, OSError):
+        signal.signal(signum, signal.SIG_DFL)
+    with contextlib.suppress(OSError):
+        os.kill(os.getpid(), signum)
+
+
+def _record_persistent_worktree_cancellation(
+    registration: PersistentWorktreeRegistration,
+) -> None:
+    """Persist the operator-cancel outcome for a run cancelled during setup.
+
+    The same terminal record `delegate cancel` writes: whichever of the two
+    lands first, the other reconciles to cancelled, and the kept worktree stays
+    inspectable and resumable.
+    """
+    extra: JsonObject = {
+        "worktreeStatus": "present",
+        "resultQuality": None,
+        "warnings": [
+            "Run was cancelled while workspace setup was running: the setup process "
+            "group was stopped and no child was launched."
+        ],
+    }
+    delegate_runner._persist_final_progress(
+        registration.run_path,
+        registration.pre_ctx,
+        accumulator=harness_events.StreamAccumulator(harness=registration.pre_ctx.harness),
+        status=run_registry.STATUS_CANCELLED,
+        exit_code=1,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        completion_report_written=False,
+        extra=extra,
+    )
+
+
 def _run_workspace_setup_or_record_failure(
     execution: PersistentWorktreeExecution,
     registration: PersistentWorktreeRegistration,
@@ -675,7 +752,16 @@ def _run_workspace_setup_or_record_failure(
             env=profiles.child_environment(overrides=pre_ctx.env_overrides),
             log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
             timeout=float(request.timeout) if request.timeout is not None else None,
+            publish_pgid=lambda pgid: _publish_setup_pgid(registration, pgid),
         )
+    except workspace_spec.SetupInterrupted as exc:
+        # The operator terminated this launcher mid-setup. run_setup has already
+        # killed the setup group; die from the signal with the default
+        # disposition restored, so the caller sees an ordinary termination and
+        # the record is left unlaunched for the seal path rather than gaining a
+        # failure this process never established.
+        _die_by_signal(exc.signum)
+        raise
     except OSError as exc:
         result = workspace_spec.SetupResult(
             exit_code=-1,
@@ -684,6 +770,7 @@ def _run_workspace_setup_or_record_failure(
             log_path=registration.run_path / workspace_spec.SETUP_LOG_FILE,
             output_tail=f"setup could not start: {exc.strerror or exc}",
         )
+    recorded_env = pre_ctx.workspace_env
     spec_record = registration.creation_context.get("workspaceSpec")
     if isinstance(spec_record, dict):
         spec_record["setupResult"] = result.as_json()
@@ -694,14 +781,30 @@ def _run_workspace_setup_or_record_failure(
         )
     if result.ok:
         return
+    with delegate_runner._launch_registry_lock(pre_ctx):
+        cancelled = delegate_runner._launch_refused(
+            run_registry.load_run_state_or_none(pre_ctx.registry_root, registration.run_id)
+        )
+    if cancelled:
+        # `delegate cancel` stamped its marker and signalled the setup group, so
+        # this nonzero exit is the cancellation, not a break in the caller's
+        # command. Finalize cancelled (the same outcome cancel persists) and
+        # never launch the child this setup was preparing for.
+        _record_persistent_worktree_cancellation(registration)
+        raise PersistentWorktreeError("cancelled_by_user", "Run was cancelled.", 1)
     reason = (
         f"timed out after {request.timeout}s" if result.timed_out else f"exited {result.exit_code}"
     )
     message = (
         f"Workspace setup {reason}; the child was not launched. Setup output: {result.log_path}"
     )
-    if result.output_tail.strip():
-        message = f"{message}\n--- setup output (tail) ---\n{result.output_tail}"
+    # The tail is the child-shaped environment's own output: `set -x` traces and
+    # `npm ci` progress lines print expanded values, so every recorded --env
+    # value is masked before the tail enters a message that state.json and the
+    # error envelope both carry.
+    tail = workspace_spec.mask_recorded_env_values(result.output_tail, recorded_env)
+    if tail.strip():
+        message = f"{message}\n--- setup output (tail) ---\n{tail}"
     _record_persistent_worktree_failure(
         registration,
         error=workspace_spec.SETUP_FAILED,
