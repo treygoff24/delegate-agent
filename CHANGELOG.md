@@ -53,8 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   latest child run when that run is cancelled, stale, or never launched
   (`agent_adopt_skipped`).
 - Resume seals a workflow child that never published a pid (stuck at `running`
-  or `creating_isolation`) once it has been idle for 300 seconds, instead of
-  refusing with `workflow_children_unsealed` forever.
+  or `creating_isolation`) once it has been idle for 300 seconds and its
+  recorded launcher (`launcherPid`) is dead or its pid was reused, instead of
+  refusing with `workflow_children_unsealed` forever. The runner re-reads the
+  record under the registry lock before every process start, the first included,
+  and publishes the child's pid only over a record that is neither terminal nor
+  cancel-requested, so a sealed launch never gains a child.
 - `workflow run --dry-run` executes the script with its working directory set to
   the `--cwd` workspace, as a real run's supervisor does.
 - Codex work runs recover the last substantive agent message as the completion

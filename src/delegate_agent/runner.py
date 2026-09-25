@@ -3593,6 +3593,16 @@ def _cancel_requested_or_cancelled(ctx: RunContext) -> bool:
     )
 
 
+def _launch_refused(current: JsonObject | None) -> bool:
+    """Whether a launch must not start or publish over ``current``."""
+    if not isinstance(current, dict):
+        return False
+    return (
+        current.get("cancelRequested") is True
+        or current.get("status") in run_registry.TERMINAL_STATUSES
+    )
+
+
 def _run_single_tracked_attempt(
     argv: list[str],
     cwd: str,
@@ -3621,15 +3631,12 @@ def _run_single_tracked_attempt(
     # observes either its marker blocking a retry or a complete live generation;
     # there is no launched-but-unpublished child it can accidentally miss.
     with _launch_registry_lock(ctx):
-        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
-        if (
-            prior_capture is not None
-            and isinstance(current, dict)
-            and (
-                current.get("cancelRequested") is True
-                or current.get("status") == run_registry.STATUS_CANCELLED
-            )
-        ):
+        # Every attempt, the first included, re-reads the record immediately
+        # before Popen. A record another process already finished or marked
+        # for cancel (an operator cancel, or a workflow sealing a launch it
+        # judged dead) must never gain a child: the sealer relaunches the step
+        # and a second live child for one step would follow.
+        if _launch_refused(run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)):
             raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
         if attempt_label is not None:
             _append_attempt_delimiter(files.stderr_log, label=attempt_label)
@@ -3665,6 +3672,15 @@ def _run_single_tracked_attempt(
                         "missing_child_pid",
                         "Child process did not expose a numeric pid for process-group tracking.",
                     )
+                # Publication is a compare-and-set: it never replaces a record
+                # that turned terminal or cancel-requested after the admission
+                # read. Every sealer takes this lock, so this only fires for a
+                # writer that bypassed it; the child is killed by the handler
+                # below and the record is left exactly as that writer left it.
+                if _launch_refused(
+                    run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+                ):
+                    raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
                 write_state(
                     files.run_path,
                     build_run_record(

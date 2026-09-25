@@ -506,22 +506,69 @@ def unlaunched_run_age(state: JsonObject | None, run_path: Path | None = None) -
     return None
 
 
+def unlaunched_launcher_alive(
+    registry_root: Path, run_id: str, state: JsonObject | None
+) -> bool | None:
+    """Whether the process that wrote an unlaunched record may still launch it.
+
+    Returns None when the record does not name its launcher (``launcherPid``),
+    False when that pid is dead or now belongs to a process that started after
+    the run, and True otherwise. A live pid whose start time cannot be read is
+    treated as the launcher: sealing a live launch is the failure to avoid.
+    """
+    if not isinstance(state, dict):
+        return None
+    launcher = _state_int(state, "launcherPid")
+    if launcher is None:
+        return None
+    if run_registry.process_alive(launcher) is not True:
+        return False
+    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    started_raw = manifest.get("startedAt") if isinstance(manifest, dict) else None
+    started_at = (
+        run_registry.parse_utc_timestamp(started_raw) if isinstance(started_raw, str) else None
+    )
+    proc_start = _process_start_datetime(launcher)
+    if started_at is None or proc_start is None:
+        return True
+    # The launcher existed before it stamped the run's startedAt; a process
+    # that started after that (beyond ps's one-second resolution) reuses the pid.
+    return proc_start <= started_at + timedelta(seconds=PID_IDENTITY_SKEW_SECONDS)
+
+
+def unlaunched_run_sealable(
+    registry_root: Path,
+    run_id: str,
+    state: JsonObject | None,
+    *,
+    grace_seconds: float = UNLAUNCHED_SEAL_GRACE_SECONDS,
+) -> bool:
+    """Whether an unlaunched record may be sealed: its launcher is not
+    verifiably alive and it has been quiet for the whole grace window."""
+    age = unlaunched_run_age(state, run_registry.run_directory(registry_root, run_id))
+    if age is None or age < grace_seconds:
+        return False
+    return unlaunched_launcher_alive(registry_root, run_id, state) is not True
+
+
 def seal_unlaunched_run(
     registry_root: Path,
     run_id: str,
     *,
     grace_seconds: float = UNLAUNCHED_SEAL_GRACE_SECONDS,
 ) -> bool:
-    """Seal a run that never launched a process, once it is past the grace window.
+    """Seal a run that never launched a process, once its launcher is gone.
 
     Re-checked under the registry lock, so a launch that publishes its pid in
-    the meantime wins and nothing is sealed.
+    the meantime wins and nothing is sealed. The seal also stamps the cancel
+    marker, which the runner re-reads under the same lock before every Popen
+    and before publishing a pid, so a launcher that outlives this check can
+    never start a child for the sealed record.
     """
     with run_registry.registry_lock(registry_root):
         run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
         state = run_registry.load_run_state_or_none(registry_root, run_id)
-        age = unlaunched_run_age(state, run_registry.run_directory(registry_root, run_id))
-        if age is None or age < grace_seconds:
+        if not unlaunched_run_sealable(registry_root, run_id, state, grace_seconds=grace_seconds):
             return False
         alias = state.get("alias") if isinstance(state, dict) else None
         target = run_registry.RunTarget(run_id, alias if isinstance(alias, str) else None)
