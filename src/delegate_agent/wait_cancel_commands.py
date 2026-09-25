@@ -567,6 +567,16 @@ def _cancel_signal_generation(
     return generation
 
 
+def _setup_window_status(state: JsonObject | None) -> bool:
+    """Whether the record still carries the status a worktree setup runs under.
+
+    A launcher writes it before the worktree exists and clears nothing until it
+    finalizes, so this is true both while setup runs (with ``setupPgid``
+    recorded) and in the window before anything has been started at all.
+    """
+    return isinstance(state, dict) and state.get("status") == SETUP_WINDOW_STATUS
+
+
 def _setup_path_taken(state: JsonObject | None) -> bool:
     """Whether the run's signal target came from the workspace setup window.
 
@@ -577,7 +587,7 @@ def _setup_path_taken(state: JsonObject | None) -> bool:
     """
     if _state_int(state, "setupPgid") is not None:
         return True
-    return isinstance(state, dict) and state.get("status") == SETUP_WINDOW_STATUS
+    return _setup_window_status(state)
 
 
 # A run record with no pid is normally a launch that has not published its
@@ -776,6 +786,10 @@ SETUP_ENDED_BEFORE_SIGNAL_WARNING = (
     "the run's workspace setup ended before cancel could signal it: no child had "
     "launched, and nothing was signalled"
 )
+SETUP_NOT_STARTED_WARNING = (
+    "the run was in workspace setup with no published process: "
+    "nothing was signalled, and the run was marked cancelled"
+)
 SETUP_GROUP_CLEARED_WARNING = (
     "the run's workspace setup group was signalled and the record was cleared before "
     "cancel finalized it: no child had launched"
@@ -852,6 +866,17 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
                 "run_already_terminal",
                 f"Run {target.alias or target.run_id} is already terminal ({effective}).",
             )
+        if _cancel_signal_target(state) is None and _setup_window_status(state):
+            # Before setup publishes its group, only the cancel marker can
+            # stop this run. Launchers check it before setup and child Popen.
+            _stamp_cancel_marker_locked(registry_root, target, state, None)
+            state = run_registry.load_run_state_or_none(registry_root, target.run_id)
+            _persist_cancelled_terminal_locked(
+                registry_root, target, state, [SETUP_NOT_STARTED_WARNING]
+            )
+            payload = _terminal_payload(registry_root, target)
+            payload["warnings"] = [SETUP_NOT_STARTED_WARNING]
+            return payload
         generation = _cancel_signal_generation(state, target)
     warnings: list[str] = []
     cancel_marker_written = False

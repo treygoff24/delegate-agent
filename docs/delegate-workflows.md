@@ -524,8 +524,11 @@ process's own environment, so a lane that cannot take env (safe mode, call
 mode, work without a worktree) simply does not receive it; such a call is not
 an error, and its replay key is unchanged by a workflow-level env. The launch
 values are what a resume replays, rather than whatever the resuming shell
-exports. `workflow resume` and `workflow run --resume` refuse `--env`. The
-script's own process does not see these variables.
+exports: a worktree child records the merged env in its own run, so a manual
+`delegate resume` of that child replays workflow-level values that the call's
+own `env=` did not override.
+`workflow resume` and `workflow run --resume` refuse `--env`. The script's own
+process does not see these variables.
 
 `workflow run` detaches its supervisor and returns, so the invoking process ends
 immediately. Run it under a systemd unit only with `KillMode=process`
