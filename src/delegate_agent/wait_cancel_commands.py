@@ -834,6 +834,39 @@ URGENT_CANCEL_UNRECORDED_WARNING = (
 URGENT_CANCEL_RECORD_WAIT_SECONDS = 2.0
 
 
+def _urgent_recheck_before_signal(
+    registry_root: Path,
+    target: run_registry.RunTarget,
+    generation: tuple[int | None, int | None, int, bool],
+) -> None:
+    """Narrow the unlocked window immediately before the urgent SIGTERM.
+
+    The locked path reconciles the finalize WAL, re-reads the record, and
+    requires the generation it selected. Without the lock this can only read:
+    ``load_run_state_or_none`` overlays a pending finalize WAL onto the record
+    read-only (it never replays, quarantines, or removes the WAL), so one fresh
+    read sees both a finalizer that finished since selection and a record that
+    moved. A terminal result means the run already finished; a different
+    generation means a retry launched (or the record moved) since selection,
+    and signalling either one would be a guess.
+    """
+    label = target.alias or target.run_id
+    latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
+    effective = run_registry.status_fields(latest).get("effectiveStatus")
+    if effective in run_registry.TERMINAL_STATUSES:
+        raise WaitCancelError(
+            "run_already_terminal",
+            f"Run {label} is already terminal ({effective}). Nothing was signalled.",
+        )
+    if _cancel_signal_target(latest) != generation:
+        raise WaitCancelError(
+            "cancel_target_changed",
+            f"Run {label} changed its child process while cancel was reading it without "
+            "the registry lock (another process holds it). Nothing was signalled. Retry "
+            "cancel.",
+        )
+
+
 def _urgent_cancel_without_lock(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
     """Stop a run's recorded child when the registry lock cannot be taken.
 
@@ -869,6 +902,7 @@ def _urgent_cancel_without_lock(registry_root: Path, target: run_registry.RunTar
     identity_pid = pid if pid is not None else signal_value
     warnings = [URGENT_CANCEL_WARNING]
     warnings.extend(_check_pid_identity(registry_root, target, identity_pid))
+    _urgent_recheck_before_signal(registry_root, target, generation)
     signal_refusal: JsonObject | None = None
     with contextlib.suppress(ProcessLookupError):
         _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
