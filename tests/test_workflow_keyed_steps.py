@@ -420,6 +420,43 @@ class GateActionTests(_WorkflowFixture):
         decision = self.park("task-8", result, ["retry", "skip"])
         self.assertEqual(decision["action"], "skip")
 
+    def test_a_reask_question_is_not_answered_by_a_result_hash(self) -> None:
+        """A result shaped like the old re-ask payload must not satisfy a re-ask."""
+        result = {"task": 11}
+        collision = {"reask": {"result": result, "actions": ["retry"]}}
+        # Pass 1: the script parks this key on a result that is exactly what a
+        # later re-ask would have hashed, and the operator answers it.
+        self.assertIsInstance(
+            self.park("task-11", collision, ["retry", "accept"]), runtime.GateExit
+        )
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="accept", note="pass 1")
+            ),
+            0,
+        )
+        # Pass 2: the plain result, still offering "accept", and answered.
+        self.assertIsInstance(self.park("task-11", result, ["retry", "accept"]), runtime.GateExit)
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="accept", note="pass 2")
+            ),
+            0,
+        )
+        # Pass 3: only "retry" is offered now, so the recorded "accept" lapses
+        # and the question is asked again under a hash of its own.
+        reparked = self.park("task-11", result, ["retry"])
+        self.assertIsInstance(reparked, runtime.GateExit, "the re-ask consumed another answer")
+        self.assertEqual(self.events("gate_action_undeclared")[-1]["action"], "accept")
+        self.assertEqual(self.events("gate")[-1]["actions"], ["retry"])
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-11", action="retry", note="pass 3")
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-11", result, ["retry"])["action"], "retry")
+
     def test_a_second_live_park_gate_with_one_key_is_refused(self) -> None:
         dsl = runtime.WorkflowDsl(self.state(), {})
         nested: list[object] = []
