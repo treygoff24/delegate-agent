@@ -8,12 +8,16 @@ command to use instead.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
-from delegate_agent import run_registry
+from delegate_agent import config as delegate_config
+from delegate_agent import request_build, request_models, run_registry
 from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
@@ -143,3 +147,74 @@ class FollowupInheritedRouteTests(CommandTestBase):
         with self.assertRaises(DelegateError) as caught:
             parse_cli(["followup", "--bogus", "codex-1", "go on"])
         self.assertNotIn("inherits", caught.exception.message)
+
+
+class LaunchNoticeTests(CommandTestBase):
+    """Notices that change what a child runs against print when it launches."""
+
+    def _repo(self) -> str:
+        temp = tempfile.TemporaryDirectory(prefix="delegate-launch-notice-")
+        self.addCleanup(temp.cleanup)
+        repo = str(Path(temp.name).resolve())
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                repo,
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            check=True,
+        )
+        return repo
+
+    def _launch(self, argv: list[str], config: dict, *, dry_run: bool = False):
+        repo = self._repo()
+        if dry_run:
+            argv = ["dry-run", *argv]
+        parsed = parse_cli(argv)
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, self._config_env, clear=False):
+            request = request_build.request_from_parsed(
+                parsed,
+                config,
+                io.StringIO(),
+                stderr,
+                workspace=request_models.ResolvedWorkspace(repo, "git"),
+            )
+        return request, stderr.getvalue()
+
+    def test_forbid_commit_implied_worktree_note_prints_at_launch(self):
+        config = delegate_config.embedded_default_config()
+        _request, stderr = self._launch(["codex", "work", "--forbid-commit", "fix it"], config)
+        self.assertIn("note: --forbid-commit implies --isolation worktree", stderr)
+
+        _request, stderr = self._launch(
+            ["codex", "work", "--forbid-commit", "fix it"], config, dry_run=True
+        )
+        self.assertNotIn("implies --isolation worktree", stderr)
+
+    def test_missing_codex_profile_overlay_warns_at_launch(self):
+        codex_home = tempfile.TemporaryDirectory(prefix="delegate-codex-home-")
+        self.addCleanup(codex_home.cleanup)
+        config = delegate_config.embedded_default_config()
+        config["codex"]["profile"] = "fast-lane"
+        with mock.patch.dict(os.environ, {"CODEX_HOME": codex_home.name}, clear=False):
+            request, stderr = self._launch(["codex", "safe", "review it"], config)
+        (warning,) = [w for w in request.warnings if w.startswith("codex.profile ")]
+        self.assertIn("fast-lane.config.toml", warning)
+        self.assertIn(f"delegate: warning: {warning}", stderr)
+
+        (Path(codex_home.name) / "fast-lane.config.toml").write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": codex_home.name}, clear=False):
+            request, stderr = self._launch(["codex", "safe", "review it"], config)
+        self.assertFalse(any(w.startswith("codex.profile ") for w in request.warnings))
+        self.assertNotIn("codex.profile", stderr)

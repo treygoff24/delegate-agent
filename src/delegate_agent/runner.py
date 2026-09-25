@@ -3008,6 +3008,31 @@ def _finalize_mail_push_state(
     return mail_warnings, stderr_tail
 
 
+# Resolver and reachability failures as Node, curl, Python, and libc word them.
+_NETWORK_FAILURE_RE = re.compile(
+    r"getaddrinfo|ENOTFOUND|EAI_AGAIN|Could not resolve host|"
+    r"Temporary failure in name resolution|nodename nor servname|"
+    r"Name or service not known|network is unreachable",
+    re.IGNORECASE,
+)
+
+
+def _safe_mode_network_warning(ctx: RunContext, signal_text: str) -> str | None:
+    """Point a safe-mode run whose child hit DNS/network errors at work mode.
+
+    Safe mode's sandbox may block network access, so a child's fetch fails with
+    a resolver error that reads like an outage. The warning says where the
+    cause may be; it does not change the run's status or failure kind.
+    """
+    if ctx.mode != "safe" or not _NETWORK_FAILURE_RE.search(signal_text):
+        return None
+    return (
+        "the child reported DNS/network failures, and safe mode may block network "
+        "access. Research that needs the network belongs in work mode: "
+        f"delegate {ctx.harness} work ..."
+    )
+
+
 def _finalize_tracked_run(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -3188,6 +3213,11 @@ def _finalize_tracked_run(
         # already returns stderrTail on failure; tracked runs now match it.
         if stderr_tail.strip():
             merged_extra["stderrTail"] = stderr_tail
+    network_warning = _safe_mode_network_warning(ctx, signal_text)
+    if network_warning is not None:
+        warnings = list(merged_extra.get("warnings") or [])
+        _append_unique(warnings, network_warning)
+        merged_extra["warnings"] = warnings
     report_text, report_source = _completion_report_text_and_source(
         ctx,
         capture.accumulator,
