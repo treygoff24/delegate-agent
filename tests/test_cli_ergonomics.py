@@ -143,6 +143,23 @@ class FollowupInheritedRouteTests(CommandTestBase):
                 option = argv[1].split("=", 1)[0]
                 self.assertIn(f"delegate resume {option} ... HANDLE", message)
 
+    def test_non_route_resume_only_options_get_the_same_message(self):
+        # dlg-qd1: --include-dirty, --persona, and --continuity-mode are not
+        # routes, so the refusal must read as "resume owns this" for them too.
+        for argv in (
+            ["followup", "--include-dirty", "codex-1", "go on"],
+            ["followup", "--persona", "reviewer", "codex-1", "go on"],
+            ["followup", "--continuity-mode", "pinned", "codex-1", "go on"],
+        ):
+            with self.subTest(option=argv[1]):
+                with self.assertRaises(DelegateError) as caught:
+                    parse_cli(argv)
+                message = caught.exception.message
+                self.assertEqual(caught.exception.error, "unknown_option")
+                self.assertIn(f"followup has no {argv[1]} option", message)
+                self.assertIn(f"{argv[1]} belongs to resume", message)
+                self.assertIn(f"delegate resume {argv[1]} ... HANDLE", message)
+
     def test_non_route_unknown_option_keeps_the_plain_message(self):
         with self.assertRaises(DelegateError) as caught:
             parse_cli(["followup", "--bogus", "codex-1", "go on"])

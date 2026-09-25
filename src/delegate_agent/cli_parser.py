@@ -1580,9 +1580,10 @@ def _followup_inherited_route_options() -> frozenset[str]:
 
 def _followup_inherited_route_message(option: str) -> str:
     return (
-        f"followup has no {option} option: a followup inherits the source run's route "
-        "(engine, model, effort, progress, schema) from its manifest. To change it, "
-        f"use: delegate resume {option} ... HANDLE 'instructions'."
+        f"followup has no {option} option: {option} belongs to resume. A followup inherits the "
+        "source run's route (engine, model, effort, progress, schema) from its manifest, so "
+        "route changes and creation-time options are both given to resume: "
+        f"delegate resume {option} ... HANDLE 'instructions'."
     )
 
 
