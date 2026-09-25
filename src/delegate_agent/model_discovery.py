@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TextIO
 
@@ -408,7 +409,7 @@ def launch_model_absence_warning(
     *,
     catalog_model: str | None = None,
 ) -> tuple[str, ...]:
-    """Warn at launch when a concrete selector is in no catalog Delegate knows.
+    """Warn on discovered catalog misses or likely typos in the bundled list.
 
     Launch preflight refuses only selectors it can prove unverifiable; a
     concrete id the harness will reject still launches and fails inside the
@@ -426,7 +427,32 @@ def launch_model_absence_warning(
     catalog, source = launch_catalog(discovery, engine)
     if not catalog or lookup in catalog:
         return ()
+    if source == "bundled":
+        # Ranking alone always returns neighbors, even for unrelated selectors.
+        # Cursor's optional provider prefix is not part of the model spelling.
+        prefix = "cursor-" if engine == "cursor" else ""
+        catalog = tuple(
+            selector
+            for selector in catalog
+            if SequenceMatcher(
+                None,
+                lookup.lower().removeprefix(prefix),
+                selector.lower().removeprefix(prefix),
+            ).ratio()
+            >= 0.8
+        )
+        if not catalog:
+            return ()
     nearest = nearest_model_ids(lookup, catalog)
+    if source == "bundled":
+        return (
+            f"{engine} model {redaction.redact_string(model)!r} is not in Delegate's small "
+            f"built-in list; no discovery snapshot catalog exists for {engine}. "
+            "It resembles "
+            + ", ".join(redaction.redact_string(selector) for selector in nearest)
+            + ". The launch proceeds. Run `delegate capabilities refresh` to update the "
+            f"cached catalog, or `delegate models {engine} --live` to see a fresh one.",
+        )
     suggestion = (
         " Nearest known selectors: "
         + ", ".join(redaction.redact_string(selector) for selector in nearest)

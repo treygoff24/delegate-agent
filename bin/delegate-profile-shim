@@ -284,6 +284,10 @@ EOF
 # AI_PROFILE for the child. Every time the flag overrides or loses to the
 # environment, say so on stderr.
 _delegate_flag="$(_delegate_flag_profile "$@")"
+if [ -n "$_delegate_flag" ]; then
+  # Match profiles.resolve_active_profile, including Unicode whitespace.
+  _delegate_flag="$(python3 -c 'import sys; print(sys.argv[1].strip())' "$_delegate_flag")" || exit "$?"
+fi
 case "$_delegate_flag" in
   work|personal)
     _delegate_flag_config="${HOME}/.delegate/config.${_delegate_flag}.json"

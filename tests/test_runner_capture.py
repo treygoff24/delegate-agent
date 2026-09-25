@@ -383,24 +383,33 @@ class RunnerCaptureTests(unittest.TestCase):
                     [],
                 )
 
-    def test_provider_auth_failure_gets_no_dns_hint(self):
-        """The same resolver text in a provider auth failure is not the sandbox's doing."""
+    def test_diagnosed_provider_failure_gets_no_dns_hint(self):
+        """Quota/auth failures keep their cause even with resolver text in stderr."""
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        script = Path(temp.name) / "expired-key"
-        script.write_text(
-            "#!/usr/bin/env bash\ncat >/dev/null\n"
-            "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
-            "printf 'Error 401: unauthorized request\\n' >&2\nexit 7\n",
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        with tempfile.TemporaryDirectory() as workspace:
-            code, payload = self._tracked_script_run(script, mode="safe", workspace=workspace)
+        script = Path(temp.name) / "provider-failure"
+        for message, reason in (
+            ("Error 401: unauthorized request", "auth_failed"),
+            ("You exceeded your current quota usage limit", "usage_limit"),
+        ):
+            with self.subTest(reason=reason):
+                script.write_text(
+                    "#!/usr/bin/env bash\ncat >/dev/null\n"
+                    "echo 'Error: getaddrinfo ENOTFOUND api.example.com' >&2\n"
+                    f"echo {shlex.quote(message)} >&2\nexit 7\n",
+                    encoding="utf-8",
+                )
+                script.chmod(0o755)
+                with tempfile.TemporaryDirectory() as workspace:
+                    code, payload = self._tracked_script_run(
+                        script, mode="safe", workspace=workspace
+                    )
 
-        self.assertEqual(code, 7)
-        self.assertEqual(payload["failureReason"], "auth_failed")
-        self.assertEqual([w for w in payload.get("warnings", []) if "safe mode may block" in w], [])
+                self.assertEqual(code, 7)
+                self.assertEqual(payload["failureReason"], reason)
+                self.assertEqual(
+                    [w for w in payload.get("warnings", []) if "safe mode may block" in w], []
+                )
 
     def test_dns_hint_gate_reads_the_failure_kind(self):
         # The end-to-end cases above cover the wiring; this covers the kinds that
@@ -429,6 +438,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 ("failed", "child_failed", True),
                 ("failed", "exit_nonzero", True),
                 ("failed", "provider_error", False),
+                ("failed", "usage_limit", False),
                 ("failed", "auth_failed", False),
                 ("succeeded", None, False),
                 ("cancelled", "harness_cancelled", False),
@@ -438,6 +448,13 @@ class RunnerCaptureTests(unittest.TestCase):
                         ctx, signal_text, status=status, failure_reason=reason
                     )
                     self.assertEqual(hint is not None, expected, hint)
+
+            for kind in self.runner.outcome.FAILURE_KINDS:
+                with self.subTest(kind=kind):
+                    hint = self.runner._safe_mode_network_warning(
+                        ctx, signal_text, status="failed", failure_reason=kind
+                    )
+                    self.assertEqual(hint is not None, kind == "exit_nonzero", hint)
 
     def _tracked_script_run(self, script: Path, *, mode: str, workspace: str) -> tuple[int, dict]:
         root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")

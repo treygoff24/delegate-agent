@@ -2405,6 +2405,12 @@ class EngineArgvTests(CommandTestBase):
             self.assertEqual(ctx.exception.error, "invalid_input_key")
             self.assertIn("profile", ctx.exception.message)
 
+    def test_describe_droid_defaults_include_configured_binary(self):
+        config = delegate_config.embedded_default_config()
+        config["droid"]["binary"] = "custom-droid"
+        payload = describe_api.describe_payload(config, "embedded-default")
+        self.assertEqual(payload["engineDefaults"]["droid"]["binary"], "custom-droid")
+
     def test_describe_preserves_safe_read_only_modes(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         config["pi"]["defaultModel"] = "openai-codex/gpt-5.6-sol"

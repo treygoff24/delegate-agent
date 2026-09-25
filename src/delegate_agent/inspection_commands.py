@@ -253,25 +253,7 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         ]
     else:
         summaries = [redaction.redact_value(summary) for summary in summaries]
-    warnings: list[str] = []
-    if not summaries:
-        # An empty table reads as "every lane died" unless the listing says why.
-        # The workspace-scope hint is not a property of --group/--harness: a bare
-        # status-filtered listing against an empty Registry needs it just as much.
-        status_filter_present = command.running or command.stale or command.active
-        if status_filter_present and scope_total > 0:
-            if command.running:
-                warnings.append("No running runs matched. Drop --running to include terminal runs.")
-            elif command.stale:
-                warnings.append("No stale runs matched. Drop --stale to include terminal runs.")
-            else:
-                warnings.append("No active runs matched. Drop --active to include terminal runs.")
-        elif scope_total == 0:
-            warnings.append(
-                "No matching runs in this workspace Registry. "
-                "The run Registry is workspace-scoped; use --cwd PATH to target another "
-                "workspace's Registry."
-            )
+    warnings = _runs_empty_warnings(command, total=total, scope_total=scope_total)
     if command.json_mode:
         delegate_rendering.print_json(
             delegate_rendering.runs_json_payload(
@@ -294,6 +276,22 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
     return 0
 
 
+def _runs_empty_warnings(command: RunsCommand, *, total: int, scope_total: int) -> list[str]:
+    if total:
+        return []
+    # Status filters distinguish an empty result from an empty Registry scope.
+    if (command.running or command.stale or command.active) and scope_total > 0:
+        flag = "running" if command.running else "stale" if command.stale else "active"
+        return [f"No {flag} runs matched. Drop --{flag} to include terminal runs."]
+    if scope_total == 0:
+        return [
+            "No matching runs in this workspace Registry. "
+            "The run Registry is workspace-scoped; use --cwd PATH to target another "
+            "workspace's Registry."
+        ]
+    return []
+
+
 RUNS_SUMMARY_SCHEMA = "delegate.runs.summary.v1"
 
 
@@ -307,22 +305,25 @@ def _emit_runs_summary(
 ) -> int:
     """Counts for every matching run, with no rows (``runs --summary``)."""
     counts: dict[str, dict[str, int]] = {"byStatus": {}, "byHarness": {}, "byGroup": {}}
-    total = 0
+    matched_ids: set[str] = set()
+    scope_ids: set[str] = set()
     for linked_workspace, root in sources:
         try:
-            found, found_total, _scope = run_status.count_run_summaries(
+            found, found_ids = run_status.count_run_summaries(
                 root,
                 run_registry.load_index(root),
                 active=command.active,
                 status_filter=status_filter,
                 harness=command.harness,
                 group=command.group,
+                seen_run_ids=matched_ids,
             )
         except (OSError, ValueError, DelegateError):
             if linked_workspace is None:
                 raise
             continue
-        total += found_total
+        matched_ids |= found_ids.matched
+        scope_ids |= found_ids.scoped
         for bucket, values in found.items():
             for label, count in values.items():
                 counts[bucket][label] = counts[bucket].get(label, 0) + count
@@ -330,12 +331,23 @@ def _emit_runs_summary(
         bucket: dict(sorted(values.items(), key=lambda item: (-item[1], item[0])))
         for bucket, values in counts.items()
     }
+    total = len(matched_ids)
+    warnings = _runs_empty_warnings(command, total=total, scope_total=len(scope_ids))
     if command.json_mode:
         delegate_rendering.print_json(
-            {"schema": RUNS_SUMMARY_SCHEMA, "ok": True, "mode": mode, "total": total, **ordered},
+            {
+                "schema": RUNS_SUMMARY_SCHEMA,
+                "ok": True,
+                "mode": mode,
+                "total": total,
+                **ordered,
+                **({"warnings": warnings} if warnings else {}),
+            },
             stdout,
         )
         return 0
+    for warning in warnings:
+        print(f"warning: {warning}", file=stdout)
     print(f"mode: {mode}", file=stdout)
     print(f"total: {total}", file=stdout)
     for bucket, label in (("byStatus", "status"), ("byHarness", "harness"), ("byGroup", "group")):
