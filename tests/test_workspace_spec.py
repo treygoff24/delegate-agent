@@ -204,6 +204,36 @@ class WorkspaceSpecLaunchTests(ExecutionTestBase):
             self.assertIsNotNone(commands["reviewDiffVsCreationBase"])
             self.assertIsNotNone(commands["cherryPickRange"])
 
+    def test_worktree_show_labels_a_based_lane_with_its_base_ref(self):
+        """The creation line pairs a ref with the oid that ref names.
+
+        `sourceHeadRef` is the checkout's branch and `sourceHeadOid` is the
+        creation base under `--base`, so pairing them read 'created from
+        master@<spine oid>' for a lane that never came from master.
+        """
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo = self._repo_with_side_branch()
+            agent = self.write_executable("agent", RESULT_EVENT)
+            code, payload, stderr = self._launch(
+                repo, fake_home, agent, "--base", "spine", "do the task", keep_worktree=True
+            )
+            self.assertEqual(code, 0, stderr)
+            config = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stdout, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {"HOME": fake_home, "DELEGATE_CONFIG": str(config)}):
+                code = self.delegate.main(
+                    ["--cwd", repo, "worktree", "show", payload["alias"]],
+                    stdout=stdout,
+                    stderr=err,
+                )
+            self.assertEqual(code, 0, err.getvalue())
+            spine_oid = git("rev-parse", "spine", cwd=repo).stdout.strip()[:7]
+            self.assertIn(
+                f"created from spine@{spine_oid}; source now at master@", stdout.getvalue()
+            )
+
     def test_setup_failure_output_masks_recorded_env_values(self):
         """`set -x` prints the expanded token, and the tail goes into records."""
         secret = "supersecret-npm-token-1234567890"
