@@ -171,10 +171,17 @@ class LineSignals:
     ``progress`` is unconditional (tool activity, a boundary, a terminal event).
     ``deltas`` are candidate model output: each counts as progress only if its
     normalized content is not already in the recent-delta memory.
+    ``delta_chars`` says how many characters of model output each delta
+    carries toward the runaway budget, parallel to ``deltas``. It exists
+    because a delta is a dedup key, not a payload: pi/omp and grok prefix the
+    event type onto it, a pi/omp ``*_end`` event repeats text its deltas
+    already carried, and a whole-line fallback is not model output at all.
+    ``None`` means each delta is exactly its payload.
     """
 
     progress: bool = False
     deltas: tuple[str, ...] = ()
+    delta_chars: tuple[int, ...] | None = None
     tools_started: tuple[str, ...] = ()
     tools_finished: tuple[str, ...] = ()
     label: str | None = None
@@ -258,12 +265,20 @@ def _classify_pi(payload: JsonObject, event_type: str) -> LineSignals | None:
         if update_type.endswith(_PI_DELTA_SUFFIX):
             delta = update.get("delta")
             if isinstance(delta, str):
-                return LineSignals(deltas=(f"{update_type}:{delta}",), label=update_type)
+                return LineSignals(
+                    deltas=(f"{update_type}:{delta}",),
+                    delta_chars=(len(delta),),
+                    label=update_type,
+                )
             return _NO_SIGNALS
         if update_type.endswith(_PI_END_SUFFIX):
             content = update.get("content")
             if isinstance(content, str):
-                return LineSignals(deltas=(f"{update_type}:{content}",), label=update_type)
+                # The full block its deltas already streamed: novel as a
+                # dedup key, but not new output for the runaway budget.
+                return LineSignals(
+                    deltas=(f"{update_type}:{content}",), delta_chars=(0,), label=update_type
+                )
             return LineSignals(progress=True, label=update_type)
         return _NO_SIGNALS
     if event_type == "tool_execution_start":
@@ -313,7 +328,9 @@ def _classify_grok(payload: JsonObject, event_type: str) -> LineSignals | None:
     if event_type in {"text", "thought"}:
         data = payload.get("data")
         if isinstance(data, str):
-            return LineSignals(deltas=(f"{event_type}:{data}",), label=event_type)
+            return LineSignals(
+                deltas=(f"{event_type}:{data}",), delta_chars=(len(data),), label=event_type
+            )
         return _NO_SIGNALS
     if event_type in {"end", "error"}:
         return LineSignals(progress=True, label=event_type)
@@ -505,21 +522,25 @@ def classify_line(line: str, *, harness: str | None = None) -> LineSignals:
     stripped = line.strip()
     if not stripped:
         return _NO_SIGNALS
+    # Whole-line fallbacks charge nothing to the runaway budget: the line is
+    # not known to be model output (omp json mode streams tool output as
+    # unmodeled `tool_execution_update` lines, for one), and the idle and
+    # repeated-content checks still see it.
     if harness in _TEXT_STREAM_HARNESSES:
-        return LineSignals(deltas=(stripped,), label="text")
+        return LineSignals(deltas=(stripped,), delta_chars=(0,), label="text")
     try:
         payload: JsonValue = json.loads(stripped)
     except (json.JSONDecodeError, RecursionError):
-        return LineSignals(deltas=(stripped,), label="text")
+        return LineSignals(deltas=(stripped,), delta_chars=(0,), label="text")
     if not isinstance(payload, dict):
-        return LineSignals(deltas=(stripped,), label="text")
+        return LineSignals(deltas=(stripped,), delta_chars=(0,), label="text")
     event_type = payload.get("type")
     label = event_type if isinstance(event_type, str) else "event"
     signals = _classify_payload(payload, event_type, harness=harness)
     if signals is None:
         # An event shape this module does not model: fall back to line
         # deduplication rather than reading it as idleness.
-        return LineSignals(deltas=(stripped,), label=label)
+        return LineSignals(deltas=(stripped,), delta_chars=(0,), label=label)
     return signals
 
 
@@ -693,6 +714,17 @@ class StallWatchdog:
     ) -> None:
         tool_activity = bool(signals.tools_started or signals.tools_finished)
         repeated_call = tool_activity and self._repeats_locked(tool_events)
+        completed_events = sum(1 for event in tool_events if event.completed)
+        if len(signals.tools_finished) > completed_events:
+            # A tool finished that the stream accumulator does not normalize
+            # into a ToolEvent (codex `file_change` from apply_patch, and its
+            # mcp/web-search items). It cannot be the failing call, so it
+            # breaks the streak: a fix loop that patches between identical
+            # test runs is working, not looping. It also ends "the same call
+            # again", so the next identical run counts as progress.
+            self._failure_signature = None
+            self._failure_count = 0
+            self._last_completion = None
         self._record_outcomes_locked(tool_events)
         progressed = False
         had_pending = bool(self._pending_tools)
@@ -726,18 +758,23 @@ class StallWatchdog:
             # A new phase began; content the model repeated during the last one
             # is no longer evidence of a loop.
             self._recent_deltas.clear()
-        for delta in signals.deltas:
+        charges = signals.delta_chars
+        for index, delta in enumerate(signals.deltas):
             normalized = normalize_delta(delta)
             if not normalized:
                 continue
             if normalized in self._recent_deltas:
                 continue
             self._recent_deltas.append(normalized)
-            self._output_chars_since_tool += len(delta)
+            if charges is None:
+                self._output_chars_since_tool += len(delta)
+            elif index < len(charges):
+                self._output_chars_since_tool += charges[index]
             progressed = True
         if (
             self._trip is None
             and self.runaway_output_chars > 0
+            and self.harness not in _TEXT_STREAM_HARNESSES
             and self._output_chars_since_tool > self.runaway_output_chars
         ):
             self._trip = {

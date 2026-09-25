@@ -508,6 +508,158 @@ class RepeatedToolFailureTests(unittest.TestCase):
         self.assertIsNone(fed.watchdog.stalled_for(30.0))
 
 
+FIX_LOOP_COMMAND = "pytest tests/test_x.py"
+
+
+def _codex_fix_loop(index: int, edit: bool) -> list[str]:
+    if edit:
+        item = {"id": f"e{index}", "type": "file_change", "changes": [{"path": "a.py"}]}
+        return [
+            json.dumps({"type": "item.started", "item": {**item, "status": "in_progress"}}),
+            json.dumps({"type": "item.completed", "item": {**item, "status": "completed"}}),
+        ]
+    return [
+        codex_command(f"c{index}", FIX_LOOP_COMMAND),
+        codex_command(f"c{index}", FIX_LOOP_COMMAND, status="failed"),
+    ]
+
+
+def _claude_fix_loop(index: int, edit: bool) -> list[str]:
+    name, tool_input = (
+        ("Edit", {"file_path": "a.py"}) if edit else ("Bash", {"command": FIX_LOOP_COMMAND})
+    )
+    tool_id = f"t{index}{edit}"
+    use = {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
+    result = {"type": "tool_result", "tool_use_id": tool_id, "content": "x", "is_error": not edit}
+    return [
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [use]}}),
+        json.dumps({"type": "user", "message": {"role": "user", "content": [result]}}),
+    ]
+
+
+def _pi_fix_loop(index: int, edit: bool) -> list[str]:
+    name, args = ("edit", {"path": "a.py"}) if edit else ("bash", {"command": FIX_LOOP_COMMAND})
+    call = {"toolCallId": f"p{index}{edit}", "toolName": name, "args": args}
+    return [
+        json.dumps({"type": "tool_execution_start", **call}),
+        json.dumps({"type": "tool_execution_end", **call, "isError": not edit, "result": {}}),
+    ]
+
+
+def _cursor_fix_loop(index: int, edit: bool) -> list[str]:
+    key, args = (
+        ("editToolCall", {"path": "a.py"})
+        if edit
+        else ("shellToolCall", {"command": FIX_LOOP_COMMAND})
+    )
+    result = {"success": {}} if edit else {"error": {"message": "exit 1"}}
+    call_id = f"u{index}{edit}"
+    return [
+        json.dumps(
+            {
+                "type": "tool_call",
+                "subtype": "started",
+                "call_id": call_id,
+                "tool_call": {key: {"args": args}},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "tool_call",
+                "subtype": "completed",
+                "call_id": call_id,
+                "tool_call": {key: {"args": args, "result": result}},
+            }
+        ),
+    ]
+
+
+def _grok_fix_loop(index: int, edit: bool) -> list[str]:
+    name, raw = (
+        ("search_replace", {"target_file": "a.py"})
+        if edit
+        else ("run_terminal_command", {"command": FIX_LOOP_COMMAND})
+    )
+    call_id = f"g{index}{edit}"
+    return [
+        json.dumps(
+            {
+                "type": "tool_call",
+                "toolCallId": call_id,
+                "status": "pending",
+                "toolName": name,
+                "rawInput": raw,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "tool_call_update",
+                "toolCallId": call_id,
+                "status": "completed" if edit else "failed",
+            }
+        ),
+    ]
+
+
+def _opencode_fix_loop(index: int, edit: bool) -> list[str]:
+    tool, tool_input = (
+        ("edit", {"filePath": "a.py"}) if edit else ("bash", {"command": FIX_LOOP_COMMAND})
+    )
+    state = {"status": "completed" if edit else "error", "input": tool_input}
+    part = {"type": "tool", "tool": tool, "callID": f"o{index}{edit}", "state": state}
+    return [json.dumps({"type": "tool_use", "part": part})]
+
+
+FIX_LOOP_LINES = {
+    "codex": _codex_fix_loop,
+    "claude": _claude_fix_loop,
+    "omp": _pi_fix_loop,
+    "pi": _pi_fix_loop,
+    "cursor": _cursor_fix_loop,
+    "grok": _grok_fix_loop,
+    "opencode": _opencode_fix_loop,
+}
+
+
+class FixLoopResetTests(unittest.TestCase):
+    """A successful edit between identical failing test runs is a fix loop, not a loop."""
+
+    def run_fix_loop(self, engine: str, *, with_edit: bool) -> str | None:
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness=engine))
+        lines = FIX_LOOP_LINES[engine]
+        now = 0.0
+        for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT + 2):
+            for line in lines(index, False) + (lines(index, True) if with_edit else []):
+                now += 1.0
+                fed.feed(line, now)
+        return fed.watchdog.stall_detail(0.0).get("stallReason")
+
+    def test_codex_patch_between_failing_runs_does_not_trip(self):
+        self.assertEqual(self.run_fix_loop("codex", with_edit=True), "idle")
+
+    def test_every_engine_resets_on_a_successful_edit_and_still_trips_without_one(self):
+        for engine in FIX_LOOP_LINES:
+            with self.subTest(engine=engine):
+                self.assertEqual(self.run_fix_loop(engine, with_edit=True), "idle")
+                self.assertEqual(
+                    self.run_fix_loop(engine, with_edit=False), "repeated_tool_failure"
+                )
+
+    def test_codex_reasoning_between_failing_runs_is_not_a_reset(self):
+        """Only a completed tool breaks the streak; the model thinking does not."""
+        fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=480.0, harness="codex"))
+        now = 0.0
+        for index in range(stall_watchdog.REPEATED_TOOL_FAILURE_LIMIT):
+            reasoning = {"id": f"r{index}", "type": "reasoning", "text": f"try {index}"}
+            for line in [
+                json.dumps({"type": "item.completed", "item": reasoning}),
+                *_codex_fix_loop(index, False),
+            ]:
+                now += 1.0
+                fed.feed(line, now)
+        self.assertEqual(fed.watchdog.stall_detail(0.0).get("stallReason"), "repeated_tool_failure")
+
+
 class RepeatedToolCallProgressTests(unittest.TestCase):
     def test_fast_identical_calls_do_not_keep_resetting_the_idle_clock(self):
         fed = _FedWatchdog(stall_watchdog.StallWatchdog(stall_seconds=300.0, harness="codex"))
@@ -568,6 +720,74 @@ class RunawayOutputTests(unittest.TestCase):
                 watchdog.observe_line(json.dumps(start), now=index)
                 watchdog.observe_line(json.dumps(end), now=index)
         self.assertIsNone(watchdog.stalled_for(61.0))
+
+    def test_the_budget_counts_payload_characters_not_prefixed_dedup_keys(self):
+        """Token-sized omp deltas: 800 real characters stay under a 1000 budget
+        even though each dedup key carries a 15-character event-type prefix."""
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="omp", runaway_output_chars=1000
+        )
+        tokens = [f"t{index:03d}" for index in range(200)]  # 4 chars each, 800 total
+        for index, token in enumerate(tokens):
+            watchdog.observe_line(omp_delta(token, seq=index), now=float(index))
+        # The *_end event repeats the whole block its deltas already streamed.
+        end = {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "thinking_end", "content": "".join(tokens)},
+        }
+        watchdog.observe_line(json.dumps(end), now=201.0)
+        self.assertIsNone(watchdog.stalled_for(202.0))
+        for index in range(60):  # 240 more real characters: past the budget
+            watchdog.observe_line(omp_delta(f"u{index:03d}", seq=300 + index), now=202.0)
+        idle = watchdog.stalled_for(203.0)
+        self.assertIsNotNone(idle)
+        detail = watchdog.stall_detail(idle or 0.0)
+        self.assertEqual(detail["stallReason"], "runaway_output")
+        self.assertEqual(detail["outputChars"], 1004)
+
+    def test_omp_tool_output_streamed_during_a_tool_is_not_model_output(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="omp", runaway_output_chars=1000
+        )
+        watchdog.observe_line(
+            json.dumps({"type": "tool_execution_start", "toolCallId": "t1", "toolName": "bash"}),
+            now=0.0,
+        )
+        for index in range(50):
+            update = {
+                "type": "tool_execution_update",
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "partialResult": {"content": [{"type": "text", "text": f"line {index} " * 20}]},
+            }
+            watchdog.observe_line(json.dumps(update), now=float(index))
+        watchdog.observe_line(
+            json.dumps({"type": "tool_execution_end", "toolCallId": "t1", "toolName": "bash"}),
+            now=51.0,
+        )
+        self.assertIsNone(watchdog.stalled_for(52.0))
+        self.assertNotIn("outputChars", watchdog.stall_detail(0.0))
+
+    def test_a_devin_text_stream_past_the_budget_does_not_trip(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="devin", runaway_output_chars=1000
+        )
+        for index in range(100):
+            watchdog.observe_line(f"build step {index}: " + "compiling " * 5, now=float(index))
+        self.assertIsNone(watchdog.stalled_for(101.0))
+        # The idle check still applies to devin.
+        idle = watchdog.stalled_for(101.0 + 481.0)
+        self.assertIsNotNone(idle)
+        self.assertEqual(watchdog.stall_detail(idle or 0.0)["stallReason"], "idle")
+
+    def test_unmodeled_whole_line_events_do_not_count(self):
+        watchdog = stall_watchdog.StallWatchdog(
+            stall_seconds=480.0, harness="claude", runaway_output_chars=1000
+        )
+        for index in range(100):
+            line = json.dumps({"type": "some_future_event", "n": index, "pad": "x" * 50})
+            watchdog.observe_line(line, now=float(index))
+        self.assertIsNone(watchdog.stalled_for(101.0))
 
     def test_default_budget_is_far_past_a_real_report(self):
         self.assertGreaterEqual(stall_watchdog.RUNAWAY_OUTPUT_CHARS_DEFAULT, 100_000)
