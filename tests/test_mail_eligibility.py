@@ -39,11 +39,15 @@ class MailEligibilityTests(unittest.TestCase):
     def _send(
         self, *, sender: dict[str, str] | None, to: str | None = None, group: str | None = None
     ):
-        return mail.send(
-            self.root,
-            mail.MailCommand(action="send", to=to, group=group, body="eligibility"),
-            env=sender,
-        )["message"]
+        command = mail.MailCommand(action="send", to=to, group=group, body="eligibility")
+        try:
+            return mail.send(self.root, command, env=sender)["message"]
+        except mail.MailError as exc:
+            # dlg-qd1: a send that reaches nobody is a typed failure; the
+            # ledger rows ride on the error so outcomes stay assertable.
+            self.assertEqual(exc.error, "mail_not_delivered")
+            assert exc.diagnostics is not None
+            return {"msgId": exc.diagnostics["msgId"], "recipients": exc.diagnostics["recipients"]}
 
     def test_direct_to_only_publishes_to_effectively_running_work_run(self) -> None:
         sender_id, sender_alias = self._run(group="g")

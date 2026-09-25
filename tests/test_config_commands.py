@@ -444,8 +444,7 @@ class LauncherShimTests(unittest.TestCase):
         self.assertEqual(payload["delegateConfig"], str(personal_config))
         self.assertEqual(payload["aiProfile"], "personal")
         self.assertIn(
-            f"--auth-profile personal selects {personal_config} over "
-            f"DELEGATE_CONFIG={work_config}",
+            f"--auth-profile personal selects {personal_config} over DELEGATE_CONFIG={work_config}",
             result.stderr,
         )
         self.assertIn("overrides AI_PROFILE=work", result.stderr)
