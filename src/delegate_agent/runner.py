@@ -2383,6 +2383,14 @@ def _launch_tracked_process(
             raise DelegateError(
                 "invalid_bwrap_plan", "Tracked sandbox requires a validated SandboxPlan."
             )
+        uv_venv = sandbox_bwrap.uv_project_environment(
+            cwd,
+            env,
+            # Both roots are rw-bound below; neither sits in the workspace.
+            str(temp_dir or scratch_dir) if (temp_dir or scratch_dir) is not None else None,
+        )
+        if uv_venv is not None:
+            env[sandbox_bwrap.UV_PROJECT_ENVIRONMENT_ENV] = uv_venv
         # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
         # resolved), mirroring where the codex-pure seatbelt prefix is applied.
         # Boundary construction and the preflight of the final plan raise
