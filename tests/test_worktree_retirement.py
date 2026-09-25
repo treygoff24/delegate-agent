@@ -206,6 +206,99 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertFalse(self._worktree_paths(fake_home))
             self.assertEqual(seeded.read_text(encoding="utf-8"), "source dirt\n")
 
+    def test_seeded_untracked_directory_unchanged_is_not_a_change(self):
+        # The launch seeded an untracked DIRECTORY. `git status -unormal` reports
+        # it as one collapsed `?? home/` entry that the per-file seeded digest
+        # map can never match, so the run read as dirty and the worktree was
+        # retained for work the child never did.
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            seeded_dir = Path(repo.name) / "home"
+            seeded_dir.mkdir()
+            (seeded_dir / "seeded.txt").write_text("source dirt\n", encoding="utf-8")
+            agent = self._clean_agent()
+            code, payload = self._run_cursor(
+                repo.name,
+                config_api.embedded_default_config(),
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["worktreeRetired"])
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 0)
+            # Per-file accounting: the one seeded file, not the collapsed
+            # directory entry, is what the raw total counts.
+            self.assertEqual(payload["workSummary"]["rawChangedFilesCount"], 1)
+            self.assertTrue(payload["workSummary"]["seededOnlyChanges"])
+            self.assertFalse(self._worktree_paths(fake_home))
+
+    def test_seeded_untracked_directory_does_not_turn_a_quiet_run_into_a_success(self):
+        # No assistant text and no child edits: the run must fail as
+        # no_assistant_text. Phantom changes from the seeded directory used to
+        # make it report succeeded, so an orchestrator adopted nothing.
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            seeded_dir = Path(repo.name) / "home"
+            seeded_dir.mkdir()
+            (seeded_dir / "seeded.txt").write_text("source dirt\n", encoding="utf-8")
+            agent = Path(fake_home) / "quiet-agent"
+            agent.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            agent.chmod(0o755)
+            code, payload = self._run_cursor(
+                repo.name,
+                config_api.embedded_default_config(),
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["failureKind"], "no_assistant_text")
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 0)
+            self.assertEqual(payload["worktreeRetained"], "run_not_succeeded")
+
+    def test_child_file_inside_a_seeded_untracked_directory_is_one_change(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            seeded_dir = Path(repo.name) / "home"
+            seeded_dir.mkdir()
+            (seeded_dir / "seeded.txt").write_text("source dirt\n", encoding="utf-8")
+            agent = self._clean_agent()
+            agent.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'child edit\\n' > home/child-added.txt\n"
+                "printf 'done\\n'\n"
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- child edit fake\"}\\n'\n",
+                encoding="utf-8",
+            )
+            agent.chmod(0o755)
+            code, payload = self._run_cursor(
+                repo.name,
+                config_api.embedded_default_config(),
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["worktreeRetained"], "dirty")
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
+            self.assertEqual(
+                [entry["path"] for entry in payload["workSummary"]["changedFiles"]],
+                ["home/child-added.txt"],
+            )
+            self.assertFalse(payload["workSummary"]["seededOnlyChanges"])
+
     def test_seeded_file_edited_by_child_is_retained(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()
