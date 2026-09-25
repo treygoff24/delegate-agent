@@ -35,7 +35,9 @@ class WorktreeCommand:
     path: str | None = None
 
 
-def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObject) -> JsonObject:
+def _list_payload(
+    command: WorktreeCommand, registry_root: Path, config: JsonObject, _workspace: Path | None
+) -> JsonObject:
     auto_prune = worktree_gc.maybe_auto_prune(
         registry_root,
         config,
@@ -70,16 +72,19 @@ def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObj
     return payload
 
 
-def _show_payload(command: WorktreeCommand, registry_root: Path, _config: JsonObject) -> JsonObject:
+def _show_payload(
+    command: WorktreeCommand, registry_root: Path, _config: JsonObject, workspace: Path | None
+) -> JsonObject:
     return worktree_mgmt.show_worktree(
         registry_root,
         handle=command.handle,
         latest_harness=command.latest_harness,
+        workspace=workspace,
     )
 
 
 def _remove_payload(
-    command: WorktreeCommand, registry_root: Path, _config: JsonObject
+    command: WorktreeCommand, registry_root: Path, _config: JsonObject, workspace: Path | None
 ) -> JsonObject:
     if command.group is not None:
         removed: list[JsonObject] = []
@@ -142,11 +147,12 @@ def _remove_payload(
         force_branch=command.force_branch,
         keep_branch=command.keep_branch,
         force=command.force,
+        workspace=workspace,
     )
 
 
 def _prune_payload(
-    command: WorktreeCommand, registry_root: Path, _config: JsonObject
+    command: WorktreeCommand, registry_root: Path, _config: JsonObject, _workspace: Path | None
 ) -> JsonObject:
     return worktree_gc.prune_worktrees(
         registry_root,
@@ -169,7 +175,10 @@ def _gc_pool_data_home(command: WorktreeCommand, config: JsonObject) -> Path | N
 
 
 def _gc_payload(
-    command: WorktreeCommand, registry_root: Path | None, config: JsonObject
+    command: WorktreeCommand,
+    registry_root: Path | None,
+    config: JsonObject,
+    _workspace: Path | None,
 ) -> JsonObject:
     return worktree_gc.gc_worktrees(
         registry_root,
@@ -182,7 +191,10 @@ def _gc_payload(
 
 
 def _reap_payload(
-    command: WorktreeCommand, registry_root: Path | None, config: JsonObject
+    command: WorktreeCommand,
+    registry_root: Path | None,
+    config: JsonObject,
+    _workspace: Path | None,
 ) -> JsonObject:
     return worktree_gc.reap_worktrees(
         registry_root,
@@ -198,7 +210,7 @@ def _reap_payload(
     )
 
 
-PayloadBuilder = Callable[[WorktreeCommand, Path | None, JsonObject], JsonObject]
+PayloadBuilder = Callable[[WorktreeCommand, Path | None, JsonObject, Path | None], JsonObject]
 TextRenderer = Callable[[JsonObject, TextIO], None]
 ACTION_DISPATCH: dict[str, tuple[PayloadBuilder, TextRenderer]] = {
     "list": (_list_payload, delegate_rendering.render_worktree_list_text),
@@ -247,7 +259,7 @@ def emit(
             }
         )
     build_payload, render_text = ACTION_DISPATCH[action]
-    payload = build_payload(command, registry_root, config)
+    payload = build_payload(command, registry_root, config, Path(workspace_path))
     if command.json_mode:
         delegate_rendering.print_json(payload, stdout)
     else:

@@ -1189,6 +1189,7 @@ def resolve_record(
     *,
     handle: str | None,
     latest_harness: str | None = None,
+    workspace: Path | None = None,
 ) -> PersistentWorktreeRecord:
     index = run_registry.load_index(registry_root)
     if latest_harness is not None:
@@ -1236,7 +1237,7 @@ def resolve_record(
         )
         return latest_record
     if _looks_like_path(handle):
-        return _record_for_path(registry_root, handle)
+        return _record_for_path(registry_root, handle, workspace=workspace)
     resolved = run_registry.resolve_handle(index, handle)
     if resolved.run_id is None:
         suggestions = suggest_worktree_handles(registry_root, handle)
@@ -1296,8 +1297,18 @@ def _looks_like_path(handle: str) -> bool:
     return os.sep in handle or "/" in handle or handle.startswith(("~", "."))
 
 
-def _record_for_path(registry_root: Path, handle: str) -> PersistentWorktreeRecord:
-    wanted = worktree_records._canonical_path(os.path.expanduser(handle))
+def _record_for_path(
+    registry_root: Path,
+    handle: str,
+    *,
+    workspace: Path | None = None,
+) -> PersistentWorktreeRecord:
+    expanded = os.path.expanduser(handle)
+    if workspace is not None and not os.path.isabs(expanded):
+        # A relative path names a worktree inside the workspace this command was
+        # pointed at (`--cwd`), not inside the process's current directory.
+        expanded = str(workspace / expanded)
+    wanted = worktree_records._canonical_path(expanded)
     for record in load_persistent_records(registry_root):
         cwd = record.get("executionCwd")
         if isinstance(cwd, str) and worktree_records._canonical_path(cwd) == wanted:
@@ -1363,8 +1374,11 @@ def show_worktree(
     handle: str | None,
     latest_harness: str | None = None,
     include_detached: bool = False,
+    workspace: Path | None = None,
 ) -> JsonObject:
-    record = resolve_record(registry_root, handle=handle, latest_harness=latest_harness)
+    record = resolve_record(
+        registry_root, handle=handle, latest_harness=latest_harness, workspace=workspace
+    )
     entry = decorate_record(
         record,
         include_detached=include_detached,
