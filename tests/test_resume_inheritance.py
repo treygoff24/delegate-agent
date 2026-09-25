@@ -560,4 +560,16 @@ class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
         payload, stderr = self.run_resume(["--dry-run", "--engine", "grok", alias, "next step"])
 
         self.assertFalse(payload.get("resumable", False))
-        self.assertIn("resumable dropped: grok work runs cannot record a native session", stderr)
+        self.assertIn("resumable dropped: grok work runs do not support --resumable", stderr)
+        self.assertIn("continue the resumed run with delegate resume", stderr)
+
+    def test_safe_resume_drops_the_opt_in_with_a_mode_accurate_note(self):
+        _run_id, alias, _run_path = self.seed_run(mode="safe", manifest={"resumable": True})
+
+        payload, stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False))
+        self.assertIn("resumable dropped: codex safe runs do not support --resumable", stderr)
+        self.assertIn("native followup requires a codex or claude work run", stderr)
+        self.assertIn("continue the resumed run with delegate resume", stderr)
+        self.assertNotIn("cannot record a native session", stderr)

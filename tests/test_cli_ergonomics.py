@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -73,6 +74,78 @@ class RunsSummaryTests(CommandTestBase):
         self.assertEqual(code, 0)
         self.assertIn("total: 3", stdout)
         self.assertIn("harness: codex 2, cursor 1", stdout)
+
+    def test_summary_deduplicates_copied_registry_in_every_bucket(self):
+        self._run("codex", "running", group="wave")
+        self._run("codex", "succeeded", group="wave")
+        self._run("cursor", "failed", group="wave")
+        self._run("cursor", "succeeded")
+        linked = self.workspace / "linked"
+        copied = linked / ".delegate"
+        shutil.copytree(self.registry_root, copied)
+
+        with mock.patch(
+            "delegate_agent.inspection_commands.linked_registry_roots",
+            return_value=[(str(linked), copied)],
+        ):
+            code, stdout, stderr = self.run_main(
+                ["--json", "--cwd", str(self.workspace), "runs", "--summary"]
+            )
+            self.assertEqual(code, 0, stderr)
+            payload = json.loads(stdout)
+            code, stdout, stderr = self.run_main(
+                ["--json", "--cwd", str(self.workspace), "runs", "--limit", "1"]
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["total"], json.loads(stdout)["total"])
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["byStatus"], {"succeeded": 2, "failed": 1, "running": 1})
+        self.assertEqual(payload["byHarness"], {"codex": 2, "cursor": 2})
+        self.assertEqual(payload["byGroup"], {"wave": 3, "(none)": 1})
+
+        # Conflicting copies still use the earlier root's bucket values.
+        for run_id in run_registry.load_index(copied)["runs"]:
+            run_registry.write_json_atomic(
+                run_registry.run_directory(copied, run_id) / run_registry.STATE_FILE,
+                {"status": "cancelled", "lastActivityAt": "2026-09-24T13:00:00Z"},
+            )
+        with mock.patch(
+            "delegate_agent.inspection_commands.linked_registry_roots",
+            return_value=[(str(linked), copied)],
+        ):
+            code, stdout, stderr = self.run_main(
+                ["--json", "--cwd", str(self.workspace), "runs", "--summary"]
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(json.loads(stdout), payload)
+
+    def test_empty_summary_uses_listing_warning_in_json_and_text(self):
+        for flags in ([], ["--running"], ["--active"], ["--stale"], ["--group", "missing"]):
+            with self.subTest(flags=flags):
+                base = ["--cwd", str(self.workspace), "runs", *flags]
+                code, listing, stderr = self.run_main(["--json", *base])
+                self.assertEqual(code, 0, stderr)
+                code, summary, stderr = self.run_main(["--json", *base, "--summary"])
+                self.assertEqual(code, 0, stderr)
+                warnings = json.loads(summary)["warnings"]
+                self.assertEqual(warnings, json.loads(listing)["warnings"])
+                self.assertIn("use --cwd PATH", warnings[0])
+                code, summary, stderr = self.run_main([*base, "--summary"])
+                self.assertEqual(code, 0, stderr)
+                self.assertIn(f"warning: {warnings[0]}", summary)
+
+    def test_status_filtered_summary_uses_listing_warning(self):
+        self._run("codex", "succeeded")
+        for flag in ("--running", "--active", "--stale"):
+            with self.subTest(flag=flag):
+                base = ["--json", "--cwd", str(self.workspace), "runs", flag]
+                code, listing, stderr = self.run_main(base)
+                self.assertEqual(code, 0, stderr)
+                code, summary, stderr = self.run_main([*base, "--summary"])
+                self.assertEqual(code, 0, stderr)
+                warnings = json.loads(summary)["warnings"]
+                self.assertEqual(warnings, json.loads(listing)["warnings"])
+                self.assertIn(f"Drop {flag}", warnings[0])
 
     def test_summary_refuses_row_shaping_options(self):
         for option in (["--limit", "3"], ["--structural"]):

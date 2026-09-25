@@ -2847,10 +2847,11 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pinned = resolve_model_selection(cursor, build.model_alias)
 
     warnings: list[str] = []
+    base_model, family_warning = _resolve_cursor_family_name(
+        pinned or cursor["defaultModel"], build.discovery
+    )
     if pinned is not None:
-        pinned, family_warning = _resolve_cursor_family_name(pinned, build.discovery)
-        if family_warning is not None:
-            warnings.append(family_warning)
+        pinned = base_model
     capability: reasoning.ReasoningCapability | None = None
     mappings = cursor.get("reasoningEffortModels")
     discovered_routes: dict[str, str] = {}
@@ -2858,7 +2859,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         record = reasoning._discovery_harness_record(build.discovery, "cursor")
         raw_models = record.get("models") if record is not None else None
         discovered_models = raw_models if isinstance(raw_models, dict) else {}
-        base_model = pinned or cursor["defaultModel"]
         base_entry = discovered_models.get(base_model)
         route_family = base_entry.get("routeFamily") if isinstance(base_entry, dict) else None
         if isinstance(route_family, str) and route_family:
@@ -2898,7 +2898,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             effort_source=build.effort_source,
         )
         warnings.extend(reasoning_warnings)
-        model = capability.model if capability is not None else cursor["defaultModel"]
+        model = capability.model if capability is not None else base_model
         capability_model_source = "config"
     elif build.requested_effort is not None and discovered_routes:
         routed_model = discovered_routes.get(build.requested_effort)
@@ -2965,8 +2965,16 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model = base_model
         capability_model_source = "config"
     else:
-        model = pinned or cursor["defaultModel"]
+        model = base_model
         capability_model_source = "explicit" if pinned is not None else "config"
+
+    model, effective_family_warning = _resolve_cursor_family_name(model, build.discovery)
+    if effective_family_warning is not None:
+        warnings.append(effective_family_warning)
+    elif family_warning is not None and (
+        model == base_model or capability_model_source == "discovery"
+    ):
+        warnings.append(family_warning)
 
     argv = build_cursor_argv(
         cursor["argvPrefix"],

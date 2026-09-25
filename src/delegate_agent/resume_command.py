@@ -877,7 +877,8 @@ def build_resume_plan(
     )
     if manifest.get("resumable") is True and not resumable:
         notes.append(
-            f"resumable dropped: {engine} {mode} runs cannot record a native session, so "
+            f"resumable dropped: {engine} {mode} runs do not support --resumable; "
+            "native followup requires a codex or claude work run, so "
             "continue the resumed run with delegate resume, not followup."
         )
 
