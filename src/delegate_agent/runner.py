@@ -3778,14 +3778,13 @@ def _merge_tracked_attempt_captures(
     accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
     accumulator.terminal_event = current_capture.accumulator.terminal_event
     accumulator.terminal_status = current_capture.accumulator.terminal_status
-    accumulator.provider_terminal_state = (
-        current_capture.accumulator.provider_terminal_state
-        or prior_capture.accumulator.provider_terminal_state
-    )
-    accumulator.provider_terminal_reason = (
-        current_capture.accumulator.provider_terminal_reason
-        or prior_capture.accumulator.provider_terminal_reason
-    )
+    # A provider terminal (a cancellation, a max-turns stop, a refusal-coded
+    # turn failure) is a verdict on the attempt that recorded it: the merge's
+    # final attempt answers for the merged run, and a retry or failover that
+    # answered cleanly afterwards must not be labelled with the earlier
+    # attempt's terminal state. The event stays in ``events`` for diagnosis.
+    accumulator.provider_terminal_state = current_capture.accumulator.provider_terminal_state
+    accumulator.provider_terminal_reason = current_capture.accumulator.provider_terminal_reason
     accumulator.served_model = (
         current_capture.accumulator.served_model or prior_capture.accumulator.served_model
     )
@@ -5431,24 +5430,18 @@ def execute_call(
         call_stdin_text=retry_stdin,
         call_prompt_file_text=retry_prompt_file,
     )
-    warnings = list(result.warnings)
-    for warning in retry.warnings:
-        _append_unique(warnings, warning)
     resolved = retry.exit_code == 0 and retry.result_quality == RESULT_QUALITY_OK
+    # The retry owns every provider signal, exactly as in the thread-retry and
+    # auth-fallback merges: the joined stderr keeps both attempts for diagnosis,
+    # but the first attempt's quota line must not classify a clean retry
+    # (cli.py reads ``final_attempt_stderr_tail``).
+    merged = _merge_call_attempts(result, retry, "empty-success retry")
+    warnings = list(merged.warnings)
     if not resolved:
         _append_unique(warnings, EMPTY_RETRY_WARNING)
-    stderr_parts = [part for part in (result.stderr_tail, retry.stderr_tail) if part]
     return replace(
-        retry,
-        duration_ms=result.duration_ms + retry.duration_ms,
-        stdout_bytes=result.stdout_bytes + retry.stdout_bytes,
-        stderr_bytes=result.stderr_bytes + retry.stderr_bytes,
-        stderr_tail=("\n--- empty-success retry ---\n".join(stderr_parts))[
-            -profiles.STDERR_TAIL_LIMIT :
-        ],
+        merged,
         warnings=tuple(warnings),
-        text_truncated=result.text_truncated or retry.text_truncated,
-        usage=_aggregate_usage(result.usage, retry.usage),
         empty_retry_attempted=True,
         empty_retry_resolved=resolved,
     )

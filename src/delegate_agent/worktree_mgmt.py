@@ -712,9 +712,14 @@ def porcelain_status(
     *,
     limit: int | None = None,
 ) -> tuple[list[str] | None, int | None, list[str]]:
+    # ``--untracked-files=all`` keeps these lines filterable by the launch-seeded
+    # per-file digest map (see worktree_summary.effective_changed_files): a
+    # collapsed ``?? seeded-dir/`` entry is never seeded, so it read as child
+    # dirt and drove both the retirement decision and ``worktree show``'s
+    # workSummary.
     result = _run_git(
         execution_cwd,
-        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
