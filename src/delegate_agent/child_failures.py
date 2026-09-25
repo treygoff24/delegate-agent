@@ -61,21 +61,29 @@ _USAGE_PATTERNS = (
     re.compile(r"\bRESOURCE_EXHAUSTED\b"),
 )
 # A bare "rate limit" or HTTP 429 is often transient throttling, not an account/quota
-# problem, so it only classifies when account-context wording appears anywhere
-# in the same diagnostic text (before or after, any line).
-_RATE_LIMIT_PATTERN = re.compile(
-    r"\brate limit(?:s|ed)?\b|\b(?:HTTP|status|code)[ :=]*429\b|\b429\b[^\n]{0,40}\btoo many requests\b",
-    re.IGNORECASE,
+# problem, so it only classifies when account-context wording appears on the same
+# line and within a tight window of the trigger, in either order. "HTTP 429 Too
+# Many Requests, backing off" next to an unrelated "memory usage: 82%" (or a
+# wrapped command's `usage:` help line) must stay transient throttling: pairing
+# them sent orchestrators to credential rotation for a retryable 429.
+_RATE_LIMIT_TRIGGER = (
+    r"\brate limit(?:s|ed)?\b"
+    r"|\b(?:HTTP|status|code)[ :=]*429\b"
+    r"|\b429\b[^\n]{0,40}\btoo many requests\b"
 )
-_ACCOUNT_CONTEXT_PATTERN = re.compile(
-    r"\b(?:quota|usage|billing|subscription|account|credit)\b", re.IGNORECASE
+_ACCOUNT_CONTEXT_WORD = r"\b(?:quota|usage|billing|subscription|account|credit)\b"
+_CONTEXT_WINDOW = r"[^\n]{0,80}"
+_RATE_LIMIT_PATTERN = re.compile(
+    rf"(?:{_RATE_LIMIT_TRIGGER}){_CONTEXT_WINDOW}(?:{_ACCOUNT_CONTEXT_WORD})"
+    rf"|(?:{_ACCOUNT_CONTEXT_WORD}){_CONTEXT_WINDOW}(?:{_RATE_LIMIT_TRIGGER})",
+    re.IGNORECASE,
 )
 
 
 def _matches_usage_limit(text: str) -> bool:
     if any(pattern.search(text) for pattern in _USAGE_PATTERNS):
         return True
-    return bool(_RATE_LIMIT_PATTERN.search(text)) and bool(_ACCOUNT_CONTEXT_PATTERN.search(text))
+    return bool(_RATE_LIMIT_PATTERN.search(text))
 
 
 _RESET_PATTERN = re.compile(

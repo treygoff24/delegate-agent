@@ -304,6 +304,13 @@ def build_run_summary(
             value = state.get(key)
             if value is not None:
                 summary[key] = value
+        # ``failureKind`` is the outcome contract's "the outcome was recorded"
+        # marker, and null is meaningful: it says the contract weighed this run
+        # and found no failure (a quiet work run whose changes landed). Dropping
+        # it made a consumer such as run_succeeded(..., failure_kind=...) fall
+        # back to the older result-quality veto and call that success a failure.
+        if "failureKind" in state:
+            summary["failureKind"] = state.get("failureKind")
         # `runs`/`ps` report usage from a record a shared workspace can rewrite,
         # so the summary carries the allowlisted normalized shape, not the bytes
         # the record holds.
