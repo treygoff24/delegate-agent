@@ -68,15 +68,16 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below).
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)).
 - `agent_meta(label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no label, that of the most recent `agent()` call on the calling thread.
-- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`); a script tests membership before relying on a newer feature.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
-- `pipeline(items, stage1, ...)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
-- `parallel([lambda: ...])` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
+- `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
+- `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
 - `phase(title)` emits a progress event.
 - `log(message)` emits a JSON-safe log event.
-- `workflow(name_or_path, args=None, gate=False)` nests another workflow. Use `gate=True` or `gate="on-failure"` for approval checkpoints.
+- `workflow(name_or_path, args=None, gate=False, key=None)` nests another workflow. Use `gate=True` or `gate="on-failure"` for approval checkpoints.
+- `park_gate(key, result=None, actions=None)` pauses for an operator decision and, once approved, returns `{"gate", "action", "note", "data"}` (see [Gate actions](#gate-actions)).
 - `judges(prompt, schema, engines=[...], *, effort=None)` runs one `call --read-only` judge lane per engine and returns the votes. Pass `effort=` to select a uniform reasoning effort for the panel, or set `"effort"` per engine dict item in `engines` to override it.
 
 Workflow `engine` values and `workflows.engineCaps` keys accept `cursor`,
@@ -93,6 +94,53 @@ under the same name. Dry-runs expose persona name/source/digest/byte count but
 never write the persona body. Child input JSON carries `persona` and
 `allowRepoPersona`; the normal run manifest and inspection projections expose
 non-sensitive persona metadata only.
+
+### Stable step keys
+
+By default a call's replay identity is positional: its scope path
+(`root/parallel@1/thunk#0/seq#0`) plus its prompt and options. A resumed script
+replays correctly only when it makes the same calls in the same order with the
+same prompts. A script that reads mutable state (plan files, git heads) and
+skips settled work breaks that: skipping one `parallel()` shifts every later
+position, and a new head in a prompt changes the key, so settled steps run
+again.
+
+`agent(..., key="impl-task-7")` replaces that identity with the caller's key,
+namespaced by the enclosing named scope. Position and prompt text no longer
+matter, and a keyed call consumes no positional counter, so skipping it never
+shifts an unkeyed sibling. The `agent_started` event records `callerKey`,
+`promptDigest`, and `optsDigest`. When a resumed call sends a different prompt
+or options under the same key, the recorded result is still adopted and the
+journal gets a `key_prompt_mismatch` event (`promptChanged`, `optsChanged`,
+both digests).
+
+`parallel(..., key=)`, `pipeline(..., key=)`, and `workflow(..., key=)` name
+their scope `<named scope>/<kind>:<key>`. Positional counters inside restart
+from that stable parent, and keyed calls inside are namespaced by it. An unkeyed
+primitive keeps today's positional scope and passes the enclosing named scope
+through. The root, a keyed primitive, and a `soft_park()` item are named
+scopes.
+
+A key names one step per run lifetime (one supervisor process). Reusing a
+key in the same named scope raises `WorkflowKeyConflict`: while the first call
+is live ("held by a live agent() call"), or after it settled ("already used
+by an earlier agent() call"), because the second call would silently receive
+the first's result. Inside a per-item `pipeline()` or `parallel()`, include the
+item id in the key or key the enclosing primitive. `reject()` of a keyed step
+moves it to the next retry identity, so reject-and-rerun works in one lifetime
+and replays the same way on resume.
+
+Unkeyed calls keep their positional keys exactly, so existing journals replay
+unchanged.
+
+### Concurrent calls and stale children
+
+Positional scopes and counters are per thread. Two calls from plain Python
+threads (not `parallel()`) can therefore share one scope path. On resume, an
+unfinished child from an earlier lifetime whose scope now carries a different
+key is stale and is cancelled. A child started by the current lifetime is never
+treated as stale, whatever its scope: `agent_started` carries the supervisor's
+`incarnation` token, and the runtime cancels only children it did not start.
 
 ## Gates and resume
 
@@ -203,6 +251,39 @@ whatever was left behind.
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.
 
+A child record that never published a pid (a launch whose isolation or
+process start never completed, so it sits at `running` or
+`creating_isolation` with no pid) is refused while it may still be launching.
+After 300 seconds without activity, resume seals it as `cancelled` with
+`staleReason: missing_pid` instead of failing with `workflow_children_unsealed`.
+Adoption follows the same rule: when a key's latest child run is cancelled,
+stale, or never launched, the call journals `agent_adopt_skipped` with the
+reason and relaunches instead of waiting on it or failing.
+
+### Gate actions
+
+`park_gate(key, result=None, actions=["retry", "accept"])` records a `gate`
+event carrying `gateName` (the key) and `actions`, then pauses the workflow the
+same way `workflow(gate=True)` does. The operator chooses:
+
+```bash
+python3 bin/delegate.py workflow approve wf_0123abcdef45 \
+  --gate task-7-park --action retry --note "fixture fixed" --data '{"attempt": 2}'
+```
+
+The resumed script reaches the same call, and it returns
+`{"gate": "task-7-park", "action": "retry", "note": "fixture fixed", "data": {"attempt": 2}}`
+and journals `gate_decided`. `actions` defaults to `["approve"]`. `approve`
+refuses an action the gate did not declare and names the allowed ones, and it
+refuses a bare approve on a gate whose actions exclude `approve`. `--gate`
+selects an unapproved gate by its `park_gate()` key or journal key; without
+it, approve takes the latest unapproved gate as before. A bare approve stores
+exactly what approvals always stored, and the call returns action `approve`.
+As with every gate, the approval is bound to the gate's result hash: if the
+resumed script parks the same key with a different result, it pauses again.
+In a dry run, `park_gate()` returns its first declared action with
+`dryRun: true`.
+
 A completed dry-run can also become a live run without creating a second
 workflow record:
 
@@ -212,6 +293,13 @@ python3 bin/delegate.py workflow run --resume wf_0123abcdef45
 
 Its simulated events remain in `journal.jsonl` for audit, but resume ignores
 them as cached results and resets simulated budget before launching live agents.
+
+### Dry-run working directory
+
+A dry run executes the script in the invoking process with its working
+directory set to the `--cwd` workspace, the same directory a real run's
+detached supervisor uses. Scripts that read plan state or git heads by relative
+path see the same files in both modes.
 
 ### Dry-run write warning
 
@@ -382,6 +470,7 @@ python3 bin/delegate.py workflow watch wf_0123abcdef45 --jsonl
 python3 bin/delegate.py workflow wait --timeout 60
 python3 bin/delegate.py workflow result --field summary
 python3 bin/delegate.py workflow approve wf_0123abcdef45
+python3 bin/delegate.py workflow approve wf_0123abcdef45 --gate task-7-park --action retry
 python3 bin/delegate.py workflow kill wf_0123abcdef45
 python3 bin/delegate.py workflow save review.py --name review-changes
 ```

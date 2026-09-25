@@ -94,12 +94,18 @@ def record_approval(
     result_hash: str,
     *,
     previous: JsonObject | None = None,
+    decision: JsonObject | None = None,
 ) -> JsonObject:
     """Approve ``gate_key`` without forgetting earlier approvals.
 
     A resume replays the whole script, so every gate the run already passed
     fires again with the same deterministic key; if the file only held the
     latest key or result, approving gate N would re-pause the run at gate N-1.
+
+    ``decision`` carries a gate action (``action``, optional ``note`` and
+    ``data``) chosen with ``approve --action``. A bare approval stores no
+    decision fields and reads back as action "approve". Re-approving the same
+    gate and result with a decision replaces the earlier decision.
     """
     if not isinstance(result_hash, str) or not result_hash:
         raise ValueError("workflow approvals require a result hash")
@@ -115,11 +121,21 @@ def record_approval(
                 and isinstance(record.get("resultHash"), str)
             ):
                 approved_results.append(dict(record))
-    if not any(
-        record.get("key") == gate_key and record.get("resultHash") == result_hash
-        for record in approved_results
-    ):
-        approved_results.append({"key": gate_key, "resultHash": result_hash})
+    existing = next(
+        (
+            record
+            for record in approved_results
+            if record.get("key") == gate_key and record.get("resultHash") == result_hash
+        ),
+        None,
+    )
+    if existing is None:
+        existing = {"key": gate_key, "resultHash": result_hash}
+        approved_results.append(existing)
+    if decision:
+        for name in ("action", "note", "data"):
+            existing.pop(name, None)
+        existing.update(decision)
     payload: JsonObject = {"approved": True, "approvedResults": approved_results}
     write_json(path, payload)
     return payload
@@ -152,6 +168,28 @@ def approval_allows(
         else []
     )
     return any(record.get("resultHash") == result_hash for record in matching_records)
+
+
+def approval_decision(
+    root: Path,
+    gate_key: str,
+    result_hash: str,
+    *,
+    approval: JsonObject | None = None,
+) -> JsonObject | None:
+    """Return the approval record for this gate and result, or None."""
+    payload = approval if approval is not None else read_json(root / APPROVAL_FILE)
+    if not approval_allows(root, gate_key, result_hash, approval=payload or {}):
+        return None
+    records = payload.get("approvedResults") if isinstance(payload, dict) else None
+    for record in records if isinstance(records, list) else []:
+        if (
+            isinstance(record, dict)
+            and record.get("key") == gate_key
+            and record.get("resultHash") == result_hash
+        ):
+            return dict(record)
+    return None
 
 
 def read_json(path: Path) -> JsonObject | None:
