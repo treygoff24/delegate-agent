@@ -66,6 +66,39 @@ class StallWatchdogRunnerTests(unittest.TestCase):
             self.assertTrue(payload["stoppedAfterCompletion"])
             self.assertNotIn("stall", payload)
 
+    def test_a_devin_report_of_failed_or_blocked_then_silence_records_a_failure(self):
+        for status in ("failed", "blocked"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                context = self.context(workspace, harness="devin", stall_seconds=0.5)
+                script = (
+                    "import time\n"
+                    "print('Could not finish.', flush=True)\n"
+                    f"print('- Status: {status}', flush=True)\n"
+                    "time.sleep(30)\n"
+                )
+                started = time.monotonic()
+                code, _payload = self.run_child(context, workspace, script)
+                self.assertLess(time.monotonic() - started, 15)
+                self.assertNotEqual(code, 0)
+                state = run_registry.load_run_state(context.registry_root, context.run_id)
+                self.assertEqual(state["status"], "failed")
+                self.assertTrue(state["stoppedAfterCompletion"])
+                self.assertNotIn("stall", state)
+
+    def test_an_echoed_report_template_is_not_a_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="devin", stall_seconds=0.5)
+            script = (
+                "import time\n"
+                "print('- Status: completed / blocked / failed', flush=True)\n"
+                "time.sleep(30)\n"
+            )
+            with self.assertRaises(runner.RunnerLaunchError) as raised:
+                self.run_child(context, workspace, script)
+            self.assertEqual(raised.exception.error, "stalled")
+
     def test_devin_silence_without_a_report_stalls_with_child_activity(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

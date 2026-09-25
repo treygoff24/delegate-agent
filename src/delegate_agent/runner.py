@@ -2878,12 +2878,13 @@ def _capture_tracked_process(
                 idle_seconds = watchdog.stalled_for(now)
                 if idle_seconds is not None:
                     stall_detail = watchdog.stall_detail(idle_seconds)
-                    if (
-                        stall_detail.get("stallReason") == stall_watchdog.STALL_REASON_IDLE
+                    reported_status = (
+                        stall_watchdog.completion_report_status(accumulator.assistant_text)
+                        if stall_detail.get("stallReason") == stall_watchdog.STALL_REASON_IDLE
                         and stall_watchdog.reports_completion_by_text(ctx.harness)
-                        and stall_watchdog.completion_report_status(accumulator.assistant_text)
-                        is not None
-                    ):
+                        else None
+                    )
+                    if reported_status is not None:
                         # A text-stream child (Devin) that already wrote its
                         # completion report and then went quiet finished its
                         # work; only its exit is missing. Stop it the way a
@@ -2897,7 +2898,10 @@ def _capture_tracked_process(
                         )
                         stall_detail = None
                         stopped_after_completion = True
-                        exit_code = 0
+                        # The report's own verdict decides the outcome: a child
+                        # that reported blocked or failed did not succeed just
+                        # because it stopped cleanly.
+                        exit_code = 0 if reported_status == "completed" else 1
                         break
                     # Idle stdout cannot say whether the child is waiting on its
                     # provider, spinning silently, or gone; sample the group
