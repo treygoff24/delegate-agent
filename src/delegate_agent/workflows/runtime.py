@@ -1677,8 +1677,11 @@ class WorkflowState:
         The journal is the authority.  ``status.json`` is only a recoverable
         projection, so a supervisor death while draining cannot lose the gate
         identity. Re-parking the same key and result reuses its journal event
-        and never appends a duplicate. ``result_hash`` overrides the hash of
-        ``result`` for a gate that asks a derived question about it.
+        and never appends a duplicate, unless the actions on offer changed:
+        ``approve`` validates a choice against the event it finds, so an event
+        that still carries an earlier park's list would refuse an action the
+        script now offers. ``result_hash`` overrides the hash of ``result`` for
+        a gate that asks a derived question about it.
         """
         if result_hash is None:
             result_hash = _gate_result_hash(result)
@@ -1688,6 +1691,12 @@ class WorkflowState:
             if isinstance(last_seq, int):
                 self.sequence = max(self.sequence, last_seq)
             event = self._latest_gate_event_locked(gate_key, result_hash)
+            if (
+                event is not None
+                and actions is not None
+                and _declared_gate_actions(event) != list(actions)
+            ):
+                event = None
             if event is None:
                 self.sequence += 1
                 event = {
@@ -5325,6 +5334,14 @@ def _stable_hash(value: str) -> str:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _declared_gate_actions(event: JsonObject | None) -> list[str]:
+    """The actions a gate event offers; an event without a list offers approve."""
+    declared = event.get("actions") if isinstance(event, dict) else None
+    if isinstance(declared, list) and declared:
+        return [item for item in declared if isinstance(item, str)]
+    return ["approve"]
 
 
 def _gate_result_hash(result: object) -> str:

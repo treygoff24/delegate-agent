@@ -457,6 +457,25 @@ class GateActionTests(_WorkflowFixture):
         )
         self.assertEqual(self.park("task-11", result, ["retry"])["action"], "retry")
 
+    def test_a_reparked_gate_carries_the_actions_now_on_offer(self) -> None:
+        result = {"task": 9}
+        self.assertIsInstance(self.park("task-9", result, ["retry", "accept"]), runtime.GateExit)
+        # The resumed script offers a different list for the same result: the
+        # pending question must show the new one, or approve refuses an action
+        # the script now declares.
+        self.assertIsInstance(self.park("task-9", result, ["retry", "skip"]), runtime.GateExit)
+        self.assertEqual(self.events("gate")[-1]["actions"], ["retry", "skip"])
+        self.assertEqual(
+            self.events("gate")[-1]["gateResultHash"], self.events("gate")[0]["gateResultHash"]
+        )
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate="task-9", action="skip", note="new list")
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-9", result, ["retry", "skip"])["action"], "skip")
+
     def test_a_second_live_park_gate_with_one_key_is_refused(self) -> None:
         dsl = runtime.WorkflowDsl(self.state(), {})
         nested: list[object] = []
