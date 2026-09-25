@@ -889,7 +889,38 @@ def send(
             private_io.write_json_atomic(sent_path, ledger)
         ledger["recipients"] = rows
         private_io.write_json_atomic(sent_path, ledger)
+        _require_a_delivery(ledger)
         return _send_payload(ledger, identity)
+
+
+def _require_a_delivery(ledger: JsonObject) -> None:
+    """Refuse to report success for a send that reached nobody.
+
+    ``ok`` on a send means at least one inbox received the message. The sent
+    ledger stays written either way, so ``mail status`` can still show every
+    recipient's outcome.
+    """
+    rows = [row for row in ledger.get("recipients") or [] if isinstance(row, dict)]
+    if any(row.get("outcome") == "delivered" for row in rows):
+        return
+    message_id = str(ledger.get("msgId") or "")
+    if rows:
+        outcomes = "; ".join(
+            f"{row.get('recipient')}: {row.get('outcome')}"
+            + (f" ({row['reason']})" if row.get("reason") else "")
+            for row in rows
+        )
+        detail = f"No recipient received it: {outcomes}."
+    else:
+        detail = f"Group {ledger.get('group')!r} has no recipients."
+    raise MailError(
+        "mail_not_delivered",
+        f"Mail {message_id} was not delivered. {detail} Mail delivers only to effectively "
+        "running work-mode runs and the coordinator; the sent ledger records the attempt.",
+        1,
+        diagnostics={"msgId": message_id, "recipients": rows},
+        next_actions=["delegate runs --running", f"delegate mail status {message_id}"],
+    )
 
 
 def _send_payload(ledger: JsonObject, identity: MailIdentity) -> JsonObject:

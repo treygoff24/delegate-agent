@@ -1171,6 +1171,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate mail send --to coordinator --subject status 'The review is ready.'",),
         notes=(
             "Only effectively running work-mode recipients receive a publication; other registered recipients are ledgered as skipped_ineligible.",
+            "A send succeeds only when at least one recipient received it; a send that reaches nobody fails with mail_not_delivered (exit 1), names each recipient's outcome and reason, and stays on the sent ledger for mail status.",
             "Rules are evaluated after group expansion and cannot be bypassed by group addressing.",
             "Bodies are capped at 256 KiB and direct blocked routes refuse with the do-not-route-around explanation.",
         ),

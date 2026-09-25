@@ -56,7 +56,9 @@ delegate mail prune [--older-than DAYS] [--dry-run]
 
 `send` records per-recipient outcomes (`delivered`, `failed`,
 `skipped_ineligible`, or `blocked`); `status` may report `pruned` when a
-delivered mailbox file is gone. `watch --once` emits metadata-only NDJSON and
+delivered mailbox file is gone. A send that delivers to nobody exits 1 with
+the typed error `mail_not_delivered`, naming each recipient's outcome and
+reason; its ledger stays readable through `mail status`. `watch --once` emits metadata-only NDJSON and
 returns exit code 124 on timeout. Read-only profile guards allow inbox,
 status, watch, and `read --peek`; mutating mail operations remain protected.
 `mail prune --dry-run` is byte-preserving and best-effort; under concurrent
