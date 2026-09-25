@@ -504,11 +504,16 @@ python3 bin/delegate.py workflow save review.py --name review-changes
 
 `workflow run --env NAME=VALUE` and `--env-file PATH` (both repeatable, launch
 only) record a workflow-level env in the workflow directory's private
-`workspace-env.json`. Every `agent()` child of every attempt receives it,
-beneath Delegate's pinned operational variables, so a resume uses the launch
-values rather than whatever the resuming shell exports. `workflow resume` and
-`workflow run --resume` refuse `--env`. The script's own process does not see
-these variables.
+`workspace-env.json`. Every `agent()` child of every attempt receives it
+where a child can take workspace env (mode `work` with
+`isolation="worktree"`), beneath the call's own `env=`. It travels as
+workspace-spec data in the child's run input, never as the child Delegate
+process's own environment, so a lane that cannot take env (safe mode, call
+mode, work without a worktree) simply does not receive it; such a call is not
+an error, and its replay key is unchanged by a workflow-level env. The launch
+values are what a resume replays, rather than whatever the resuming shell
+exports. `workflow resume` and `workflow run --resume` refuse `--env`. The
+script's own process does not see these variables.
 
 `workflow run` detaches its supervisor and returns, so the invoking process ends
 immediately. Run it under a systemd unit only with `KillMode=process`

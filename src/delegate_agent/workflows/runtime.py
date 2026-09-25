@@ -1280,6 +1280,12 @@ class WorkflowState:
     replay_attempt: int = 0
     attempt_config: JsonObject | None = None
     attempt_environment: dict[str, str] | None = None
+    # The env recorded by ``workflow run --env`` for the workflow directory.
+    # It travels to children as *data* (merged under each agent(env=) into the
+    # child's workspace spec) and NEVER as process environment: putting it on
+    # the child Delegate's own env would move its config/data-home/pin-root
+    # resolution and its git calls, not just the harness child's.
+    launch_env: dict[str, str] = field(default_factory=dict)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     signal_received: str | None = None
     signals_repeated: list[str] = field(default_factory=list)
@@ -2347,21 +2353,6 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
         }
         exec(code, globals_dict)
         return globals_dict["__delegate_workflow__"]()
-
-
-def with_launch_environment(
-    root: Path, attempt_environment: dict[str, str] | None
-) -> dict[str, str] | None:
-    """Layer the env recorded by ``workflow run --env`` under an attempt's env.
-
-    Children inherit the supervisor's environment and then this mapping, so
-    the launch values win over whatever the resuming shell exports, while the
-    pinned operational variables still win over the launch values.
-    """
-    launch_env = workspace_spec.read_run_env(root)
-    if not launch_env:
-        return attempt_environment
-    return {**launch_env, **(attempt_environment or {})}
 
 
 def _agent_workspace_spec(
@@ -3517,8 +3508,18 @@ class WorkflowDsl:
             raise ValueError("timeout must be a positive number of seconds")
         resolved_isolation = isolation or self.defaults.get("isolation")
         resolved_phase = phase or self.current_phase
+        # The workflow-level launch env reaches a child as workspace-spec data,
+        # under the call's own env=. It is a default, not a demand: a call whose
+        # mode/isolation cannot take env gets no spec and must not fail, so the
+        # replay key of such a call is identical to a workflow with no launch env.
+        spec_env = env
+        if self.state.launch_env:
+            if env:
+                spec_env = {**self.state.launch_env, **env}
+            elif resolved_mode == MODE_WORK and resolved_isolation == "worktree":
+                spec_env = dict(self.state.launch_env)
         workspace = _agent_workspace_spec(
-            base=base, env=env, setup=setup, mode=resolved_mode, isolation=resolved_isolation
+            base=base, env=spec_env, setup=setup, mode=resolved_mode, isolation=resolved_isolation
         )
         opts = {
             "engine": engines if len(engines) > 1 else engines[0],
@@ -5989,7 +5990,11 @@ def run_supervisor(
         notify_spec = status.get("notify")
         script_path = root / registry.SCRIPT_FILE
         args = load_args(root)
-        attempt_environment = with_launch_environment(root, attempt_environment)
+        # The workflow launch env is read once here and replayed to children as
+        # run-input data (see WorkflowDsl.agent); attempt_environment, which is
+        # the pinned operational + attempt variables, keeps going into the child
+        # process environment exactly as before.
+        launch_env = workspace_spec.read_run_env(root) or {}
         budget_payload = status.get("budget")
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
@@ -6017,6 +6022,7 @@ def run_supervisor(
             replay_attempt=replay_attempt,
             attempt_config=attempt_config,
             attempt_environment=attempt_environment,
+            launch_env=launch_env,
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
