@@ -313,7 +313,11 @@ them as cached results and resets simulated budget before launching live agents.
 A dry run executes the script in the invoking process with its working
 directory set to the `--cwd` workspace, the same directory a real run's
 detached supervisor uses. Scripts that read plan state or git heads by relative
-path see the same files in both modes.
+path see the same files in both modes. The previous directory is restored when
+the script finishes. A dry run that exceeds `workflows.dryRunTimeoutSeconds`
+fails with `dry_run_timeout`, and its abandoned script thread cannot be stopped,
+so the process keeps the workspace as its working directory rather than moving
+the script's relative paths out from under it.
 
 ### Dry-run write warning
 

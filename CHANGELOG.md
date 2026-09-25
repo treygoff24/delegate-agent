@@ -60,7 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and publishes the child's pid only over a record that is neither terminal nor
   cancel-requested, so a sealed launch never gains a child.
 - `workflow run --dry-run` executes the script with its working directory set to
-  the `--cwd` workspace, as a real run's supervisor does.
+  the `--cwd` workspace, as a real run's supervisor does. A dry run that times
+  out leaves the workspace as the working directory, because its abandoned
+  script thread may still be resolving relative paths.
 - Codex work runs recover the last substantive agent message as the completion
   report when the stream never sealed `turn.completed`, instead of classifying a
   complete report as `resultQuality=empty`. A progress preamble is still not
