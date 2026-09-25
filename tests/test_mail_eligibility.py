@@ -37,17 +37,30 @@ class MailEligibilityTests(unittest.TestCase):
         return run_id, alias
 
     def _send(
-        self, *, sender: dict[str, str] | None, to: str | None = None, group: str | None = None
+        self,
+        *,
+        sender: dict[str, str] | None,
+        to: str | None = None,
+        group: str | None = None,
+        expect_nothing_delivered: bool = False,
     ):
+        # dlg-qd1: absorb `mail_not_delivered` only where the test expects the
+        # send to reach nobody. Swallowing it unconditionally let a send that
+        # wrongly refused a partial delivery still look green here; a send the
+        # test expects to deliver now fails loudly instead.
         command = mail.MailCommand(action="send", to=to, group=group, body="eligibility")
         try:
-            return mail.send(self.root, command, env=sender)["message"]
+            payload = mail.send(self.root, command, env=sender)
         except mail.MailError as exc:
-            # dlg-qd1: a send that reaches nobody is a typed failure; the
-            # ledger rows ride on the error so outcomes stay assertable.
+            if not expect_nothing_delivered:
+                self.fail(f"send raised {exc.error} although this test expects a delivery")
             self.assertEqual(exc.error, "mail_not_delivered")
             assert exc.diagnostics is not None
             return {"msgId": exc.diagnostics["msgId"], "recipients": exc.diagnostics["recipients"]}
+        if expect_nothing_delivered:
+            self.fail("send reported a delivery although this test expects none")
+        self.assertIs(payload.get("ok"), True, payload)
+        return payload["message"]
 
     def test_direct_to_only_publishes_to_effectively_running_work_run(self) -> None:
         sender_id, sender_alias = self._run(group="g")
@@ -65,7 +78,9 @@ class MailEligibilityTests(unittest.TestCase):
         sender = {"DELEGATE_RUN_ID": sender_id, "DELEGATE_MAIL_SELF": sender_alias}
         for alias in (eligible, safe, call, terminal, stale):
             with self.subTest(alias=alias):
-                message = self._send(sender=sender, to=alias)
+                message = self._send(
+                    sender=sender, to=alias, expect_nothing_delivered=alias != eligible
+                )
                 row = message["recipients"][0]
                 if alias == eligible:
                     self.assertEqual(row["outcome"], "delivered")
@@ -105,6 +120,8 @@ class MailEligibilityTests(unittest.TestCase):
         state["pid"] = 99999999
         run_registry.write_json_atomic(stale_path, state)
 
+        # `_send` asserts ok:true here: a mixed group delivered to the eligible
+        # run, so a refusal to report that would be the bug under test.
         message = self._send(
             sender={"DELEGATE_RUN_ID": sender_id, "DELEGATE_MAIL_SELF": sender_alias},
             group="reviewers",
