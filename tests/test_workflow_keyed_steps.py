@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -475,6 +476,47 @@ class GateActionTests(_WorkflowFixture):
             0,
         )
         self.assertEqual(self.park("task-9", result, ["retry", "skip"])["action"], "skip")
+
+    def test_status_suggests_an_approve_the_gate_accepts(self) -> None:
+        result = {"task": 12}
+        self.assertIsInstance(self.park("task-12", result, ["retry", "accept"]), runtime.GateExit)
+        view = commands._status_view(
+            self.root, registry.read_json(self.root / registry.STATUS_FILE) or {}
+        )
+        argvs = [shlex.split(action) for action in view["decision"]["nextActions"]]
+        approves = [argv for argv in argvs if "approve" in argv]
+        self.assertEqual(
+            [argv[-2:] for argv in approves],
+            [["--action", "retry"], ["--action", "accept"]],
+            "a paused gate's suggestions must name the actions it declares",
+        )
+        for argv in approves:
+            self.assertEqual(argv[:4], ["delegate", "--cwd", str(self.workspace), "workflow"])
+            self.assertEqual(argv[4:6], ["approve", self.wf_id])
+        self.assertIn(
+            ["delegate", "--cwd", str(self.workspace), "workflow", "events", self.wf_id], argvs
+        )
+        # The suggested command is one the gate accepts.
+        parsed = parse_cli(approves[0][1:]).payload
+        self.assertEqual(
+            self.resume(
+                gate_choice=commands.GateChoice(gate=parsed.gate, action=parsed.gate_action)
+            ),
+            0,
+        )
+        self.assertEqual(self.park("task-12", result, ["retry", "accept"])["action"], "retry")
+
+    def test_status_keeps_the_bare_approve_for_a_default_gate(self) -> None:
+        self.assertIsInstance(self.park("plain-9", {"n": 1}, None), runtime.GateExit)
+        view = commands._status_view(
+            self.root, registry.read_json(self.root / registry.STATUS_FILE) or {}
+        )
+        self.assertEqual(
+            view["decision"]["nextActions"][0],
+            shlex.join(
+                ["delegate", "--cwd", str(self.workspace), "workflow", "approve", self.wf_id]
+            ),
+        )
 
     def test_a_second_live_park_gate_with_one_key_is_refused(self) -> None:
         dsl = runtime.WorkflowDsl(self.state(), {})
