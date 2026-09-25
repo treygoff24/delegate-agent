@@ -1439,7 +1439,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--structural",
                 None,
-                "JSON: reduce each run to identity, terminal status, and failure fields.",
+                "JSON only: reduce each run to identity, terminal status, and failure fields "
+                "(resolution warnings move to the payload's top level); text output ignores it.",
             ),
         ),
         examples=(

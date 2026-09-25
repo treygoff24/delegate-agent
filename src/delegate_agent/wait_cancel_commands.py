@@ -219,6 +219,15 @@ def _run_succeeded(payload: JsonObject) -> bool:
     )
 
 
+# Handle-resolution warnings: advisory, never a change to which run resolves,
+# and the only per-run warnings the text table prints.
+WAIT_RESOLUTION_WARNING_PREFIXES = (
+    "bare_handle_stale:",
+    "bare_handle_ambiguous:",
+    "run_target_stale:",
+)
+
+
 def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
     for run in runs:
         delegate_rendering.render_resolution_text(run, stdout)
@@ -226,7 +235,7 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         if isinstance(warnings, list):
             for warning in warnings:
                 if isinstance(warning, str) and warning.startswith(
-                    ("bare_handle_stale:", "bare_handle_ambiguous:", "run_target_stale:")
+                    WAIT_RESOLUTION_WARNING_PREFIXES
                 ):
                     print(f"warning: {warning}", file=stdout)
     print("alias        status     quality          failure", file=stdout)
@@ -266,6 +275,25 @@ def _group_workspace_warnings(command: WaitCommand, runs: list[JsonObject]) -> l
         "execution workspace; commit between feature waves or use persistent worktree "
         f"isolation and integrate separately: {', '.join(shared)}"
     ]
+
+
+def _resolution_warnings(runs: list[JsonObject]) -> list[str]:
+    """The handle-resolution warnings a structural view would otherwise drop.
+
+    ``--structural`` keeps each run's identity and terminal fields only, so the
+    run's own ``warnings`` list goes away; a compact caller still has to learn
+    that its bare handle was stale or ambiguous, so these ride at the top level.
+    """
+    found: list[str] = []
+    for run in runs:
+        warnings = run.get("warnings")
+        if not isinstance(warnings, list):
+            continue
+        for warning in warnings:
+            if isinstance(warning, str) and warning.startswith(WAIT_RESOLUTION_WARNING_PREFIXES):
+                if warning not in found:
+                    found.append(warning)
+    return found
 
 
 def _append_reports(
@@ -337,6 +365,8 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
             if command.structural
             else runs,
         }
+        if command.structural:
+            warnings = [*warnings, *(w for w in _resolution_warnings(runs) if w not in warnings)]
         if warnings:
             payload["warnings"] = warnings
         delegate_rendering.print_json(payload, stdout)

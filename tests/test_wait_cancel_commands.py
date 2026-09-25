@@ -169,6 +169,24 @@ class WaitCancelCommandTests(unittest.TestCase):
             len(json.loads(full_out)["runs"][0]), len(ok_run), "structural must be smaller"
         )
 
+    def test_wait_structural_keeps_resolution_warnings(self):
+        """dlg-qd1: --structural drops run content, so resolution warnings ride at the top."""
+        _older_id, older_alias = self.write_run(status="running", pid=os.getpid())
+        _newest_id, newest_alias = self.write_run(status="succeeded", result_quality="complete")
+
+        code, out, err = self.run_cli(
+            ["--json", "wait", "codex", "--structural", "--interval", "1"]
+        )
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["runs"][0]["alias"], newest_alias)
+        # The run view itself stays reduced: no per-run warning list to carry it.
+        self.assertNotIn("warnings", payload["runs"][0])
+        (warning,) = payload["warnings"]
+        self.assertTrue(warning.startswith("bare_handle_ambiguous:"), warning)
+        self.assertIn(older_alias, warning)
+
     def test_wait_dead_pid_is_terminal_failure_not_timeout(self):
         _run_id, alias = self.write_run(status="running", pid=999999999)
         code, out, err = self.run_cli(
