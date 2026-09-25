@@ -102,6 +102,26 @@ class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
 
 
+class WorkflowKeyConflict(RuntimeError):
+    """A caller-supplied key was reused within one runtime lifetime.
+
+    Two calls sharing a key would share one replay identity: the second would
+    silently return the first's result, or (while the first is live) race it.
+    The runtime refuses instead of resolving either by cancelling the holder.
+    """
+
+
+class WorkflowKeyError(ValueError, WorkflowKeyConflict):
+    """A caller-supplied key or declared gate action is not usable at all.
+
+    Raised where a key or action list is validated, so a direct call keeps
+    refusing with the ``ValueError`` it always raised. It is also a
+    ``WorkflowKeyConflict``, which lets the per-item handlers of ``parallel()``,
+    ``pipeline()``, and ``soft_park()`` re-raise the script-authoring mistake
+    to the script instead of turning it into a failed item slot.
+    """
+
+
 # Provider recovery and credential rotation belong to the child harness. Only
 # workflow watchdog interruptions are transient here; unknown failures stop.
 WORKFLOW_TRANSIENT_FAILURES = frozenset(
@@ -120,7 +140,20 @@ WORKFLOW_CAPABILITIES: dict[str, int] = {
     "agentFailure": 1,
     "agentMeta": 1,
     "failureKind": 1,
+    # agent(key=...): replay identity is the caller's key inside the enclosing
+    # named scope, not the call's position or prompt text.
+    "agentKey": 1,
+    # parallel/pipeline/workflow(key=...) name their scope so positional
+    # counters inside are relative to a stable parent.
+    "scopeKey": 1,
+    # park_gate(key, result, actions=[...]) returns the operator's chosen
+    # action from ``workflow approve --gate KEY --action NAME``.
+    "gateActions": 1,
 }
+
+# Caller-supplied step and gate keys are identities an operator types
+# (``approve --gate``), so they stay short and printable.
+CALLER_KEY_MAX_CHARS = 200
 
 
 def _workflow_retry_delay(attempt: int) -> float:
@@ -1187,6 +1220,9 @@ class _WorkflowInvocation:
     args: JsonValue
     namespace: str
     depth: int
+    # The stable scope keyed calls are namespaced by. None means the
+    # namespace itself is stable (the root, or a keyed nested workflow).
+    named_scope: str | None = None
 
 
 _AGENT_AUTHORITY_EVENTS = frozenset({"budget", "agent_started", "agent_child", "agent_finished"})
@@ -1256,6 +1292,20 @@ class WorkflowState:
     pending_gate: list[tuple[str, str | None, JsonValue, str]] = field(default_factory=list)
     soft_parked_items: dict[str, JsonObject] = field(default_factory=dict)
     soft_park_scopes: dict[str, str] = field(default_factory=dict)
+    # Keys whose agent_started this runtime lifetime wrote. A lifetime is one
+    # WorkflowState (one supervisor incarnation, identified in the journal by
+    # ``supervisor_token`` on agent_started as ``incarnation``). Stale-scope
+    # cancellation only ever targets children of an earlier lifetime.
+    lifetime_started_keys: set[str] = field(default_factory=set)
+    # Concrete keys claimed by caller-keyed agent() calls in this lifetime,
+    # mapped to the caller key, and the subset whose call is still running.
+    lifetime_caller_keys: dict[str, str] = field(default_factory=dict)
+    live_caller_keys: set[str] = field(default_factory=set)
+    live_gate_keys: set[str] = field(default_factory=set)
+    # Keyed parallel/pipeline/workflow scopes entered in this lifetime.
+    lifetime_scope_keys: set[str] = field(default_factory=set)
+    # Prompt/options digests recorded on each key's latest agent_started.
+    key_digests: dict[str, JsonObject] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.journal_path = self.root / registry.JOURNAL_FILE
@@ -1330,6 +1380,10 @@ class WorkflowState:
             scope = event.get("scope")
             if event.get("type") == "agent_started" and isinstance(scope, str):
                 self.started_scopes[key] = scope
+            if event.get("type") == "agent_started":
+                digests = _event_digests(event)
+                if digests:
+                    self.key_digests[key] = digests
             if isinstance(etype, str) and etype in _AGENT_AUTHORITY_EVENTS:
                 # An unmarked rejection following only simulated rows
                 # must not resurrect a tombstone; any real agent/budget row
@@ -1494,6 +1548,11 @@ class WorkflowState:
                 and isinstance(event_scope, str)
             ):
                 self.started_scopes[event_key] = event_scope
+            if event_type == "agent_started" and isinstance(event_key, str):
+                self.lifetime_started_keys.add(event_key)
+                digests = _event_digests(event)
+                if digests:
+                    self.key_digests[event_key] = digests
             if (
                 isinstance(event_key, str)
                 and event_type in _AGENT_AUTHORITY_EVENTS
@@ -1603,21 +1662,41 @@ class WorkflowState:
             extra["gateResultHash"] = result_hash
         self._write_status_locked(status="paused", last_event=event, extra=extra)
 
-    def park_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
+    def park_gate(
+        self,
+        gate_key: str,
+        *,
+        child: str | None,
+        result: JsonValue,
+        gate_name: str | None = None,
+        actions: list[str] | None = None,
+        result_hash: str | None = None,
+    ) -> GateExit:
         """Durably record a gate before closing admission and draining agents.
 
         The journal is the authority.  ``status.json`` is only a recoverable
         projection, so a supervisor death while draining cannot lose the gate
         identity. Re-parking the same key and result reuses its journal event
-        and never appends a duplicate.
+        and never appends a duplicate, unless the actions on offer changed:
+        ``approve`` validates a choice against the event it finds, so an event
+        that still carries an earlier park's list would refuse an action the
+        script now offers. ``result_hash`` overrides the hash of ``result`` for
+        a gate that asks a derived question about it.
         """
-        result_hash = _gate_result_hash(result)
+        if result_hash is None:
+            result_hash = _gate_result_hash(result)
         with self.journal_lock:
             status = registry.read_json(self.status_path) or {}
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
             if isinstance(last_seq, int):
                 self.sequence = max(self.sequence, last_seq)
             event = self._latest_gate_event_locked(gate_key, result_hash)
+            if (
+                event is not None
+                and actions is not None
+                and _declared_gate_actions(event) != list(actions)
+            ):
+                event = None
             if event is None:
                 self.sequence += 1
                 event = {
@@ -1629,6 +1708,11 @@ class WorkflowState:
                     "result": result,
                     "gateResultHash": result_hash,
                 }
+                if gate_name is not None:
+                    # The operator-facing name ``approve --gate`` matches.
+                    event["gateName"] = gate_name
+                if actions is not None:
+                    event["actions"] = list(actions)
                 if self.dry_run:
                     event["simulated"] = True
                 # ``gate`` is in DURABLE_EVENT_TYPES, so append_jsonl flushes
@@ -1739,13 +1823,24 @@ class WorkflowState:
         return key
 
     def cancel_stale_scope_children(self, scope: str, current_key: str) -> None:
-        for old_key, old_scope in tuple(self.started_scopes.items()):
-            if (
-                old_scope != scope
-                or old_key == current_key
-                or old_key not in self.started_without_result
-            ):
-                continue
+        """Cancel a prior lifetime's unfinished child that this position replaced.
+
+        On resume, an unfinished child whose scope now carries a different key
+        (the script changed the prompt at that position) is stale. A child this
+        lifetime started is never stale: two plain script threads, or two calls
+        that share a scope for any other reason, are both live work, and
+        cancelling one of them killed a running adjudicator.
+        """
+        with self.journal_lock:
+            candidates = [
+                old_key
+                for old_key, old_scope in self.started_scopes.items()
+                if old_scope == scope
+                and old_key != current_key
+                and old_key in self.started_without_result
+                and old_key not in self.lifetime_started_keys
+            ]
+        for old_key in candidates:
             cancel_workflow_agent_child(self.workspace, self.wf_id, old_key)
             old_run = _find_workflow_agent_run(self.workspace, self.wf_id, old_key)
             if old_run is not None:
@@ -1902,6 +1997,84 @@ class WorkflowState:
     def current_scope(self) -> str:
         return getattr(self.thread_local, "scope", self.namespace)
 
+    def current_named_scope(self) -> str:
+        """The nearest stable scope: keyed calls are namespaced by it."""
+        return getattr(self.thread_local, "named_scope", self.namespace)
+
+    @contextlib.contextmanager
+    def named_scope(self, value: str) -> Iterator[None]:
+        previous = getattr(self.thread_local, "named_scope", _MISSING)
+        self.thread_local.named_scope = value
+        try:
+            yield
+        finally:
+            if previous is _MISSING:
+                del self.thread_local.named_scope
+            else:
+                self.thread_local.named_scope = previous
+
+    def enter_keyed_scope(self, kind: str, key: str) -> str:
+        """Return the stable scope for a keyed primitive, once per lifetime."""
+        scope = f"{self.current_named_scope()}/{kind}:{key}"
+        with self.journal_lock:
+            if scope in self.lifetime_scope_keys:
+                raise WorkflowKeyConflict(
+                    f"{kind}(key={key!r}) was already used in scope "
+                    f"{self.current_named_scope()!r} during this run; keys name one step "
+                    "each. Make the key unique (for example include the item id), or key "
+                    "the enclosing parallel/pipeline/workflow."
+                )
+            self.lifetime_scope_keys.add(scope)
+        return scope
+
+    def claim_caller_key(self, key: str, caller_key: str) -> None:
+        """Reserve a caller-keyed agent's concrete key for this call.
+
+        A key held by a live call is refused, never resolved by cancelling the
+        holder; a key an earlier call of this lifetime already settled is
+        refused too, because the second call would silently receive the
+        first's result.
+        """
+        with self.journal_lock:
+            if key in self.live_caller_keys:
+                raise WorkflowKeyConflict(
+                    f"agent(key={caller_key!r}) is already held by a live agent() call in "
+                    f"scope {self.current_named_scope()!r}; a caller key names one step. "
+                    "Make the key unique (for example include the item id)."
+                )
+            if key in self.lifetime_caller_keys:
+                raise WorkflowKeyConflict(
+                    f"agent(key={caller_key!r}) was already used by an earlier agent() call "
+                    f"in scope {self.current_named_scope()!r} during this run; a caller key "
+                    "names one step. Make the key unique, or reject() the earlier result "
+                    "to run the step again."
+                )
+            self.lifetime_caller_keys[key] = caller_key
+            self.live_caller_keys.add(key)
+
+    def release_caller_key(self, key: str) -> None:
+        with self.journal_lock:
+            self.live_caller_keys.discard(key)
+
+    def claim_gate_key(self, gate_key: str, caller_key: str) -> None:
+        """Reserve a park_gate() key while its call is in flight.
+
+        Two live calls with one key in one named scope would ask one question
+        and share one answer, so the second is refused rather than merged.
+        """
+        with self.journal_lock:
+            if gate_key in self.live_gate_keys:
+                raise WorkflowKeyConflict(
+                    f"park_gate(key={caller_key!r}) is already held by a live park_gate() "
+                    f"call in scope {self.current_named_scope()!r}; a gate key names one "
+                    "question. Make the key unique (for example include the item id)."
+                )
+            self.live_gate_keys.add(gate_key)
+
+    def release_gate_key(self, gate_key: str) -> None:
+        with self.journal_lock:
+            self.live_gate_keys.discard(gate_key)
+
     def current_invocation(self) -> _WorkflowInvocation:
         current = getattr(self.thread_local, "invocation", None)
         if isinstance(current, _WorkflowInvocation):
@@ -1913,7 +2086,10 @@ class WorkflowState:
         previous = getattr(self.thread_local, "invocation", _MISSING)
         self.thread_local.invocation = frame
         try:
-            with self.scope(frame.namespace):
+            with (
+                self.scope(frame.namespace),
+                self.named_scope(frame.named_scope or frame.namespace),
+            ):
                 yield
         finally:
             if previous is _MISSING:
@@ -2177,6 +2353,7 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
             "AgentFailure": AgentFailure,
             "capabilities": dict(WORKFLOW_CAPABILITIES),
             "judges": dsl.judges,
+            "park_gate": dsl.park_gate,
             "args": frame.args,
             "budget": state.budget,
             "dry_run": state.dry_run,
@@ -2509,6 +2686,7 @@ class WorkflowDsl:
         gate_errors: list[GateExit] = []
         watchdog_errors: list[SupervisorWatchdogExit] = []
         validation_errors: list[ValueError] = []
+        key_errors: list[WorkflowKeyConflict] = []
         bypass_item_cap = self.state.inside_item_thread()
         cap = _item_thread_cap(self.state.config)
         owner_scope = self.state.current_scope()
@@ -2527,6 +2705,7 @@ class WorkflowDsl:
                 self.state.invocation(parent_invocation),
                 self.state.item_slot(bypass=bypass_item_cap),
                 self.state.scope(scope),
+                self.state.named_scope(scope),
             ):
                 try:
                     result = callback()
@@ -2554,6 +2733,11 @@ class WorkflowDsl:
                     gate_error = exc
                 except SupervisorWatchdogExit as exc:
                     watchdog_errors.append(exc)
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error: collect it and re-raise it to the script rather
+                    # than leaving a silent None slot.
+                    key_errors.append(exc)
                 except Exception as exc:
                     self.state.append_event(
                         "soft_park_item_failed",
@@ -2570,6 +2754,7 @@ class WorkflowDsl:
                 and len(active) < cap
                 and not gate_errors
                 and not watchdog_errors
+                and not key_errors
             ):
                 index = next_index
                 name, value, callback = entries[index]
@@ -2624,10 +2809,32 @@ class WorkflowDsl:
         )
         if outstanding:
             raise SoftParkExit(outstanding)
+        if key_errors:
+            # Raised after the park and gate exits: those carry durable state
+            # an operator resolves, while the refusal is deterministic and
+            # comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
+    def _child_scopes(self, kind: str, key: object) -> tuple[str, str]:
+        """Return (base scope, named scope for children) for a primitive.
+
+        A keyed primitive's scope is derived from the enclosing named scope and
+        its key, so positional counters inside it are relative to a stable
+        parent. An unkeyed one keeps today's positional scope and passes the
+        enclosing named scope through unchanged.
+        """
+        if key is None:
+            return self.state.next_child_scope(kind), self.state.current_named_scope()
+        caller_key = _validate_caller_key(key, what=f"{kind}()")
+        scope = self.state.enter_keyed_scope(kind, caller_key)
+        return scope, scope
+
     def pipeline(
-        self, items: list[object], *stages: Callable[[object, object, int], object]
+        self,
+        items: list[object],
+        *stages: Callable[[object, object, int], object],
+        key: str | None = None,
     ) -> list[object]:
         if not isinstance(items, list):
             raise TypeError("pipeline() expects an array")
@@ -2636,12 +2843,13 @@ class WorkflowDsl:
         if any(not callable(stage) for stage in stages):
             raise TypeError("pipeline() stages must be functions")
         parent_invocation = self.state.current_invocation()
-        base_scope = self.state.next_child_scope("pipeline")
+        base_scope, child_named_scope = self._child_scopes("pipeline", key)
         results: list[object] = [None] * len(items)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(items) + 1)
             if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
@@ -2654,6 +2862,7 @@ class WorkflowDsl:
             with (
                 self.state.invocation(parent_invocation),
                 self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
+                self.state.named_scope(child_named_scope),
             ):
                 if start_barrier is not None:
                     start_barrier.wait()
@@ -2676,6 +2885,12 @@ class WorkflowDsl:
                                 gate_errors.append(exc)
                                 previous = None
                                 break
+                            except WorkflowKeyConflict as exc:
+                                # A reused or invalid caller key is a
+                                # script-authoring error, not a failed item.
+                                key_errors.append(exc)
+                                previous = None
+                                break
                             except Exception as exc:
                                 self.state.append_event(
                                     "stage_failed",
@@ -2689,7 +2904,7 @@ class WorkflowDsl:
                 results[index] = previous
 
         for index, item in enumerate(items):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 # Gate already closed: short-circuit remaining items without
                 # spawning threads that would only block then die on admission.
                 break
@@ -2699,7 +2914,7 @@ class WorkflowDsl:
                 pre_acquired = True
                 # Re-check after acquire: with a tight item-thread cap the gate
                 # may have closed while we were blocked on the semaphore.
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -2725,9 +2940,16 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
-    def parallel(self, thunks: list[Callable[[], object]]) -> list[object]:
+    def parallel(
+        self, thunks: list[Callable[[], object]], *, key: str | None = None
+    ) -> list[object]:
         if not isinstance(thunks, list):
             raise TypeError("parallel() expects an array")
         if len(thunks) > workflow_script.ITEM_LIMIT:
@@ -2737,22 +2959,29 @@ class WorkflowDsl:
         if self.state.dry_run:
             # Dry-run output is a plan, not concurrent execution.  Preserve
             # source order so the reported call list is deterministic.
+            named = (
+                contextlib.nullcontext()
+                if key is None
+                else self.state.named_scope(self._child_scopes("parallel", key)[1])
+            )
             results: list[object] = []
-            for thunk in thunks:
-                try:
-                    results.append(thunk())
-                except (SoftParkExit, _SoftParkRequest):
-                    raise
-                except (BudgetExceeded, GateExit):
-                    results.append(None)
+            with named:
+                for thunk in thunks:
+                    try:
+                        results.append(thunk())
+                    except (SoftParkExit, _SoftParkRequest):
+                        raise
+                    except (BudgetExceeded, GateExit):
+                        results.append(None)
             return results
         parent_invocation = self.state.current_invocation()
-        base_scope = self.state.next_child_scope("parallel")
+        base_scope, child_named_scope = self._child_scopes("parallel", key)
         results: list[object] = [None] * len(thunks)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(thunks) + 1)
             if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
@@ -2764,6 +2993,7 @@ class WorkflowDsl:
                 self.state.invocation(parent_invocation),
                 self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
                 self.state.scope(f"{base_scope}/thunk#{index}"),
+                self.state.named_scope(child_named_scope),
             ):
                 try:
                     if start_barrier is not None:
@@ -2779,6 +3009,12 @@ class WorkflowDsl:
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error, not a failed item: collect it and re-raise it to
+                    # the script, the way a gate or soft-park exit travels.
+                    key_errors.append(exc)
+                    results[index] = None
                 except Exception as exc:
                     self.state.append_event(
                         "thunk_failed",
@@ -2788,13 +3024,13 @@ class WorkflowDsl:
                     results[index] = None
 
         for index, thunk in enumerate(thunks):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 break
             pre_acquired = False
             if not bypass_item_cap:
                 self.state.item_semaphore.acquire()
                 pre_acquired = True
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -2820,6 +3056,11 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def judges(
@@ -2850,7 +3091,11 @@ class WorkflowDsl:
         return self.parallel(thunks)
 
     def workflow(
-        self, name_or_path: str, args: JsonValue = None, gate: bool | str = False
+        self,
+        name_or_path: str,
+        args: JsonValue = None,
+        gate: bool | str = False,
+        key: str | None = None,
     ) -> object:
         invocation = self.state.current_invocation()
         if invocation.depth >= 3:
@@ -2859,7 +3104,11 @@ class WorkflowDsl:
         child_source = workflow_script.read_script(child_path)
         workflow_script.check_source(child_source, filename=str(child_path))
         name = Path(name_or_path).stem
-        scope = self.state.next_child_scope(f"wf:{name}")
+        if key is None:
+            scope = self.state.next_child_scope(f"wf:{name}")
+            child_named_scope = self.state.current_named_scope()
+        else:
+            scope, child_named_scope = self._child_scopes("wf", key)
         if self.state.dry_run:
             self.state.dry_runs.append(
                 {
@@ -2876,7 +3125,13 @@ class WorkflowDsl:
             return None
         result = execute_workflow(
             self.state,
-            _WorkflowInvocation(child_path, args, scope, invocation.depth + 1),
+            _WorkflowInvocation(
+                child_path,
+                args,
+                scope,
+                invocation.depth + 1,
+                named_scope=child_named_scope,
+            ),
         )
         should_gate = gate is True or (gate == "on-failure" and _gate_failed(result))
         if should_gate:
@@ -2892,6 +3147,116 @@ class WorkflowDsl:
                 time.sleep(0.01)
                 raise self.state.park_gate(gate_key, child=name, result=result)
         return result
+
+    def park_gate(
+        self,
+        key: str,
+        result: JsonValue = None,
+        *,
+        actions: list[str] | None = None,
+    ) -> JsonObject:
+        """Pause for an operator decision and return it once approved.
+
+        ``actions`` declares what the operator may choose (default
+        ``["approve"]``). ``workflow approve <wfId> --gate KEY --action NAME
+        [--note TEXT] [--data JSON]`` records the choice; the resumed script
+        reaches this call again and receives ``{"gate", "action", "note",
+        "data"}``. The approval is bound to ``result``, as for workflow gates:
+        a different result is a new question and parks again, and so does a
+        recorded action this call no longer declares. A second live call with
+        the same key in one named scope raises ``WorkflowKeyConflict``.
+        """
+        caller_key = _validate_caller_key(key, what="park_gate()")
+        allowed = _validate_gate_actions(actions)
+        named_scope = self.state.current_named_scope()
+        gate_key = _caller_gate_key(named_scope, caller_key)
+        self.state.claim_gate_key(gate_key, caller_key)
+        try:
+            return self._park_gate_claimed(caller_key, gate_key, named_scope, result, allowed)
+        finally:
+            self.state.release_gate_key(gate_key)
+
+    def _park_gate_claimed(
+        self,
+        caller_key: str,
+        gate_key: str,
+        named_scope: str,
+        result: JsonValue,
+        allowed: list[str],
+    ) -> JsonObject:
+        if self.state.dry_run:
+            self.state.dry_runs.append(
+                {
+                    "scope": f"{named_scope}/gate:{caller_key}",
+                    "mode": "gate",
+                    "gate": caller_key,
+                    "actions": allowed,
+                    "phase": self.current_phase,
+                }
+            )
+            self.state.append_event(
+                "gate_stubbed", gate=caller_key, gateKey=gate_key, actions=allowed, dryRun=True
+            )
+            return {
+                "gate": caller_key,
+                "action": allowed[0],
+                "note": None,
+                "data": None,
+                "dryRun": True,
+            }
+        result_hash = _gate_result_hash(result)
+        decision = registry.approval_decision(self.state.root, gate_key, result_hash)
+        if decision is not None and _decision_action(decision) not in allowed:
+            # The operator answered the gate as it parked, and the script has
+            # since stopped declaring that action. Like a changed result, that
+            # is a new question: ask it under a hash bound to the result and
+            # the actions now on offer, so the stale answer cannot satisfy it
+            # and the approve command sees it as pending.
+            self.state.append_event(
+                "gate_action_undeclared",
+                gate=caller_key,
+                gateKey=gate_key,
+                action=_decision_action(decision),
+                actions=allowed,
+            )
+            # approve validated any answer to this hash against these actions.
+            result_hash = _gate_reask_hash(result, allowed)
+            decision = registry.approval_decision(self.state.root, gate_key, result_hash)
+            if decision is not None and _decision_action(decision) not in allowed:
+                # An approval written against some other list must not hand
+                # this call an action it did not declare.
+                self.state.append_event(
+                    "gate_action_undeclared",
+                    gate=caller_key,
+                    gateKey=gate_key,
+                    action=_decision_action(decision),
+                    actions=allowed,
+                    reask=True,
+                )
+                decision = None
+        if decision is not None:
+            action = _decision_action(decision)
+            note = decision.get("note")
+            self.state.append_event(
+                "gate_decided", gate=caller_key, gateKey=gate_key, action=action
+            )
+            return {
+                "gate": caller_key,
+                "action": action,
+                "note": note if isinstance(note, str) else None,
+                "data": decision.get("data"),
+            }
+        # Same admission settle as workflow(gate=...): let admitted siblings
+        # reach their child seam before stop_admitting becomes visible.
+        time.sleep(0.01)
+        raise self.state.park_gate(
+            gate_key,
+            child=None,
+            result=result,
+            gate_name=caller_key,
+            actions=allowed,
+            result_hash=result_hash,
+        )
 
     def _finish_child(
         self,
@@ -3061,7 +3426,13 @@ class WorkflowDsl:
         )
         with self.state.active_agent():
             self.state.thread_local.last_run_id = None
-            self.state.append_event("agent_started", key=key, scope=scope, **start_event)
+            self.state.append_event(
+                "agent_started",
+                key=key,
+                scope=scope,
+                incarnation=self.state.supervisor_token,
+                **start_event,
+            )
             result, engine = launch()
             if result is not None:
                 return self._finish_child(
@@ -3100,9 +3471,11 @@ class WorkflowDsl:
         allow_repo_persona: bool = False,
         resumable: bool = False,
         on_failure: str = "none",
+        key: str | None = None,
     ) -> JsonValue | AgentFailure:
         if on_failure not in {"none", "typed"}:
             raise ValueError('on_failure must be "none" or "typed"')
+        caller_key = None if key is None else _validate_caller_key(key, what="agent()")
         if not isinstance(prompt, str):
             prompt = str(prompt)
         engines = _engine_chain(engine or self.defaults.get("engine") or DEFAULT_ENGINE)
@@ -3176,14 +3549,26 @@ class WorkflowDsl:
             opts["resumable"] = True
         if timeout is not None:
             opts["timeout"] = timeout
-        path = self.state.next_agent_path()
-        key_opts = dict(opts)
-        base_key = _agent_key(path, prompt, key_opts)
-        key = base_key
-        if base_key in self.state.tombstoned_keys:
-            retry_opts = dict(key_opts)
-            retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
-            key = _agent_key(path, prompt, retry_opts)
+        key_digests: JsonObject = {}
+        if caller_key is not None:
+            # A keyed call consumes no positional counter, so skipping it (or
+            # any earlier keyed call) never shifts an unkeyed sibling's key.
+            named_scope = self.state.current_named_scope()
+            path = f"{named_scope}/key:{caller_key}"
+            key = self._caller_key_candidate(named_scope, caller_key)
+            key_digests = {
+                "promptDigest": _stable_hash(prompt),
+                "optsDigest": _stable_hash(_canonical_json(opts)),
+            }
+        else:
+            path = self.state.next_agent_path()
+            key_opts = dict(opts)
+            base_key = _agent_key(path, prompt, key_opts)
+            key = base_key
+            if base_key in self.state.tombstoned_keys:
+                retry_opts = dict(key_opts)
+                retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
+                key = _agent_key(path, prompt, retry_opts)
         persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
         prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes
         dry_run_entry: JsonObject = {
@@ -3199,6 +3584,8 @@ class WorkflowDsl:
             "label": label,
             "schema": bool(schema),
         }
+        if caller_key is not None:
+            dry_run_entry["key"] = caller_key
         if resumable:
             dry_run_entry["resumable"] = True
         if persona_resolution is not None:
@@ -3254,31 +3641,44 @@ class WorkflowDsl:
                     return result, candidate
             return None, None
 
-        value = self._run_child_lifecycle(
-            key=key,
-            scope=path,
-            label=label,
-            phase=resolved_phase,
-            schema=schema,
-            timeout=timeout,
-            start_event={
-                "workflowAgentKey": key,
-                "label": label,
-                "phase": resolved_phase,
-                "engine": engines,
-                "mode": resolved_mode,
-                "personaDigest": (
-                    persona_resolution.digest if persona_resolution is not None else None
-                ),
-                "personaSource": (
-                    persona_resolution.source if persona_resolution is not None else None
-                ),
-            },
-            dry_run_entry=dry_run_entry,
-            dry_run_engine=engines[0],
-            resumable=resumable,
-            launch=launch,
-        )
+        start_event: JsonObject = {
+            "workflowAgentKey": key,
+            "label": label,
+            "phase": resolved_phase,
+            "engine": engines,
+            "mode": resolved_mode,
+            "personaDigest": (
+                persona_resolution.digest if persona_resolution is not None else None
+            ),
+            "personaSource": (
+                persona_resolution.source if persona_resolution is not None else None
+            ),
+        }
+        if caller_key is not None:
+            start_event["callerKey"] = caller_key
+            start_event.update(key_digests)
+            self.state.claim_caller_key(key, caller_key)
+        try:
+            if caller_key is not None:
+                self._warn_key_prompt_mismatch(
+                    key, caller_key=caller_key, scope=path, label=label, digests=key_digests
+                )
+            value = self._run_child_lifecycle(
+                key=key,
+                scope=path,
+                label=label,
+                phase=resolved_phase,
+                schema=schema,
+                timeout=timeout,
+                start_event=start_event,
+                dry_run_entry=dry_run_entry,
+                dry_run_engine=engines[0],
+                resumable=resumable,
+                launch=launch,
+            )
+        finally:
+            if caller_key is not None:
+                self.state.release_caller_key(key)
         if value is None and on_failure == "typed":
             # None is also a schema-valid JSON null; only an exhausted call
             # (journaled agent_finished exhausted=true) becomes a failure.
@@ -3286,6 +3686,63 @@ class WorkflowDsl:
             if failure is not None:
                 return failure
         return value
+
+    def _caller_key_candidate(self, named_scope: str, caller_key: str) -> str:
+        """Pick the concrete key for a caller key: the first not rejected.
+
+        Each reject() of a keyed step moves it to the next retry identity, so a
+        reject-and-rerun loop works inside one lifetime and replays the same
+        way on resume (the choice depends only on the journal).
+        """
+        with self.state.journal_lock:
+            for retry in range(workflow_script.LIFETIME_AGENT_LIMIT + 1):
+                candidate = _caller_agent_key(named_scope, caller_key, retry)
+                if (
+                    candidate not in self.state.tombstoned_keys
+                    or candidate in self.state.started_after_tombstone
+                ):
+                    return candidate
+        raise RuntimeError(f"agent(key={caller_key!r}) exhausted its retry identities")
+
+    def _warn_key_prompt_mismatch(
+        self,
+        key: str,
+        *,
+        caller_key: str,
+        scope: str,
+        label: str | None,
+        digests: JsonObject,
+    ) -> None:
+        """Journal a keyed step whose prompt or options changed since it ran.
+
+        The key is the identity, so the recorded result is still adopted; the
+        warning is how a reader learns the replayed answer was produced from a
+        different prompt than the script now sends.
+        """
+        with self.state.journal_lock:
+            recorded = self.state.key_digests.get(key)
+            has_prior = (
+                key in self.state.replay
+                or key in self.state.started_without_result
+                or key in self.state.exhausted_keys
+            )
+        if not recorded or not has_prior:
+            return
+        prompt_changed = recorded.get("promptDigest") != digests.get("promptDigest")
+        opts_changed = recorded.get("optsDigest") != digests.get("optsDigest")
+        if not prompt_changed and not opts_changed:
+            return
+        self.state.append_event(
+            "key_prompt_mismatch",
+            key=key,
+            callerKey=caller_key,
+            scope=scope,
+            label=label,
+            promptChanged=prompt_changed,
+            optsChanged=opts_changed,
+            recordedPromptDigest=recorded.get("promptDigest"),
+            promptDigest=digests.get("promptDigest"),
+        )
 
     def _adopt_existing_agent_run(
         self,
@@ -3301,13 +3758,44 @@ class WorkflowDsl:
         run_id = _find_workflow_agent_run(self.state.workspace, self.state.wf_id, key)
         if run_id is None:
             return _MISSING
+        unadoptable = _unadoptable_run_reason(self.state.workspace, run_id)
+        if unadoptable == "never_launched" and key in self.state.lifetime_started_keys:
+            # This lifetime started that run, so its launcher is a sibling
+            # thread of this supervisor, not a dead predecessor. Sealing it and
+            # relaunching could leave two children for one step; wait instead.
+            unadoptable = None
+        if unadoptable is not None:
+            # A cancelled, stale, or never-launched run holds no answer and no
+            # live process to wait on. Seal what is sealable and relaunch;
+            # never fail the call over a dead predecessor. A dry run neither
+            # seals, cancels, reaps, nor launches anything: it only journals
+            # what the live path would do. The predecessor's leftover temporary
+            # structured-retry workspace is what an operator dry-running an
+            # adoption came to read, and the live respawn reaps it anyway.
+            if not self.state.dry_run:
+                with contextlib.suppress(WorkflowChildCancellationError):
+                    cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
+            self.state.append_event(
+                "agent_adopt_skipped",
+                key=key,
+                scope=scope,
+                runId=run_id,
+                label=label,
+                reason=unadoptable,
+            )
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            return _MISSING
         if not _workflow_run_terminal(self.state.workspace, run_id):
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
             if not waited and not _workflow_run_terminal(self.state.workspace, run_id):
                 # Match live-path timeout: cancel the child; timeout is definitive.
                 # The terminal re-check closes the race where the child finished
                 # between the wait deadline and the cancel — adopt that instead.
-                cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
+                # A dry run reports the same timeout and cancels nothing: the
+                # child it could not wait out may still be live work.
+                if not self.state.dry_run:
+                    cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
                 # The adoption path recorded key/scope/runId but not the label a
                 # human reads, nor the bound that expired, and it never notified
                 # at all -- so a lane adopted from a prior run could time out in
@@ -3323,10 +3811,14 @@ class WorkflowDsl:
                     label=label,
                     timeout=timeout,
                 )
-                self.state.notify_event(
-                    "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
-                )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    # A notification carries no simulated marker, so a dry run
+                    # must not send one: it would read as a timeout the operator
+                    # never waited out. Neither does it reap the scratch.
+                    self.state.notify_event(
+                        "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
+                    )
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return None
         text = _workflow_agent_run_result(
             self.state.workspace,
@@ -3335,7 +3827,10 @@ class WorkflowDsl:
         )
         if text is None:
             # Failed/cancelled/unparseable children are not definitive — respawn.
-            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            # A dry run leaves the dead child's scratch where a live respawn
+            # would reap it.
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if schema is None:
             result: JsonValue = text
@@ -3353,9 +3848,13 @@ class WorkflowDsl:
                     runId=run_id,
                     error=str(exc),
                 )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return _MISSING
-        _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+        if not self.state.dry_run:
+            # The adoption is the reuse; a dry run copies the answer out of the
+            # run and leaves its scratch for the live path to reap.
+            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
         resumable = _workflow_agent_run_resumable(self.state.workspace, run_id)
         self._emit_adopted_child_identity(run_id, key=key, label=label, resumable=resumable)
         if label is not None:
@@ -4789,6 +5288,52 @@ def _engine_chain(value: object) -> list[str]:
     return [DEFAULT_ENGINE]
 
 
+def _caller_agent_key(named_scope: str, caller_key: str, retry: int = 0) -> str:
+    """Replay identity of a caller-keyed agent(): scope and key, nothing else."""
+    suffix = "" if retry == 0 else f"\x00retry={retry}"
+    return _stable_hash(f"agent-key-v1:{named_scope}\x00{caller_key}{suffix}")
+
+
+def _caller_gate_key(named_scope: str, caller_key: str) -> str:
+    return _stable_hash(f"gate-key-v1:{named_scope}\x00{caller_key}")
+
+
+def _validate_caller_key(value: object, *, what: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > CALLER_KEY_MAX_CHARS
+        or any(ch < " " or ch == "\x7f" for ch in value)
+    ):
+        raise WorkflowKeyError(
+            f"{what} key must be a non-empty printable string of at most "
+            f"{CALLER_KEY_MAX_CHARS} characters"
+        )
+    return value
+
+
+def _validate_gate_actions(actions: object) -> list[str]:
+    if actions is None:
+        return ["approve"]
+    if not isinstance(actions, (list, tuple)) or not actions:
+        raise WorkflowKeyError("park_gate() actions must be a non-empty list of names")
+    names: list[str] = []
+    for action in actions:
+        name = _validate_caller_key(action, what="park_gate() action")
+        if name in names:
+            raise WorkflowKeyError(f"park_gate() action {name!r} is declared twice")
+        names.append(name)
+    return names
+
+
+def _event_digests(event: JsonObject) -> JsonObject:
+    return {
+        name: event[name]
+        for name in ("promptDigest", "optsDigest")
+        if isinstance(event.get(name), str)
+    }
+
+
 def _agent_key(scope_path: str, prompt: str, opts: JsonObject) -> str:
     canonical_opts = _canonical_json(opts)
     return _stable_hash(f"v{WORKFLOW_KEY_VERSION}:{scope_path}{prompt}{canonical_opts}")
@@ -4809,8 +5354,32 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _declared_gate_actions(event: JsonObject | None) -> list[str]:
+    """The actions a gate event offers; an event without a list offers approve."""
+    declared = event.get("actions") if isinstance(event, dict) else None
+    if isinstance(declared, list) and declared:
+        return [item for item in declared if isinstance(item, str)]
+    return ["approve"]
+
+
 def _gate_result_hash(result: object) -> str:
     return _stable_hash(_canonical_json(result))
+
+
+def _gate_reask_hash(result: object, actions: list[str]) -> str:
+    """Hash of a park_gate() question re-asked because its answer lapsed.
+
+    The ``gate-reask-v1:`` prefix keeps this out of the domain of
+    ``_gate_result_hash``, which hashes the canonical JSON of any result: a
+    script whose result happens to look like a re-ask payload must not be able
+    to satisfy a re-ask with the approval for that result.
+    """
+    return _stable_hash(f"gate-reask-v1:{_canonical_json(result)}\x00{_canonical_json(actions)}")
+
+
+def _decision_action(decision: JsonObject) -> str:
+    action = decision.get("action")
+    return action if isinstance(action, str) and action else "approve"
 
 
 def _gate_failed(result: object) -> bool:
@@ -4965,6 +5534,25 @@ def _cancel_workflow_runs(
             effective = run_registry.status_fields(state).get("effectiveStatus")
             if exc.error == "run_already_terminal" and effective in run_registry.TERMINAL_STATUSES:
                 continue
+            # A record with no pid either has not published its process yet
+            # (refuse, as cancel does) or never will: its launcher died during
+            # isolation. Past the grace window it is the latter, so seal it
+            # rather than refusing every resume forever.
+            if exc.error in {
+                "missing_pid",
+                "run_already_terminal",
+            } and wait_cancel_commands.seal_unlaunched_run(root, run_id):
+                alias = state.get("alias") if isinstance(state, dict) else None
+                cancelled.append(
+                    {
+                        "runId": run_id,
+                        "alias": alias if isinstance(alias, str) else None,
+                        "status": run_registry.STATUS_CANCELLED,
+                        "staleReason": "missing_pid",
+                        "sealed": True,
+                    }
+                )
+                continue
             failures.append(
                 {
                     "runId": run_id,
@@ -5093,6 +5681,36 @@ def _workflow_agent_child_event_exists(journal_path: Path, run_id: str, key: str
         if event_key == key:
             return True
     return False
+
+
+def _unadoptable_run_reason(workspace: Path, run_id: str) -> str | None:
+    """Why a key's latest run cannot be adopted, or None when it can be.
+
+    Adoption waits on a live run and reads a finished one. A cancelled run
+    (rejected by an operator or superseded by a resume), a stale run (its
+    tracked process is gone), and a record that never launched a process past
+    the grace window have nothing to wait for; the call relaunches instead.
+    """
+    root = _run_registry_root(workspace)
+    try:
+        state = run_registry.load_run_state_or_none(root, run_id)
+        fields = run_registry.status_fields(state)
+        effective = fields.get("effectiveStatus")
+        if effective == run_registry.STATUS_CANCELLED:
+            return "cancelled"
+        reason = fields.get("staleReason")
+        if effective == run_registry.STATUS_STALE and reason != "missing_pid":
+            return f"stale:{reason}" if isinstance(reason, str) else "stale"
+        # A record with no pid may be a launch still in flight. It is only
+        # abandoned once its launcher is verifiably gone and the grace window
+        # has passed; relaunching sooner could run two children for one step.
+        if wait_cancel_commands.unlaunched_run_sealable(root, run_id, state):
+            return "never_launched"
+    except (ValueError, OSError):
+        # An unreadable record is not evidence of a dead run; let the normal
+        # wait-and-read path decide.
+        return None
+    return None
 
 
 def _workflow_run_terminal(workspace: Path, run_id: str) -> bool:

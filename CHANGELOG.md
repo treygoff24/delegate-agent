@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Workflow steps can carry a stable caller-supplied identity. `agent(..., key="...")`
+  replays by that key inside the enclosing named scope instead of by position and
+  prompt text, so a resumed script that skips settled work or embeds new git heads
+  in its prompts still hits its cache. A changed prompt under the same key adopts
+  the recorded result and journals `key_prompt_mismatch`. `parallel`, `pipeline`,
+  and `workflow` accept `key=` to name their scope. Reusing a key within one run
+  raises `WorkflowKeyConflict`. Unkeyed calls keep their positional keys, so
+  existing journals replay unchanged.
+- Gate actions: `park_gate(key, result, actions=[...])` pauses for an operator
+  decision, and `workflow approve <wfId> --gate KEY --action NAME [--note TEXT]
+  [--data JSON]` returns that choice to the script. Undeclared actions are
+  refused with the allowed list. A bare `approve` behaves as before. A recorded
+  action the resumed script no longer declares is not returned: the gate parks
+  again (`gate_action_undeclared`) and asks under the current actions. A second
+  live `park_gate()` with the same key in one named scope raises
+  `WorkflowKeyConflict`.
+- The workflow `capabilities` global adds `agentKey`, `scopeKey`, and
+  `gateActions`.
 - Tracked runs persist the harness-reported token `usage` on the run record, so
   `snapshot`, `run-output`, and `runs --json` expose it without re-reading the
   child's stream (previously it reached only call mode's launch response).
@@ -30,6 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- A workflow no longer cancels its own live children as stale. Two `agent()`
+  calls from plain script threads could share one positional scope, and the
+  second call cancelled the first's running child. Stale-scope cancellation now
+  targets only children an earlier supervisor lifetime started (`agent_started`
+  records the lifetime's `incarnation`).
+- Workflow adoption relaunches instead of waiting on or failing over a key's
+  latest child run when that run is cancelled, stale, or never launched
+  (`agent_adopt_skipped`).
+- Resume seals a workflow child that never published a pid (stuck at `running`
+  or `creating_isolation`) once it has been idle for 300 seconds and its
+  recorded launcher (`launcherPid`) is dead or its pid was reused, instead of
+  refusing with `workflow_children_unsealed` forever. The runner re-reads the
+  record under the registry lock before every process start, the first included,
+  and publishes the child's pid only over a record that is neither terminal nor
+  cancel-requested, so a sealed launch never gains a child.
+- `workflow run --dry-run` executes the script with its working directory set to
+  the `--cwd` workspace, as a real run's supervisor does. A dry run that times
+  out leaves the workspace as the working directory, because its abandoned
+  script thread may still be resolving relative paths.
 - Persistent-worktree change accounting lists untracked files individually
   (`git status --untracked-files=all`), matching the per-file launch-seeded
   digest map. A seeded untracked directory used to be reported as one collapsed

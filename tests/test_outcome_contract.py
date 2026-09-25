@@ -530,7 +530,14 @@ class WorkflowAgentFailureTests(unittest.TestCase):
         self.assertEqual(
             workflow_runtime.execute_workflow(self.state, frame),
             {
-                "caps": {"agentFailure": 1, "agentMeta": 1, "failureKind": 1},
+                "caps": {
+                    "agentFailure": 1,
+                    "agentMeta": 1,
+                    "failureKind": 1,
+                    "agentKey": 1,
+                    "scopeKey": 1,
+                    "gateActions": 1,
+                },
                 "typed": "AgentFailure",
             },
         )

@@ -2875,9 +2875,19 @@ def _parse_workflow_id_action(
     jsonl = False
     timeout: int | None = None
     result_field: str | None = None
+    approve_options: dict[str, str] = {}
     i = 0
     while i < len(args):
         token = args[i]
+        if token in {"--gate", "--action", "--note", "--data"} and action == "approve":
+            if i + 1 >= len(args) or (token != "--data" and not args[i + 1].strip()):
+                raise DelegateError(
+                    "missing_workflow_approve_value",
+                    f"workflow approve {token} requires a non-empty value.",
+                )
+            approve_options[token] = args[i + 1]
+            i += 2
+            continue
         if token == "--jsonl" and action == "watch":
             jsonl = True
             i += 1
@@ -2952,6 +2962,10 @@ def _parse_workflow_id_action(
             result_field=result_field,
             json_mode=json_mode,
             jsonl=jsonl,
+            gate=approve_options.get("--gate"),
+            gate_action=approve_options.get("--action"),
+            gate_note=approve_options.get("--note"),
+            gate_data_json=approve_options.get("--data"),
         ),
     )
 
