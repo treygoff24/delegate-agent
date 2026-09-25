@@ -11,7 +11,7 @@ _delegate_profile_config="${HOME}/.delegate/config.${AI_PROFILE:-}.json"
 _delegate_subcommand() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json|--pass-through|--no-completion-report)
+      --json|--pass-through|--no-completion-report|--no-mail)
         shift
         ;;
       --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
@@ -34,28 +34,43 @@ _delegate_subcommand() {
   done
 }
 
-# Print the value of a leading global --auth-profile, or nothing. Mirrors the
-# global-option walk above: once the subcommand starts, later tokens belong to
-# it and never select a profile here.
+# Print the global --auth-profile the Python parser would honor, or nothing.
+# Mirrors _normalize_global_options in delegate_agent/cli_parser.py: every token
+# before `--` is scanned (an --auth-profile after the subcommand is still
+# global), flag globals are skipped, value globals are skipped with their value,
+# and the last occurrence wins. `--auth-profile=X` is not special-cased because
+# the Python walk only matches the two-token spelling. The one approximation:
+# cli_parser keeps command-local twins of --group/--completion-report in the
+# command stream, which only changes the walk when one of those is immediately
+# followed by `--auth-profile` — an argv the command's own parser rejects.
 _delegate_flag_profile() {
+  _delegate_flag_value=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json|--pass-through|--no-completion-report)
+      --)
+        break
+        ;;
+      --json|--pass-through|--no-completion-report|--no-mail)
         shift
         ;;
       --auth-profile)
-        [ "$#" -ge 2 ] && printf '%s\n' "$2"
-        return 0
+        [ "$#" -ge 2 ] || break
+        [ "$2" = "--" ] && break
+        _delegate_flag_value="$2"
+        shift 2
         ;;
       --cwd|--isolation|--completion-report|--group|--notify)
-        [ "$#" -ge 2 ] || return 0
+        [ "$#" -ge 2 ] || break
+        [ "$2" = "--" ] && break
         shift 2
         ;;
       *)
-        return 0
+        shift
         ;;
     esac
   done
+  [ -n "$_delegate_flag_value" ] && printf '%s\n' "$_delegate_flag_value"
+  return 0
 }
 
 _delegate_launch_help_request() {
@@ -130,7 +145,7 @@ _delegate_launch_help_request() {
 _delegate_is_readonly_request() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json|--pass-through|--no-completion-report)
+      --json|--pass-through|--no-completion-report|--no-mail)
         shift
         ;;
       --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
