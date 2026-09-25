@@ -489,7 +489,13 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
     # Creation-context line: created from <ref>@<oid>; source now at <ref>@<oid>
     creation = payload.get("creationContext")
     if isinstance(creation, dict):
-        src_ref = _short_ref(creation.get("sourceHeadRef"))
+        # With `--base` the lane was cut from that ref, not from the checkout's
+        # branch, so pairing `sourceHeadRef` (the branch) with the base oid
+        # (`sourceHeadOid`) labeled the line with a ref the lane never came from.
+        base_ref = creation.get("baseRef")
+        src_ref = _short_ref(
+            base_ref if isinstance(base_ref, str) and base_ref else creation.get("sourceHeadRef")
+        )
         src_oid = _short_oid(creation.get("sourceHeadOid"))
         if src_oid is not None:
             # Current source HEAD: ref from currentSourceHeadRef (re-read by show_worktree),

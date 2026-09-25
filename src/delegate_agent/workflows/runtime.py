@@ -114,6 +114,17 @@ class WorkflowKeyConflict(RuntimeError):
     """
 
 
+class WorkflowKeyError(ValueError, WorkflowKeyConflict):
+    """A caller-supplied key or declared gate action is not usable at all.
+
+    Raised where a key or action list is validated, so a direct call keeps
+    refusing with the ``ValueError`` it always raised. It is also a
+    ``WorkflowKeyConflict``, which lets the per-item handlers of ``parallel()``,
+    ``pipeline()``, and ``soft_park()`` re-raise the script-authoring mistake
+    to the script instead of turning it into a failed item slot.
+    """
+
+
 # Provider recovery and credential rotation belong to the child harness. Only
 # workflow watchdog interruptions are transient here; unknown failures stop.
 WORKFLOW_TRANSIENT_FAILURES = frozenset(
@@ -1280,6 +1291,12 @@ class WorkflowState:
     replay_attempt: int = 0
     attempt_config: JsonObject | None = None
     attempt_environment: dict[str, str] | None = None
+    # The env recorded by ``workflow run --env`` for the workflow directory.
+    # It travels to children as *data* (merged under each agent(env=) into the
+    # child's workspace spec) and NEVER as process environment: putting it on
+    # the child Delegate's own env would move its config/data-home/pin-root
+    # resolution and its git calls, not just the harness child's.
+    launch_env: dict[str, str] = field(default_factory=dict)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     signal_received: str | None = None
     signals_repeated: list[str] = field(default_factory=list)
@@ -1672,8 +1689,11 @@ class WorkflowState:
         The journal is the authority.  ``status.json`` is only a recoverable
         projection, so a supervisor death while draining cannot lose the gate
         identity. Re-parking the same key and result reuses its journal event
-        and never appends a duplicate. ``result_hash`` overrides the hash of
-        ``result`` for a gate that asks a derived question about it.
+        and never appends a duplicate, unless the actions on offer changed:
+        ``approve`` validates a choice against the event it finds, so an event
+        that still carries an earlier park's list would refuse an action the
+        script now offers. ``result_hash`` overrides the hash of ``result`` for
+        a gate that asks a derived question about it.
         """
         if result_hash is None:
             result_hash = _gate_result_hash(result)
@@ -1683,6 +1703,12 @@ class WorkflowState:
             if isinstance(last_seq, int):
                 self.sequence = max(self.sequence, last_seq)
             event = self._latest_gate_event_locked(gate_key, result_hash)
+            if (
+                event is not None
+                and actions is not None
+                and _declared_gate_actions(event) != list(actions)
+            ):
+                event = None
             if event is None:
                 self.sequence += 1
                 event = {
@@ -2349,21 +2375,6 @@ def execute_workflow(state: WorkflowState, frame: _WorkflowInvocation | None = N
         return globals_dict["__delegate_workflow__"]()
 
 
-def with_launch_environment(
-    root: Path, attempt_environment: dict[str, str] | None
-) -> dict[str, str] | None:
-    """Layer the env recorded by ``workflow run --env`` under an attempt's env.
-
-    Children inherit the supervisor's environment and then this mapping, so
-    the launch values win over whatever the resuming shell exports, while the
-    pinned operational variables still win over the launch values.
-    """
-    launch_env = workspace_spec.read_run_env(root)
-    if not launch_env:
-        return attempt_environment
-    return {**launch_env, **(attempt_environment or {})}
-
-
 def _agent_workspace_spec(
     *,
     base: str | None,
@@ -2713,6 +2724,7 @@ class WorkflowDsl:
         gate_errors: list[GateExit] = []
         watchdog_errors: list[SupervisorWatchdogExit] = []
         validation_errors: list[ValueError] = []
+        key_errors: list[WorkflowKeyConflict] = []
         bypass_item_cap = self.state.inside_item_thread()
         cap = _item_thread_cap(self.state.config)
         owner_scope = self.state.current_scope()
@@ -2759,6 +2771,11 @@ class WorkflowDsl:
                     gate_error = exc
                 except SupervisorWatchdogExit as exc:
                     watchdog_errors.append(exc)
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error: collect it and re-raise it to the script rather
+                    # than leaving a silent None slot.
+                    key_errors.append(exc)
                 except Exception as exc:
                     self.state.append_event(
                         "soft_park_item_failed",
@@ -2775,6 +2792,7 @@ class WorkflowDsl:
                 and len(active) < cap
                 and not gate_errors
                 and not watchdog_errors
+                and not key_errors
             ):
                 index = next_index
                 name, value, callback = entries[index]
@@ -2829,6 +2847,11 @@ class WorkflowDsl:
         )
         if outstanding:
             raise SoftParkExit(outstanding)
+        if key_errors:
+            # Raised after the park and gate exits: those carry durable state
+            # an operator resolves, while the refusal is deterministic and
+            # comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def _child_scopes(self, kind: str, key: object) -> tuple[str, str]:
@@ -2864,6 +2887,7 @@ class WorkflowDsl:
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(items) + 1)
             if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
@@ -2899,6 +2923,12 @@ class WorkflowDsl:
                                 gate_errors.append(exc)
                                 previous = None
                                 break
+                            except WorkflowKeyConflict as exc:
+                                # A reused or invalid caller key is a
+                                # script-authoring error, not a failed item.
+                                key_errors.append(exc)
+                                previous = None
+                                break
                             except Exception as exc:
                                 self.state.append_event(
                                     "stage_failed",
@@ -2912,7 +2942,7 @@ class WorkflowDsl:
                 results[index] = previous
 
         for index, item in enumerate(items):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 # Gate already closed: short-circuit remaining items without
                 # spawning threads that would only block then die on admission.
                 break
@@ -2922,7 +2952,7 @@ class WorkflowDsl:
                 pre_acquired = True
                 # Re-check after acquire: with a tight item-thread cap the gate
                 # may have closed while we were blocked on the semaphore.
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -2948,6 +2978,11 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def parallel(
@@ -2984,6 +3019,7 @@ class WorkflowDsl:
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
         soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
+        key_errors: list[WorkflowKeyConflict] = []
         start_barrier = (
             threading.Barrier(len(thunks) + 1)
             if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
@@ -3011,6 +3047,12 @@ class WorkflowDsl:
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
+                except WorkflowKeyConflict as exc:
+                    # A reused or invalid caller key is a script-authoring
+                    # error, not a failed item: collect it and re-raise it to
+                    # the script, the way a gate or soft-park exit travels.
+                    key_errors.append(exc)
+                    results[index] = None
                 except Exception as exc:
                     self.state.append_event(
                         "thunk_failed",
@@ -3020,13 +3062,13 @@ class WorkflowDsl:
                     results[index] = None
 
         for index, thunk in enumerate(thunks):
-            if self.state.gate_state["stop_admitting"] or gate_errors:
+            if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                 break
             pre_acquired = False
             if not bypass_item_cap:
                 self.state.item_semaphore.acquire()
                 pre_acquired = True
-                if self.state.gate_state["stop_admitting"] or gate_errors:
+                if self.state.gate_state["stop_admitting"] or gate_errors or key_errors:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
@@ -3052,6 +3094,11 @@ class WorkflowDsl:
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
             raise self.state.closed_gate_exit()
+        if key_errors:
+            # Raised after the gate and soft-park exits: those carry durable
+            # state an operator resolves, while the refusal is deterministic
+            # and comes back on the resumed pass.
+            raise key_errors[0]
         return results
 
     def judges(
@@ -3213,6 +3260,18 @@ class WorkflowDsl:
             # approve validated any answer to this hash against these actions.
             result_hash = _gate_reask_hash(result, allowed)
             decision = registry.approval_decision(self.state.root, gate_key, result_hash)
+            if decision is not None and _decision_action(decision) not in allowed:
+                # An approval written against some other list must not hand
+                # this call an action it did not declare.
+                self.state.append_event(
+                    "gate_action_undeclared",
+                    gate=caller_key,
+                    gateKey=gate_key,
+                    action=_decision_action(decision),
+                    actions=allowed,
+                    reask=True,
+                )
+                decision = None
         if decision is not None:
             action = _decision_action(decision)
             note = decision.get("note")
@@ -3517,8 +3576,18 @@ class WorkflowDsl:
             raise ValueError("timeout must be a positive number of seconds")
         resolved_isolation = isolation or self.defaults.get("isolation")
         resolved_phase = phase or self.current_phase
+        # The workflow-level launch env reaches a child as workspace-spec data,
+        # under the call's own env=. It is a default, not a demand: a call whose
+        # mode/isolation cannot take env gets no spec and must not fail, so the
+        # replay key of such a call is identical to a workflow with no launch env.
+        spec_env = env
+        if self.state.launch_env:
+            if env:
+                spec_env = {**self.state.launch_env, **env}
+            elif resolved_mode == MODE_WORK and resolved_isolation == "worktree":
+                spec_env = dict(self.state.launch_env)
         workspace = _agent_workspace_spec(
-            base=base, env=env, setup=setup, mode=resolved_mode, isolation=resolved_isolation
+            base=base, env=spec_env, setup=setup, mode=resolved_mode, isolation=resolved_isolation
         )
         opts = {
             "engine": engines if len(engines) > 1 else engines[0],
@@ -3767,8 +3836,11 @@ class WorkflowDsl:
         if unadoptable is not None:
             # A cancelled, stale, or never-launched run holds no answer and no
             # live process to wait on. Seal what is sealable and relaunch;
-            # never fail the call over a dead predecessor. A dry run only
-            # plans: it leaves the predecessor exactly as it found it.
+            # never fail the call over a dead predecessor. A dry run neither
+            # seals, cancels, reaps, nor launches anything: it only journals
+            # what the live path would do. The predecessor's leftover temporary
+            # structured-retry workspace is what an operator dry-running an
+            # adoption came to read, and the live respawn reaps it anyway.
             if not self.state.dry_run:
                 with contextlib.suppress(WorkflowChildCancellationError):
                     cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
@@ -3780,7 +3852,8 @@ class WorkflowDsl:
                 label=label,
                 reason=unadoptable,
             )
-            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if not _workflow_run_terminal(self.state.workspace, run_id):
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
@@ -3788,7 +3861,10 @@ class WorkflowDsl:
                 # Match live-path timeout: cancel the child; timeout is definitive.
                 # The terminal re-check closes the race where the child finished
                 # between the wait deadline and the cancel — adopt that instead.
-                cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
+                # A dry run reports the same timeout and cancels nothing: the
+                # child it could not wait out may still be live work.
+                if not self.state.dry_run:
+                    cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
                 # The adoption path recorded key/scope/runId but not the label a
                 # human reads, nor the bound that expired, and it never notified
                 # at all -- so a lane adopted from a prior run could time out in
@@ -3804,10 +3880,14 @@ class WorkflowDsl:
                     label=label,
                     timeout=timeout,
                 )
-                self.state.notify_event(
-                    "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
-                )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    # A notification carries no simulated marker, so a dry run
+                    # must not send one: it would read as a timeout the operator
+                    # never waited out. Neither does it reap the scratch.
+                    self.state.notify_event(
+                        "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
+                    )
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return None
         text = _workflow_agent_run_result(
             self.state.workspace,
@@ -3816,7 +3896,10 @@ class WorkflowDsl:
         )
         if text is None:
             # Failed/cancelled/unparseable children are not definitive — respawn.
-            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+            # A dry run leaves the dead child's scratch where a live respawn
+            # would reap it.
+            if not self.state.dry_run:
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if schema is None:
             result: JsonValue = text
@@ -3834,9 +3917,13 @@ class WorkflowDsl:
                     runId=run_id,
                     error=str(exc),
                 )
-                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+                if not self.state.dry_run:
+                    _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return _MISSING
-        _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
+        if not self.state.dry_run:
+            # The adoption is the reuse; a dry run copies the answer out of the
+            # run and leaves its scratch for the live path to reap.
+            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
         resumable = _workflow_agent_run_resumable(self.state.workspace, run_id)
         self._emit_adopted_child_identity(run_id, key=key, label=label, resumable=resumable)
         if label is not None:
@@ -5301,7 +5388,7 @@ def _validate_caller_key(value: object, *, what: str) -> str:
         or len(value) > CALLER_KEY_MAX_CHARS
         or any(ch < " " or ch == "\x7f" for ch in value)
     ):
-        raise ValueError(
+        raise WorkflowKeyError(
             f"{what} key must be a non-empty printable string of at most "
             f"{CALLER_KEY_MAX_CHARS} characters"
         )
@@ -5312,12 +5399,12 @@ def _validate_gate_actions(actions: object) -> list[str]:
     if actions is None:
         return ["approve"]
     if not isinstance(actions, (list, tuple)) or not actions:
-        raise ValueError("park_gate() actions must be a non-empty list of names")
+        raise WorkflowKeyError("park_gate() actions must be a non-empty list of names")
     names: list[str] = []
     for action in actions:
         name = _validate_caller_key(action, what="park_gate() action")
         if name in names:
-            raise ValueError(f"park_gate() action {name!r} is declared twice")
+            raise WorkflowKeyError(f"park_gate() action {name!r} is declared twice")
         names.append(name)
     return names
 
@@ -5350,13 +5437,27 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _declared_gate_actions(event: JsonObject | None) -> list[str]:
+    """The actions a gate event offers; an event without a list offers approve."""
+    declared = event.get("actions") if isinstance(event, dict) else None
+    if isinstance(declared, list) and declared:
+        return [item for item in declared if isinstance(item, str)]
+    return ["approve"]
+
+
 def _gate_result_hash(result: object) -> str:
     return _stable_hash(_canonical_json(result))
 
 
 def _gate_reask_hash(result: object, actions: list[str]) -> str:
-    """Hash of a park_gate() question re-asked because its answer lapsed."""
-    return _stable_hash(_canonical_json({"reask": {"result": result, "actions": actions}}))
+    """Hash of a park_gate() question re-asked because its answer lapsed.
+
+    The ``gate-reask-v1:`` prefix keeps this out of the domain of
+    ``_gate_result_hash``, which hashes the canonical JSON of any result: a
+    script whose result happens to look like a re-ask payload must not be able
+    to satisfy a re-ask with the approval for that result.
+    """
+    return _stable_hash(f"gate-reask-v1:{_canonical_json(result)}\x00{_canonical_json(actions)}")
 
 
 def _decision_action(decision: JsonObject) -> str:
@@ -5989,7 +6090,11 @@ def run_supervisor(
         notify_spec = status.get("notify")
         script_path = root / registry.SCRIPT_FILE
         args = load_args(root)
-        attempt_environment = with_launch_environment(root, attempt_environment)
+        # The workflow launch env is read once here and replayed to children as
+        # run-input data (see WorkflowDsl.agent); attempt_environment, which is
+        # the pinned operational + attempt variables, keeps going into the child
+        # process environment exactly as before.
+        launch_env = workspace_spec.read_run_env(root) or {}
         budget_payload = status.get("budget")
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
@@ -6017,6 +6122,7 @@ def run_supervisor(
             replay_attempt=replay_attempt,
             attempt_config=attempt_config,
             attempt_environment=attempt_environment,
+            launch_env=launch_env,
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
