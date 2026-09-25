@@ -485,6 +485,77 @@ class LauncherShimTests(unittest.TestCase):
         self.assertIn("config.personal.json", result.stderr)
         self.assertIn("config sync-profiles", result.stderr)
 
+    def test_auth_profile_scan_matches_the_python_global_walk(self):
+        # The shim must resolve the same global --auth-profile the parser would:
+        # any position before `--`, the last occurrence, and neither the `=`
+        # spelling nor a post-terminator token that the Python walk never reads.
+        from delegate_agent import cli_parser as parser_api
+
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            work_config = root / "config.work.json"
+            work_config.write_text("{}\n", encoding="utf-8")
+            personal_config = root / "config.personal.json"
+            personal_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(work_config)
+            cases = (
+                # After the subcommand: still a global before `--`.
+                (["codex", "work", "--auth-profile", "personal", "x"], "personal"),
+                # After another global flag, including one the shim used to miss.
+                (["--no-mail", "--auth-profile", "personal", "codex", "work", "x"], "personal"),
+                (["models", "--auth-profile", "personal"], "personal"),
+                # Two flags: the last one wins.
+                (["--auth-profile", "work", "--auth-profile", "personal", "profiles"], "personal"),
+                # After `--` it is prompt data, not a flag.
+                (["profiles", "--", "--auth-profile", "personal"], "work"),
+                # `--auth-profile=NAME` is not a global in the Python walk.
+                (["models", "--auth-profile=personal"], "work"),
+            )
+            resolved = []
+            for argv, expected in cases:
+                with self.subTest(argv=argv):
+                    result = self.run_shim(argv, env=env)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(payload["argv"], argv)
+                    self.assertEqual(payload["aiProfile"], expected)
+                    if expected == "personal":
+                        self.assertEqual(payload["delegateConfig"], str(personal_config))
+                        self.assertIn("--auth-profile personal", result.stderr)
+                    else:
+                        self.assertEqual(payload["delegateConfig"], str(work_config))
+                        self.assertNotIn("--auth-profile", result.stderr)
+                    resolved.append((argv, expected))
+
+        # Parity against the walk the shim mirrors, not against a table.
+        for argv, expected in resolved:
+            with self.subTest(python=argv):
+                globals_argv, _command_argv = parser_api._normalize_global_options(argv)
+                profiles = [
+                    globals_argv[index + 1]
+                    for index, token in enumerate(globals_argv)
+                    if token == "--auth-profile"
+                ]
+                self.assertEqual(profiles[-1] if profiles else "work", expected)
+
+    def test_no_mail_global_does_not_hide_the_subcommand_from_the_readonly_scan(self):
+        # `--no-mail` is a global flag, so the read-only classifier must skip it
+        # instead of reading it as the command name and blocking the launch gate.
+        with tempfile.TemporaryDirectory() as home:
+            probe = self.write_probe(Path(home))
+            result = self.run_shim(
+                ["--no-mail", "models"],
+                env=self.shim_env(home, probe, "work"),
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["argv"], ["--no-mail", "models"])
+        self.assertIn("continuing because 'models' is read-only", result.stderr)
+
     def test_explicit_delegate_config_does_not_bypass_missing_profile_overlay(self):
         with tempfile.TemporaryDirectory() as home:
             explicit_config = Path(home) / "explicit.json"
