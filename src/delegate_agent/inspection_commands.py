@@ -202,12 +202,12 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         )
     summaries: list[JsonObject] = []
     seen_run_ids: set[str] = set()
-    total = 0
-    scope_total = 0
+    matched_ids: set[str] = set()
+    scope_ids: set[str] = set()
     for linked_workspace, root in sources:
         try:
             index = run_registry.load_index(root)
-            found, found_total, found_scope = run_registry.list_run_summaries(
+            found, _found_total, _found_scope, found_ids = run_registry.list_run_summaries(
                 root,
                 index,
                 active=command.active,
@@ -221,18 +221,14 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             if linked_workspace is None:
                 raise
             continue
-        # Two worktrees can name one registry (a linked `.delegate` symlink or
-        # copy, a path Git reports twice), and one run is one row regardless of
-        # how many worktree paths reach it. The dropped rows are subtracted
-        # from this root's totals too: `found_total`/`found_scope` count the
-        # copy's rows, so an uncorrected "N of M" footer counts every one of
-        # them twice.
+        # Linked registries can copy the same runs. De-duplicate returned rows
+        # here, but count the union of pre-limit ids so truncation cannot hide
+        # duplicates from the totals.
         found_kept = [
             summary
             for summary in found
             if not (isinstance(summary.get("runId"), str) and summary["runId"] in seen_run_ids)
         ]
-        duplicates = len(found) - len(found_kept)
         found = found_kept
         for summary in found:
             if isinstance(summary.get("runId"), str):
@@ -241,8 +237,10 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             for summary in found:
                 summary["registryWorkspace"] = linked_workspace
         summaries.extend(found)
-        total += max(0, found_total - duplicates)
-        scope_total += max(0, found_scope - duplicates)
+        matched_ids |= found_ids.matched
+        scope_ids |= found_ids.scoped
+    total = len(matched_ids)
+    scope_total = len(scope_ids)
     if len(sources) > 1:
         summaries.sort(key=lambda summary: str(summary.get("activityAt") or ""), reverse=True)
         summaries = summaries[:limit]

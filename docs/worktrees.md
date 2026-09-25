@@ -139,7 +139,9 @@ delegate --isolation worktree codex work \
   does not close on the same line is refused rather than truncated.
 - `--setup CMD` runs CMD with `/bin/sh` in the fresh worktree, under the
   launching Delegate process, before the child starts, with the run's env and
-  bounded by `--timeout`. Output goes to the run's `setup.log`. A nonzero exit
+  bounded by `--timeout`, which is applied twice: setup gets the timeout, and
+  the child then gets it again from its own launch, so one run can take up to
+  about twice the timeout. Output goes to the run's `setup.log`. A nonzero exit
   or timeout fails the run with error `workspace_setup_failed` and
   `failureKind: workspace_setup`, keeps the worktree for inspection, and
   launches no child. Setup runs in its own process group: `delegate cancel`
