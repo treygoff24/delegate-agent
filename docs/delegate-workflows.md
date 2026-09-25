@@ -70,7 +70,7 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 
 - `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)).
 - `agent_meta(label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no label, that of the most recent `agent()` call on the calling thread.
-- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to, and that pin cannot change across a resume (a runtime that no longer matches the pin is refused as `pin_collision` rather than re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item; a key refusal propagates to the script instead (see [Stable step keys](#stable-step-keys)).
 - `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints and key refusals propagate to the supervisor.
@@ -303,6 +303,10 @@ The same holds when the recorded action is one the resumed script no longer
 declares: the call journals `gate_action_undeclared` and parks again under a
 new question bound to the result and the actions now offered, so
 `approve --gate KEY` sees it as pending and validates against the current list.
+A recorded answer still offered by the current action list is reused, and the
+runtime does not track recency across action-set changes: a gate whose list
+changes A, then B, then A again reuses the answer recorded for A rather than
+asking again.
 Two live `park_gate()` calls with one key in one named scope (for example two
 parallel items that both ask `"review"`) would share one answer, so the second
 raises `WorkflowKeyConflict` with the same guidance as a reused `agent(key=)`:
