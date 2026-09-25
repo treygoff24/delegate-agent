@@ -394,6 +394,7 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "trackedStreamMaxBytes": config["cursor"]["trackedStreamMaxBytes"],
         },
         "droid": {
+            "binary": config["droid"]["binary"],
             "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
             "trackedStreamMaxBytes": config["droid"]["trackedStreamMaxBytes"],

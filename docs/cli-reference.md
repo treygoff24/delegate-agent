@@ -1294,6 +1294,7 @@ creating a Run or writing a prompt record.
 | --- | --- | --- | --- | --- |
 | Engine | `engine`, falling back to `harness` | `--engine` | A missing or unknown source engine refuses resume. | The selected engine becomes the target; engine-scoped fields below may drop. |
 | Mode | `mode` | None; v1 does not override mode. | A missing or invalid mode refuses resume. | Retained unchanged. |
+| Native session opt-in | `resumable` | None | Only an exact `true` opts in; omitted or legacy values leave it off. | Kept only for Codex or Claude work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
 | Model selection | `modelAlias`, then `modelRequested`, `modelResolved`, then `model` | `--model` | No usable key uses the target engine configuration default and emits a note. | Source model selection drops; pass `--model` to pin a target model. |
 | Reasoning effort | `requestedReasoningEffort`, then `resolvedReasoningEffort`, together with `reasoningEffortSource` | `--reasoning-effort` | Missing effort uses the target default and emits a note. A source value from configuration is re-resolved through target capability/configuration; only `cli` and `input-json` source intent is inherited directly. | Source effort drops with a note; an explicit override remains valid. |
 | Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |

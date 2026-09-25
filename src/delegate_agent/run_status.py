@@ -490,12 +490,14 @@ def count_run_summaries(
     status_filter: str | None = None,
     harness: str | None = None,
     group: str | None = None,
-) -> tuple[dict[str, dict[str, int]], int, int]:
+    seen_run_ids: set[str] | None = None,
+) -> tuple[dict[str, dict[str, int]], RunListingIds]:
     """Counts by status, harness, and group over every matching run, with no rows.
 
     Uses the same cheap pass and filters as :func:`list_run_summaries`, so the
     counts agree with the listing's ``total`` and never load full manifests or
     log sizes for runs a listing would not show.
+    Buckets skip ids already counted from an earlier Registry root.
     """
     candidates, scoped_ids = _run_summary_candidates(
         registry_root,
@@ -507,8 +509,13 @@ def count_run_summaries(
     )
     counts: dict[str, dict[str, int]] = {"byStatus": {}, "byHarness": {}, "byGroup": {}}
     for summary, _state, _projected, _entry in candidates:
+        if seen_run_ids is not None and summary["runId"] in seen_run_ids:
+            continue
         for bucket, key in (("byStatus", "status"), ("byHarness", "harness"), ("byGroup", "group")):
             value = summary.get(key)
             label = value if isinstance(value, str) and value else "(none)"
             counts[bucket][label] = counts[bucket].get(label, 0) + 1
-    return counts, len(candidates), len(scoped_ids)
+    return counts, RunListingIds(
+        matched=frozenset(str(summary["runId"]) for summary, *_ in candidates),
+        scoped=frozenset(scoped_ids),
+    )

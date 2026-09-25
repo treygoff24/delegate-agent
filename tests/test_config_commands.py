@@ -206,6 +206,7 @@ class LauncherShimTests(unittest.TestCase):
             "  'argv': sys.argv[1:],\n"
             "  'delegateConfig': os.environ.get('DELEGATE_CONFIG'),\n"
             "  'aiProfile': os.environ.get('AI_PROFILE'),\n"
+            "  'profileKeyMarker': os.environ.get('PROFILE_KEY_MARKER'),\n"
             "}, sys.stdout)\n",
             encoding="utf-8",
         )
@@ -448,6 +449,34 @@ class LauncherShimTests(unittest.TestCase):
             result.stderr,
         )
         self.assertIn("overrides AI_PROFILE=work", result.stderr)
+
+    def test_auth_profile_whitespace_selects_matching_overlay_and_keys(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            for profile in ("work", "personal"):
+                (root / f"config.{profile}.json").write_text("{}\n", encoding="utf-8")
+                keys = Path(home) / ".ai-profiles" / profile / "keys.zsh"
+                keys.parent.mkdir(parents=True)
+                keys.write_text(f"export PROFILE_KEY_MARKER={profile}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(root / "config.work.json")
+            for value in (
+                " personal ",
+                "\tpersonal\r\n",
+                "\u2003personal\u00a0",
+                "\x1cpersonal\x1f",
+            ):
+                with self.subTest(value=value):
+                    argv = ["--auth-profile", value, "profiles"]
+                    result = self.run_shim(argv, env=env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["argv"], argv)
+                    self.assertEqual(payload["delegateConfig"], str(root / "config.personal.json"))
+                    self.assertEqual(payload["aiProfile"], "personal")
+                    self.assertEqual(payload["profileKeyMarker"], "personal")
 
     def test_auth_profile_flag_matching_environment_is_silent(self):
         with tempfile.TemporaryDirectory() as home:

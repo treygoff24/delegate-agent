@@ -200,17 +200,19 @@ def _resolve_followup_target(registry_root: Path, handle: str) -> tuple[str, str
     return run_id, alias
 
 
-def _later_continuations(registry_root: Path, run_id: str) -> list[tuple[str, str, bool]]:
+def _later_continuations(
+    registry_root: Path, run_id: str
+) -> list[tuple[str, str, str | None, str | None]]:
     """Runs that resumed or followed up ``run_id``, oldest first.
 
-    Each entry is (handle, relation, has_native_session).
+    Each entry is (handle, relation, engine, native_session_id).
 
     Run ids start with their UTC launch second, so only runs from that second
     on can descend from this one; older manifests are never opened.
     """
     index = run_registry.load_index(registry_root)
     floor = run_id[: len("del_YYYYMMDDTHHMMSSZ")]
-    found: list[tuple[str, str, str, bool]] = []
+    found: list[tuple[str, str, str, str | None, str | None]] = []
     for candidate, entry in run_registry.index_run_entries(index):
         if candidate == run_id or candidate[: len(floor)] < floor:
             continue
@@ -234,14 +236,21 @@ def _later_continuations(registry_root: Path, run_id: str) -> list[tuple[str, st
         except (OSError, ValueError, run_registry.RegistryJsonError):
             # Advisory lineage only: an unreadable sibling never blocks a followup.
             state = snapshot = None
-        has_session = any(
-            isinstance(record, dict) and bool(record.get("harnessSessionId"))
-            for record in (state, snapshot, manifest)
+        session_id = next(
+            (
+                record["harnessSessionId"]
+                for record in (state, snapshot, manifest)
+                if isinstance(record, dict)
+                and isinstance(record.get("harnessSessionId"), str)
+                and record["harnessSessionId"]
+            ),
+            None,
         )
-        found.append((candidate, handle, relation, has_session))
+        engine = _manifest_str(manifest, "engine") or _manifest_str(manifest, "harness")
+        found.append((candidate, handle, relation, engine, session_id))
     return [
-        (handle, relation, has_session)
-        for _candidate, handle, relation, has_session in sorted(found)
+        (handle, relation, engine, session_id)
+        for _candidate, handle, relation, engine, session_id in sorted(found)
     ]
 
 
@@ -352,11 +361,11 @@ def build_followup_plan(
 
     notes: list[str] = []
     continuations = _later_continuations(registry_root, run_id)
-    if continuations:
-        latest_alias, relation, latest_has_session = continuations[-1]
+    if continuations and continuations[-1][2:] != (source_engine, session_id):
+        latest_alias, relation, _latest_engine, latest_session_id = continuations[-1]
         continue_with = (
             f"delegate followup {latest_alias}"
-            if latest_has_session
+            if latest_session_id
             else f"delegate resume {latest_alias} (it recorded no native session)"
         )
         notes.append(

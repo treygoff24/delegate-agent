@@ -96,6 +96,50 @@ class CursorFamilyNameTests(CommandTestBase):
         self.assertEqual(request.model, "auto")
         self.assertFalse(any("family name" in warning for warning in request.warnings))
 
+    def test_configured_default_family_resolves_before_argv(self):
+        config = delegate_config.embedded_default_config()
+        config["cursor"]["defaultModel"] = "grok"
+        for discovery, expected in (
+            (None, "grok-4.7-xhigh"),
+            (_catalog("cursor", *CURSOR_GROK_CATALOG), "cursor-grok-4.6-high"),
+        ):
+            with self.subTest(discovery=discovery is not None):
+                request = self._request(None, discovery, config)
+                self.assertEqual(request.model, expected)
+                self.assertEqual(request.argv[request.argv.index("--model") + 1], expected)
+                self.assertEqual(sum("family name" in warning for warning in request.warnings), 1)
+
+    def test_configured_default_family_uses_discovered_effort_route(self):
+        config = delegate_config.embedded_default_config()
+        config["cursor"]["defaultModel"] = "grok"
+        config["cursor"]["defaultReasoningEffort"] = "low"
+        discovery = _catalog("cursor", "cursor-grok-4.6-high", "cursor-grok-4.6-low")
+        for model, entry in discovery["harnesses"]["cursor"]["models"].items():
+            entry.update(
+                routeFamily="grok-4.6",
+                routeEffort=model.rsplit("-", 1)[1],
+                reasoning={"evidence": "inferred-route"},
+            )
+
+        request = self._request(None, discovery, config)
+
+        self.assertEqual(request.model, "cursor-grok-4.6-low")
+        self.assertEqual(request.argv[request.argv.index("--model") + 1], "cursor-grok-4.6-low")
+        self.assertEqual(request.reasoning_effort, "low")
+        self.assertEqual(sum("family name" in warning for warning in request.warnings), 1)
+
+    def test_configured_reasoning_route_family_resolves_before_argv(self):
+        config = delegate_config.embedded_default_config()
+        config["cursor"]["defaultReasoningEffort"] = "high"
+        config["cursor"]["reasoningEffortModels"] = {"high": "grok"}
+
+        request = self._request(None, _catalog("cursor", *CURSOR_GROK_CATALOG), config)
+
+        self.assertEqual(request.model, "cursor-grok-4.6-high")
+        self.assertEqual(request.argv[request.argv.index("--model") + 1], "cursor-grok-4.6-high")
+        self.assertEqual(request.reasoning_effort, "high")
+        self.assertTrue(any("family name" in warning for warning in request.warnings))
+
 
 class LaunchCatalogWarningTests(CommandTestBase):
     def _request(self, engine, model, discovery):
@@ -132,9 +176,21 @@ class LaunchCatalogWarningTests(CommandTestBase):
         request = self._request("grok", "grok-4.7", None)
         self.assertEqual(self._catalog_warnings(request), [])
 
-        request = self._request("grok", "grok-9", None)
+        request = self._request("grok", "grok-4.77", None)
         (warning,) = self._catalog_warnings(request)
-        self.assertIn("absent from the bundled catalog", warning)
+        self.assertIn("not in Delegate's small built-in list", warning)
+
+    def test_unrelated_selectors_without_discovery_are_silent(self):
+        for engine, model in (
+            ("cursor", "auto"),
+            ("cursor", "custom-provider-model"),
+            ("codex", "custom-provider-model"),
+            ("grok", "custom-provider-model"),
+        ):
+            with self.subTest(engine=engine, model=model):
+                request = self._request(engine, model, None)
+                self.assertEqual(request.model, model)
+                self.assertEqual(self._catalog_warnings(request), [])
 
     def test_claude_family_aliases_are_not_catalog_checked(self):
         request = self._request("claude", "opus", _catalog("claude", "claude-opus-5-5"))
@@ -163,8 +219,13 @@ class LaunchCatalogWarningTests(CommandTestBase):
         request = self._request("cursor", "cursor-grok-4.6-hihg", None)
         self.assertEqual(request.model, "cursor-grok-4.6-hihg")
         (warning,) = self._catalog_warnings(request)
-        self.assertIn("cursor model 'cursor-grok-4.6-hihg' is absent", warning)
-        self.assertIn("absent from the bundled catalog", warning)
+        self.assertIn("cursor model 'cursor-grok-4.6-hihg' is not in", warning)
+        self.assertIn("Delegate's small built-in list", warning)
+        self.assertIn("no discovery snapshot catalog exists for cursor", warning)
+        self.assertIn("It resembles grok-4.7-xhigh", warning)
+        self.assertIn("The launch proceeds", warning)
+        self.assertIn("delegate capabilities refresh", warning)
+        self.assertNotIn("may reject", warning)
 
         snapshot = self._request(
             "cursor", "cursor-grok-4.6-hihg", _catalog("cursor", *CURSOR_GROK_CATALOG)
@@ -178,6 +239,9 @@ class LaunchCatalogWarningTests(CommandTestBase):
 
         listed = self._request("cursor", "grok-4.7-xhigh", None)
         self.assertEqual(self._catalog_warnings(listed), [])
+
+        resolved = self._request("cursor", "grok", None)
+        self.assertEqual(self._catalog_warnings(resolved), [])
 
 
 if __name__ == "__main__":
