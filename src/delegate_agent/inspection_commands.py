@@ -63,11 +63,28 @@ def linked_registry_roots(workspace_path: str) -> list[tuple[str, Path]]:
             return []
     except (OSError, RuntimeError):
         return []
+    # A linked worktree whose `.delegate` is a symlink (or a copy) of the main
+    # registry resolves to the same root: folding it in would list every run
+    # twice, once per worktree path.
+    main_root = run_registry.registry_root_if_exists(Path(workspace_path))
+    try:
+        main_resolved = main_root.resolve() if main_root is not None else None
+    except (OSError, RuntimeError):
+        main_resolved = None
     roots: list[tuple[str, Path]] = []
+    seen_roots: set[Path] = set()
     for path in paths[1:]:
         root = run_registry.registry_root_if_exists(Path(path))
-        if root is not None:
-            roots.append((path, root))
+        if root is None:
+            continue
+        try:
+            resolved = root.resolve()
+        except (OSError, RuntimeError):
+            resolved = root
+        if resolved in seen_roots or (main_resolved is not None and resolved == main_resolved):
+            continue
+        seen_roots.add(resolved)
+        roots.append((path, root))
         if len(roots) >= LINKED_REGISTRY_LIMIT:
             break
     return roots
@@ -179,6 +196,7 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
     sources: list[tuple[str | None, Path]] = [(None, registry_root)] if registry_root else []
     sources.extend(linked_registry_roots(workspace_path))
     summaries: list[JsonObject] = []
+    seen_run_ids: set[str] = set()
     total = 0
     scope_total = 0
     for linked_workspace, root in sources:
@@ -198,6 +216,17 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             if linked_workspace is None:
                 raise
             continue
+        # Two worktrees can name one registry (a linked `.delegate` symlink or
+        # copy, a path Git reports twice), and one run is one row regardless of
+        # how many worktree paths reach it.
+        found = [
+            summary
+            for summary in found
+            if not (isinstance(summary.get("runId"), str) and summary["runId"] in seen_run_ids)
+        ]
+        for summary in found:
+            if isinstance(summary.get("runId"), str):
+                seen_run_ids.add(summary["runId"])
         if linked_workspace is not None:
             for summary in found:
                 summary["registryWorkspace"] = linked_workspace
