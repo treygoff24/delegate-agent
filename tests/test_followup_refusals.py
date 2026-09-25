@@ -229,6 +229,24 @@ class FollowupRefusalsTests(unittest.TestCase):
         )
         self.assertIn(f"delegate resume {resumed} (it recorded no native session)", stderr)
 
+    def test_followup_inherits_an_explicit_stall_threshold(self):
+        run_id, alias = self.write_test_run(harness_session_id="th_valid12345")
+        exit_code, stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", alias, "continue"]
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertNotIn("stallMinutes", json.loads(stdout))
+
+        path = run_registry.run_directory(self.registry_root, run_id) / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["stallMinutes"] = 12.5
+        run_registry.write_json_atomic(path, manifest)
+        exit_code, stdout, stderr = self.run_followup_cli(
+            ["--json", "followup", "--dry-run", alias, "continue"]
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["stallMinutes"], 12.5)
+
     def test_native_followup_warning_compares_session_identity(self):
         source_id, source = self.write_test_run(harness_session_id="th_source12345")
         followup_id, followup = self.write_test_run(harness_session_id="th_source12345")

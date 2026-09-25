@@ -33,6 +33,7 @@ from delegate_agent import (
     reasoning,
     run_registry,
     safe_workspace,
+    stall_watchdog,
     structured_output,
     workspace_spec,
     wsl,
@@ -53,6 +54,7 @@ from delegate_agent.argv_builders import (
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
+    omp_image_path_warnings,
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
@@ -1707,6 +1709,7 @@ def _build_normalized_launch(
             call_read_only=launch.read_only,
             pure=launch.pure,
             timeout=launch.timeout,
+            stall_minutes=launch.stall_minutes,
             group=global_options.group,
             notify=global_options.notify,
             workflow_agent_key=spec.workflow_agent_key,
@@ -2464,6 +2467,7 @@ def build_request(
     call_read_only: bool = False,
     pure: bool = False,
     timeout: int | None = None,
+    stall_minutes: float | None = None,
     group: str | None = None,
     notify: str | None = None,
     workflow_agent_key: str | None = None,
@@ -2635,7 +2639,11 @@ def build_request(
             and _cached_native_persona_transport(discovery)
         ),
     )
-    warnings = (*warnings, *drift_warnings)
+    warnings = (
+        *warnings,
+        *drift_warnings,
+        *omp_image_path_warnings(engine, prompt),
+    )
     persona_resolution = None
     if persona is not None:
         if persona_text_override is not None:
@@ -2695,6 +2703,7 @@ def build_request(
             call_read_only=call_read_only,
             pure=pure,
             timeout=timeout,
+            stall_minutes=stall_minutes,
             group=group,
             notify=notify,
             workflow_agent_key=workflow_agent_key,
@@ -3739,6 +3748,7 @@ def _build_request_for_workspace(
     call_read_only: bool = False,
     pure: bool = False,
     timeout: int | None = None,
+    stall_minutes: float | None = None,
     group: str | None = None,
     notify: str | None = None,
     workflow_agent_key: str | None = None,
@@ -3942,7 +3952,12 @@ def _build_request_for_workspace(
             progress=progress,
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
-            stall_seconds=delegate_config.resolve_stall_seconds(config),
+            stall_seconds=(
+                stall_watchdog.stall_seconds_from_minutes(stall_minutes)
+                if stall_minutes is not None
+                else delegate_config.resolve_stall_seconds(config)
+            ),
+            stall_seconds_pinned=stall_minutes is not None,
             process_group_termination_grace_sec=(
                 delegate_config.resolve_process_group_termination_grace_sec(config)
             ),

@@ -87,6 +87,7 @@ def from_request(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         stall_seconds=request.stall_seconds,
+        stall_seconds_pinned=request.stall_seconds_pinned,
         process_group_termination_grace_sec=request.process_group_termination_grace_sec,
         registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
         tracked_stream_max_bytes=request.tracked_stream_max_bytes,

@@ -32,6 +32,7 @@ from delegate_agent import (
     mail_push,
     notify,
     outcome,
+    outside_cwd_changes,
     profiles,
     prompt_instructions,
     redaction,
@@ -83,6 +84,17 @@ STALL_SECONDS_DEFAULT = stall_watchdog.stall_seconds_from_minutes(
     stall_watchdog.STALL_MINUTES_DEFAULT
 )
 STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
+NO_PAGE_ASK_ENV = "DELEGATE_CHILD_NO_PAGE_ASK"
+NO_PAGE_ASK_DIRNAME = "no-page-bin"
+# Exit 2 is ask's own "relay down" code, so a caller that handles an
+# unreachable human already does the right thing with the stub.
+NO_PAGE_ASK_EXIT = 2
+NO_PAGE_ASK_SCRIPT = (
+    "#!/bin/sh\n"
+    "echo 'ask: paging the human is disabled for Delegate child runs "
+    f"({NO_PAGE_ASK_ENV}=1). Put the question in your final report instead.' >&2\n"
+    f"exit {NO_PAGE_ASK_EXIT}\n"
+)
 ZERO_COMMIT_BUDGET_FRACTION_DEFAULT = 0.5
 ZERO_COMMIT_BUDGET_FRACTION_ENV = "DELEGATE_ZERO_COMMIT_BUDGET_FRACTION"
 ZERO_COMMIT_HEALTH_EVENT_KIND = "run.zero_commits_at_half_budget"
@@ -172,6 +184,9 @@ class RunContext:
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
     stall_seconds: float = STALL_SECONDS_DEFAULT
+    # --stall-minutes pinned this run's threshold; DELEGATE_STALL_MINUTES does
+    # not override a per-run choice.
+    stall_seconds_pinned: bool = False
     process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
     tracked_stream_max_bytes: int | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
@@ -703,6 +718,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["progressRequested"] = ctx.progress_requested
     if ctx.timeout_seconds is not None:
         payload["timeoutSeconds"] = ctx.timeout_seconds
+    if ctx.stall_seconds_pinned:
+        # Only an explicit --stall-minutes is recorded, so resume and followup
+        # inherit operator intent; a config or env default is re-resolved.
+        payload["stallMinutes"] = ctx.stall_seconds / stall_watchdog.SECONDS_PER_MINUTE
     if ctx.tracked_stream_max_bytes is not None:
         payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes
     if ctx.output_schema_text is not None:
@@ -1563,8 +1582,39 @@ def _drain_stream(
     stream: str,
     capture_info: JsonObject | None = None,
     on_omitted: Callable[[str], None] | None = None,
+    handler_failures: list[str] | None = None,
 ) -> None:
+    """Copy one child pipe to its log until EOF, feeding decoded text to ``on_line``.
+
+    The pipe is drained no matter what the handlers do. A handler exception
+    (a registry lock timeout while persisting progress, a parser bug) is
+    recorded in ``handler_failures`` and the drain keeps reading: a drain
+    thread that died on it would stop consuming the pipe, and a child blocked
+    on a full pipe would then hang until the deadline or the stall watchdog.
+    """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
+
+    def guarded(handler: Callable[[str], None] | None) -> Callable[[str], None] | None:
+        if handler is None:
+            return None
+
+        def call(text: str) -> None:
+            try:
+                handler(text)
+            except Exception as exc:  # keep draining; the failure is reported.
+                if handler_failures is None:
+                    return
+                detail = f"{stream} stream handler failed: {type(exc).__name__}: {exc}"[:500]
+                if (
+                    len(handler_failures) < STREAM_HANDLER_FAILURE_LIMIT
+                    and detail not in handler_failures
+                ):
+                    handler_failures.append(detail)
+
+        return call
+
+    on_line = guarded(on_line)
+    on_omitted = guarded(on_omitted)
     with log_path.open("ab") as log_handle:
 
         def write(captured: bytes) -> None:
@@ -1593,6 +1643,11 @@ def _drain_stream(
             decoded = decoder.decode(b"", final=True)
             if decoded:
                 on_line(decoded)
+
+
+# Distinct handler failures kept per stream; one is enough to act on, a few
+# show whether it was one bug or several.
+STREAM_HANDLER_FAILURE_LIMIT = 3
 
 
 def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
@@ -1777,6 +1832,8 @@ class TrackedCaptureResult:
     final_attempt_accumulator: harness_events.StreamAccumulator | None = None
     zero_commit_health: JsonObject | None = None
     stdout_capture: JsonObject | None = None
+    # Exceptions the stdout/stderr line handlers raised; the drains kept reading.
+    stream_handler_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1973,7 +2030,59 @@ class StreamLimitSignal:
             self.event.set()
 
 
+def _worktree_head_probe(cwd: str | None) -> Callable[[], str | None] | None:
+    """A stall-watchdog probe returning the execution checkout's HEAD commit.
+
+    A commit is durable progress even when the child's stdout says nothing, so
+    a changed HEAD restarts the idle clock. Outside a Git checkout the probe
+    answers None and never counts as progress.
+    """
+    if not cwd:
+        return None
+
+    def probe() -> str | None:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env["LC_ALL"] = "C"
+        try:
+            result = subprocess.run(  # nosec B603 B607 - fixed Git argv, no shell.
+                ["git", "-C", cwd, "rev-parse", "--verify", "--quiet", "HEAD"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        head = result.stdout.strip()
+        return head if result.returncode == 0 and head else None
+
+    return probe
+
+
 def _stall_message(detail: JsonObject) -> str:
+    reason = detail.get("stallReason")
+    if reason == stall_watchdog.STALL_REASON_RUNAWAY_OUTPUT:
+        return (
+            f"Child produced {detail.get('outputChars')} characters of model output with no "
+            f"tool activity (limit {detail.get('outputCharLimit')}); the run was cancelled "
+            "by the stall watchdog as runaway output."
+        )
+    if reason == stall_watchdog.STALL_REASON_REPEATED_TOOL_FAILURE:
+        return (
+            f"Child failed the same {detail.get('tool')} call on the same target "
+            f"{detail.get('failures')} times in a row; the run was cancelled by the stall "
+            "watchdog as a repeated tool failure."
+        )
+    activity = detail.get("childActivity")
+    activity_text = {
+        "cpu_active": " The child was still using CPU (working or looping silently).",
+        "waiting": (
+            " The child was alive but idle on CPU (waiting on its provider, the "
+            "network, or a hung read)."
+        ),
+        "no_processes": " No process was left in the child's process group.",
+    }.get(activity if isinstance(activity, str) else "", "")
     idle = detail.get("idleSeconds")
     threshold = detail.get("thresholdSeconds")
     idle_text = f"{float(idle):.0f}s" if isinstance(idle, (int, float)) else "the stall window"
@@ -1983,6 +2092,7 @@ def _stall_message(detail: JsonObject) -> str:
     return (
         f"Child produced no new output and no tool activity for {idle_text} "
         f"(stall threshold {threshold_text}); the run was cancelled by the stall watchdog."
+        f"{activity_text}"
     )
 
 
@@ -2266,6 +2376,32 @@ def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
     return [str(scratch_root)] if scratch_root.is_dir() else []
 
 
+def _no_page_ask_requested() -> bool:
+    return os.environ.get(NO_PAGE_ASK_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _install_no_page_ask(env: dict[str, str], root: Path | None) -> None:
+    """Opt-in: shadow ``ask`` on the child's PATH with a stub that never pages.
+
+    Children inherit ``~/.local/bin`` on PATH, where the real ``ask`` pages the
+    human's phone and blocks. With ``DELEGATE_CHILD_NO_PAGE_ASK=1`` in the
+    launching environment, a stub in this run's own private directory goes
+    first on PATH and exits with ask's relay-down code. Nothing under ``$HOME``
+    is written, and the stub dir is inside a root that is already writable to
+    (and, under bwrap, bound for) this run.
+    """
+    if root is None or not _no_page_ask_requested():
+        return
+    stub_dir = root / NO_PAGE_ASK_DIRNAME
+    stub_dir.mkdir(mode=0o700, exist_ok=True)
+    stub = stub_dir / "ask"
+    if not stub.exists():
+        stub.write_text(NO_PAGE_ASK_SCRIPT, encoding="utf-8")
+        stub.chmod(0o700)
+    path = env.get("PATH", "")
+    env["PATH"] = f"{stub_dir}{os.pathsep}{path}" if path else str(stub_dir)
+
+
 def _launch_tracked_process(
     argv: list[str],
     cwd: str,
@@ -2278,17 +2414,27 @@ def _launch_tracked_process(
     sandbox: sandbox_bwrap.SandboxPlan | None = None,
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
+    run_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_temp_dir(env_overrides, temp_dir)
     )
     for key in drop_env:
         env.pop(key, None)
+    _install_no_page_ask(env, temp_dir or scratch_dir or run_path)
     if sandbox is not None:
         if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
             raise DelegateError(
                 "invalid_bwrap_plan", "Tracked sandbox requires a validated SandboxPlan."
             )
+        uv_venv = sandbox_bwrap.uv_project_environment(
+            cwd,
+            env,
+            # Both roots are rw-bound below; neither sits in the workspace.
+            str(temp_dir or scratch_dir) if (temp_dir or scratch_dir) is not None else None,
+        )
+        if uv_venv is not None:
+            env[sandbox_bwrap.UV_PROJECT_ENVIRONMENT_ENV] = uv_venv
         # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
         # resolved), mirroring where the codex-pure seatbelt prefix is applied.
         # Boundary construction and the preflight of the final plan raise
@@ -2440,9 +2586,15 @@ def _capture_tracked_process(
         continuity_mode=ctx.continuity_mode,
     )
     watchdog = stall_watchdog.StallWatchdog(
-        stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
+        stall_seconds=(
+            ctx.stall_seconds
+            if ctx.stall_seconds_pinned
+            else _stall_seconds_from_env(ctx.stall_seconds)
+        ),
         harness=ctx.harness,
+        progress_probe=_worktree_head_probe(ctx.execution_cwd),
     )
+    watchdog.prime_probe()
     pgid = process_group_pgid or _process_group_for_process(process)
     # The live generation (status/pid/pgid) is already durable: it was published
     # under the launch-generation lock once Popen returned and before this
@@ -2515,6 +2667,7 @@ def _capture_tracked_process(
             "missing_child_stream",
             "Child process did not expose stdout/stderr pipes for tracking.",
         )
+    stream_handler_failures: list[str] = []
     with open_events_log(files.run_path) as events_handle:
 
         def append_stdout_line_event(line: str) -> bool:
@@ -2541,8 +2694,15 @@ def _capture_tracked_process(
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
                 prior_session_id = accumulator.session_id
+                events_before = accumulator.events.total
                 accumulator.ingest_line(line)
-                watchdog.observe_line(line, now=time.monotonic())
+                watchdog.observe_line(
+                    line,
+                    now=time.monotonic(),
+                    tool_events=stall_watchdog.tool_events_from(
+                        accumulator.events.last(accumulator.events.total - events_before)
+                    ),
+                )
                 if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
                 elif accumulator.harness in {"pi", "omp"}:
@@ -2589,6 +2749,7 @@ def _capture_tracked_process(
                 "stream": "stdout",
                 "capture_info": stdout_capture,
                 "on_omitted": observe_omitted_thinking,
+                "handler_failures": stream_handler_failures,
             },
             daemon=True,
         )
@@ -2600,6 +2761,7 @@ def _capture_tracked_process(
                 "max_bytes": tracked_stream_max_bytes,
                 "limit_signal": limit_signal,
                 "stream": "stderr",
+                "handler_failures": stream_handler_failures,
             },
             daemon=True,
         )
@@ -2720,6 +2882,42 @@ def _capture_tracked_process(
                 idle_seconds = watchdog.stalled_for(now)
                 if idle_seconds is not None:
                     stall_detail = watchdog.stall_detail(idle_seconds)
+                    reported_status = (
+                        stall_watchdog.completion_report_status(accumulator.assistant_text)
+                        if stall_detail.get("stallReason") == stall_watchdog.STALL_REASON_IDLE
+                        and stall_watchdog.reports_completion_by_text(ctx.harness)
+                        else None
+                    )
+                    if reported_status is not None:
+                        # A text-stream child (Devin) that already wrote its
+                        # completion report and then went quiet finished its
+                        # work; only its exit is missing. Stop it the way a
+                        # terminal event followed by a lingering child is
+                        # stopped, not as a stall.
+                        _terminate_call_process(
+                            process,
+                            pgid=pgid,
+                            grace_seconds=process_group_grace_seconds,
+                            identity_ctx=ctx,
+                        )
+                        stall_detail = None
+                        stopped_after_completion = True
+                        # The report's own verdict decides the outcome: a child
+                        # that reported blocked or failed did not succeed just
+                        # because it stopped cleanly.
+                        exit_code = 0 if reported_status == "completed" else 1
+                        break
+                    # Idle stdout cannot say whether the child is waiting on its
+                    # provider, spinning silently, or gone; sample the group
+                    # before it is signalled so the record can.
+                    with contextlib.suppress(Exception):
+                        stall_detail.update(stall_watchdog.process_group_activity(pgid))
+                    # Sampling blocks while the stdout thread keeps reading: a
+                    # tool that started, new output, or a terminal event in that
+                    # window means the child is not stalled after all.
+                    if terminal_signal.is_set() or watchdog.confirm_stall(time.monotonic()) is None:
+                        stall_detail = None
+                        continue
                     _terminate_call_process(
                         process,
                         pgid=pgid,
@@ -2786,6 +2984,8 @@ def _capture_tracked_process(
             accumulator.ingest_line(line_buffer)
             append_stdout_line_event(line_buffer)
         accumulator.finish_stream()
+        for failure in stream_handler_failures:
+            append_event(events_handle, {"kind": "stream.handler_failed", "message": failure})
         error: str | None = None
         message: str | None = None
         if stall_detail is not None:
@@ -2843,6 +3043,7 @@ def _capture_tracked_process(
         zero_commit_health=zero_commit_health,
         stdout_capture=stdout_capture,
         orphaned_processes=orphaned_processes,
+        stream_handler_failures=tuple(stream_handler_failures),
     )
 
 
@@ -3746,6 +3947,7 @@ def _run_single_tracked_attempt(
                 sandbox=ctx.sandbox,
                 engine=ctx.engine,
                 extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
+                run_path=files.run_path,
             )
         except OSError as exc:
             launch_exc = exc
@@ -3969,6 +4171,11 @@ def _merge_tracked_attempt_captures(
         stderr_bytes=prior_capture.stderr_bytes + current_capture.stderr_bytes,
         stdin_failures=tuple(
             dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
+        ),
+        stream_handler_failures=tuple(
+            dict.fromkeys(
+                [*prior_capture.stream_handler_failures, *current_capture.stream_handler_failures]
+            )
         ),
         mail_push_failure_reason=(
             current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
@@ -4225,6 +4432,13 @@ def _execute_tracked(
             ctx.mode == "work"
             or (ctx.mode == "safe" and ctx.isolated_workspace and ctx.workspace_kind == "git")
         )
+        else None
+    )
+    # --isolation none edits the caller's real tree; a before/after status of
+    # the enclosing repo is the one cheap way to see edits that escaped cwd.
+    outside_snapshot = (
+        outside_cwd_changes.capture(cwd, own_paths=(str(ctx.registry_root),))
+        if ctx.effective_isolation == "none" and not ctx.isolated_workspace
         else None
     )
     fallback_extra: JsonObject | None = None
@@ -4585,6 +4799,23 @@ def _execute_tracked(
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
+    for failure in capture.stream_handler_failures:
+        _append_unique(
+            final_warnings,
+            f"{failure} (the pipe kept draining; progress records may lag the stream)",
+        )
+    if outside_snapshot is not None:
+        escaped = outside_cwd_changes.changed_outside(outside_snapshot)
+        if escaped:
+            final_extra["outsideCwdChanges"] = {
+                "repository": outside_snapshot.toplevel,
+                "count": len(escaped),
+                "examples": list(escaped[: outside_cwd_changes.EXAMPLE_LIMIT]),
+            }
+            _append_unique(
+                final_warnings,
+                outside_cwd_changes.warning(escaped, outside_snapshot.toplevel),
+            )
     if scratch_permissions is not None:
         final_extra["scratchPermissions"] = scratch_permissions
         diagnostic = profiles.read_bounded_stderr_tail(files.stderr_log).lower()

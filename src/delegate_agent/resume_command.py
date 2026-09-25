@@ -27,6 +27,7 @@ from typing import TextIO
 from delegate_agent import (
     personas,
     run_registry,
+    stall_watchdog,
     workspace_spec,
     worktree_mgmt,
     worktree_records,
@@ -765,6 +766,16 @@ def build_resume_plan(
                 "timeoutSeconds in the source manifest must be a positive integer."
             )
 
+    # Only an explicit --stall-minutes is recorded; absence means the source ran
+    # on the configured default, which the target re-resolves (no note needed).
+    stall_minutes: float | None = None
+    if "stallMinutes" in manifest:
+        stall_minutes = stall_watchdog.stall_minutes_value(manifest.get("stallMinutes"))
+        if stall_minutes is None:
+            raise _record_invalid(
+                "stallMinutes in the source manifest must be a finite number >= 0."
+            )
+
     progress_intent = opts.progress_intent
     if progress_intent is None:
         manifest_progress = manifest.get("progressRequested")
@@ -894,6 +905,7 @@ def build_resume_plan(
         fast=fast,
         progress_intent=progress_intent,
         timeout=timeout,
+        stall_minutes=stall_minutes,
         dry_run=opts.dry_run,
         model=model,
         agent=agent,

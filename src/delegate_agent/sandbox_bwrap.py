@@ -449,6 +449,31 @@ def build_bwrap_argv(
     return argv
 
 
+UV_PROJECT_ENVIRONMENT_ENV = "UV_PROJECT_ENVIRONMENT"
+UV_PROJECT_VENV_DIRNAME = "uv-project-venv"
+
+
+def uv_project_environment(
+    workspace: str, env: Mapping[str, str], writable_dir: str | None
+) -> str | None:
+    """Return a writable uv project-venv path for a uv project with no ``.venv`` yet.
+
+    Inside the boundary the workspace is read-only and ``$HOME`` is a tmpfs, so
+    uv's cache is writable but ``uv run`` dies creating ``<workspace>/.venv``
+    (observed on the devbox: "failed to create directory ... Read-only file
+    system"). Pointing ``UV_PROJECT_ENVIRONMENT`` at the run's own writable
+    temp dir fixes that without any new bind. An existing ``.venv`` is left
+    alone because uv runs from it read-only, and an explicit setting wins.
+    """
+    if not writable_dir or env.get(UV_PROJECT_ENVIRONMENT_ENV, "").strip():
+        return None
+    if not os.path.isfile(os.path.join(workspace, "pyproject.toml")):
+        return None
+    if os.path.lexists(os.path.join(workspace, ".venv")):
+        return None
+    return os.path.join(writable_dir, UV_PROJECT_VENV_DIRNAME)
+
+
 def bwrap_display_argv(engine_argv: list[str]) -> list[str]:
     """Human-facing truncated bwrap prefix; the full argv lives in the manifest."""
     return [BWRAP_BINARY, "…", "--", *engine_argv]

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess  # nosec B404 - Delegate inspects process identity with shell=False.
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -819,11 +821,167 @@ def _stamp_cancel_marker_locked(
     run_registry.write_run_state(run_registry.run_directory(registry_root, target.run_id), stamped)
 
 
+URGENT_CANCEL_WARNING = (
+    "the registry lock stayed held past cancel's wait, so the recorded child was "
+    "signalled without it after its start identity was verified"
+)
+URGENT_CANCEL_UNRECORDED_WARNING = (
+    "the cancelled outcome is not recorded yet because the registry lock is still "
+    "held: no cancel marker was written, so a runner that is still alive could "
+    "launch a retry attempt. Re-run cancel once the lock frees"
+)
+# The urgent path's single bounded attempt to record what it did.
+URGENT_CANCEL_RECORD_WAIT_SECONDS = 2.0
+
+
+def _urgent_recheck_before_signal(
+    registry_root: Path,
+    target: run_registry.RunTarget,
+    generation: tuple[int | None, int | None, int, bool],
+) -> None:
+    """Narrow the unlocked window immediately before the urgent SIGTERM.
+
+    The locked path reconciles the finalize WAL, re-reads the record, and
+    requires the generation it selected. Without the lock this can only read:
+    ``load_run_state_or_none`` overlays a pending finalize WAL onto the record
+    read-only (it never replays, quarantines, or removes the WAL), so one fresh
+    read sees both a finalizer that finished since selection and a record that
+    moved. A terminal result means the run already finished; a different
+    generation means a retry launched (or the record moved) since selection,
+    and signalling either one would be a guess.
+    """
+    label = target.alias or target.run_id
+    latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
+    effective = run_registry.status_fields(latest).get("effectiveStatus")
+    if effective in run_registry.TERMINAL_STATUSES:
+        raise WaitCancelError(
+            "run_already_terminal",
+            f"Run {label} is already terminal ({effective}). Nothing was signalled.",
+        )
+    if _cancel_signal_target(latest) != generation:
+        raise WaitCancelError(
+            "cancel_target_changed",
+            f"Run {label} changed its child process while cancel was reading it without "
+            "the registry lock (another process holds it). Nothing was signalled. Retry "
+            "cancel.",
+        )
+
+
+def _urgent_cancel_without_lock(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
+    """Stop a run's recorded child when the registry lock cannot be taken.
+
+    Reads the record without the lock and signals only a launched child
+    generation (pid/pgid) whose start identity matches the run. It never
+    seals, marks, or signals anything the locked protocol would have to decide
+    first: an unlaunched record, a setup group, a dead-pid seal, or a record
+    already terminal. Afterwards it makes one bounded attempt to record the
+    cancelled outcome under the lock, and says plainly when it could not.
+    """
+    label = target.alias or target.run_id
+    state = run_registry.load_run_state_or_none(registry_root, target.run_id)
+    fields = run_registry.status_fields(state)
+    effective = fields.get("effectiveStatus")
+    if effective in run_registry.TERMINAL_STATUSES:
+        raise WaitCancelError(
+            "run_already_terminal", f"Run {label} is already terminal ({effective})."
+        )
+    if _state_int(state, "pid") is None and _state_int(state, "pgid") is None:
+        raise WaitCancelError(
+            "registry_lock_busy",
+            f"Run {label} names no launched child and the registry lock is held by another "
+            "process, so cancel cannot mark it safely. Retry when the lock frees.",
+        )
+    if effective == run_registry.STATUS_STALE:
+        raise WaitCancelError(
+            "registry_lock_busy",
+            f"Run {label} is stale and sealing it needs the registry lock, which another "
+            "process holds. Retry when the lock frees.",
+        )
+    generation = _cancel_signal_generation(state, target)
+    pid, _pgid, signal_value, process_group = generation
+    identity_pid = pid if pid is not None else signal_value
+    warnings = [URGENT_CANCEL_WARNING]
+    warnings.extend(_check_pid_identity(registry_root, target, identity_pid))
+    _urgent_recheck_before_signal(registry_root, target, generation)
+    signal_refusal: JsonObject | None = None
+    with contextlib.suppress(ProcessLookupError):
+        _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
+    deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if _signal_target_alive(signal_value, process_group=process_group) is False:
+            break
+        time.sleep(0.05)
+    if _signal_target_alive(signal_value, process_group=process_group) is not False:
+        try:
+            _send_signal(signal_value, signal.SIGKILL, process_group=process_group)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            signal_refusal = {"signal": "SIGKILL", "reason": "permission_denied"}
+            warnings.append("SIGKILL was not permitted after SIGTERM")
+    recorded = False
+    try:
+        with run_registry.registry_lock(
+            registry_root, timeout_seconds=URGENT_CANCEL_RECORD_WAIT_SECONDS
+        ):
+            run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
+            latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
+            latest_effective = run_registry.status_fields(latest).get("effectiveStatus")
+            if latest_effective in run_registry.TERMINAL_STATUSES:
+                recorded = True
+            elif _cancel_signal_target(latest) == generation:
+                _stamp_cancel_marker_locked(registry_root, target, latest, state)
+                stamped = run_registry.load_run_state_or_none(registry_root, target.run_id)
+                _persist_cancelled_terminal_locked(
+                    registry_root, target, stamped or latest, warnings
+                )
+                recorded = True
+    except TimeoutError:
+        recorded = False
+    if not recorded:
+        warnings.append(URGENT_CANCEL_UNRECORDED_WARNING)
+    payload = _terminal_payload(registry_root, target)
+    payload["warnings"] = warnings
+    payload["registryLockBypassed"] = True
+    if signal_refusal is not None:
+        payload["signalRefusal"] = signal_refusal
+    return payload
+
+
+class _RegistryLockBusy(Exception):
+    """Cancel's initial registry-lock wait ran out before selection began."""
+
+
+@contextlib.contextmanager
+def _registry_lock_or_busy(registry_root: Path) -> Iterator[None]:
+    """The registry lock, raising ``_RegistryLockBusy`` only if acquiring it times out.
+
+    A ``TimeoutError`` raised by work done while the lock is held is not a busy
+    lock and propagates unchanged.
+    """
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(run_registry.registry_lock(registry_root))
+        except TimeoutError as exc:
+            raise _RegistryLockBusy(str(exc)) from exc
+        yield
+
+
 def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
+    # A lock that stays held past the bounded wait (a wedged holder is exactly
+    # when an operator reaches for cancel) takes the urgent path instead of
+    # failing with a raw lock timeout.
+    try:
+        return _cancel_target_under_lock(registry_root, target)
+    except _RegistryLockBusy:
+        return _urgent_cancel_without_lock(registry_root, target)
+
+
+def _cancel_target_under_lock(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
     # The runner publishes each launched generation under this same lock. Take
     # the initial selection under it too, so cancel waits for a primary Popen to
     # publish pid/pgid instead of racing the temporary no-state window.
-    with run_registry.registry_lock(registry_root):
+    with _registry_lock_or_busy(registry_root):
         run_registry.reconcile_finalize_wal_locked(registry_root, target.run_id)
         state = run_registry.load_run_state_or_none(registry_root, target.run_id)
         fields = run_registry.status_fields(state)
