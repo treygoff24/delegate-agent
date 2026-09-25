@@ -135,7 +135,7 @@ def _launch_options() -> list[str]:
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             # Tracked-only additions trail the shared launch vocabulary.
-            if option.flag in {"--mail-push", "--expect-file"}:
+            if option.flag in {"--mail-push", "--expect-file", *command_help.WORKSPACE_SPEC_FLAGS}:
                 if option.flag not in deferred:
                     deferred.append(option.flag)
                 continue
