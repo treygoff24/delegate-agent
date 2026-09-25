@@ -54,6 +54,7 @@ from delegate_agent.argv_builders import (
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
+    omp_image_path_warnings,
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
@@ -2638,7 +2639,11 @@ def build_request(
             and _cached_native_persona_transport(discovery)
         ),
     )
-    warnings = (*warnings, *drift_warnings)
+    warnings = (
+        *warnings,
+        *drift_warnings,
+        *omp_image_path_warnings(engine, prompt),
+    )
     persona_resolution = None
     if persona is not None:
         if persona_text_override is not None:

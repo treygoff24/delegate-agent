@@ -11,6 +11,8 @@ read-only flag sets. Preserve those branches exactly.
 
 from __future__ import annotations
 
+import re
+
 from delegate_agent import reasoning
 from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
@@ -106,6 +108,40 @@ PI_FAMILY_SAFE_LOCKDOWN = {
         "always-ask",
     ),
 }
+
+
+OMP_IMAGE_PATH_PATTERN = re.compile(
+    r"(?<![\w@])@?[^\s'\"`()<>]+\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic)(?![\w.])",
+    re.IGNORECASE,
+)
+OMP_IMAGE_PATH_WARNING = (
+    "omp attaches images only from @path command-line arguments, and Delegate sends the "
+    "omp prompt on stdin, so image paths in this prompt ({paths}) reach the child as plain "
+    "text, @ prefix or not. Ask the child to open them with its read tool, which loads images."
+)
+
+
+def omp_image_path_warnings(engine: str, prompt: str, *, limit: int = 3) -> tuple[str, ...]:
+    """Warn when an omp prompt names image files it will not auto-attach.
+
+    omp expands ``@file`` only in argv MESSAGES (omp 18.3.0 ``src/cli/args.ts``);
+    piped stdin text is never scanned. Delegate deliberately does not lift
+    prompt paths into argv attachments: that would let a safe-mode prompt pull
+    host files from outside the isolated workspace into the child's context.
+    """
+    if engine != "omp":
+        return ()
+    found: list[str] = []
+    for match in OMP_IMAGE_PATH_PATTERN.finditer(prompt):
+        token = match.group(0)
+        if token not in found:
+            found.append(token)
+    if not found:
+        return ()
+    shown = ", ".join(found[:limit]) + (
+        f", ... (+{len(found) - limit} more)" if len(found) > limit else ""
+    )
+    return (OMP_IMAGE_PATH_WARNING.format(paths=shown),)
 
 
 def redacted_prompt_argv(argv: list[str]) -> list[str]:
