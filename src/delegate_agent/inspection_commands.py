@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, redaction, run_registry, snapshot_view
+from delegate_agent import command_errors, redaction, run_registry, run_status, snapshot_view
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
@@ -93,6 +93,7 @@ class RunsCommand:
     older_than_days: int | None = None
     dry_run: bool = False
     structural: bool = False
+    summary: bool = False
     json_mode: bool = False
 
 
@@ -178,6 +179,10 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         status_filter = None
     sources: list[tuple[str | None, Path]] = [(None, registry_root)] if registry_root else []
     sources.extend(linked_registry_roots(workspace_path))
+    if command.summary:
+        return _emit_runs_summary(
+            command, sources, mode=mode, status_filter=status_filter, stdout=stdout
+        )
     summaries: list[JsonObject] = []
     total = 0
     scope_total = 0
@@ -254,4 +259,55 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             total=total,
             warnings=warnings or None,
         )
+    return 0
+
+
+RUNS_SUMMARY_SCHEMA = "delegate.runs.summary.v1"
+
+
+def _emit_runs_summary(
+    command: RunsCommand,
+    sources: list[tuple[str | None, Path]],
+    *,
+    mode: str,
+    status_filter: str | None,
+    stdout: TextIO,
+) -> int:
+    """Counts for every matching run, with no rows (``runs --summary``)."""
+    counts: dict[str, dict[str, int]] = {"byStatus": {}, "byHarness": {}, "byGroup": {}}
+    total = 0
+    for linked_workspace, root in sources:
+        try:
+            found, found_total, _scope = run_status.count_run_summaries(
+                root,
+                run_registry.load_index(root),
+                active=command.active,
+                status_filter=status_filter,
+                harness=command.harness,
+                group=command.group,
+            )
+        except (OSError, ValueError, DelegateError):
+            if linked_workspace is None:
+                raise
+            continue
+        total += found_total
+        for bucket, values in found.items():
+            for label, count in values.items():
+                counts[bucket][label] = counts[bucket].get(label, 0) + count
+    ordered = {
+        bucket: dict(sorted(values.items(), key=lambda item: (-item[1], item[0])))
+        for bucket, values in counts.items()
+    }
+    if command.json_mode:
+        delegate_rendering.print_json(
+            {"schema": RUNS_SUMMARY_SCHEMA, "ok": True, "mode": mode, "total": total, **ordered},
+            stdout,
+        )
+        return 0
+    print(f"mode: {mode}", file=stdout)
+    print(f"total: {total}", file=stdout)
+    for bucket, label in (("byStatus", "status"), ("byHarness", "harness"), ("byGroup", "group")):
+        values = ordered[bucket]
+        rendered = ", ".join(f"{name} {count}" for name, count in values.items()) or "-"
+        print(f"{label}: {rendered}", file=stdout)
     return 0
