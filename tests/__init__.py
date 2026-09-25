@@ -160,8 +160,11 @@ _TEST_VAR_TMP = Path(_TEST_ROOT) / "var-tmp"
 _TEST_VAR_TMP.mkdir()
 
 # Captured before the pin below, so the containment helpers keep naming the
-# root a subprocess launch really uses.
-_PRODUCTION_TEMP_ROOT = _run_scratch.PERSISTENT_TEMP_ROOT
+# root a subprocess launch really uses. Resolved the way
+# `run_scratch._compact_temp_root` resolves it: macOS spells `/var/tmp` as
+# `/private/var/tmp`, and an unresolved root never matched a recorded
+# `tempPath` there, so containment silently skipped every Mac run (bead dlg-4l5).
+_PRODUCTION_TEMP_ROOT = _run_scratch.PERSISTENT_TEMP_ROOT.resolve(strict=False)
 PRODUCTION_COMPACT_TEMP_ROOT = _PRODUCTION_TEMP_ROOT / (
     f"{_run_scratch.COMPACT_TEMP_DIR_PREFIX}{os.geteuid()}"
 )
