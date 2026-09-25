@@ -919,6 +919,13 @@ a `profileIdentity` stamp retain their existing execution behavior and report
 `profileIdentityPinned: false` plus an identity-unavailable warning; definitions
 alone are not represented as proof of frozen credential selection.
 
+Children inherit the launching PATH, including `~/.local/bin`, so a child can
+reach a human-paging helper such as `ask`. Set `DELEGATE_CHILD_NO_PAGE_ASK=1` in
+the launching environment to opt out for tracked runs: each child then finds a
+stub `ask` first on PATH, in the run's own private directory, that prints a
+refusal and exits 2 (ask's relay-down code) without paging anyone. Nested
+Delegate launches inherit the setting. Nothing under `$HOME` is written.
+
 The operational environment overrides `DELEGATE_STALL_MINUTES`,
 `DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC`,
 `DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`, `DELEGATE_PROGRESS_INITIAL_DELAY_SEC`,
