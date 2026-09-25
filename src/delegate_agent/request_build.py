@@ -2970,9 +2970,8 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         resume_session_id=build.resume_session_id,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
-    warnings.extend(
-        model_discovery.configured_model_absence_warning("cursor", model, build.discovery)
-    )
+    # The shared launch-time catalog check covers this engine (see
+    # _launch_model_catalog_warnings); a second call here would warn twice.
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -3509,7 +3508,7 @@ def _preflight_pinned_claude_alias(engine: str, model: str | None, continuity_mo
 
 # Engines whose request builder already checks its resolved selector against
 # the catalog, with engine-specific wording.
-_ENGINES_WITH_OWN_CATALOG_CHECK = frozenset({"cursor", "omp"})
+_ENGINES_WITH_OWN_CATALOG_CHECK = frozenset({"omp"})
 
 
 def _launch_model_catalog_warnings(
@@ -3518,15 +3517,19 @@ def _launch_model_catalog_warnings(
     """Launch-time catalog check for every engine without its own.
 
     Claude family and provider-chosen aliases are not concrete ids, so they are
-    never compared against a catalog of dated ids.
+    never compared against a catalog of dated ids. A Claude ``[1m]`` context
+    window is Delegate-side decoration the catalog never stores, so membership
+    and nearest suggestions use the base selector the provider is asked for.
     """
     if engine in _ENGINES_WITH_OWN_CATALOG_CHECK or not model:
         return ()
-    if engine == "claude" and claude_alias_base(model).lower() in (
-        *CLAUDE_FAMILY_ALIASES,
-        *CLAUDE_UNPINNABLE_ALIASES,
-    ):
-        return ()
+    if engine == "claude":
+        base = claude_alias_base(model)
+        if base.lower() in (*CLAUDE_FAMILY_ALIASES, *CLAUDE_UNPINNABLE_ALIASES):
+            return ()
+        return model_discovery.launch_model_absence_warning(
+            engine, model, discovery, catalog_model=base
+        )
     return model_discovery.launch_model_absence_warning(engine, model, discovery)
 
 

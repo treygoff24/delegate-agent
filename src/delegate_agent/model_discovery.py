@@ -402,7 +402,11 @@ def launch_catalog(discovery: JsonObject | None, engine: str) -> tuple[tuple[str
 
 
 def launch_model_absence_warning(
-    engine: str, model: str | None, discovery: JsonObject | None
+    engine: str,
+    model: str | None,
+    discovery: JsonObject | None,
+    *,
+    catalog_model: str | None = None,
 ) -> tuple[str, ...]:
     """Warn at launch when a concrete selector is in no catalog Delegate knows.
 
@@ -411,13 +415,18 @@ def launch_model_absence_warning(
     child. This names the likely cause first. Advisory only: a catalog can lag
     the provider, so the launch is never refused and the selector never
     rewritten.
+
+    ``catalog_model`` is the id compared against (and matched against nearest
+    suggestions) when the launch selector carries Delegate-side decoration the
+    catalog never stores, such as a Claude ``[1m]`` context-window suffix.
     """
     if not model:
         return ()
+    lookup = catalog_model if catalog_model is not None else model
     catalog, source = launch_catalog(discovery, engine)
-    if not catalog or model in catalog:
+    if not catalog or lookup in catalog:
         return ()
-    nearest = nearest_model_ids(model, catalog)
+    nearest = nearest_model_ids(lookup, catalog)
     suggestion = (
         " Nearest known selectors: "
         + ", ".join(redaction.redact_string(selector) for selector in nearest)
