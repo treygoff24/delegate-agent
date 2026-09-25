@@ -187,6 +187,9 @@ MALFORMED_SAMPLE_CHARS = 200
 # rename visible. Bounded because the type string comes from the child.
 UNHANDLED_EVENT_TYPE_LIMIT = 32
 UNHANDLED_EVENT_TYPE_CHARS = 64
+# pi/omp remember each tool start's target until its end arrives; a run whose
+# ends never arrive must not grow that memory without bound.
+PI_PENDING_TOOL_LIMIT = 256
 
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
@@ -1782,6 +1785,10 @@ class StreamAccumulator:
             if target is None and started is not None:
                 target = started[1]
         elif tool_id:
+            # Starts whose end never arrives would otherwise pile up for the
+            # rest of the run; the oldest are the least likely to complete.
+            while len(self._pending_tool_uses) >= PI_PENDING_TOOL_LIMIT:
+                del self._pending_tool_uses[next(iter(self._pending_tool_uses))]
             self._pending_tool_uses[tool_id] = (tool, target)
         self.events.append(
             NormalizedEvent(

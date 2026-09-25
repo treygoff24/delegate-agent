@@ -436,8 +436,9 @@ def _classify_codex_item(payload: JsonObject, *, completed: bool) -> LineSignals
     label = _string_field(item, "type") or "item"
     if completed and item_type == "error":
         # A bare `item.completed` with only a message and no start: an error
-        # the model hit, not a tool that finished, so it closes nothing.
-        message = normalize_delta(_string_field(item, "message") or "") or "error"
+        # the model hit, not a tool that finished, so it closes nothing. The
+        # whole message is its identity; only the trip record is truncated.
+        message = _collapse_whitespace(_string_field(item, "message") or "") or "error"
         return LineSignals(failed_finish=("error", message), label=label)
     key = _tool_key(item, "id", "command", "type")
     if completed:
@@ -452,8 +453,16 @@ def _classify_codex_item(payload: JsonObject, *, completed: bool) -> LineSignals
     return LineSignals(tools_started=(key,), label=label)
 
 
+def _collapse_whitespace(text: str) -> str:
+    return _WHITESPACE.sub(" ", text).strip()
+
+
 def _codex_item_target(item: JsonObject) -> str:
-    """What a failed codex item was acting on, for repeated-failure identity."""
+    """What a failed codex item was acting on, for repeated-failure identity.
+
+    Untruncated: two commands that share a long prefix are different calls.
+    The trip record truncates what it reports, not what it compares.
+    """
     changes = item.get("changes")
     if isinstance(changes, list):
         paths = sorted(
@@ -462,13 +471,13 @@ def _codex_item_target(item: JsonObject) -> str:
             if isinstance(change, dict) and isinstance(change.get("path"), str)
         )
         if paths:
-            return ",".join(paths)[:DELTA_SIGNATURE_LIMIT]
+            return ",".join(paths)
     named = [_string_field(item, name) for name in ("server", "tool", "command", "query")]
     parts = [part for part in named if part]
     arguments = item.get("arguments")
     if arguments is not None:
         parts.append(json.dumps(arguments, sort_keys=True, default=str))
-    return (":".join(parts) or _string_field(item, "type") or "item")[:DELTA_SIGNATURE_LIMIT]
+    return ":".join(parts) or _string_field(item, "type") or "item"
 
 
 def _classify_claude_assistant(payload: JsonObject) -> LineSignals:
@@ -797,11 +806,17 @@ class StallWatchdog:
         tool_activity = bool(signals.tools_started or signals.tools_finished)
         repeated_call = tool_activity and self._repeats_locked(tool_events)
         completed_events = sum(1 for event in tool_events if event.completed)
+        # A finish the accumulator normalized into a ToolEvent (a codex
+        # `command_execution`) is counted by the command streak alone. Only an
+        # error item (no finish at all) or a finish with no ToolEvent (a failed
+        # `file_change` or `mcp_tool_call`) belongs to the unmatched streak.
+        unmatched_finish = len(signals.tools_finished) > completed_events
         if signals.failed_finish is not None:
-            # An explicit failure (a failed patch, an error item) is neither a
-            # reset nor the fix loop working: it counts in its own streak.
-            self._record_unmatched_failure_locked(signals.failed_finish)
-        elif len(signals.tools_finished) > completed_events:
+            if unmatched_finish or not signals.tools_finished:
+                # An explicit failure (a failed patch, an error item) is neither
+                # a reset nor the fix loop working: it counts in its own streak.
+                self._record_unmatched_failure_locked(signals.failed_finish)
+        elif unmatched_finish:
             # A tool finished that the stream accumulator does not normalize
             # into a ToolEvent (codex `file_change` from apply_patch, and its
             # mcp/web-search items). It cannot be the failing call, so it
