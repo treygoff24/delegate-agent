@@ -1,6 +1,7 @@
 """--isolation none: files a child changed outside its cwd are recorded and warned."""
 
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,21 @@ class OutsideCwdChangesTests(unittest.TestCase):
     def test_a_non_git_cwd_is_not_snapshotted(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(outside_cwd_changes.capture(tmp))
+
+    def test_snapshots_never_rewrite_the_callers_index(self):
+        # A plain `git status` refreshes stale stat data by taking index.lock and
+        # rewriting .git/index. In the caller's real tree that races the user's
+        # own git commands, so every probe must run without optional locks.
+        repo = self.repo()
+        stale = repo / "sub" / "keep.txt"
+        later = stale.stat().st_mtime_ns + 5_000_000_000
+        os.utime(stale, ns=(later, later))  # same content, stale stat entry
+        index = repo / ".git" / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        snapshot = outside_cwd_changes.capture(str(repo / "sub"))
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(outside_cwd_changes.changed_outside(snapshot), ())
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)
 
 
 if __name__ == "__main__":

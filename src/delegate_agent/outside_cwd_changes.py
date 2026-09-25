@@ -40,7 +40,9 @@ class OutsideCwdSnapshot:
 def _toplevel(cwd: str) -> str | None:
     try:
         result = _run_git_bytes(
-            cwd, ["rev-parse", "--show-toplevel"], timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS
+            cwd,
+            ["--no-optional-locks", "rev-parse", "--show-toplevel"],
+            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
@@ -53,7 +55,14 @@ def _status_entries(toplevel: str) -> dict[str, Signature] | None:
     try:
         result = _run_git_bytes(
             toplevel,
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ],
             timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
