@@ -67,7 +67,7 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "claude-haiku-4-5"},
         {"id": "claude-fable-5"},
         {"id": "claude-opus-5-5"},
-        {"id": "claude-sonnet-5"},
+        {"id": "claude-sonnet-5-5"},
         {"id": "claude-fable-5-1"},
     ),
     "grok": (

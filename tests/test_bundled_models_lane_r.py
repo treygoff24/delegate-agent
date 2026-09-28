@@ -37,7 +37,8 @@ def test_codex_bundled_reasoning_matches_reconciled_catalog() -> None:
 
 def test_claude_and_grok_bundled_models_include_current_catalog_rows() -> None:
     claude_ids = set(_ids("claude"))
-    assert {"claude-opus-5-5", "claude-sonnet-5", "claude-fable-5-1"} <= claude_ids
+    assert {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} <= claude_ids
+    assert "claude-sonnet-5" not in claude_ids
     assert _ids("grok") == ("grok-4.7", "grok-4.6")
     assert "swe-1.7" not in _ids("grok")
     assert "claude-opus-5" not in claude_ids
