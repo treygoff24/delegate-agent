@@ -217,6 +217,19 @@ class ClaudeModelPreflightTests(CommandTestBase):
             code, stdout, _ = self._dry_run_claude_work("--env-file", str(empty))
             self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
 
+    def test_an_empty_provider_override_clears_the_launching_environment_value(self):
+        # The child gets the empty override, so the check must not trust the
+        # parent's value for that key.
+        with tempfile.TemporaryDirectory() as directory:
+            empty = Path(directory) / "clear.env"
+            empty.write_text("CLAUDE_CODE_USE_FOUNDRY=\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_USE_FOUNDRY": "1"}):
+                code, stdout, _ = self._dry_run_claude_work("--env-file", str(empty))
+                self.assertEqual(code, 2, stdout)
+                self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
+                code, stdout, _ = self._dry_run_claude_work()
+                self.assertEqual(code, 0, stdout)
+
     def test_the_env_file_is_read_once_for_the_preflight_and_the_launch(self):
         from delegate_agent import workspace_spec
 
