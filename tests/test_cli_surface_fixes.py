@@ -37,6 +37,7 @@ class IncludeDirtySafeTests(ExecutionTestBase):
         request = request_build.request_from_parsed(
             parsed, delegate_config.embedded_default_config(), io.StringIO()
         )
+        self.assertFalse(request.include_dirty)
         self.assertTrue(
             any("--include-dirty is a no-op in safe mode" in w for w in request.warnings)
         )

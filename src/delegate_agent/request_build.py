@@ -1796,7 +1796,7 @@ def _build_normalized_launch(
             progress_initial_delay_sec=initial,
             progress_interval_sec=interval,
             forbid_commit=launch.forbid_commit,
-            include_dirty=launch.include_dirty,
+            include_dirty=launch.include_dirty and launch.mode != MODE_SAFE,
             auth_profile_override=global_options.auth_profile,
             auth_profile_inherited=global_options.auth_profile_inherited,
             output_schema=spec.output_schema,
