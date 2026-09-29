@@ -35,6 +35,7 @@ from delegate_agent import (
     outside_cwd_changes,
     profiles,
     prompt_instructions,
+    provider_errors,
     redaction,
     rendering,
     resume_command,
@@ -1195,6 +1196,7 @@ def _failure_details(
     status: str,
     signal_text: str,
     extra: JsonObject,
+    provider_error: JsonObject | None = None,
 ) -> child_failures.ChildFailure | None:
     existing = extra.get("failureReason")
     if status not in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}:
@@ -1209,6 +1211,11 @@ def _failure_details(
             existing_error,
             message if isinstance(message, str) and message else "Child harness failed.",
         )
+    # The provider's terminal error, classified status-first, outranks a regex
+    # over everything the run printed.
+    from_provider = child_failures.failure_from_provider_error(provider_error)
+    if from_provider is not None:
+        return from_provider
     classified = child_failures.classify(signal_text)
     if classified is not None:
         return classified
@@ -1274,6 +1281,23 @@ def delegate_report_notice(
     return "\n".join([DELEGATE_REPORT_NOTICE_HEADER, *(f"- {line}" for line in lines)])
 
 
+def _provider_error_report_lines(provider_error: JsonObject | None) -> list[str]:
+    """The providerError as report lines; already redacted and bounded at capture."""
+    if provider_error is None:
+        return []
+    status = provider_error.get("status")
+    label = (
+        f"{provider_error.get('signature')} ({provider_error.get('class')}"
+        + (f", HTTP {status}" if isinstance(status, int) else "")
+        + ")"
+    )
+    lines = [f"Provider error: {label}"]
+    hint = provider_error.get("hint")
+    if isinstance(hint, str) and hint:
+        lines.append(f"Hint: {hint}")
+    return lines
+
+
 def _completion_report_text_and_source(
     ctx: RunContext,
     accumulator: harness_events.StreamAccumulator,
@@ -1283,6 +1307,7 @@ def _completion_report_text_and_source(
     failure_reason: str | None,
     failure_message: str | None,
     stderr_tail: str,
+    provider_error: JsonObject | None = None,
 ) -> tuple[str, str | None]:
     child_text = _completion_report_source(
         ctx,
@@ -1364,6 +1389,7 @@ def _completion_report_text_and_source(
         terminal_reason = terminal.get("reason")
         if isinstance(terminal_reason, str) and terminal_reason.strip():
             lines.append(f"Harness error: {redaction.redact_string(terminal_reason.strip())}")
+        lines.extend(_provider_error_report_lines(provider_error))
         if failure_reason == "auth_failed":
             lines.append(_auth_remediation_line(ctx))
         if stderr_tail.strip():
@@ -1874,6 +1900,8 @@ class CallResult:
     # attempt's own, the only stderr that may classify the outcome. None means
     # the call had one attempt, so stderr_tail is already the final one.
     final_attempt_stderr_tail: str | None = None
+    # The classified provider error of a failed call (providerError), else None.
+    provider_error: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -3358,6 +3386,14 @@ def _finalize_tracked_run(
         if ctx.followup_of is not None or ctx.resume_session_id is not None
         else None
     )
+    provider_error = provider_errors.provider_error_record(
+        engine=ctx.engine, raw=final_accumulator.provider_error, fallback_text=signal_text
+    )
+    # A named signature names the failure reason; an error the table does not know
+    # still marks the failure as the provider's (`provider_error`), not a bare exit.
+    provider_reason = provider_errors.reason_for_record(provider_error) or (
+        "provider_error" if provider_error is not None and provider_error.get("message") else None
+    )
     # Failures Delegate established on its own, independent of the child's exit
     # code: a capture-side timeout/stall/output cap, the commit policy, and a
     # pinned-continuity pause.
@@ -3388,7 +3424,7 @@ def _finalize_tracked_run(
         result_quality=capture_quality,
         cancelled=cancel_requested,
         signal_text=signal_text,
-        diagnosed_reason=session_failure.code if session_failure is not None else None,
+        diagnosed_reason=session_failure.code if session_failure is not None else provider_reason,
         unrecovered_error=final_accumulator.unrecovered_error_message,
         missing_deliverables=missing_deliverables,
         orphaned_processes=capture.orphaned_processes,
@@ -3451,22 +3487,37 @@ def _finalize_tracked_run(
         status=status,
         signal_text=signal_text,
         extra=merged_extra,
+        provider_error=provider_error,
     )
     if failure is not None and failure.code == "child_failed":
-        failure = _unclassified_provider_failure(final_accumulator) or failure
+        failure = _unclassified_provider_failure(final_accumulator, provider_error) or failure
     if session_failure is not None:
         failure = session_failure
     failure_reason = failure.code if failure is not None else None
     failure_message = failure.message if failure is not None else None
+    if status == run_registry.STATUS_FAILED and provider_error is not None:
+        merged_extra["providerError"] = provider_error
     if failure_reason is not None:
         merged_extra["failureReason"] = failure_reason
         if status != run_registry.STATUS_CANCELLED:
             merged_extra["error"] = failure_reason
             merged_extra["message"] = failure_message
+        provider_hint = provider_error.get("hint") if provider_error is not None else None
         if failure_reason == "auth_failed":
-            merged_extra["nextActions"] = _auth_remediation_actions(ctx)
+            merged_extra["nextActions"] = [
+                *([provider_hint] if isinstance(provider_hint, str) and provider_hint else []),
+                *_auth_remediation_actions(ctx),
+            ]
         elif failure_reason == "session_expired" and followup_source is not None:
             merged_extra["nextActions"] = [f'delegate resume {followup_source} "<instructions>"']
+        elif (
+            status == run_registry.STATUS_FAILED
+            and isinstance(provider_hint, str)
+            and provider_hint
+            and provider_error is not None
+            and provider_error.get("signature") != provider_errors.UNCLASSIFIED
+        ):
+            merged_extra["nextActions"] = [provider_hint]
         # An unclassified child failure carries a generic message, so without
         # this the child's own words reach only the completion report and the
         # caller is told "Child harness failed" and nothing else. Call mode
@@ -3488,6 +3539,7 @@ def _finalize_tracked_run(
         failure_reason=failure_reason,
         failure_message=failure_message,
         stderr_tail=stderr_tail,
+        provider_error=provider_error,
     )
     # Everything below prefixes delegate-authored material onto the artifact.
     # The child's own text is what the quality heuristic is about, so
@@ -4177,6 +4229,7 @@ def _merge_tracked_attempt_captures(
     # The final attempt's unrecovered provider error stays unrecovered after the
     # merge; an earlier attempt's never carries over.
     accumulator._last_error_message = current_capture.accumulator.unrecovered_error_message
+    accumulator.provider_error = current_capture.accumulator.provider_error
     return replace(
         current_capture,
         accumulator=accumulator,
@@ -5366,10 +5419,18 @@ def _parse_claude_call_json(
 
 def _unclassified_provider_failure(
     accumulator: harness_events.StreamAccumulator,
+    provider_error: JsonObject | None = None,
 ) -> child_failures.ChildFailure | None:
-    if accumulator.harness not in {"pi", "omp"} or accumulator.terminal_status != "failed":
-        return None
-    reason = (accumulator.terminal_event or {}).get("reason")
+    """Carry the provider's own words as the failure message, for every engine.
+
+    The captured provider error is the terminal word for any harness that
+    surfaces one; pi and omp also keep their terminal-event reason as before.
+    """
+    reason = provider_error.get("message") if provider_error is not None else None
+    if not isinstance(reason, str) or not reason.strip():
+        if accumulator.harness not in {"pi", "omp"} or accumulator.terminal_status != "failed":
+            return None
+        reason = (accumulator.terminal_event or {}).get("reason")
     if not isinstance(reason, str) or not reason.strip():
         return None
     return child_failures.ChildFailure("provider_error", redaction.redact_string(reason))
@@ -5381,12 +5442,15 @@ def _call_failure_details(
     *,
     error: str | None = None,
     message: str | None = None,
+    provider_error: JsonObject | None = None,
 ) -> tuple[str | None, str | None]:
     if exit_code == 0:
         return None, None
     if error not in {None, "child_failed"}:
         return error, message
-    failure = child_failures.classify(signal_text)
+    failure = child_failures.failure_from_provider_error(provider_error) or child_failures.classify(
+        signal_text
+    )
     if failure is not None:
         return failure.code, failure.message
     return "child_failed", message
@@ -5552,11 +5616,19 @@ def _execute_call_once(
             # Claude marks result text as a harness error channel only when
             # is_error=true. Successful result text remains model output.
             failure_signal = "\n".join(part for part in (stderr_tail, raw_text) if part)
+        claude_provider_error = (
+            provider_errors.provider_error_record(
+                engine=harness, raw=None, fallback_text=failure_signal
+            )
+            if result_exit_code != 0
+            else None
+        )
         error, message = _call_failure_details(
             result_exit_code,
             failure_signal,
             error=error,
             message=message,
+            provider_error=claude_provider_error,
         )
         return CallResult(
             text=text,
@@ -5572,6 +5644,7 @@ def _execute_call_once(
             message=message,
             model_resolved=model_resolved,
             usage=usage,
+            provider_error=claude_provider_error,
             result_quality=(
                 RESULT_QUALITY_EMPTY
                 if result_exit_code == 0 and not raw_text.strip()
@@ -5614,13 +5687,22 @@ def _execute_call_once(
         or accumulator.provider_terminal_state is not None
     ):
         result_exit_code = 1
-    error, message = _call_failure_details(
-        result_exit_code,
-        "\n".join(
-            part for part in (stderr_tail, _accumulator_failure_signal_text(accumulator)) if part
-        ),
+    call_signal_text = "\n".join(
+        part for part in (stderr_tail, _accumulator_failure_signal_text(accumulator)) if part
     )
-    if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
+    call_provider_error = (
+        provider_errors.provider_error_record(
+            engine=harness, raw=accumulator.provider_error, fallback_text=call_signal_text
+        )
+        if result_exit_code != 0
+        else None
+    )
+    error, message = _call_failure_details(
+        result_exit_code, call_signal_text, provider_error=call_provider_error
+    )
+    if error == "child_failed" and (
+        failure := _unclassified_provider_failure(accumulator, call_provider_error)
+    ):
         error, message = failure.code, failure.message
     if stdout_capture is not None:
         warning = stream_capture.capture_warning(stdout_capture)
@@ -5641,6 +5723,7 @@ def _execute_call_once(
         usage=accumulator.usage or {"basis": "unavailable"},
         stdout_capture=stdout_capture,
         unrecovered_error=accumulator.unrecovered_error_message,
+        provider_error=call_provider_error,
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0
