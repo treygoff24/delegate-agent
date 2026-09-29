@@ -302,6 +302,13 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["timeoutSeconds"] = request.timeout
     if request.stall_seconds_pinned:
         payload["stallMinutes"] = request.stall_seconds / 60
+    window_seconds, window_source = _stall_watchdog.apply_env_override(
+        request.stall_seconds,
+        request.stall_source,
+        pinned=request.stall_seconds_pinned,
+        raw_env=os.environ.get(_stall_watchdog.STALL_MINUTES_ENV),
+    )
+    payload["stallWindow"] = _stall_watchdog.stall_window_record(window_seconds, window_source)
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if request.write_guard is not None:
@@ -468,20 +475,23 @@ def _stall_minutes_explicitly_configured(config: JsonObject) -> bool:
 
 
 def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Request:
-    stall_seconds = _stall_watchdog.effective_stall_seconds(
+    stall_seconds, source = _stall_watchdog.resolve_stall_window(
         request.stall_seconds,
         harness=request.engine,
         timeout_seconds=request.timeout,
-        explicitly_configured=(
-            request.stall_seconds_pinned or _stall_minutes_explicitly_configured(config)
-        ),
+        pinned=request.stall_seconds_pinned,
+        config_explicit=_stall_minutes_explicitly_configured(config),
+        effort=request.reasoning_effort,
+        model=request.model,
     )
-    if stall_seconds == request.stall_seconds:
+    if stall_seconds == request.stall_seconds and source == request.stall_source:
         return request
-    return dc_replace(request, stall_seconds=stall_seconds)
+    return dc_replace(request, stall_seconds=stall_seconds, stall_source=source)
 
 
-def _apply_provider_policy(request: Request, config: JsonObject, *, force_launch: bool) -> Request:
+def _apply_provider_policy(
+    request: Request, config: JsonObject, *, force_launch: bool, pass_through: bool = False
+) -> Request:
     """Attach the launch's lane and provider-error policy (known-bad refusal, auto-resume)."""
     lane = lane_health.derive_lane(
         engine=request.engine,
@@ -491,6 +501,9 @@ def _apply_provider_policy(request: Request, config: JsonObject, *, force_launch
         codex_identity=request.codex_failover_identity,
     )
     policy = lane_health.policy_from_config(config, force_launch=force_launch)
+    if pass_through:
+        # Pass-through never auto-resumes or reruns, so nothing may defer a marker.
+        policy = dc_replace(policy, auto_resume=False)
     return dc_replace(request, lane=lane, provider_policy=policy)
 
 
@@ -503,6 +516,7 @@ def _maybe_auto_resume(
     config: JsonObject,
     config_source: str | None,
     workspace: _request_models.ResolvedWorkspace,
+    completion_report_mode: str,
     stdin: TextIO,
     stdout: TextIO,
     stderr: TextIO,
@@ -516,15 +530,28 @@ def _maybe_auto_resume(
     """
     from delegate_agent import request_build
 
-    if (
-        auto_resume.skip_reason(
+    enabled = request.provider_policy.auto_resume
+    already_automatic = request.auto_resume is not None
+    if auto_resume.skip_reason(note, enabled=enabled, already_automatic=already_automatic):
+        if (
+            auto_resume.rerun_skip_reason(
+                note, enabled=enabled, already_automatic=already_automatic
+            )
+            is not None
+        ):
+            return first
+        return _auto_rerun(
+            first,
             note,
-            enabled=request.provider_policy.auto_resume,
-            already_automatic=request.auto_resume is not None,
+            request,
+            global_options,
+            config=config,
+            config_source=config_source,
+            workspace=workspace,
+            completion_report_mode=completion_report_mode,
+            stdout=stdout,
+            stderr=stderr,
         )
-        is not None
-    ):
-        return first
 
     def keep_first(reason: str) -> tuple[int, JsonObject | None]:
         exit_code, payload = first
@@ -581,6 +608,64 @@ def _maybe_auto_resume(
         # named by type so the reason is never lost.
         code = getattr(exc, "error", type(exc).__name__)
         return keep_first(f"{code}: {getattr(exc, 'message', None) or exc}")
+    if payload is not None:
+        payload["autoResume"] = annotation
+    return exit_code, payload
+
+
+def _auto_rerun(
+    first: tuple[int, JsonObject | None],
+    note: auto_resume.RunNote,
+    request: Request,
+    global_options: _request_models.GlobalOptions,
+    *,
+    config: JsonObject,
+    config_source: str | None,
+    workspace: _request_models.ResolvedWorkspace,
+    completion_report_mode: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> tuple[int, JsonObject | None]:
+    """Rerun the same request once as a fresh run (no session resume).
+
+    For a safe-mode run killed by a transient stream drop, or a launch the
+    broker refused with ``binding_not_active``. The rerun is a new run stamped
+    ``autoResume`` (kind ``rerun``, the first attempt's error kept); the first
+    run stays in the registry with its own failure. A failure to launch the
+    rerun leaves ``first`` untouched, annotated with the reason.
+    """
+    annotation = auto_resume.rerun_annotation(note)
+    signature = (note.provider_error or {}).get("signature")
+    try:
+        if not global_options.json_mode:
+            print(
+                f"notice: {note.alias} failed with {signature}; rerunning it once automatically "
+                "as a fresh run.",
+                file=stderr,
+            )
+        backoff = auto_resume.broker_backoff_seconds(note)
+        if backoff > 0:
+            auto_resume.sleep(backoff)
+        exit_code, payload = execute_request(
+            dc_replace(request, auto_resume=annotation),
+            global_options.json_mode,
+            config=config,
+            config_source=config_source,
+            pass_through=False,
+            completion_report_mode=completion_report_mode,
+            source_workspace=workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except Exception as exc:
+        code = getattr(exc, "error", type(exc).__name__)
+        reason = f"{code}: {getattr(exc, 'message', None) or exc}"
+        exit_code, payload = first
+        if payload is not None:
+            payload["autoResume"] = auto_resume.skipped_annotation(note, reason)
+        elif not global_options.json_mode:
+            print(f"notice: automatic rerun of {note.alias} skipped: {reason}", file=stderr)
+        return exit_code, payload
     if payload is not None:
         payload["autoResume"] = annotation
     return exit_code, payload
@@ -2145,7 +2230,12 @@ def main(
         if followup_plan is not None:
             request = _followup_command.apply_followup_to_request(request, followup_plan)
         request = _apply_stall_watchdog_policy(request, config)
-        request = _apply_provider_policy(request, config, force_launch=parsed_force_launch)
+        request = _apply_provider_policy(
+            request,
+            config,
+            force_launch=parsed_force_launch,
+            pass_through=global_options.pass_through,
+        )
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (
@@ -2219,6 +2309,7 @@ def main(
                 config=config,
                 config_source=source,
                 workspace=workspace,
+                completion_report_mode=completion_report_mode,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,

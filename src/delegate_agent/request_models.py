@@ -282,6 +282,9 @@ class Request:
     # True when --stall-minutes set stall_seconds for this run: it then wins
     # over config, the silent-harness default policy, and DELEGATE_STALL_MINUTES.
     stall_seconds_pinned: bool = False
+    # Where stall_seconds came from: flag, config, effort_default,
+    # harness_default, or default (DELEGATE_STALL_MINUTES is applied at spawn).
+    stall_source: str = "default"
     # Seconds to wait after SIGTERM before escalating a child process group to
     # SIGKILL. Resolved from tracking config at request-build time.
     process_group_termination_grace_sec: float = 3.0

@@ -319,6 +319,15 @@ default-threshold stall on those two is normally a false positive, and a run wit
 no deadline keeps the detector, because nothing else would stop it. An explicit
 operator `stallMinutes` is always honored, on every engine, deadline or not.
 
+The default silent window is 8 minutes, or 20 minutes for a run at `xhigh`,
+`max`, or `ultra` reasoning effort on any engine (also inferred from an
+effort-suffixed model id such as `grok-4.7-xhigh`), because those runs can think
+silently for many minutes. `--stall-minutes`, `stallMinutes` config, and
+`DELEGATE_STALL_MINUTES` still win. `dry-run` output and the run manifest carry
+`stallWindow: {"minutes": N, "source": ...}` with `source` one of `flag`,
+`config`, `env`, `effort_default`, `harness_default` (Kimi/Devin with a
+deadline: 0, disabled), or `default`.
+
 `--forbid-commit` is an opt-in launch flag for `work` mode; when isolation is
 omitted, it implies `--isolation worktree` and launch output prints
 `note: --forbid-commit implies --isolation worktree`. An explicit
@@ -1635,8 +1644,10 @@ where `class` is `persistent`, `transient`, or `unknown`; see
 [troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume)
 for the signature table. A run that Delegate continued after a transient drop
 carries `autoResume` (`automatic`, `attempt`, `of`, `trigger`) on the
-continuation's envelope, or `attempted: false` with a `reason` on the first run's
-envelope when the continuation could not be built. `wait` reports `runner_lost` when a running record's runner
+continuation's envelope (plus `kind`: `resume`, or `rerun` with `firstError` for a fresh
+rerun of a safe stream drop or a safe-mode broker `binding_not_active` refusal with no child output), or
+`attempted: false` with a `reason` on the first run's envelope when the
+continuation could not be built. `wait` reports `runner_lost` when a running record's runner
 process is gone (`staleReason` `dead_pid` or `missing_pid`); `stalled` is kept
 for the stall watchdog.
 `failureReason` keeps the more specific remediation code, and

@@ -392,7 +392,7 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 | `model_unavailable` | persistent | HTTP 404: the account cannot use the requested model. Pick another alias (`delegate models`). |
 | `age_confirmation_required` | persistent | The provider wants an age confirmation on this account. Complete it, then relaunch. |
 | `harness_config_rejected` | persistent | The harness rejected its own configuration (an unsupported `-c` override or config key) before running. Fix the config or upgrade the harness. |
-| `broker_binding_inactive`, `broker_uid_unmapped`, `broker_principal_not_cell` | persistent | The estate broker refused the launch (HTTP 403); no vendor process ran. Launch from a bound, mapped cell. |
+| `broker_binding_inactive`, `broker_uid_unmapped`, `broker_principal_not_cell` | persistent | The estate broker refused the launch (HTTP 403); no vendor process ran. Launch from a bound, mapped cell. A single `broker_binding_inactive` is often launch-slot contention: a `safe` run retries it once (see "Fresh rerun" below) and only marks the lane known-bad if the retry is refused too; a `work` run is not retried, marks the lane, and its hint says to relaunch once with `--force-launch`. |
 | `request_image_limit` | persistent, this request only | HTTP 400, 413, or 422 naming an image count or size limit. This is not an auth failure. Attach fewer or smaller images. |
 | `request_too_large` | persistent, this request only | HTTP 413: the request exceeds the size or context limit. Shorten the prompt or attachments. |
 | `request_rejected` | persistent, this request only | HTTP 400 or 422: the provider called the request malformed. Fix what the message names. |
@@ -464,12 +464,43 @@ result is final; there is no second attempt. If the continuation cannot be
 built, the first run's envelope carries `autoResume` with `attempted: false` and
 a `reason`.
 
-It never applies to `safe` or `call` mode, pass-through, structured-output runs
+Session resume never applies to `safe` or `call` mode, pass-through, structured-output runs
 (the workflow supervisor owns that retry), runs with no saved session, runs in a
 temporary worktree (its files are gone), or any other error class. Set
 `providerErrors.autoResume` to `false` to opt out. Workflow children run
 unresumable unless the call passes `resumable=True`, so this applies to them
 only then.
+
+#### Fresh rerun (safe mode and broker refusals)
+
+Two cases get one automatic fresh rerun of the same request instead of a session
+resume. The rerun is a new run (no `followupOf`), and its envelope and manifest
+carry `autoResume: {"automatic": true, "kind": "rerun", "attempt": 1, "of":
+{...}, "trigger": {...}, "firstError": {...}}`; `firstError` is the first
+attempt's full `providerError` record. The first run stays in the registry with
+its own failure. If the rerun cannot be launched, the first run's envelope
+carries `autoResume` with `attempted: false` and a `reason`.
+
+- A `safe` run (any engine) that fails with `stream_disconnected` or
+  `provider_unavailable`. Safe mode has no durable side effects and starts from a
+  fresh isolated copy, so a rerun is safe. No saved session is needed. This
+  covers the Codex "websocket closed by server before response.completed" drop.
+- A `safe` launch the broker refused with `broker_binding_inactive` (HTTP 403)
+  that shows no child output: zero stdout bytes and events, no assistant text,
+  and no recorded workspace changes. A broker-looking error line after the child
+  already worked is not retried and marks the lane as before. A `work` run is
+  never rerun this way: output
+  counters are read after the child exits and cannot prove a silent edit or
+  external action did not happen first, so a rerun could apply it twice. Its
+  refusal marks the lane as before, and the error hint says to relaunch once
+  with `--force-launch` when sibling launches are succeeding. Delegate waits a jittered 1 to 3 seconds and
+  relaunches once. The first refusal does not mark the lane known-bad (the run
+  reports `laneMarkerDeferred: "broker_binding_retry"`); if the retry is refused
+  too, the failure is final and the lane is marked as before.
+
+`call` mode is not covered. `providerErrors.autoResume: false` turns both reruns
+off (the broker refusal then marks the lane immediately). Pass-through and
+structured-output safe runs are never rerun.
 
 ## A finished Run never read the coordinator's mail (`unreadMail`)
 

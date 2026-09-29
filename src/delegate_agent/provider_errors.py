@@ -186,7 +186,12 @@ SIGNATURES: tuple[Signature, ...] = (
         scope=SCOPE_LANE,
         reason="binding_not_active",
         summary="The estate broker says this cell's identity binding is inactive.",
-        hint="Rebind the cell or retry from a healthy cell; no vendor process ran.",
+        hint=(
+            "A single refusal while sibling launches succeed is usually launch-slot "
+            "contention: relaunch once (add --force-launch if the lane is now marked "
+            "known-bad). A repeat means the binding is inactive: rebind the cell or "
+            "launch from a healthy one."
+        ),
         statuses=(403,),
         patterns=(_BINDING_NOT_ACTIVE_PATTERN,),
     ),
