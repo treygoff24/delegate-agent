@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from delegate_agent import (
+    lane_health,
     notify,
     personas,
     profiles,
+    provider_errors,
     reasoning,
     record_io,
     redaction,
@@ -48,7 +50,7 @@ from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
     ARGV_PROMPT_TRANSPORT_ENGINES,
 )
-from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry
+from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry, stage_guard
 from delegate_agent.workflows import schema as workflow_schema
 from delegate_agent.workflows import script as workflow_script
 
@@ -106,6 +108,14 @@ class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
 
 
+class _StageLaneStopped(Exception):
+    """The stage stopped launching on this lane; carries the guard's trip record."""
+
+    def __init__(self, trip: JsonObject) -> None:
+        super().__init__(f"stage {trip.get('stage')!r} stopped launching on {trip.get('lane')}")
+        self.trip = trip
+
+
 class WorkflowKeyConflict(RuntimeError):
     """A caller-supplied key was reused within one runtime lifetime.
 
@@ -156,6 +166,9 @@ WORKFLOW_CAPABILITIES: dict[str, int] = {
     # agent(base=, env=, setup=) and ``workflow run --env/--env-file``: a work
     # lane's worktree base ref, recorded env, and setup command.
     "workspaceSpec": 1,
+    # failureKind values ``lane_known_bad`` and ``provider_exhausted``, and the
+    # ``providerError`` record on AgentFailure and child outcomes.
+    "providerOutcomes": 1,
 }
 
 # Every name ``execute_workflow`` injects into a workflow script.
@@ -216,6 +229,9 @@ class ChildAttemptOutcome:
     exit_code: int | None = None
     stderr_tail: str | None = None
     failure_kind: str | None = None
+    # The child's classified provider error (signature, class, scope, hint), when it
+    # ended on one; already bounded and redacted by the child.
+    provider_error: JsonObject | None = None
 
     def as_json(self) -> JsonObject:
         payload: JsonObject = {
@@ -238,6 +254,8 @@ class ChildAttemptOutcome:
             payload["exitCode"] = self.exit_code
         if self.stderr_tail:
             payload["stderrTail"] = self.stderr_tail
+        if self.provider_error:
+            payload["providerError"] = self.provider_error
         return payload
 
 
@@ -287,9 +305,11 @@ class AgentFailure:
         engine: str | None = None,
         served_model: str | None = None,
         served_provider: str | None = None,
+        provider_error: JsonObject | None = None,
     ) -> None:
         self.key = key
         self.label = label
+        self.provider_error = provider_error
         self.failure_kind = failure_kind
         self.failure_reason = failure_reason
         self.attempts = attempts
@@ -305,7 +325,7 @@ class AgentFailure:
         return False
 
     def as_json(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "ok": False,
             "key": self.key,
             "label": self.label,
@@ -320,6 +340,9 @@ class AgentFailure:
             "servedModel": self.served_model,
             "servedProvider": self.served_provider,
         }
+        if self.provider_error:
+            payload["providerError"] = self.provider_error
+        return payload
 
     def __repr__(self) -> str:
         return (
@@ -473,6 +496,32 @@ def _child_failure_default_reason(returncode: int) -> str:
     return "invalid_envelope" if returncode == 0 else "nonzero_exit"
 
 
+def _provider_error_from_payload(data: JsonObject | None) -> JsonObject | None:
+    """The provider error a child's failed envelope carries, else None.
+
+    A failed run publishes ``providerError``. A launch refused by a known-bad lane
+    marker publishes no run, only the marker's signature at the top level, and that
+    counts as the lane's persistent failure for the workflow's stage guard too.
+    """
+    if not isinstance(data, dict):
+        return None
+    record = data.get("providerError")
+    if isinstance(record, dict):
+        return record
+    if data.get("error") == lane_health.LANE_KNOWN_BAD_ERROR and isinstance(
+        data.get("signature"), str
+    ):
+        refused: JsonObject = {
+            "signature": data["signature"],
+            "class": data.get("class"),
+            "scope": provider_errors.SCOPE_LANE,
+            "hint": data.get("hint"),
+            "refused": True,
+        }
+        return refused
+    return None
+
+
 def _child_attempt_outcome(
     payload: JsonObject | None,
     *,
@@ -511,6 +560,7 @@ def _child_attempt_outcome(
         failure_kind=(
             data.get("failureKind") if isinstance(data.get("failureKind"), str) else None
         ),
+        provider_error=_provider_error_from_payload(data),
     )
 
 
@@ -626,6 +676,7 @@ def _failed_child_result(
         exit_code=exit_code if exit_code is not None else outcome.exit_code,
         stderr_tail=stderr_tail or outcome.stderr_tail,
         failure_kind=(outcome.failure_kind if outcome.failure_reason == reason else None),
+        provider_error=(outcome.provider_error if outcome.failure_reason == reason else None),
     )
     return _DelegateChildResult(
         text=None,
@@ -1416,6 +1467,10 @@ class WorkflowState:
         self.status_path = self.root / registry.STATUS_FILE
         self.result_path = self.root / registry.RESULT_FILE
         self.thread_local = threading.local()
+        # Per-stage tally of persistent provider failures (providerErrors.stageStopAfter).
+        self.stage_guard = stage_guard.StageLaneGuard(
+            lane_health.policy_from_config(self.config).stage_stop_after
+        )
         self.agent_semaphore = threading.Semaphore(_global_agent_cap())
         self.engine_semaphores = _engine_semaphores(self.config)
         self.item_semaphore = threading.Semaphore(_item_thread_cap(self.config))
@@ -2646,11 +2701,33 @@ class WorkflowDsl:
         reason = attempt_outcome.get("failureReason") or (
             child.get("failureReason") if child is not None else None
         )
+        provider_error = attempt_outcome.get("providerError")
+        if not isinstance(provider_error, dict):
+            provider_error = None
+        skipped = next((e for e in window if e.get("type") == "agent_lane_skipped"), None)
+        if kind is None and skipped is not None:
+            # No child ever ran: the stage had stopped launching on every lane this
+            # call could use, so the typed outcome is the guard's, with its signature.
+            kind = run_outcome.FAILURE_PROVIDER_EXHAUSTED
+            reason = run_outcome.FAILURE_PROVIDER_EXHAUSTED
+            signature_id = skipped.get("signature")
+            table_row = provider_errors.SIGNATURES_BY_ID.get(signature_id)
+            provider_error = {
+                "signature": signature_id,
+                "class": provider_errors.CLASS_PERSISTENT,
+                "scope": provider_errors.SCOPE_LANE,
+                "engine": skipped.get("engine"),
+                "hint": table_row.hint if table_row is not None else None,
+                "stage": skipped.get("stage"),
+                "lane": skipped.get("lane"),
+                "count": skipped.get("count"),
+            }
         child_runs = sum(1 for e in window if e.get("type") == "agent_child")
         structured_attempts = exhausted.get("attempts") if exhausted is not None else None
         return AgentFailure(
             key=key,
             label=label,
+            provider_error=provider_error,
             failure_kind=(kind if isinstance(kind, str) else run_outcome.FAILURE_EXIT_NONZERO),
             failure_reason=reason if isinstance(reason, str) else None,
             attempts=(
@@ -3563,6 +3640,7 @@ class WorkflowDsl:
         )
         with self.state.active_agent():
             self.state.thread_local.last_run_id = None
+            self.state.thread_local.last_provider_error = None
             self.state.append_event(
                 "agent_started",
                 key=key,
@@ -3772,6 +3850,7 @@ class WorkflowDsl:
 
         def launch() -> tuple[JsonValue | _StructuredNullType, str | None]:
             for candidate in engines:
+                lane = stage_guard.lane_label(candidate, resolved_model)
                 try:
                     result = self._run_agent_attempts(
                         candidate,
@@ -3791,11 +3870,23 @@ class WorkflowDsl:
                         allow_repo_persona=allow_repo_persona,
                         resumable=resumable,
                         workspace=workspace,
+                        stage=resolved_phase,
                     )
                 except SupervisorWatchdogExit:
                     raise
                 except PersonaDigestMismatch:
                     raise
+                except _StageLaneStopped as stopped:
+                    self.state.append_event(
+                        "agent_lane_skipped",
+                        key=key,
+                        scope=path,
+                        label=label,
+                        engine=candidate,
+                        reason="stage_stopped_on_lane",
+                        **stopped.trip,
+                    )
+                    continue
                 except Exception as exc:
                     self.state.append_event(
                         "agent_failed",
@@ -3805,6 +3896,7 @@ class WorkflowDsl:
                         error=str(exc),
                     )
                     result = None
+                self._note_stage_result(resolved_phase, lane, ok=result is not None)
                 if result is not None:
                     return result, candidate
             return None, None
@@ -4060,6 +4152,30 @@ class WorkflowDsl:
             event["resumable"] = True
         self.state.append_event("agent_child", **event)
 
+    def _note_stage_result(self, stage: str | None, lane: str, *, ok: bool) -> None:
+        """Feed one finished call to the stage guard; journal why when it trips."""
+        provider_error = (
+            None if ok else getattr(self.state.thread_local, "last_provider_error", None)
+        )
+        trip = self.state.stage_guard.record(
+            stage, lane, signature=stage_guard.persistent_signature(provider_error)
+        )
+        if trip is None:
+            return
+        row = provider_errors.SIGNATURES_BY_ID.get(str(trip["signature"]))
+        hint = row.hint if row is not None else None
+        self.state.append_durable_event(
+            "stage_lane_stopped",
+            **trip,
+            hint=hint,
+            message=(
+                f"Stage {trip['stage']!r} stopped launching on lane {lane}: its first "
+                f"{trip['count']} results all failed with the persistent provider error "
+                f"{trip['signature']}. Remaining calls on this lane return provider_exhausted "
+                f"without launching." + (f" {hint}" if hint else "")
+            ),
+        )
+
     def _run_agent_attempts(
         self,
         engine: str,
@@ -4080,6 +4196,7 @@ class WorkflowDsl:
         allow_repo_persona: bool = False,
         resumable: bool = False,
         workspace: JsonObject | None = None,
+        stage: str | None = None,
     ) -> JsonValue | _StructuredNullType:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
@@ -4115,6 +4232,7 @@ class WorkflowDsl:
                     allow_repo_persona=allow_repo_persona,
                     resumable=resumable,
                     workspace=workspace,
+                    stage=stage,
                 )
             with engine_sem:
                 return self._run_structured_or_text(
@@ -4135,6 +4253,7 @@ class WorkflowDsl:
                     allow_repo_persona=allow_repo_persona,
                     resumable=resumable,
                     workspace=workspace,
+                    stage=stage,
                 )
 
     def _run_structured_or_text(
@@ -4157,7 +4276,13 @@ class WorkflowDsl:
         allow_repo_persona: bool = False,
         resumable: bool = False,
         workspace: JsonObject | None = None,
+        stage: str | None = None,
     ) -> JsonValue | _StructuredNullType:
+        # Checked here, inside the agent semaphores: a cell that queued behind the
+        # cap before the stage tripped must not launch once it finally gets a slot.
+        trip = self.state.stage_guard.tripped(stage, stage_guard.lane_label(engine, model))
+        if trip is not None:
+            raise _StageLaneStopped(trip)
         if schema is None:
             # Retry attachment is a child-run concern, not a structured-output
             # concern.  A work-lane timeout with no schema still has a dirty
@@ -4820,6 +4945,9 @@ class WorkflowDsl:
         except json.JSONDecodeError:
             result = None
         if isinstance(result, dict):
+            if result.get("ok") is not True:
+                # What the stage guard reads back after the call.
+                self.state.thread_local.last_provider_error = _provider_error_from_payload(result)
             run_id = result.get("runId")
             if isinstance(run_id, str):
                 self.state.thread_local.last_run_id = run_id

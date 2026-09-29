@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
+from delegate_agent import provider_errors
 from delegate_agent.constants import CLAUDE_FAMILY_ALIASES, CURSOR_EFFORT_LABELS, claude_alias_base
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 from delegate_agent.redaction import redact_string
@@ -809,6 +810,10 @@ class StreamAccumulator:
     _grok_sealed_response: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
     _last_error_message: str | None = field(default=None, repr=False)
+    # The provider's own last unrecovered error as data: status, provider code, and a
+    # redacted, bounded message (provider_errors.raw_error). Cleared by a successful
+    # terminal, like `_last_error_message`; the runner classifies it at finalization.
+    provider_error: JsonObject | None = None
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     _pi_text_buffer: str = field(default="", repr=False)
     _pi_recovery_error: str | None = field(default=None, repr=False)
@@ -871,6 +876,7 @@ class StreamAccumulator:
             # leaving it set lets a later bodiless failure inherit an error the
             # run already recovered from.
             self._last_error_message = None
+            self.provider_error = None
         payload: JsonObject = {"event": event, "status": status}
         # The reason is child-supplied text and both sinks below are persisted to
         # the run record: `terminalEvent` directly and the `run.completed` event
@@ -1102,11 +1108,9 @@ class StreamAccumulator:
             self._ingest_result_event(payload, terminal_recorded=terminal_recorded)
             return
         if event_type in ("turn.failed", "turn.error"):
-            self._record_terminal_event(
-                event=event_type,
-                status="failed",
-                reason=self._terminal_error_reason(payload),
-            )
+            reason = self._terminal_error_reason(payload)
+            self._capture_provider_error(payload, reason, source=event_type)
+            self._record_terminal_event(event=event_type, status="failed", reason=reason)
             return
         if event_type in ("turn.cancelled", "turn.canceled"):
             # The provider-terminal table classifies this event type as
@@ -1256,6 +1260,35 @@ class StreamAccumulator:
         ):
             self.session_id = candidate
 
+    def _capture_provider_error(
+        self, payload: JsonObject, message: str | None, *, source: str
+    ) -> None:
+        """Keep the provider's terminal error as data (status, code, message).
+
+        The last one wins: a later error, or a successful terminal that clears it,
+        is the provider's final word. Only the error text is ever stored, and it is
+        redacted and bounded before it lands here.
+        """
+        raw = provider_errors.raw_error(
+            message=message,
+            status=provider_errors.status_from_payload(payload),
+            code=provider_errors.code_from_payload(payload),
+            source=source,
+        )
+        if raw is None:
+            return
+        prior = self.provider_error
+        if (
+            prior is not None
+            and raw.get("status") is None
+            and raw.get("providerCode") is None
+            and prior.get("message") == raw.get("message")
+        ):
+            # A retry epilogue restates the same error without its structure.
+            raw["status"] = prior.get("status")
+            raw["providerCode"] = prior.get("providerCode")
+        self.provider_error = raw
+
     def _ingest_error_event(self, payload: JsonObject) -> None:
         # Anthropic- and OpenAI-shaped errors nest the text under `error`; codex
         # and grok put it at the top level. `_terminal_error_reason` already read
@@ -1265,6 +1298,7 @@ class StreamAccumulator:
             error = payload.get("error")
             if isinstance(error, dict):
                 message = _string_field(error, "message")
+        self._capture_provider_error(payload, message, source="error")
         if message:
             # Redact at the source: `_last_error_message` feeds the terminal
             # reason, the failover classifier and the synthesized completion
@@ -1564,6 +1598,10 @@ class StreamAccumulator:
             if usage is not None:
                 self.usage = usage
         result = claude_result_text(payload)
+        if payload.get("is_error") is True:
+            self._capture_provider_error(
+                payload, result or _string_field(payload, "subtype"), source="result"
+            )
         if result is not None:
             # `terminal_recorded` means the provider-terminal table classified
             # this same line as a refusal, cancellation or truncation. Its text
@@ -1728,6 +1766,9 @@ class StreamAccumulator:
             text = message.strip()
             self._record_recoverable_assistant_text(text)
             self.current = _bounded_current_line(text)
+        self._capture_provider_error(
+            payload, message if isinstance(message, str) else None, source="grok.error"
+        )
         self._record_terminal_event(event="grok.error", status="failed")
 
     def _reset_opencode_step_text_state(self) -> None:
@@ -1839,6 +1880,7 @@ class StreamAccumulator:
         data = error.get("data")
         message = _string_field(data, "message") if isinstance(data, dict) else None
         reason = ": ".join(part for part in (name, message) if part)
+        self._capture_provider_error(payload, reason or None, source="opencode.error")
         self._record_terminal_event(
             event="opencode.error",
             status="failed",
@@ -1967,7 +2009,9 @@ class StreamAccumulator:
                 reason = (
                     _string_field(message, "errorMessage") or f"Provider stopped: {stop_reason}"
                 )
-                self._ingest_error_event({"message": reason})
+                self._ingest_error_event(
+                    {"message": reason, **({"status": error_status} if http_error else {})}
+                )
             self._pi_recovery_error = reason
             self._record_terminal_event(
                 event=f"{self.harness}.turn_end", status=status, reason=reason

@@ -167,6 +167,13 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         None,
         "Disable mail prompt injection and sandbox grants for this launch; --notify is unchanged.",
     ),
+    OptionSpec(
+        "--force-launch",
+        None,
+        "Launch even when the lane (engine + model/provider + account) is marked known-bad by "
+        "an earlier persistent provider failure. Without it such a launch is refused before "
+        "anything spawns (error lane_known_bad, exit 4); a success clears the marker.",
+    ),
 )
 
 
@@ -491,6 +498,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "without a launch flag; the session files persist in CODEX_HOME. --no-resumable or "
             "codex.resumable: false opts out. The default outranks codex.ephemeral: --ephemeral "
             "applies only to Runs that are not resumable (safe, call, and opted-out Runs).",
+            "A work Run with a saved session that dies on a transient provider drop (stream "
+            "disconnect, 5xx) is continued once automatically as a new Run linked by followupOf "
+            "and marked autoResume; there is no second automatic retry. "
+            "providerErrors.autoResume: false opts out.",
             "codex.profile is a Codex CLI config overlay; top-level profiles selects "
             "Delegate-injected auth/env.",
         ),
@@ -547,6 +558,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "without a launch flag; the session files persist in the Claude account's projects "
             "directory. --no-resumable or claude.resumable: false opts out. The default outranks "
             "claude.noSessionPersistence, which applies only to Runs that are not resumable.",
+            "A work Run with a saved session that dies on a transient provider drop (stream "
+            "disconnect, 5xx) is continued once automatically as a new Run linked by followupOf "
+            "and marked autoResume; there is no second automatic retry. "
+            "providerErrors.autoResume: false opts out.",
         ),
         see_also=("cursor", "codex", "droid", "models", "agent-help"),
     ),
@@ -2042,7 +2057,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "doctor": CommandSpec(
         name="doctor",
-        summary="Show the installed runtime digest, the last promotion stamp, and active workflow supervisors.",
+        summary="Show the installed runtime digest, the last promotion stamp, active workflow supervisors, and known-bad lanes.",
         usage=("delegate [--json] doctor",),
         examples=("delegate doctor", "delegate --json doctor"),
         notes=(
@@ -2051,8 +2066,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "the view without rewriting the index.",
             "Warns when the live runtime digest differs from the stamped one -- the "
             "installed runtime changed without 'delegate promote' -- or when no stamp exists.",
+            "Lists live known-bad lane markers from ~/.delegate/state/lane-health/: lanes "
+            "(engine + model/provider + account) that a persistent provider failure marked, "
+            "with signature, hint, and expiry. Launches on those lanes refuse until the marker "
+            "expires or --force-launch overrides it.",
             "JSON (delegate.doctor.v1) reports runtimeDigest, entrypoint, entrypointDigest, "
-            "promotion, promotionMatchesRuntime, activeSupervisors, and warnings.",
+            "promotion, promotionMatchesRuntime, activeSupervisors, knownBadLanes, authHealth "
+            "(the last reading `capabilities refresh` recorded per engine), and warnings.",
         ),
         see_also=("promote", "workflow list", "describe"),
         unsupported_global_options=(
@@ -2505,6 +2525,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Cached reporting reads the selected profile's private user cache and invokes no child binaries.",
             "refresh runs metadata-only probes for every supported harness and updates that profile's user cache.",
             "refresh <engine> probes only the named harnesses; other harnesses keep their last-known-good records.",
+            "refresh also records per-engine auth health from the read-only probes named in "
+            "providerErrors.authProbes (default: `estate-cursor status` for cursor, "
+            "`estate-omp usage` for omp) as authHealth: ok, logged_out, limit_reached, "
+            "partial (omp: some provider accounts are at their limit, others are not; per-lane "
+            "detail is under lanes), or unknown. A missing, slow, or unrecognised probe records "
+            "unknown, never a failure; `delegate doctor` shows the last reading.",
             "The legacy workspace reasoning cache remains a lower-precedence read-only compatibility source.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),
@@ -2610,6 +2636,7 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--completion-report",
     "--no-completion-report",
     "--no-mail",
+    "--force-launch",
     "--group",
     "--notify",
 )

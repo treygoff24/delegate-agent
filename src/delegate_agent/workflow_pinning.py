@@ -31,13 +31,14 @@ import re
 import shutil
 import stat
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
-from delegate_agent import VERSION, personas, redaction, run_registry
+from delegate_agent import VERSION, lane_health, personas, redaction, run_registry
+from delegate_agent import auth_health as auth_health_module
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry as workflow_registry
@@ -1177,13 +1178,22 @@ def register_active_supervisor(
         return result
 
 
-def doctor(*, home: Path | None = None, extra_warnings: Sequence[str] = ()) -> JsonObject:
+def doctor(
+    *,
+    home: Path | None = None,
+    extra_warnings: Sequence[str] = (),
+    known_bad_lanes: Sequence[JsonObject] = (),
+    auth_health: Mapping[str, JsonObject] | None = None,
+) -> JsonObject:
     """Read executing/installed artifact identities, stamp, and pinned supervisors.
 
     ``extra_warnings`` carries checks this module must not perform itself:
     ``profiles`` imports ``workflow_pinning``, so config-derived findings such
     as a missing Codex profile overlay are resolved by the caller and appended
     here rather than pulling config knowledge into the runtime-identity seam.
+    ``known_bad_lanes`` is the caller's snapshot of live lane markers
+    (``lane_health``), reported alongside the runtime identity; ``auth_health`` is
+    the last recorded per-engine reading from `capabilities refresh`.
     """
     index = active_supervisors_view(home=home)
     entries = index.get("supervisors")
@@ -1214,6 +1224,8 @@ def doctor(*, home: Path | None = None, extra_warnings: Sequence[str] = ()) -> J
         "promotion": promotion,
         "promotionMatchesRuntime": matches,
         "activeSupervisors": entries if isinstance(entries, dict) else {},
+        "knownBadLanes": list(known_bad_lanes),
+        "authHealth": dict(auth_health or {}),
     }
     warnings: list[str] = []
     if promotion is None:
@@ -1321,8 +1333,15 @@ def emit_doctor(
     stdout: TextIO,
     json_mode: bool = False,
     extra_warnings: Sequence[str] = (),
+    known_bad_lanes: Sequence[JsonObject] = (),
+    auth_health: Mapping[str, JsonObject] | None = None,
 ) -> int:
-    payload = doctor(home=home, extra_warnings=extra_warnings)
+    payload = doctor(
+        home=home,
+        extra_warnings=extra_warnings,
+        known_bad_lanes=known_bad_lanes,
+        auth_health=auth_health,
+    )
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
@@ -1345,6 +1364,15 @@ def emit_doctor(
         for workflow_id, entry in active.items() if isinstance(active, dict) else ():
             workspace = entry.get("workspace") if isinstance(entry, dict) else None
             print(f"{workflow_id} {workspace or ''}".rstrip(), file=stdout)
+        lanes = payload.get("knownBadLanes")
+        print(f"known-bad lanes: {len(lanes) if isinstance(lanes, list) else 0}", file=stdout)
+        for lane in lanes if isinstance(lanes, list) else ():
+            if isinstance(lane, dict):
+                print(lane_health.describe_public(lane), file=stdout)
+        health = payload.get("authHealth")
+        for record in health.values() if isinstance(health, dict) else ():
+            if isinstance(record, dict):
+                print(f"auth health - {auth_health_module.describe(record)}", file=stdout)
         for warning in payload.get("warnings", []):
             if isinstance(warning, str):
                 print(f"warning: {warning}", file=stdout)

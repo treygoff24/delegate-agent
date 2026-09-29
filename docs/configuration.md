@@ -950,6 +950,50 @@ Controls parent progress heartbeats for tracked foreground runs. Heartbeats are 
 
 Timing resolves as environment override, then config, then embedded default. Non-positive, non-finite, or non-numeric `initialDelaySec`/`intervalSec`, and a non-boolean `enabled`, are rejected at config load. See [CLI reference](cli-reference.md) for the `--progress` / `--no-progress` launch flags.
 
+### `providerErrors`
+
+```json
+{
+  "providerErrors": {
+    "knownBadLaneMinutes": 15,
+    "autoResume": true,
+    "stageStopAfter": 3,
+    "authProbes": {
+      "cursor": ["estate-cursor", "status"],
+      "omp": ["estate-omp", "usage"]
+    }
+  }
+}
+```
+
+How Delegate reacts to provider errors; see
+[troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume)
+for the signature table.
+
+- `knownBadLaneMinutes`: how long a lane stays marked known-bad after a
+  persistent, lane-scoped provider failure (bad credentials, no credit, no access
+  to the model). Launches on a marked lane are refused with `lane_known_bad`
+  (exit code 4) unless `--force-launch` is given. Defaults to `15`; `0` turns the
+  markers off. Any non-negative number of minutes.
+- `autoResume`: defaults to `true`. A Codex or Claude work run that dies on a
+  transient stream drop or provider 5xx and saved its session gets exactly one
+  automatic continuation. `false` opts out.
+- `stageStopAfter`: defaults to `3`. In a workflow, when the first this-many
+  results of one `phase()` stage on one lane all failed with the same persistent
+  lane-scoped signature, the stage stops launching further calls on that lane and
+  they return `provider_exhausted`. `0` turns the stop off.
+- `authProbes`: the read-only health commands `delegate capabilities refresh`
+  runs to record per-engine auth health (`authHealth`, shown by `delegate
+  doctor`). Only `cursor` and `omp` are understood; each value is a command and
+  its arguments, or `null` to turn that probe off. A missing or unrecognised
+  probe records `unknown`, never a failure. An empty `authProbes: {}` in your
+  config leaves the defaults in place, so use `null` per engine to disable.
+  Set the environment variable `DELEGATE_AUTH_PROBES=off` (or `0`, `false`,
+  `no`) to skip every probe, for CI or a sandbox.
+
+Unknown keys under `providerErrors` are rejected with
+`invalid_provider_errors_config`.
+
 ### `workflows`
 
 #### Operational settings on pinned workflow attempts

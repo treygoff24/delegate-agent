@@ -77,7 +77,7 @@ drift from that tuple.
 
 - `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None, base=None, env=None, setup=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. Workflow children stay non-resumable unless the call passes `resumable=True`, even though standalone Codex and Claude work Runs are resumable by default: a fan-out would otherwise retain every child's native session file and worktree. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)). `base=`, `env=` (a dict of names to strings), and `setup=` pass a [workspace spec](worktrees.md#workspace-spec-base-env-setup) to a `mode="work"`, `isolation="worktree"` child; other lanes raise `ValueError`. They join the call's replay identity with env values reduced to a digest. A structured retry that re-enters the first attempt's worktree carries `env` only.
 - `agent_meta(key_or_label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `degraded`, `degradedReason`, `servedModel`, `servedProvider`), or, with no argument, that of the most recent `agent()` call on the calling thread. `degraded` is `True` when a `succeeded` child [ended its turn with work unfinished](cli-reference.md#degraded-runs-the-child-ended-its-turn-mid-job) (for example, "Waiting on the gate" while its test run was still in the background), and `None` otherwise. The step is not failed and `agent()` still returns the child's text: a script that must not accept unfinished work checks `agent_meta()` itself, and the same fields ride on the `agent_child` journal event.
-- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to. A plain resume keeps that pin (a runtime that no longer matches the pin is refused as `pin_collision` rather than silently re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run. `workflow resume --repin` is the one way to move the pin (see [Pinned runtime and `--repin`](#pinned-runtime-and---repin)); the capabilities map then describes the live runtime, so a script that branches on it can take a different branch after a repin.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`, `providerOutcomes`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to. A plain resume keeps that pin (a runtime that no longer matches the pin is refused as `pin_collision` rather than silently re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run. `workflow resume --repin` is the one way to move the pin (see [Pinned runtime and `--repin`](#pinned-runtime-and---repin)); the capabilities map then describes the live runtime, so a script that branches on it can take a different branch after a repin.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item; a key refusal propagates to the script instead (see [Stable step keys](#stable-step-keys)).
 - `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints and key refusals propagate to the supervisor.
@@ -491,6 +491,38 @@ a later child failure), `candidate_present`, `validation_error`, `run_id`,
 because compiled workflows test `result is None`. The
 `agent_structured_exhausted` journal event records the same `attempts`,
 `failureKind`, and candidate either way.
+
+### Provider outcomes and the stage stop
+
+`AgentFailure` also carries `provider_error`, the child's structured
+`providerError` (`signature`, `class`, `hint`, and the redacted `status` and
+`message`; see [troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume)),
+so a script can branch on the signature instead of parsing prose. Two failure
+kinds are specific to this layer, both returned as an `AgentFailure` with
+`on_failure="typed"` (`capabilities["providerOutcomes"]` advertises them):
+
+- `lane_known_bad`: the child refused to launch, with no process started,
+  because its lane carries a known-bad marker (`--force-launch` is not passed by
+  workflows). `provider_error` is the marker's signature.
+- `provider_exhausted`: the call was skipped, with no child run at all
+  (`run_id` is `None`), because its stage already stopped launching on the lane.
+
+A stage is one `phase()` label; a lane is one engine on one model. When the
+first `providerErrors.stageStopAfter` results (default 3; `0` turns the stop
+off) of a stage on a lane all failed with the same persistent, lane-scoped
+signature (for example `auth_rejected`), the rest of that stage's calls on that
+lane are not launched. Cells already queued behind the agent cap skip as well,
+and a call with an engine fallback list moves on to its next engine. A success
+or any different result among the first results means the lane is not uniformly
+bad, and the stage keeps launching. Transient and request-scoped failures never
+count. The journal records the trip once as a durable `stage_lane_stopped`
+event (stage, lane, signature, count, hint) and every skipped call as
+`agent_lane_skipped`. Because a skipped call is not a run, it still counts
+against the workflow's agent budget.
+
+Workflow children run unresumable unless the call passes `resumable=True`, so
+the automatic resume after a transient stream drop (see troubleshooting) applies
+to a workflow child only in that case.
 
 Structured parsing accepts raw control characters inside JSON strings. When
 stray control characters make a document invalid JSON, they are stripped and the
