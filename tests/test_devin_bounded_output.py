@@ -75,7 +75,8 @@ class DevinBlockBoundTests(unittest.TestCase):
 
     def test_the_bounded_block_matches_bound_assistant_text_around_the_limit(self):
         for length in (1, 99, 100, 101, HEAD, LIMIT - 1, LIMIT, LIMIT + 1, 40_000, 40_001, 50_000):
-            for width in (7, 100, 9_999):
+            # 100_000 is wider than every length here: one line, longer than the whole budget.
+            for width in (7, 100, 9_999, 100_000):
                 with self.subTest(length=length, width=width):
                     full = text_of_length(length, width=width)
                     acc = feed(full)
@@ -86,12 +87,7 @@ class DevinBlockBoundTests(unittest.TestCase):
                     self.assertEqual(bounded, expected)
                     self.assertEqual(meta["assistantTextChars"], length)
                     self.assertEqual(meta["assistantTextTruncated"], length > LIMIT)
-
-    def test_one_line_longer_than_the_whole_budget_is_bounded(self):
-        line = "".join(string.ascii_letters[i % 52] for i in range(45_000))
-        acc = feed(line)
-        self.assertEqual(acc.assistant_text, harness_events.bound_assistant_text(line))
-        self.assertLess(len(acc.assistant_chunks[0]), LIMIT + MARKER_ROOM)
+                    self.assertLess(len(acc.assistant_chunks[0]), LIMIT + MARKER_ROOM)
 
     def test_short_output_is_unchanged(self):
         acc = feed("line one\nline two\nline three")

@@ -153,12 +153,12 @@ class OpencodeUsageTests(unittest.TestCase):
         self.assertEqual(acc.usage["cacheWriteTokens"], 0)
         self.assertAlmostEqual(acc.usage["costUsd"], 0.00099855 + 0.00026988)
         self.assertEqual(acc.terminal_status, "succeeded")
-
-    def test_single_step_run(self):
-        acc = ingest("opencode", fixture_lines("opencode", "simple_text.ndjson"))
-        self.assertEqual(acc.usage["inputTokens"], 17324)
-        self.assertEqual(acc.usage["outputTokens"], 62)
-        self.assertEqual(acc.usage["cacheReadTokens"], 0)
+        # The degenerate case of the same summing path: a single step.
+        with self.subTest(fixture="simple_text.ndjson"):
+            single = ingest("opencode", fixture_lines("opencode", "simple_text.ndjson"))
+            self.assertEqual(single.usage["inputTokens"], 17324)
+            self.assertEqual(single.usage["outputTokens"], 62)
+            self.assertEqual(single.usage["cacheReadTokens"], 0)
 
     def test_step_finish_without_tokens_leaves_usage_unset(self):
         step = {

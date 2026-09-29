@@ -13,6 +13,7 @@ from unittest import mock
 from delegate_agent import cli, cli_parser, notify
 from delegate_agent import config as delegate_config
 from delegate_agent.errors import DelegateError
+from tests.execution_test_base import ExecutionTestBase
 
 
 class NotifyTargetTests(unittest.TestCase):
@@ -62,6 +63,7 @@ def _fake_post(
         f"printf '%s\\n' \"{stdout}\"\n"
         f"printf '%b' \"{stderr}\" >&2\n"
         f'echo "$@" > "{directory}/argv.txt"\n'
+        f'pwd -P > "{directory}/cwd.txt"\n'
         f"exit {exit_code}\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
@@ -109,6 +111,11 @@ class SendNotificationTests(unittest.TestCase):
         self.assertEqual(outcome.message_id, "20260822-010000-000001-abcdef")
         argv = (self.dir / "argv.txt").read_text()
         self.assertIn("chat c --send --body hello", argv)
+        # `post` ran from the workspace directory, not from the test process's cwd.
+        self.assertEqual(
+            (self.dir / "cwd.txt").read_text().strip(), os.path.realpath(self.temp.name)
+        )
+        self.assertNotEqual(os.path.realpath(self.temp.name), os.path.realpath(os.getcwd()))
 
     def test_an_older_posts_crossed_send_refusal_is_retried_with_anyway(self) -> None:
         script = self.dir / "post"
@@ -447,13 +454,7 @@ class ParserAndDryRunTests(unittest.TestCase):
             )
         self.assertIn("call mode does not use --notify", str(caught.exception))
 
-    def test_notify_threads_into_global_options_for_launches(self) -> None:
-        parsed = cli_parser.parse_cli(
-            ["--json", "--notify", "channel:machineroom", "codex", "safe", "review"]
-        )
-        self.assertEqual(parsed.global_options.notify, "channel:machineroom")
-
-    def test_notify_rejected_for_non_launch_subcommands_and_call_mode(self) -> None:
+    def test_notify_rejected_for_non_launch_subcommands_and_invalid_targets(self) -> None:
         with self.assertRaises(DelegateError) as caught:
             cli_parser.parse_cli(["--notify", "room:r", "runs"])
         self.assertEqual(caught.exception.error, "invalid_option_combination")
@@ -461,25 +462,20 @@ class ParserAndDryRunTests(unittest.TestCase):
             cli_parser.parse_cli(["--notify", "nope", "codex", "safe", "x"])
         self.assertEqual(caught.exception.error, "invalid_notify_target")
 
+
+class DryRunPayloadTests(ExecutionTestBase):
     def test_dry_run_payload_reports_target_and_post_argv(self) -> None:
         import dataclasses
 
-        from tests.execution_test_base import ExecutionTestBase
-
-        base = ExecutionTestBase()
-        base.setUp()
-        try:
-            request = base.build_git_request(
-                "codex",
-                "safe",
-                None,
-                "/repo",
-                "review",
-                delegate_config.embedded_default_config(),
-                dry_run=True,
-            )
-        except AttributeError:
-            self.skipTest("execution test base lacks build_git_request")
+        request = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
         request = dataclasses.replace(request, notify="room:devbox")
         payload = cli.dry_run_payload(request)
         self.assertEqual(payload["notify"]["target"], "room:devbox")

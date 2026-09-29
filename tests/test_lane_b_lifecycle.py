@@ -146,7 +146,7 @@ class EffortAwareStallWindowTests(unittest.TestCase):
             (self.LONG, "default"),
         )
 
-    def test_dry_run_and_manifest_show_the_window_and_its_source(self):
+    def test_dry_run_shows_the_window_and_its_source(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
         out = io.StringIO()

@@ -1052,6 +1052,54 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("fixed recovery", report["content"])
         self.assertNotIn("Plan is up-to-date", report["content"])
 
+    def test_run_output_recovers_an_unfinished_assistant_report_for_opencode_pi_omp(self):
+        """The recovery gate (`ASSISTANT_RECOVERY_HARNESSES`) admits these engines.
+
+        The streams carry substantive assistant text but no terminal event, so
+        only the assistant-text fallback can produce a report.
+        """
+        report_text = "Status: completed\n- fixed recovery\n- added tests"
+        opencode_text = json.loads(
+            (ROOT / "tests" / "fixtures" / "opencode" / "simple_text.ndjson")
+            .read_text(encoding="utf-8")
+            .splitlines()[1]
+        )
+        opencode_text["part"]["text"] = report_text
+        pi_delta = {
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "contentIndex": 0,
+                "delta": report_text,
+            },
+        }
+        streams = {
+            "opencode": opencode_text,
+            "pi": pi_delta,
+            "omp": pi_delta,
+        }
+        for harness, event in streams.items():
+            with self.subTest(harness=harness):
+                run_id, alias = self.write_run(harness=harness, status="succeeded", pid=None)
+                run_path = self.registry.run_directory(self.registry_root, run_id)
+                (run_path / "stdout.log").write_text(json.dumps(event) + "\n", encoding="utf-8")
+                stdout = io.StringIO()
+                code = self.delegate.main(
+                    [
+                        "--json",
+                        "--cwd",
+                        str(self.workspace),
+                        "run-output",
+                        alias,
+                        "--completion-report",
+                    ],
+                    stdout=stdout,
+                )
+                self.assertEqual(code, 0)
+                report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+                self.assertEqual(report["recoveryQuality"], "substantive_assistant_fallback")
+                self.assertIn("fixed recovery", report["content"])
+
     def test_run_output_recovers_substantive_report_over_long_progress_message(self):
         run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)

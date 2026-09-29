@@ -103,6 +103,10 @@ class UncappedCaptureTests(unittest.TestCase):
         self.assertEqual(capped["retainedLimitBytes"], 4096)
         self.assertEqual(capped["transportLimitBytes"], stream_capture.OMP_TRANSPORT_MAX_BYTES)
         self.assertEqual(capped["recordLimitBytes"], stream_capture.OMP_RECORD_MAX_BYTES)
+        uncapped = stream_capture.CaptureStats().payload(None)
+        self.assertIsNone(uncapped["retainedLimitBytes"])
+        self.assertIsNone(uncapped["transportLimitBytes"])
+        self.assertIsNone(uncapped["recordLimitBytes"])
 
 
 class TrackedRunWithoutCapTests(unittest.TestCase):
