@@ -620,6 +620,51 @@ delegate --json codex safe --output-schema findings.schema.json "Audit auth hand
 delegate --json cursor safe --no-completion-report "Return bare JSON matching the schema in the prompt."
 ```
 
+## `unknown_handle` for a run that exists
+
+Runs are recorded per workspace under `<workspace>/.delegate`, so a handle only
+resolves in the workspace you are in (`--cwd`, or the current directory). When it
+misses, Delegate checks a roster of the other workspaces it has launched in
+(`~/.delegate/registries.json`) and tells you where the run lives.
+
+- A run ID found in one other workspace: `snapshot` and `run-output` read it
+  directly and report `resolutionKind: "cross_registry"` with `resolvedWorkspace`.
+  `wait`, `cancel`, `resume`, `followup`, and `worktree show` fail with the
+  workspace and the exact command, for example
+  `delegate --cwd /path/to/workspace wait del_...`; run that.
+- A numbered alias such as `codex-1` is unique only inside one workspace, so it is
+  never resolved for you. The error lists every workspace that has it; rerun with
+  `--cwd` for the right one, or use the run ID.
+- Nothing listed: the run was launched in a workspace that predates the roster or
+  whose `.delegate` directory is gone. Pass `--cwd` for that workspace yourself.
+  Workflow IDs behave the same way (`workflow_not_found`).
+
+## Scratch space keeps growing
+
+Safe-mode and isolated runs get a neutral scratch directory under
+`~/.delegate/run-scratch/` (or `/var/tmp/delegate-<uid>/run-scratch/`), a sidecar
+per mail-push engine home, and a compact temp directory under
+`/var/tmp/dlg-<uid>/`. They survive failure so you can inspect them, but they
+are given back once the run is terminal and older than
+`tracking.retention.scratchDays` (default 3) whenever a workspace command runs
+the ambient retention pass. To see or force it now:
+
+```bash
+delegate runs reclaim --dry-run          # per-run sizes, removes nothing
+delegate runs reclaim --older-than 0     # every finished run, now
+```
+
+Running and stale runs are never touched, and the run record stays; `snapshot`
+shows `scratchReclaimedAt` and `scratchReclaimedBytes`. A run listed under
+`errors` was refused because its recorded path no longer matches the owned path
+or an entry is owned by another user; the scratch is left in place for you to
+inspect. A run listed as `budget_exhausted` (with `budgetExhausted: true`) was
+large enough to run into the ambient pass's 20-second budget; part of its scratch
+is already gone, it is not marked yet, and the next workspace command finishes it
+(or run `delegate runs reclaim`, which has no time limit). The ambient pass is
+skipped when `tracking.retention.enabled` is `false`; `delegate runs reclaim`
+still works.
+
 ## Worktree cleanup refused
 
 `delegate worktree remove` refuses dirty worktrees and unmerged branches by default. Inspect first:

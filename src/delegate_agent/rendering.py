@@ -132,6 +132,17 @@ def _render_snapshot_current(view: SnapshotView, stdout: TextIO) -> None:
         print(f"current: {current}", file=stdout)
 
 
+def _render_snapshot_scratch(view: SnapshotView, stdout: TextIO) -> None:
+    reclaimed_at = view.get("scratchReclaimedAt")
+    if not isinstance(reclaimed_at, str) or not reclaimed_at:
+        return
+    size = view.get("scratchReclaimedBytes")
+    detail = ""
+    if isinstance(size, int) and not isinstance(size, bool):
+        detail = f" ({_format_mib(size)})"
+    print(f"scratch reclaimed: {reclaimed_at}{detail}", file=stdout)
+
+
 def _render_snapshot_cleanup(view: SnapshotView, stdout: TextIO) -> None:
     cleanup = view.get("worktreeCleanupCommands")
     if isinstance(cleanup, dict):
@@ -188,6 +199,7 @@ def _render_snapshot_completion(view: SnapshotView, stdout: TextIO) -> None:
 def render_snapshot_text(view: SnapshotView, stdout: TextIO) -> None:
     _render_snapshot_header(view, stdout)
     _render_snapshot_status_detail(view, stdout)
+    _render_snapshot_scratch(view, stdout)
     _render_snapshot_string_fields(view, SNAPSHOT_CONTEXT_FIELDS, stdout)
     _render_snapshot_isolation(view, stdout)
     _render_snapshot_reasoning(view, stdout)
@@ -672,6 +684,32 @@ def render_runs_prune_text(payload: JsonObject, stdout: TextIO) -> None:
                         item.get("reason") or item.get("code") or item.get("effectiveStatus") or ""
                     )
                     print(f"  - {label} {detail}", file=stdout)
+
+
+def _format_mib(size: object) -> str:
+    value = size if isinstance(size, int) and not isinstance(size, bool) else 0
+    return f"{value / (1 << 20):.1f} MiB"
+
+
+def render_runs_reclaim_text(payload: JsonObject, stdout: TextIO) -> None:
+    print(f"older than: {payload.get('olderThanDays', '?')} days", file=stdout)
+    if payload.get("dryRun") is True:
+        print("dry run: scratch and run records unchanged", file=stdout)
+    if payload.get("budgetExhausted") is True:
+        print("stopped early: time budget spent; run again to continue", file=stdout)
+    for section in ("planned", "reclaimed", "skipped", "errors"):
+        items = payload.get(section)
+        count = len(items) if isinstance(items, list) else 0
+        print(f"{section}: {count}", file=stdout)
+        if isinstance(items, list):
+            for item in items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("alias") or item.get("runId") or "?"
+                size = f" {_format_mib(item['scratchBytes'])}" if "scratchBytes" in item else ""
+                detail = item.get("reason") or item.get("code") or item.get("message") or ""
+                print(f"  - {label}{size} {detail}".rstrip(), file=stdout)
+    print(f"total: {_format_mib(payload.get('totalBytes'))}", file=stdout)
 
 
 def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:

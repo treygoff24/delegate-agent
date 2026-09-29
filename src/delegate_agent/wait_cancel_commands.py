@@ -120,30 +120,42 @@ def _group_targets(registry_root: Path, group: str) -> list[run_registry.RunTarg
     return targets
 
 
+def _lookup_error(target: run_registry.RunTargetLookupError) -> WaitCancelError:
+    error = WaitCancelError(target.error, target.message)
+    error.next_actions = list(target.next_actions) or None
+    return error
+
+
 def _resolve_targets(
     registry_root: Path,
     handles: tuple[str, ...],
     latest_harness: str | None,
     group: str | None = None,
+    *,
+    command: str = "wait",
 ):
     targets: dict[str, run_registry.RunTarget] = {}
     for handle in handles:
+        # Both wait and cancel act on one Registry, so a run found in another
+        # workspace is reported with the exact --cwd command, never followed.
         target = run_registry.resolve_run_target(
             registry_root,
             handle=handle,
             latest_harness=None,
+            command=command,
         )
         if isinstance(target, run_registry.RunTargetLookupError):
-            raise WaitCancelError(target.error, target.message)
+            raise _lookup_error(target)
         targets.setdefault(target.run_id, target)
     if latest_harness is not None:
         target = run_registry.resolve_run_target(
             registry_root,
             handle=None,
             latest_harness=latest_harness,
+            command=command,
         )
         if isinstance(target, run_registry.RunTargetLookupError):
-            raise WaitCancelError(target.error, target.message)
+            raise _lookup_error(target)
         targets.setdefault(target.run_id, target)
     if group is not None:
         for target in _group_targets(registry_root, group):
@@ -1204,7 +1216,7 @@ def _cancel_target_under_lock(registry_root: Path, target: run_registry.RunTarge
 
 def emit_cancel(command: CancelCommand, *, workspace_path: str, stdout: TextIO) -> int:
     registry_root = _registry_for_workspace(workspace_path)
-    targets = _resolve_targets(registry_root, command.handles, None)
+    targets = _resolve_targets(registry_root, command.handles, None, command="cancel")
     runs = [_cancel_target(registry_root, target) for target in targets]
     if command.json_mode:
         delegate_rendering.print_json(

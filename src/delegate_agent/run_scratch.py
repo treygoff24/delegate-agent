@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import stat
 import subprocess  # nosec B404 - fixed offline Git ancestry probe.
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -269,13 +270,57 @@ def _sidecar_paths(scratch_plan: ScratchPlan, run_id: str) -> list[Path]:
     return sorted(entry for entry in scratch_plan.bucket.iterdir() if entry.name.startswith(prefix))
 
 
-def remove_owned(registry_root: Path, run_id: str) -> None:
-    """Remove the deterministic scratch, sidecars, and compact temp of this run.
+def verify_recorded_paths(
+    registry_root: Path,
+    run_id: str,
+    manifest: dict | None,
+    *,
+    action: str = "prune",
+) -> None:
+    """Refuse when a manifest's recorded scratch or temp path is not the owned one.
 
-    The compact child temp is removed from exactly here, alongside the run
-    scratch: whatever retains the scratch (a non-pruned run, a failed prune)
-    retains it too, and a run whose scratch was never allocated has no compact
-    temp to find.
+    Removal only ever touches the deterministic paths derived from registry
+    identity and run id, never record bytes. A recorded path that no longer
+    matches is conflicting metadata: refuse rather than delete a directory the
+    record no longer claims. A manifest without either key carries no pointer
+    and passes, because a run that never allocated scratch can still have left
+    a sidecar.
+    """
+    if manifest is None:
+        return
+    if "scratchPath" in manifest:
+        recorded = manifest.get("scratchPath")
+        if not isinstance(recorded, str) or not recorded:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: invalid recorded scratch path"
+            )
+        expected = expected_path(registry_root, run_id)
+        recorded_path = Path(os.path.abspath(recorded))
+        if recorded_path != expected:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: recorded scratch path {recorded_path} "
+                f"does not match current owned path {expected}"
+            )
+    if "tempPath" in manifest:
+        recorded_temp = manifest.get("tempPath")
+        if not isinstance(recorded_temp, str) or not recorded_temp:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: invalid recorded temp path"
+            )
+        expected_temp = expected_compact_temp_path(registry_root, run_id)
+        if Path(os.path.abspath(recorded_temp)) != expected_temp:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: recorded temp path {recorded_temp} "
+                f"does not match current owned path {expected_temp}"
+            )
+
+
+def owned_targets(registry_root: Path, run_id: str) -> list[Path]:
+    """Existing scratch, sidecars, and compact temp of this run, safety-checked.
+
+    Only the deterministic paths are considered. The shared roots must be real
+    owner-only directories we own; a hostile or foreign root raises rather than
+    being routed around.
     """
     scratch_plan = plan(registry_root, run_id)
     targets: list[Path] = []
@@ -290,17 +335,220 @@ def remove_owned(registry_root: Path, run_id: str) -> None:
     if _path_exists(compact_plan.path):
         _ensure_compact_temp_roots(compact_plan)
         targets.append(compact_plan.path)
+    return targets
+
+
+def tree_bytes(path: Path) -> int:
+    """Apparent size of the regular files under ``path``; symlinks are never followed."""
+    total = 0
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(info.st_mode):
+                        total += info.st_size
+        except OSError:
+            continue
+    return total
+
+
+class ScratchBudgetExceeded(Exception):
+    """The caller's time budget ran out; whatever was freed so far stays freed."""
+
+
+class Deadline:
+    """A monotonic time budget checked between filesystem operations.
+
+    ``Deadline(None)`` never expires. The clock is injectable so a caller with
+    its own notion of time (and its tests) stays in charge of it.
+    """
+
+    def __init__(self, seconds: float | None, *, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._limit = None if seconds is None else clock() + seconds
+
+    def expired(self) -> bool:
+        return self._limit is not None and self._clock() >= self._limit
+
+    def check(self) -> None:
+        if self.expired():
+            raise ScratchBudgetExceeded
+
+
+@dataclass
+class RemovalProgress:
+    """What a removal freed, and whether it reached the end of every target."""
+
+    freed_bytes: int = 0
+    complete: bool = False
+
+
+_DIR_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _safe_removal_available() -> bool:
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.rmdir in os.supports_dir_fd
+        and os.scandir in os.supports_fd
+    )
+
+
+def _entry_lstat(entry: os.DirEntry[str]) -> os.stat_result:
+    return entry.stat(follow_symlinks=False)
+
+
+def _fd_stat(fd: int) -> os.stat_result:
+    return os.fstat(fd)
+
+
+def _scan_for_foreign_owner(target: Path, deadline: Deadline | None) -> None:
+    """Refuse a tree, before removing anything, that holds an entry owned by
+    someone else or an entry on another filesystem.
+
+    A different device inside the tree is a mount point (or a bind mount of a
+    file): removal would otherwise descend into it and delete the mounted
+    filesystem's contents before the mount point itself refused to go. A target
+    on a different device from its parent is refused for the same reason.
+    Symlinks are inspected with ``lstat`` semantics and never entered.
+    """
+    target_device = os.lstat(target).st_dev
+    if os.lstat(target.parent).st_dev != target_device:
+        raise ScratchSafetyError(f"scratch directory is a mount point: {target}")
+    euid = os.geteuid() if hasattr(os, "geteuid") else None
+    pending = [target]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if deadline is not None:
+                    deadline.check()
+                info = _entry_lstat(entry)
+                if euid is not None and info.st_uid != euid:
+                    raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry.path}")
+                if info.st_dev != target_device:
+                    raise ScratchSafetyError(
+                        f"scratch entry is on another filesystem (a mount point): {entry.path}"
+                    )
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(Path(entry.path))
+
+
+def _list_directory(fd: int, deadline: Deadline | None) -> list[tuple[str, bool, int]]:
+    """(name, is directory, regular-file size) of each entry, without following symlinks."""
+    items: list[tuple[str, bool, int]] = []
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if deadline is not None:
+                deadline.check()
+            info = entry.stat(follow_symlinks=False)
+            size = info.st_size if stat.S_ISREG(info.st_mode) else 0
+            items.append((entry.name, stat.S_ISDIR(info.st_mode), size))
+    return items
+
+
+def _remove_tree(target: Path, deadline: Deadline | None, progress: RemovalProgress) -> None:
+    """Remove ``target`` bottom-up, one entry at a time, through directory descriptors.
+
+    Every directory is opened with ``O_NOFOLLOW`` relative to its parent's
+    descriptor, so a path swapped for a symlink after it was listed is refused
+    rather than followed. The deadline is checked before each entry; when it
+    fires the walk stops where it is (``ScratchBudgetExceeded``) and
+    ``progress.freed_bytes`` holds what was actually freed. Removal is resumable
+    because a half-removed tree is just a smaller tree.
+
+    Every directory opened is also checked to be on the target's filesystem, so
+    a mount that appeared after ``_scan_for_foreign_owner`` is refused before
+    anything under it is listed or removed.
+    """
+    parent_fd = os.open(target.parent, _DIR_OPEN_FLAGS)
+    stack: list[tuple[int, list[tuple[str, bool, int]], str]] = []
+    try:
+        root_fd = os.open(target.name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        try:
+            device = _fd_stat(root_fd).st_dev
+            if _fd_stat(parent_fd).st_dev != device:
+                raise ScratchSafetyError(f"scratch directory is a mount point: {target}")
+            stack.append((root_fd, _list_directory(root_fd, deadline), target.name))
+        except BaseException:
+            os.close(root_fd)
+            raise
+        while stack:
+            fd, remaining, name = stack[-1]
+            if not remaining:
+                stack.pop()
+                os.close(fd)
+                container = stack[-1][0] if stack else parent_fd
+                os.rmdir(name, dir_fd=container)
+                continue
+            if deadline is not None:
+                deadline.check()
+            entry_name, is_directory, size = remaining.pop()
+            if is_directory:
+                child_fd = os.open(entry_name, _DIR_OPEN_FLAGS, dir_fd=fd)
+                try:
+                    if _fd_stat(child_fd).st_dev != device:
+                        raise ScratchSafetyError(
+                            f"scratch entry is on another filesystem (a mount point): {entry_name}"
+                        )
+                    stack.append((child_fd, _list_directory(child_fd, deadline), entry_name))
+                except BaseException:
+                    os.close(child_fd)
+                    raise
+            else:
+                os.unlink(entry_name, dir_fd=fd)
+                progress.freed_bytes += size
+    finally:
+        for fd, _remaining, _name in stack:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def remove_targets(targets: list[Path], *, deadline: Deadline | None = None) -> RemovalProgress:
+    """Remove ``owned_targets`` results, refusing foreign-owned entries.
+
+    Each target is checked as before (owned, owner-only, outside any Git
+    worktree, no foreign-owned entry inside) and then removed incrementally.
+    With a ``deadline`` the walk and the removal stop cleanly when it passes:
+    the result is incomplete, what was freed stays freed, and a later call
+    finishes the rest. Without one it runs to the end.
+    """
+    progress = RemovalProgress()
     if not targets:
-        return
-    if not shutil.rmtree.avoids_symlink_attacks:
+        progress.complete = True
+        return progress
+    if not _safe_removal_available():
         raise ScratchSafetyError("safe no-follow directory removal is unavailable")
-    for target in targets:
-        _require_owned_directory(target, private=True)
-        _require_outside_git_worktree(target)
-        for root, directories, files in os.walk(target, topdown=True, followlinks=False):
-            for name in [*directories, *files]:
-                entry = Path(root) / name
-                info = entry.lstat()
-                if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
-                    raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry}")
-        shutil.rmtree(target)
+    try:
+        for target in targets:
+            if deadline is not None:
+                deadline.check()
+            _require_owned_directory(target, private=True)
+            _require_outside_git_worktree(target)
+            _scan_for_foreign_owner(target, deadline)
+            _remove_tree(target, deadline, progress)
+    except ScratchBudgetExceeded:
+        return progress
+    progress.complete = True
+    return progress
+
+
+def remove_owned(registry_root: Path, run_id: str) -> None:
+    """Remove the deterministic scratch, sidecars, and compact temp of this run.
+
+    The compact child temp is removed from exactly here, alongside the run
+    scratch: whatever retains the scratch (a non-pruned run, a failed prune)
+    retains it too, and a run whose scratch was never allocated has no compact
+    temp to find.
+    """
+    remove_targets(owned_targets(registry_root, run_id))

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import archived_logs, private_io, run_scratch, run_status
+from delegate_agent import archived_logs, private_io, registry_roster, run_scratch, run_status
 from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
@@ -318,6 +318,9 @@ def ensure_registry(
             save_index(root, empty_index())
         else:
             ensure_private_file(index_path(root))
+    # Best effort and outside the registry lock: lets a lookup that misses in
+    # some other workspace find this one.
+    registry_roster.note_workspace(workspace)
     return root
 
 
@@ -699,12 +702,17 @@ class RunTarget:
     resolution_kind: str = "literal"
     resolution_details: JsonObject | None = None
     resolution_warning: str | None = None
+    # Set only when the run was found in another workspace's Registry
+    # (``resolution_kind == "cross_registry"``); callers that accept it read the
+    # run from this root instead of the one they searched.
+    registry_root: Path | None = None
 
 
 @dataclass(frozen=True)
 class RunTargetLookupError:
     error: str
     message: str
+    next_actions: tuple[str, ...] = ()
 
 
 def _newer_sibling_count(index: JsonObject, run_id: str) -> tuple[str | None, int]:
@@ -948,12 +956,66 @@ def resolve_handle(
     return ResolveResult(run_id, alias, (), handle, alias or run_id, "literal")
 
 
+def _handle_elsewhere(registry_root: Path, handle: str) -> list[registry_roster.RosterMatch]:
+    """Other Registries holding this run id, or this alias, from the roster."""
+    exclude = registry_root.parent
+    if RUN_ID_RE.fullmatch(handle):
+        return registry_roster.find_run(handle, exclude=exclude)
+    if ALIAS_RE.fullmatch(handle) and handle not in HARNESS_NAMES:
+        return registry_roster.find_alias(handle, exclude=exclude)
+    return []
+
+
+def handle_elsewhere_hint(
+    registry_root: Path, handle: str, command: str | None = None
+) -> tuple[str, list[str]]:
+    """Error text and next actions for a handle another Registry holds, or ("", [])."""
+    return registry_roster.describe_matches(
+        handle, _handle_elsewhere(registry_root, handle), command=command
+    )
+
+
+def _cross_registry_target(
+    handle: str,
+    other: registry_roster.RosterMatch,
+) -> RunTarget | None:
+    run_id = other.run_id
+    if run_id is None:
+        return None
+    root = other.registry_root
+    alias = alias_for_run(load_index(root), run_id)
+    workspace = str(other.workspace)
+    return RunTarget(
+        run_id,
+        alias,
+        handle,
+        alias or run_id,
+        "cross_registry",
+        {"resolvedWorkspace": workspace},
+        f"cross_registry: {handle} is not in this workspace's Registry; read it from the "
+        f"Registry of {workspace}. Pass --cwd {shlex.quote(workspace)} to work on it there.",
+        root,
+    )
+
+
 def resolve_run_target(
     registry_root: Path,
     *,
     handle: str | None,
     latest_harness: str | None,
+    command: str | None = None,
+    read_across_registries: bool = False,
 ) -> RunTarget | RunTargetLookupError:
+    """Resolve a handle inside ``registry_root``, or find it in another Registry.
+
+    A miss consults the registry roster. A run id is globally unique: when
+    exactly one other Registry holds it, ``read_across_registries`` (read-only
+    commands) resolves it there and returns a target carrying that root;
+    otherwise the error names the workspace and the exact ``--cwd`` command. An
+    alias is only unique per Registry, so it is never auto-resolved: the error
+    lists every Registry that has it. ``command`` is the subcommand words used
+    to spell the exact command.
+    """
     index = load_index(registry_root)
     if latest_harness is not None:
         if ":" in latest_harness:
@@ -992,16 +1054,28 @@ def resolve_run_target(
         )
     resolved = resolve_handle(index, handle, registry_root=registry_root)
     if resolved.run_id is None:
+        elsewhere = _handle_elsewhere(registry_root, handle)
+        if (
+            read_across_registries
+            and len(elsewhere) == 1
+            and elsewhere[0].run_id == handle
+            and RUN_ID_RE.fullmatch(handle)
+        ):
+            found = _cross_registry_target(handle, elsewhere[0])
+            if found is not None:
+                return found
         suggestion_items = latest_handle_suggestions(index, registry_root)
         suggestion_items.extend(
             item for item in resolved.suggestions if item not in suggestion_items
         )
         suggestions = ", ".join(suggestion_items[:8]) if suggestion_items else "(none)"
+        where, next_actions = registry_roster.describe_matches(handle, elsewhere, command=command)
         return RunTargetLookupError(
             "unknown_handle",
             f"Unknown run handle: {handle}. Suggestions: {suggestions}. "
             "Runs are recorded per-workspace under <workspace>/.delegate; "
-            "if this run was launched elsewhere, pass --cwd <that workspace>.",
+            "if this run was launched elsewhere, pass --cwd <that workspace>." + where,
+            tuple(next_actions),
         )
     details = None
     warning = None
@@ -1229,31 +1303,7 @@ def _remove_run_record_artifacts(
             f"refusing to prune run {run_id}: unreadable manifest must be preserved: "
             f"{manifest_error}"
         ) from manifest_error
-    if manifest is not None and "scratchPath" in manifest:
-        recorded = manifest.get("scratchPath")
-        if not isinstance(recorded, str) or not recorded:
-            raise OSError(f"refusing to prune run {run_id}: invalid recorded scratch path")
-        expected = run_scratch.expected_path(registry_root, run_id)
-        recorded_path = Path(os.path.abspath(recorded))
-        if recorded_path != expected:
-            raise OSError(
-                f"refusing to prune run {run_id}: recorded scratch path {recorded_path} "
-                f"does not match current owned path {expected}"
-            )
-    if manifest is not None and "tempPath" in manifest:
-        # The compact child temp is deleted by the same run-owned cleanup as
-        # the scratch, so a recorded path that no longer matches the owned one
-        # is conflicting metadata: refuse rather than delete a directory the
-        # record no longer claims.
-        recorded_temp = manifest.get("tempPath")
-        if not isinstance(recorded_temp, str) or not recorded_temp:
-            raise OSError(f"refusing to prune run {run_id}: invalid recorded temp path")
-        expected_temp = run_scratch.expected_compact_temp_path(registry_root, run_id)
-        if Path(os.path.abspath(recorded_temp)) != expected_temp:
-            raise OSError(
-                f"refusing to prune run {run_id}: recorded temp path {recorded_temp} "
-                f"does not match current owned path {expected_temp}"
-            )
+    run_scratch.verify_recorded_paths(registry_root, run_id, manifest, action="prune")
     # A manifest without a recorded scratch path, or an absent legacy manifest,
     # carries no deletion pointer, and a run that allocated no scratch can
     # still have left a sidecar (the mail-push private homes). The

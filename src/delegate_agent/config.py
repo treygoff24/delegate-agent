@@ -85,6 +85,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "retention": {
             "enabled": True,
             "rawLogDays": 7,
+            "scratchDays": 3,
         },
         # Advisory registry mutations wait this long before a finalizer falls
         # back to its per-run write-ahead record.
@@ -1681,6 +1682,13 @@ def validate_config(config: JsonObject) -> None:
                 _validate_required_non_negative_int(
                     raw_log_days,
                     path="tracking.retention.rawLogDays",
+                    error="invalid_tracking_config",
+                )
+            scratch_days = retention.get("scratchDays")
+            if scratch_days is not None:
+                _validate_required_non_negative_int(
+                    scratch_days,
+                    path="tracking.retention.scratchDays",
                     error="invalid_tracking_config",
                 )
         if "processGroupTerminationGraceSec" in tracking:
