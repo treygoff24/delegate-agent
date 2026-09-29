@@ -362,6 +362,8 @@ ANNOUNCING_FINALS = {
     "going_to": "The diff looks right. I'm going to run the full suite.",
     "lets": "Let's create the file.",
     "then": "Then I will commit the change.",
+    "addresses_requester": "Next, I'll run the tests you requested.",
+    "addresses_requester_report": "Now let me write the report you asked for.",
 }
 FINISHED_SHORT_ENDINGS = {
     "let_me_know_docs": "Done. Tests pass (42/42). Let me know if you want the docs updated.",
@@ -370,6 +372,7 @@ FINISHED_SHORT_ENDINGS = {
     "past_summary": "I wrote the report to reports/review.md and ran the suite: 42 passed.",
     "leave_rest": "Fixed the import. I'll leave the rest to you.",
     "recommend": "Reviewed the diff; no issues. Next, I'd recommend running the tests.",
+    "offer_if_needed": "Fix is in. I'll run the gate if needed.",
     "offer_if": "Patch applied and verified. I'll write the changelog entry if you want one.",
     "offer_when": "Fix is in. I'll run the gate when you say so.",
     "question": "The fix is in and green. Shall I write the docs now?",
@@ -392,6 +395,8 @@ NOT_AWAITING_FINALS = {
     "no_gate_word": "Nothing found. Awaiting your decision on next steps.",
     "negated": "I am not waiting for approval; I am going ahead with the implementation.",
     "long": "Fixed parser.py. " * 60 + "Awaiting approval for the implementation.",
+    "completed_plan": "The plan is complete. Awaiting approval of the implementation design.",
+    "delivered_design": "Design doc delivered in docs/plan.md. Pending approval to implement.",
 }
 
 
