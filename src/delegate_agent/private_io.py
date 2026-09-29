@@ -265,8 +265,15 @@ def _ensure_owned_dir_fd(path: Path) -> int:
         try:
             entry = os.lstat(name, dir_fd=parent_fd)
         except FileNotFoundError:
-            os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
-            created = True
+            try:
+                os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=parent_fd)
+                created = True
+            except FileExistsError:
+                # A concurrent launch (parallel workflow children share the
+                # scratch root) created it between the lstat and the mkdir.
+                # Adopt it: the checks below still refuse a symlink, a
+                # non-directory, or foreign ownership.
+                pass
             entry = os.lstat(name, dir_fd=parent_fd)
         if stat.S_ISLNK(entry.st_mode):
             raise OSError(errno.ELOOP, "private directory is a symlink", str(path))
