@@ -318,7 +318,8 @@ starts. Gitignored files remain excluded, and external symlinks are blocked with
 the same protections used by safe-mode workspace sync. Automatic sync emits a
 `dirty_source_auto_included` warning with tracked-modified and untracked counts.
 `--include-dirty` remains an explicit launch flag and is a no-op when the source
-is already clean.
+is already clean; when it syncs files the launcher gets `dirty_source_included`
+(counts) and `dirty_source_included_paths` (up to five paths).
 Safe runs with worktree isolation also mirror the dirty source; the launcher gets a
 `dirty_source_mirrored` warning (count plus up to five paths) in the envelope
 `warnings` and the dry run.
