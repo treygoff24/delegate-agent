@@ -200,7 +200,7 @@ def main() -> int:
             return 1
         pytest_command = [pytest]
         print(f"python: {sys.executable}\npytest: {pytest}\n{version}", flush=True)
-        if run([sys.executable, "--version"]):
+        if run([sys.executable, "--version"]) or run([pytest, "--version"]):
             return 1
     with lock_path().open("a") as lock:
         try:
@@ -240,7 +240,7 @@ def main() -> int:
             code = run(command)
             if code:
                 return code
-        print("FAST GATE PASS" if args.fast else "GATE PASS", flush=True)
+        print("FAST CHECKS PASS" if args.fast else "GATE PASS", flush=True)
         return 0
 
 

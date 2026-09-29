@@ -9,7 +9,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 python3 bin/delegate.py --json describe
-python3 -m pytest -q
+tests/acceptance.sh
 ```
 
 Use `python3 bin/delegate.py` from this repository when validating development changes. Do not overwrite an installed `delegate` shim, `~/.delegate/config.json`, or any live runtime unless an operator explicitly asks for promotion.
@@ -33,14 +33,15 @@ Required CI runs the suite on Linux for Python 3.11, 3.12, 3.13, and 3.14, and o
 Run the narrowest useful checks for your change, then the full suite before proposing a release or broad merge:
 
 ```bash
-python3 -m compileall -q src tests bin
+python3 scripts/test.py -- tests/test_delegate_parser.py  # affected tests
+tests/acceptance.sh --fast                              # quick checks
+tests/acceptance.sh                                     # full gate
 git diff --check
-python3 -m pytest -q
-ruff check .
-ruff format --check .
 ```
 
-`ruff` ships in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
+`--fast` is partial coverage; the full gate is required before merge. All runs
+share bounded workers, low priority, and a lock across worktrees. `ruff` ships
+in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
 
 ## Reporting issues
 
