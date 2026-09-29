@@ -380,11 +380,16 @@ class WorkflowAttemptTests(unittest.TestCase):
         self.assertEqual(json.loads(child.stdout)["configSource"], str(attempt.config_path))
 
     def test_missing_explicit_config_fails_before_workflow_creation(self):
-        with (
-            mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(self.root / "missing.json")}),
-            self.assertRaises(config.ConfigError),
-        ):
-            config.load_config()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        script = self.workspace / "script.py"
+        script.write_text("return True\n")
+        with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(self.root / "missing.json")}):
+            code = cli.main(
+                ["--cwd", str(self.workspace), "--json", "workflow", "run", str(script)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertNotEqual(code, 0, stdout.getvalue())
         self.assertFalse(registry.workflow_root(self.workspace).exists())
 
     def test_invalid_ops_are_rejected_before_approval_or_status_mutation(self):
