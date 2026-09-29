@@ -853,10 +853,14 @@ live run (`run_active`, `run_not_terminal`, `process_group_alive`,
 `--force` will not override it; wait for the run, or pass `--kill-live` to remove
 the worktree out from under it.
 If it says `nested_worktrees_block_remove`, runs launched with `--cwd <this
-worktree>` left worktrees of their own: each is listed in `nestedWorktrees` with
-the exact command to remove it; finished, clean ones are removed automatically
-along with the parent. `worktree remove --group NAME` and handles match only the
-Registry of the workspace the command runs in (the error names it as
+worktree>` left dirty or unmerged worktrees of their own: each is listed in
+`nestedWorktrees` with the exact command to remove it by name; the parent's
+`--force` never reaches them. Clean, merged ones are removed automatically along
+with the parent. `nested_registry_unreadable` (a nested Registry that cannot be
+read or locked) and `nested_worktree_remove_failed` (a nested removal failed;
+the parent is kept) name the path or nested result to fix. `worktree remove
+--group NAME` and handles match only the Registry of the workspace the command
+runs in (the error names it as
 `registryRoot`); pass `--cwd` for the workspace that launched the run. Edits to those ledger paths are not lost on
 removal: they are copied to `<Registry>/salvage/<worktree>-<timestamp>/` first,
 and the result names that path.
