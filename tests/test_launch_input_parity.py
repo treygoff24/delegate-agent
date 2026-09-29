@@ -265,16 +265,29 @@ class LaunchInputParityTests(unittest.TestCase):
                     self.assertEqual(getattr(left, field), value, field)
 
     def test_call_read_only_pure_schema_and_quiet_timing(self):
-        for engine, options, values in (
-            ("codex", ("--read-only", "--timeout", "41"), {"readOnly": True, "timeout": 41}),
-            ("claude", ("--pure",), {"pure": True}),
-            ("codex", ("--output-schema", str(self.schema)), {"outputSchema": str(self.schema)}),
+        for engine, options, values, absolute in (
+            (
+                "codex",
+                ("--read-only", "--timeout", "41"),
+                {"readOnly": True, "timeout": 41},
+                {"call_read_only": True, "timeout": 41, "pure": False},
+            ),
+            ("claude", ("--pure",), {"pure": True}, {"pure": True, "call_read_only": False}),
+            (
+                "codex",
+                ("--output-schema", str(self.schema)),
+                {"outputSchema": str(self.schema)},
+                {"output_schema_text": self.schema.read_text(encoding="utf-8")},
+            ),
         ):
             with self.subTest(engine=engine, options=options):
                 left, right = self.pair(engine=engine, mode="call", options=options, values=values)
                 self.assert_equivalent(left, right)
                 self.assertFalse(left.progress)
                 self.assertIsNone(left.isolation_context)
+                # Equivalence alone passes if both frontends drop the option.
+                for attribute, expected in absolute.items():
+                    self.assertEqual(getattr(left, attribute), expected, attribute)
 
     def test_config_defaults_and_explicit_progress_override(self):
         cfg = copy.deepcopy(self.config)

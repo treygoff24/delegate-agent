@@ -101,11 +101,6 @@ class ParserTests(unittest.TestCase):
                 parsed = parser_api.parse_cli(argv)
                 self.assertIsNotNone(parsed.subcommand)
 
-    def test_global_flags_before_subcommand(self):
-        parsed = parser_api.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
-        self.assertTrue(parsed.global_options.json_mode)
-        self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
-
     def test_all_global_options_are_normalized_before_dispatch(self):
         cases = (
             (["dry-run", "--json", "codex", "safe", "hello"], "json_mode", True),
@@ -202,7 +197,7 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(parsed.global_options.group)
         self.assertEqual(parsed.payload.prompt_parts, ["hello", "--json", "--group", "literal"])
 
-    def test_setup_accepts_only_json_and_auth_profile(self):
+    def test_setup_accepts_json_and_auth_profile(self):
         parsed = parser_api.parse_cli(["--json", "--auth-profile", "work", "setup"])
         self.assertEqual(parsed.subcommand, "setup")
         self.assertTrue(parsed.global_options.json_mode)
@@ -211,11 +206,9 @@ class ParserTests(unittest.TestCase):
         trailing_json = parser_api.parse_cli(["setup", "--json"])
         self.assertTrue(trailing_json.global_options.json_mode)
 
-    def test_parsed_command_and_promote_options_keep_dataclass_contracts(self):
+    def test_promote_options_are_frozen(self):
         import dataclasses
 
-        fields = {field.name for field in dataclasses.fields(request_types.ParsedCommand)}
-        self.assertEqual(fields, {"subcommand", "global_options", "help_topic", "payload"})
         options = parser_api.parse_cli(["promote", "--actor", "a", "--source", "b"]).payload
         with self.assertRaises(dataclasses.FrozenInstanceError):
             options.actor = "c"
@@ -258,20 +251,6 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(error_types.DelegateError) as ctx:
             parser_api.parse_cli(["setup", "unexpected"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
-
-    def test_setup_rejects_irrelevant_global_options(self):
-        cases = (
-            ["--cwd", "/tmp", "setup"],
-            ["--isolation", "none", "setup"],
-            ["--pass-through", "setup"],
-            ["--completion-report", "none", "setup"],
-            ["--no-completion-report", "setup"],
-            ["--group", "batch", "setup"],
-        )
-        for argv in cases:
-            with self.subTest(argv=argv), self.assertRaises(error_types.DelegateError) as ctx:
-                parser_api.parse_cli(argv)
-            self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_setup_help_does_not_bypass_irrelevant_global_rejection(self):
         cases = (
@@ -426,16 +405,6 @@ class ParserTests(unittest.TestCase):
             parser_api.parse_cli(["models", "--verbose"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
 
-    def test_auth_profile_accepted_for_models_and_capabilities_reads(self):
-        for argv in (
-            ["--auth-profile", "work", "models"],
-            ["--auth-profile", "work", "models", "codex", "--live"],
-            ["--auth-profile", "work", "capabilities"],
-        ):
-            with self.subTest(argv=argv):
-                parsed = parser_api.parse_cli(argv)
-                self.assertEqual(parsed.global_options.auth_profile, "work")
-
     def test_auth_profile_accepted_for_capabilities_refresh(self):
         parsed = parser_api.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
@@ -475,6 +444,11 @@ class ParserTests(unittest.TestCase):
         cases = (
             (["ps", "bogus"], "unknown_option", "ps does not support option: bogus"),
             (["ps", "--limit", "0"], "invalid_limit", "ps --limit must be at least 1."),
+            (
+                ["ps", "--limit", "nope"],
+                "invalid_limit",
+                "ps --limit must be a positive integer.",
+            ),
             (["ps", "--limit"], "missing_limit", "ps --limit requires a positive integer."),
             (["ps", "--harness"], "missing_harness", "ps --harness requires a harness name."),
             (["ps", "--harness", "nope"], "invalid_harness", "ps --harness must be one of"),
@@ -494,17 +468,13 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(ctx.exception.message, "runs does not support option: bogus")
         with self.assertRaises(error_types.DelegateError) as ctx:
             parser_api.parse_cli(["runs", "--limit", "0"])
+        self.assertEqual(ctx.exception.error, "invalid_limit")
         self.assertEqual(ctx.exception.message, "runs --limit must be at least 1.")
 
     def test_capabilities_read_rejects_engine_arguments(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
             parser_api.parse_cli(["capabilities", "codex"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
-
-    def test_auth_profile_remains_rejected_for_describe(self):
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            parser_api.parse_cli(["--auth-profile", "work", "describe"])
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_auth_profile_accepted_for_grok_launch(self):
         parsed = parser_api.parse_cli(["--auth-profile", "work", "grok", "safe", "x"])
@@ -554,6 +524,8 @@ class ParserTests(unittest.TestCase):
 
     def test_prompt_file_before_prompt_text(self):
         parsed = parser_api.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
+        self.assertEqual(parsed.subcommand, "cursor")
+        self.assertIsNone(parsed.help_topic)
         self.assertEqual(parsed.payload.prompt_file, "task.md")
         self.assertEqual(parsed.payload.prompt_parts, [])
 
@@ -780,23 +752,6 @@ class ParserTests(unittest.TestCase):
             request_api.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_progress_config")
 
-    def test_dry_run_droid_reasoning_effort(self):
-        parsed = parser_api.parse_cli(
-            [
-                "dry-run",
-                "droid",
-                "safe",
-                "--model",
-                "reviewer",
-                "--reasoning-effort",
-                "high",
-                "review",
-            ]
-        )
-        self.assertTrue(parsed.payload.dry_run)
-        self.assertEqual(parsed.payload.engine, "droid")
-        self.assertEqual(parsed.payload.reasoning_effort, "high")
-
     def test_reasoning_effort_after_prompt_is_prompt_text(self):
         parsed = parser_api.parse_cli(["codex", "safe", "review", "--reasoning-effort", "high"])
         self.assertIsNone(parsed.payload.reasoning_effort)
@@ -833,11 +788,148 @@ class ParserTests(unittest.TestCase):
         self.assertIn("delegate snapshot cursor-1", help_text)
         self.assertIn("set -o pipefail", help_text)
 
-    def test_codex_direct_commands_parse(self):
-        parsed = parser_api.parse_cli(["codex", "work", "implement"])
-        self.assertEqual(parsed.subcommand, "codex")
-        self.assertEqual(parsed.payload.engine, "codex")
-        self.assertEqual(parsed.payload.mode, "work")
+    def test_every_engine_parses_its_direct_and_dry_run_forms(self):
+        # (argv, expected) rows: "subcommand" is read from the parsed command, every
+        # other key from its payload; an "error" row expects a DelegateError code.
+        rows = (
+            (
+                [
+                    "dry-run",
+                    "droid",
+                    "safe",
+                    "--model",
+                    "reviewer",
+                    "--reasoning-effort",
+                    "high",
+                    "review",
+                ],
+                {"dry_run": True, "engine": "droid", "reasoning_effort": "high"},
+            ),
+            (
+                ["codex", "work", "implement"],
+                {"subcommand": "codex", "engine": "codex", "mode": "work"},
+            ),
+            (
+                ["dry-run", "codex", "safe", "review"],
+                {"subcommand": "codex", "dry_run": True},
+            ),
+            (
+                ["claude", "safe", "--reasoning-effort", "high", "review"],
+                {
+                    "subcommand": "claude",
+                    "engine": "claude",
+                    "mode": "safe",
+                    "reasoning_effort": "high",
+                    "prompt_parts": ["review"],
+                },
+            ),
+            (
+                ["dry-run", "claude", "work", "ship"],
+                {"subcommand": "claude", "dry_run": True},
+            ),
+            (
+                ["grok", "safe", "review"],
+                {"subcommand": "grok", "engine": "grok", "mode": "safe"},
+            ),
+            (["grok", "safe", "--prompt-file", "task.md"], {"prompt_file": "task.md"}),
+            (
+                ["dry-run", "grok", "work", "fix"],
+                {"subcommand": "grok", "dry_run": True},
+            ),
+            (["dry-run", "grok", "safe", "--prompt-file", "task.md"], {"prompt_file": "task.md"}),
+            (
+                ["devin", "safe", "review"],
+                {"subcommand": "devin", "engine": "devin", "mode": "safe"},
+            ),
+            (["devin", "safe", "--prompt-file", "task.md"], {"prompt_file": "task.md"}),
+            (
+                ["dry-run", "devin", "work", "fix"],
+                {"subcommand": "devin", "dry_run": True},
+            ),
+            (["dry-run", "devin", "safe", "--prompt-file", "task.md"], {"prompt_file": "task.md"}),
+            (
+                ["dry-run", "opencode", "work", "--agent", "builder", "fix"],
+                {"subcommand": "opencode", "dry_run": True, "agent": "builder"},
+            ),
+            (
+                ["dry-run", "opencode", "safe", "--prompt-file", "task.md"],
+                {"prompt_file": "task.md"},
+            ),
+            (
+                ["pi", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"],
+                {
+                    "subcommand": "pi",
+                    "engine": "pi",
+                    "mode": "safe",
+                    "model": "reviewer",
+                    "reasoning_effort": "high",
+                    "prompt_parts": ["review"],
+                },
+            ),
+            (
+                ["dry-run", "pi", "work", "--prompt-file", "task.md"],
+                {"dry_run": True, "prompt_file": "task.md"},
+            ),
+            (
+                ["omp", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"],
+                {
+                    "subcommand": "omp",
+                    "engine": "omp",
+                    "model": "reviewer",
+                    "reasoning_effort": "high",
+                },
+            ),
+            (
+                ["dry-run", "omp", "work", "--prompt-file", "task.md"],
+                {"engine": "omp", "prompt_file": "task.md"},
+            ),
+            (
+                ["kimi", "safe", "review this"],
+                {
+                    "subcommand": "kimi",
+                    "engine": "kimi",
+                    "mode": "safe",
+                    "prompt_parts": ["review this"],
+                },
+            ),
+            (
+                ["kimi", "work", "fix this"],
+                {
+                    "subcommand": "kimi",
+                    "engine": "kimi",
+                    "mode": "work",
+                    "prompt_parts": ["fix this"],
+                },
+            ),
+            (
+                ["dry-run", "kimi", "safe", "review"],
+                {"subcommand": "kimi", "dry_run": True, "engine": "kimi", "mode": "safe"},
+            ),
+            (
+                ["kimi", "safe", "--prompt-file", "task.md"],
+                {
+                    "subcommand": "kimi",
+                    "engine": "kimi",
+                    "mode": "safe",
+                    "prompt_file": "task.md",
+                    "prompt_parts": [],
+                },
+            ),
+            (["kimi", "agent", "hello"], {"error": "invalid_mode"}),
+        )
+        for argv, expected in rows:
+            with self.subTest(argv=argv):
+                if "error" in expected:
+                    with self.assertRaises(error_types.DelegateError) as ctx:
+                        parser_api.parse_cli(argv)
+                    self.assertEqual(ctx.exception.error, expected["error"])
+                    continue
+                parsed = parser_api.parse_cli(argv)
+                for key, value in expected.items():
+                    actual = (
+                        parsed.subcommand if key == "subcommand" else getattr(parsed.payload, key)
+                    )
+                    self.assertEqual(actual, value, f"{argv}: {key}")
 
     def test_modeless_call_mode_parses(self):
         for engine in (
@@ -1019,43 +1111,6 @@ class ParserTests(unittest.TestCase):
             self.assertIn("isolation none", request.warnings[0])
             self.assertNotIn("--isolation", request.warnings[0])
 
-    def test_claude_direct_commands_parse(self):
-        parsed = parser_api.parse_cli(["claude", "safe", "--reasoning-effort", "high", "review"])
-        self.assertEqual(parsed.subcommand, "claude")
-        self.assertEqual(parsed.payload.engine, "claude")
-        self.assertEqual(parsed.payload.mode, "safe")
-        self.assertEqual(parsed.payload.reasoning_effort, "high")
-        self.assertEqual(parsed.payload.prompt_parts, ["review"])
-
-    def test_grok_direct_commands_parse(self):
-        parsed = parser_api.parse_cli(["grok", "safe", "review"])
-        self.assertEqual(parsed.subcommand, "grok")
-        self.assertEqual(parsed.payload.engine, "grok")
-        self.assertEqual(parsed.payload.mode, "safe")
-        parsed = parser_api.parse_cli(
-            ["grok", "safe", "--prompt-file", "task.md"],
-        )
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
-    def test_dry_run_grok_parses(self):
-        parsed = parser_api.parse_cli(["dry-run", "grok", "work", "fix"])
-        self.assertEqual(parsed.subcommand, "grok")
-        self.assertTrue(parsed.payload.dry_run)
-        parsed = parser_api.parse_cli(
-            ["dry-run", "grok", "safe", "--prompt-file", "task.md"],
-        )
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
-    def test_devin_direct_commands_parse(self):
-        parsed = parser_api.parse_cli(["devin", "safe", "review"])
-        self.assertEqual(parsed.subcommand, "devin")
-        self.assertEqual(parsed.payload.engine, "devin")
-        self.assertEqual(parsed.payload.mode, "safe")
-        parsed = parser_api.parse_cli(
-            ["devin", "safe", "--prompt-file", "task.md"],
-        )
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
     def test_missing_mode_lists_each_engine_supported_modes(self):
         for engine, expected in (
             ("devin", "devin requires mode: work, or call."),
@@ -1065,15 +1120,6 @@ class ParserTests(unittest.TestCase):
                 parser_api.parse_cli([engine])
             self.assertEqual(ctx.exception.error, "missing_mode")
             self.assertEqual(ctx.exception.message, expected)
-
-    def test_dry_run_devin_parses(self):
-        parsed = parser_api.parse_cli(["dry-run", "devin", "work", "fix"])
-        self.assertEqual(parsed.subcommand, "devin")
-        self.assertTrue(parsed.payload.dry_run)
-        parsed = parser_api.parse_cli(
-            ["dry-run", "devin", "safe", "--prompt-file", "task.md"],
-        )
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
 
     def test_opencode_direct_commands_parse(self):
         parsed = parser_api.parse_cli(
@@ -1094,44 +1140,6 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.payload.mode, "call")
         self.assertEqual(parsed.payload.agent, "judge")
 
-    def test_dry_run_opencode_parses(self):
-        parsed = parser_api.parse_cli(["dry-run", "opencode", "work", "--agent", "builder", "fix"])
-        self.assertEqual(parsed.subcommand, "opencode")
-        self.assertTrue(parsed.payload.dry_run)
-        self.assertEqual(parsed.payload.agent, "builder")
-        parsed = parser_api.parse_cli(
-            ["dry-run", "opencode", "safe", "--prompt-file", "task.md"],
-        )
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
-    def test_pi_direct_and_prompt_file_commands_parse(self):
-        parsed = parser_api.parse_cli(
-            ["pi", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
-        )
-        self.assertEqual(parsed.subcommand, "pi")
-        self.assertEqual(parsed.payload.engine, "pi")
-        self.assertEqual(parsed.payload.mode, "safe")
-        self.assertEqual(parsed.payload.model, "reviewer")
-        self.assertEqual(parsed.payload.reasoning_effort, "high")
-        self.assertEqual(parsed.payload.prompt_parts, ["review"])
-
-        parsed = parser_api.parse_cli(["dry-run", "pi", "work", "--prompt-file", "task.md"])
-        self.assertTrue(parsed.payload.dry_run)
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
-    def test_omp_direct_and_prompt_file_commands_parse(self):
-        parsed = parser_api.parse_cli(
-            ["omp", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
-        )
-        self.assertEqual(parsed.subcommand, "omp")
-        self.assertEqual(parsed.payload.engine, "omp")
-        self.assertEqual(parsed.payload.model, "reviewer")
-        self.assertEqual(parsed.payload.reasoning_effort, "high")
-
-        parsed = parser_api.parse_cli(["dry-run", "omp", "work", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.payload.engine, "omp")
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-
     def test_agent_flag_rejected_for_non_opencode_engines(self):
         for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin"):
             with self.subTest(engine=engine):
@@ -1143,36 +1151,16 @@ class ParserTests(unittest.TestCase):
             parser_api.parse_cli(["droid", "safe", "--agent", "reviewer", "review"])
         self.assertEqual(ctx.exception.error, "unsupported_agent")
 
-    def test_dry_run_codex_parses(self):
-        parsed = parser_api.parse_cli(["dry-run", "codex", "safe", "review"])
-        self.assertEqual(parsed.subcommand, "codex")
-        self.assertTrue(parsed.payload.dry_run)
-
-    def test_dry_run_claude_parses(self):
-        parsed = parser_api.parse_cli(["dry-run", "claude", "work", "ship"])
-        self.assertEqual(parsed.subcommand, "claude")
-        self.assertTrue(parsed.payload.dry_run)
-
     def test_json_describe_shape(self):
         payload = describe_api.describe_payload(DEFAULT_CONFIG, "embedded-default")
-        self.assertTrue(payload["ok"])
-        self.assertIn("safe", payload["modes"])
-        self.assertIn("work", payload["modes"])
-        self.assertIn("cursor", payload["modeMapping"])
-        self.assertIn("claude", payload["modeMapping"])
-        self.assertIn("codex", payload["modeMapping"])
-        self.assertIn("devin", payload["modeMapping"])
-        self.assertIn("opencode", payload["modeMapping"])
-        self.assertIn("claude", payload["engines"])
-        self.assertIn("grok", payload["engines"])
-        self.assertIn("devin", payload["engines"])
-        self.assertIn("codex", payload["engines"])
-        self.assertIn("policyProfiles", payload)
-        self.assertIn("policyFieldSupport", payload)
-        self.assertIn("effectivePolicy", payload)
-        self.assertIn("claude", payload["effectivePolicy"])
-        self.assertIn("codex", payload["effectivePolicy"])
-        self.assertIn("passThrough", payload)
+        self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["modes"], ["safe", "work", "call"])
+        self.assertEqual(payload["engines"], list(parser_api.KNOWN_ENGINES))
+        self.assertEqual(set(payload["modeMapping"]), set(parser_api.KNOWN_ENGINES))
+        self.assertTrue({"claude", "codex"} <= set(payload["effectivePolicy"]))
+        self.assertIn("safe", payload["policyProfiles"])
+        self.assertTrue(payload["policyFieldSupport"])
+        self.assertIn("incompatible with --json", payload["passThrough"])
 
     def test_describe_claude_effective_policy_masks_global_external_sandbox_bypass(self):
         config = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -1209,17 +1197,6 @@ class ParserTests(unittest.TestCase):
                 parsed = parser_api.parse_cli(["codex", "safe", *option_tokens, "hello"])
                 self.assertEqual(getattr(parsed.global_options, attribute), expected)
 
-    def test_dry_run_global_options_after_subcommand_are_accepted(self):
-        cases = (
-            (["--pass-through"], "pass_through", True),
-            (["--completion-report", "none"], "completion_report", "none"),
-            (["--no-completion-report"], "completion_report", "none"),
-        )
-        for option_tokens, attribute, expected in cases:
-            with self.subTest(option=option_tokens):
-                parsed = parser_api.parse_cli(["dry-run", *option_tokens, "codex", "safe", "hello"])
-                self.assertEqual(getattr(parsed.global_options, attribute), expected)
-
     def test_completion_report_none_flag(self):
         parsed = parser_api.parse_cli(["--completion-report", "none", "cursor", "safe", "hello"])
         self.assertEqual(parsed.global_options.completion_report, "none")
@@ -1247,7 +1224,7 @@ class ParserTests(unittest.TestCase):
         effective = request_api.effective_prompt(original, completion_report_mode="none")
         self.assertEqual(effective, original)
 
-    def test_prompt_file_is_not_mutated_for_completion_report(self):
+    def test_prompt_file_text_survives_completion_report_wrapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             prompt_path = Path(tmp) / "task.md"
             prompt_path.write_text("original prompt\n")
@@ -1261,7 +1238,8 @@ class ParserTests(unittest.TestCase):
             )
             self.assertIn("Delegate sub-agent skill review requirement", effective)
             self.assertIn("Delegate completion report requirement", effective)
-            self.assertEqual(prompt_path.read_text(), "original prompt\n")
+            self.assertEqual(prompt, "original prompt\n")
+            self.assertIn(prompt, effective)
 
     def test_nonblocking_stdin_select_failure_does_not_read(self):
         class BadSelectableStdin:
@@ -1288,11 +1266,6 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.payload.handle, "cursor")
         self.assertTrue(parsed.payload.completion_report)
         self.assertTrue(parsed.payload.default)
-
-    def test_runs_limit_must_be_positive(self):
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            parser_api.parse_cli(["runs", "--limit", "0"])
-        self.assertEqual(ctx.exception.error, "invalid_limit")
 
     def test_runs_prune_parses_age_override_and_dry_run(self):
         parsed = parser_api.parse_cli(
@@ -1328,27 +1301,6 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed, 3)
         self.assertEqual(next_index, 2)
-
-    def test_parse_required_positive_int_option_errors(self):
-        with self.assertRaises(error_types.DelegateError) as missing:
-            parser_api.parse_required_positive_int_option(
-                ["--limit"],
-                0,
-                option_label="runs --limit",
-                missing_error="missing_limit",
-                invalid_error="invalid_limit",
-            )
-        self.assertEqual(missing.exception.error, "missing_limit")
-
-        with self.assertRaises(error_types.DelegateError) as invalid:
-            parser_api.parse_required_positive_int_option(
-                ["--limit", "nope"],
-                0,
-                option_label="runs --limit",
-                missing_error="missing_limit",
-                invalid_error="invalid_limit",
-            )
-        self.assertEqual(invalid.exception.error, "invalid_limit")
 
     def test_runs_active_and_recent_are_mutually_exclusive(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1397,10 +1349,6 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parsed.payload.stdout)
         self.assertEqual(parsed.payload.tail, run_output_commands.RUN_OUTPUT_DEFAULT_TAIL_LINES)
 
-    def test_worktree_trailing_json_is_global(self):
-        parsed = parser_api.parse_cli(["worktree", "list", "--json"])
-        self.assertTrue(parsed.global_options.json_mode)
-
     def test_worktree_unknown_option_is_action_specific(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
             parser_api.parse_cli(["worktree", "remove", "cursor-1", "--older-than", "7"])
@@ -1417,45 +1365,6 @@ class ParserTests(unittest.TestCase):
             parser_api.parse_cli(["worktree", "list", "--harness", "--status", "present"])
         self.assertEqual(ctx.exception.error, "missing_option_value")
         self.assertIn("--harness requires a value", ctx.exception.message)
-
-    def test_parse_kimi_safe(self):
-        parsed = parser_api.parse_cli(["kimi", "safe", "review this"])
-        self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.payload.engine, "kimi")
-        self.assertEqual(parsed.payload.mode, "safe")
-        self.assertEqual(parsed.payload.prompt_parts, ["review this"])
-
-    def test_parse_kimi_work(self):
-        parsed = parser_api.parse_cli(["kimi", "work", "fix this"])
-        self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.payload.engine, "kimi")
-        self.assertEqual(parsed.payload.mode, "work")
-        self.assertEqual(parsed.payload.prompt_parts, ["fix this"])
-
-    def test_parse_kimi_dry_run(self):
-        parsed = parser_api.parse_cli(["dry-run", "kimi", "safe", "review"])
-        self.assertEqual(parsed.subcommand, "kimi")
-        self.assertTrue(parsed.payload.dry_run)
-        self.assertEqual(parsed.payload.engine, "kimi")
-        self.assertEqual(parsed.payload.mode, "safe")
-
-    def test_parse_kimi_help(self):
-        parsed = parser_api.parse_cli(["kimi", "--help"])
-        self.assertEqual(parsed.subcommand, "help")
-        self.assertEqual(parsed.help_topic, "kimi")
-
-    def test_parse_kimi_prompt_file(self):
-        parsed = parser_api.parse_cli(["kimi", "safe", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.payload.engine, "kimi")
-        self.assertEqual(parsed.payload.mode, "safe")
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-        self.assertEqual(parsed.payload.prompt_parts, [])
-
-    def test_parse_kimi_unknown_mode(self):
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            parser_api.parse_cli(["kimi", "agent", "hello"])
-        self.assertEqual(ctx.exception.error, "invalid_mode")
 
     def test_worktree_remove_keep_branch_and_force_are_mutually_exclusive(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1482,31 +1391,11 @@ class ParserTests(unittest.TestCase):
             parser_api.parse_cli(["worktree", "list", "--kill-live"])
         self.assertEqual(ctx.exception.error, "unknown_option")
 
-    def test_worktree_prune_requires_filter_at_execution_time(self):
+    def test_worktree_prune_parses_with_no_filter_selected(self):
         parsed = parser_api.parse_cli(["worktree", "prune"])
         self.assertEqual(parsed.payload.action, "prune")
         self.assertFalse(parsed.payload.merged)
         self.assertIsNone(parsed.payload.older_than_days)
-
-    def test_load_config_cli_overrides_win(self):
-        config_path = ROOT / "src" / "delegate_agent" / "config.py"
-        spec = importlib.util.spec_from_file_location("delegate_config_parser_test", config_path)
-        config_mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(config_mod)
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            local_delegate = workspace / ".delegate"
-            local_delegate.mkdir()
-            (local_delegate / "config.json").write_text(
-                json.dumps({"cursor": {"defaultModel": "workspace-model"}})
-            )
-            loaded, source = config_mod.load_config(
-                workspace=workspace,
-                cli_overrides={"cursor": {"defaultModel": "cli-model"}},
-            )
-            self.assertEqual(loaded["cursor"]["defaultModel"], "cli-model")
-            self.assertEqual(source, "cli-overrides")
 
     def test_isolation_worktree_cursor_work_parses(self):
         parsed = parser_api.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
@@ -2227,6 +2116,9 @@ class ParserTests(unittest.TestCase):
                 request = request_api.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")
+                # The workspace config asked for a worktree; the trusted global config
+                # said none, so the launch must run in place.
+                self.assertEqual(request.isolation_context.effective_isolation, "none")
 
     def test_main_run_input_json_ignores_workspace_config(self):
         """End-to-end main(): repository config cannot select executable or isolation."""

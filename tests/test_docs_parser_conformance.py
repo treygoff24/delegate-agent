@@ -334,6 +334,14 @@ class UsageExpansionTests(unittest.TestCase):
         # claimed the pair the parser refuses.
         old = self.expand("delegate x [--limit N] [--structural|--summary]")
         self.assertIn("x --limit 5 --summary", old)
+        # The other nested branch: --tail and --max-chars are each reachable inside
+        # the group, and --raw excludes both.
+        raw = self.expand("delegate x [--raw | [--tail N] [--max-chars N]]")
+        self.assertIn("x --raw", raw)
+        self.assertIn("x --tail 5", raw)
+        self.assertIn("x --max-chars 5", raw)
+        self.assertNotIn("x --raw --tail 5", raw)
+        self.assertNotIn("x --raw --max-chars 5", raw)
 
     def test_brace_choice_and_value_enumeration(self) -> None:
         self.assertEqual(self.expand("delegate x {safe,work} y"), ["x safe y", "x work y"])
@@ -366,13 +374,6 @@ class UsageExpansionTests(unittest.TestCase):
             self.expand("delegate mail send (BODY|--file FILE|-)"),
             ["mail send b", "mail send --file f", "mail send -"],
         )
-
-    def test_nested_optional_group_is_reachable_but_exclusive_with_its_sibling(self) -> None:
-        variants = self.expand("delegate x [--raw | [--tail N] [--max-chars N]]")
-        self.assertIn("x --raw", variants)
-        self.assertIn("x --tail 5", variants)
-        self.assertIn("x --max-chars 5", variants)
-        self.assertNotIn("x --raw --tail 5", variants)
 
     def test_ellipsis_prompt_and_elision_marker(self) -> None:
         self.assertEqual(
@@ -433,16 +434,6 @@ class PartialLineTests(unittest.TestCase):
 
 class MailSendStdinTests(unittest.TestCase):
     """The mail send help promises three body sources; the parser must honour each."""
-
-    def test_documented_body_sources_all_parse(self) -> None:
-        for argv in (
-            ["mail", "send", "--to", "coordinator", "The review is ready."],
-            ["mail", "send", "--to", "coordinator", "--file", "body.md"],
-            ["mail", "send", "--to", "coordinator", "-"],
-            ["mail", "send", "--to", "coordinator", "--subject", "status", "-"],
-        ):
-            with self.subTest(argv=argv):
-                parse_cli(argv)
 
     def test_bare_dash_delivers_the_bytes_on_stdin(self) -> None:
         """parse_cli accepting ``-`` says nothing about the runtime reading stdin.

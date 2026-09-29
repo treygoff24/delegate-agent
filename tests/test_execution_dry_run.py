@@ -304,12 +304,12 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
-        self.assertIn("isolationMode", payload)
-        self.assertIn("effectiveIsolation", payload)
-        self.assertIn("isolationLifecycle", payload)
-        self.assertIn("preservedWorkspace", payload)
+        self.assertEqual(payload["isolationMode"], "worktree")
+        self.assertEqual(payload["effectiveIsolation"], "worktree")
+        self.assertEqual(payload["isolationLifecycle"], "temporary")
+        self.assertIs(payload["preservedWorkspace"], False)
         self.assertIn("plannedExecutionCwd", payload)
-        self.assertIn("plannedBranch", payload)
+        self.assertIsNone(payload["plannedBranch"])
 
     def test_dry_run_cursor_work_auto_isolation_fields(self):
         """Work mode with auto isolation reports none lifecycle."""
@@ -356,9 +356,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
             dry_run=True,
         )
         payload = self.delegate.dry_run_payload(request)
-        self.assertIn("isolation", payload)
-        self.assertIsInstance(payload["isolation"], str)
-        self.assertGreater(len(payload["isolation"]), 5)
+        self.assertIn("temporary detached git worktree", payload["isolation"])
 
     def test_dry_run_isolation_worktree_creates_no_filesystem_artifacts_under_tmp_home(self):
         """Assert dry-run with --isolation worktree creates NO filesystem entries

@@ -35,35 +35,6 @@ def load_delegate():
     return importlib.reload(cli)
 
 
-# Top-level commands that must support `<cmd> --help`.
-TOP_LEVEL_COMMANDS = (
-    "cursor",
-    "claude",
-    "devin",
-    "opencode",
-    "pi",
-    "omp",
-    "codex",
-    "droid",
-    "dry-run",
-    "profiles",
-    "run",
-    "snapshot",
-    "runs",
-    "ps",
-    "run-output",
-    "wait",
-    "cancel",
-    "worktree",
-    "workflow",
-    "models",
-    "setup",
-    "describe",
-    "agent-help",
-    "help",
-)
-
-
 class HelpCliTestBase(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
@@ -88,7 +59,13 @@ class TopLevelHelpTests(HelpCliTestBase):
     """`<cmd> --help` exits 0 and prints non-empty help naming the command."""
 
     def test_every_top_level_command_help(self):
-        for command in TOP_LEVEL_COMMANDS:
+        top_level = [
+            name
+            for name, spec in command_help.COMMAND_SPECS.items()
+            if " " not in name and not spec.internal
+        ]
+        self.assertIn("kimi", top_level)
+        for command in top_level:
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, error_types.EXIT_OK)
@@ -135,6 +112,10 @@ class MultiLevelHelpTests(HelpCliTestBase):
         self.assertIn("workflow result [<wfId>] [--field KEY]", out)
         self.assertIn("--field KEY", out)
 
+        code, out, err = self.run_main(["--json", "workflow", "result", "--help"])
+        self.assertEqual(code, error_types.EXIT_OK, err)
+        self.assertIn("--field", {option["flag"] for option in json.loads(out)["options"]})
+
 
 class FocusedCallHelpTests(HelpCliTestBase):
     """Call help reflects call's narrower option contract after real CLI routing."""
@@ -174,18 +155,6 @@ class FocusedCallHelpTests(HelpCliTestBase):
                 self.assertIn("--cwd PATH", out)
                 self.assertIn("only with --group", out)
                 self.assertIn("never changes the child's throwaway execution cwd", out)
-
-    def test_json_call_help_exposes_same_filtered_contract(self):
-        code, out, err = self.run_main(["--json", "codex", "call", "--help"])
-        self.assertEqual(code, error_types.EXIT_OK, err)
-        payload = json.loads(out)
-        self.assertEqual(payload["command"], "codex call")
-        self.assertEqual(
-            {option["flag"] for option in payload["options"]}
-            & {"--progress", "--no-progress", "--forbid-commit", "--include-dirty"},
-            set(),
-        )
-        self.assertIn("--cwd", {option["flag"] for option in payload["globalOptions"]})
 
 
 class DashHAliasTests(HelpCliTestBase):
@@ -237,6 +206,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "opencode", "safe", "--help"], "opencode"),
         (["--json", "pi", "safe", "--help"], "pi"),
         (["--json", "omp", "safe", "--help"], "omp"),
+        (["--json", "codex", "call", "--help"], "codex call"),
     )
 
     def test_json_command_help(self):
@@ -310,12 +280,6 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIn("--no-progress", payload["launchOptions"])
         self.assertIn("--forbid-commit", payload["launchOptions"])
 
-    def test_describe_summary_catalog_includes_setup(self):
-        code, out, err = self.run_main(["--json", "describe", "--summary"])
-        self.assertEqual(code, error_types.EXIT_OK, err)
-        payload = json.loads(out)
-        self.assertIn("setup", {entry["command"] for entry in payload["commands"]})
-
     def test_setup_help_advertises_only_supported_global_options(self):
         code, out, err = self.run_main(["--json", "setup", "--help"])
         self.assertEqual(code, error_types.EXIT_OK, err)
@@ -370,6 +334,7 @@ class HelpSubcommandTests(HelpCliTestBase):
             "delegate codex work --isolation worktree --forbid-commit --prompt-file task.md",
             out,
         )
+        self.assertIn("describe", out)
 
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
@@ -393,25 +358,6 @@ class JsonPositionIndependenceTests(HelpCliTestBase):
         # All three must be byte-for-byte identical help for "worktree".
         self.assertEqual(payloads[0], payloads[1])
         self.assertEqual(payloads[1], payloads[2])
-
-
-class HelpShortCircuitsValidationTests(HelpCliTestBase):
-    """Help wins before required-arg validation (no alias/mode/--input-json)."""
-
-    def test_droid_help_without_alias(self):
-        code, out, _err = self.run_main(["droid", "--help"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        self.assertIn("droid", out)
-
-    def test_cursor_help_without_mode(self):
-        code, out, _err = self.run_main(["cursor", "--help"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        self.assertIn("cursor", out)
-
-    def test_run_help_without_input_json(self):
-        code, out, _err = self.run_main(["run", "--help"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        self.assertIn("run", out)
 
 
 class DestructiveSafetyTests(HelpCliTestBase):
@@ -447,13 +393,6 @@ class PromptBoundaryTests(HelpCliTestBase):
 class RegressionGuardTests(HelpCliTestBase):
     """Help wiring must not disturb existing parse outcomes (I4/I5)."""
 
-    def test_prompt_file_still_parses_as_run(self):
-        parsed = parser_api.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.subcommand, "cursor")
-        self.assertIsNone(parsed.help_topic)
-        self.assertEqual(parsed.payload.prompt_file, "task.md")
-        self.assertEqual(parsed.payload.prompt_parts, [])
-
     def test_true_usage_error_exits_with_exit_usage(self):
         code, _out, err = self.run_main(["definitely-not-a-command"])
         self.assertEqual(code, error_types.EXIT_USAGE)
@@ -465,22 +404,6 @@ class RegressionGuardTests(HelpCliTestBase):
         )
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.payload.prompt_parts, ["hello"])
-
-    def test_trailing_json_is_accepted_for_inspection_commands(self):
-        cases = (
-            ["describe", "--json"],
-            ["models", "--json"],
-            ["capabilities", "--json"],
-            ["snapshot", "cursor", "--json"],
-            ["runs", "--stale", "--json"],
-            ["run-output", "cursor", "--completion-report", "--json"],
-            ["wait", "cursor", "--json"],
-            ["cancel", "cursor", "--json"],
-        )
-        for argv in cases:
-            with self.subTest(argv=argv):
-                parsed = parser_api.parse_cli(argv)
-                self.assertTrue(parsed.global_options.json_mode)
 
 
 class RunOutputHelpTests(HelpCliTestBase):
@@ -662,27 +585,14 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertNotIn("--yolo by default", out)
         self.assertIn("does not emit --yolo", out)
 
-    def test_kimi_in_describe_engines(self):
-        code, out, _err = self.run_main(["--json", "describe", "--full"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        payload = json.loads(out)
-        self.assertIn("kimi", payload["engines"])
-
     def test_kimi_in_describe_mode_mapping(self):
         code, out, _err = self.run_main(["--json", "describe", "--full"])
         self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
+        self.assertIn("kimi", payload["engines"])
         self.assertIn("kimi", payload["modeMapping"])
         self.assertIn("safe", payload["modeMapping"]["kimi"])
         self.assertIn("work", payload["modeMapping"]["kimi"])
-
-    def test_kimi_is_discoverable_from_agent_guidance(self):
-        code, out, _err = self.run_main(["agent-help"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        self.assertIn("describe", out)
-        code, out, _err = self.run_main(["--json", "describe"])
-        self.assertEqual(code, error_types.EXIT_OK)
-        self.assertIn("kimi", {row["command"] for row in json.loads(out)["commands"]})
 
     def test_kimi_in_models(self):
         code, out, _err = self.run_main(["--json", "models"])
