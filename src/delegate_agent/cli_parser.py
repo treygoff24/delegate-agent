@@ -1688,7 +1688,7 @@ def parse_resume(
     output_schema: str | None = None
     drop_output_schema = False
     include_dirty = False
-    mail_push = False
+    mail_push: bool | None = None
     no_resumable = False
     dry_run = False
     persona: str | None = None
@@ -1790,12 +1790,13 @@ def parse_resume(
                 include_dirty = True
                 i += 1
                 continue
-            if token == "--mail-push":
-                if mail_push:
+            if token in ("--mail-push", "--no-mail-push"):
+                if mail_push is not None:
                     raise DelegateError(
-                        "invalid_option_combination", "Only one --mail-push flag is allowed."
+                        "invalid_option_combination",
+                        "Only one of --mail-push or --no-mail-push is allowed, once.",
                     )
-                mail_push = True
+                mail_push = token == "--mail-push"
                 i += 1
                 continue
             if token == "--no-resumable":
@@ -1916,6 +1917,7 @@ def parse_followup(
     prompt_file: str | None = None
     timeout: int | None = None
     dry_run = False
+    mail_push: bool | None = None
     handle: str | None = None
     prompt_parts: list[str] = []
     tail_warnings: tuple[str, ...] = ()
@@ -1950,6 +1952,15 @@ def parse_followup(
                 raise DelegateError("ambiguous_prompt_source", "Only one --prompt-file is allowed.")
             prompt_file = rest[i + 1]
             i += 2
+            continue
+        if token in ("--mail-push", "--no-mail-push"):
+            if mail_push is not None:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one of --mail-push or --no-mail-push is allowed, once.",
+                )
+            mail_push = token == "--mail-push"
+            i += 1
             continue
         if token == "--dry-run":
             dry_run = True
@@ -2000,6 +2011,7 @@ def parse_followup(
             prompt_file=prompt_file,
             timeout=timeout,
             dry_run=dry_run,
+            mail_push=mail_push,
             warnings=tail_warnings,
         ),
     )

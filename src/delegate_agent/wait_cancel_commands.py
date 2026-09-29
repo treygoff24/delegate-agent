@@ -17,6 +17,7 @@ from delegate_agent import (
     degraded,
     outcome,
     profiles,
+    record_io,
     redaction,
     run_registry,
     snapshot_view,
@@ -75,6 +76,7 @@ WAIT_STRUCTURAL_KEYS = (
     "resultQuality",
     "degraded",
     "degradedReason",
+    "unreadMail",
     "failureKind",
     "failureReason",
     "staleReason",
@@ -203,6 +205,16 @@ def _wait_state(registry_root: Path, run_id: str) -> JsonObject:
     return result
 
 
+def _with_record_warnings(payload: JsonObject, warnings: list[str]) -> list[str]:
+    """The terminal record's own warnings (unread mail, for one) plus this cancel's."""
+    recorded = payload.get("warnings")
+    merged = [w for w in recorded if isinstance(w, str)] if isinstance(recorded, list) else []
+    for warning in warnings:
+        if warning not in merged:
+            merged.append(warning)
+    return merged
+
+
 def _terminal_payload(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
     payload = _merged_view(registry_root, target.run_id, target)
     wait_state = _wait_state(registry_root, target.run_id)
@@ -262,6 +274,14 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         quality = str(run.get("resultQuality") or "")[:16]
         failure = str(run.get("failureReason") or run.get("staleReason") or "")[:40]
         print(f"{alias:<12} {status:<10} {quality:<16} {failure}", file=stdout)
+        unread = run.get("unreadMail")
+        if isinstance(unread, dict) and (unread.get("count") or unread.get("unreadable")):
+            print(
+                f"  unread mail: {unread.get('count')} delivered message(s) never read by this "
+                "run; see warnings in `delegate snapshot` and send the correction with "
+                "`delegate followup` if it changes the work",
+                file=stdout,
+            )
         flags = degraded.degraded_fields(run)
         if flags:
             print(
@@ -737,6 +757,34 @@ STALE_SEAL_WARNING = (
 )
 
 
+def _record_unread_mail_on_cancel(
+    registry_root: Path, target: run_registry.RunTarget, updated: JsonObject
+) -> None:
+    """Stamp ``unreadMail`` on a cancelled record, as the runner does at finalization.
+
+    Every cancel path (locked, urgent, unlaunched seal, stale seal) ends here, so
+    mail delivered to a lane that is then cancelled is still reported. A record
+    the runner already finalized keeps the ``unreadMail`` it wrote.
+    """
+    if "unreadMail" in updated:
+        return
+    from delegate_agent import mail
+
+    manifest = record_io.load_run_manifest_or_none(registry_root, target.run_id)
+    push = isinstance(manifest, dict) and manifest.get("mailPush") is True
+    unread = mail.unread_mail_extra(
+        registry_root, target.run_id, target.alias or target.run_id, mail_push=push
+    )
+    if not unread:
+        return
+    updated["unreadMail"] = unread["unreadMail"]
+    warnings = list(updated.get("warnings") or [])
+    for warning in unread["warnings"]:
+        if warning not in warnings:
+            warnings.append(warning)
+    updated["warnings"] = warnings
+
+
 def _persist_cancelled_terminal_locked(
     registry_root: Path,
     target: run_registry.RunTarget,
@@ -784,6 +832,7 @@ def _persist_cancelled_terminal_locked(
             *existing,
             *(warning for warning in warnings if warning not in existing),
         ]
+    _record_unread_mail_on_cancel(registry_root, target, updated)
     updated.update(
         {
             "schema": run_registry.STATE_SCHEMA,
@@ -963,7 +1012,7 @@ def _urgent_cancel_without_lock(registry_root: Path, target: run_registry.RunTar
     if not recorded:
         warnings.append(URGENT_CANCEL_UNRECORDED_WARNING)
     payload = _terminal_payload(registry_root, target)
-    payload["warnings"] = warnings
+    payload["warnings"] = _with_record_warnings(payload, warnings)
     payload["registryLockBypassed"] = True
     if signal_refusal is not None:
         payload["signalRefusal"] = signal_refusal
@@ -1207,7 +1256,7 @@ def _cancel_target_under_lock(registry_root: Path, target: run_registry.RunTarge
 
         payload = _terminal_payload(registry_root, target)
         if warnings:
-            payload["warnings"] = warnings
+            payload["warnings"] = _with_record_warnings(payload, warnings)
         if signal_refusal is not None:
             payload["signalRefusal"] = signal_refusal
         return payload
