@@ -1522,8 +1522,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run, inspect, resume, and manage Delegate Workflows.",
         usage=(
             "delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]",
-            "delegate [--json] workflow run --resume <wfId> [--budget N]",
-            "delegate [--json] workflow resume <wfId> [--budget N]",
+            "delegate [--json] workflow run --resume <wfId> [--budget N] [--repin]",
+            "delegate [--json] workflow resume <wfId> [--budget N] [--repin]",
             "delegate [--json] workflow run --name <saved-name> [--args JSON] [--budget N]",
             "delegate [--json] workflow check <script.py>",
             "delegate [--json] workflow status|events|approve|kill <wfId>",
@@ -1539,6 +1539,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--budget", "N", "Maximum number of live agent() runs."),
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
+            OptionSpec(
+                "--repin",
+                None,
+                "With --resume or approve: move the workflow onto the live runtime instead of "
+                "keeping its launch-time pin. Refused while a supervisor or child run is live.",
+            ),
             OptionSpec(
                 "--env",
                 "NAME=VALUE",
@@ -1578,7 +1584,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Launch a detached workflow supervisor.",
         usage=(
             "delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]",
-            "delegate [--json] workflow run --resume <wfId>",
+            "delegate [--json] workflow run --resume <wfId> [--repin]",
             "delegate [--json] workflow run --name <saved-name>",
         ),
         options=(
@@ -1586,6 +1592,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--budget", "N", "Maximum number of live agent() runs."),
             OptionSpec("--dry-run", None, "Stub agents and print the would-be run tree."),
             OptionSpec("--resume", "wfId", "Resume an existing workflow from its journal."),
+            OptionSpec(
+                "--repin",
+                None,
+                "With --resume: move the workflow onto the live runtime. See `workflow resume`.",
+            ),
             OptionSpec("--name", "NAME", "Resolve a saved user-level workflow name."),
             OptionSpec(
                 "--env",
@@ -1611,16 +1622,34 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "workflow resume": CommandSpec(
         name="workflow resume",
         summary="Resume a workflow using the existing run --resume path.",
-        usage=("delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]",),
+        usage=("delegate [--json] workflow resume <wfId> [--budget N] [--dry-run] [--repin]",),
         arguments=(ArgSpec("wfId", True, "Workflow ID to resume."),),
         options=(
             OptionSpec("--budget", "N", "Maximum real delegate.run calls."),
             OptionSpec("--dry-run", None, "Replay using planned stubs without launching agents."),
+            OptionSpec(
+                "--repin",
+                None,
+                "Move the workflow's runtime pin onto the live runtime before resuming. "
+                "Opt-in; not valid with --dry-run.",
+            ),
         ),
         notes=(
             "Alias for workflow run --resume <wfId>; pinned args and resume checks are unchanged.",
+            "A workflow keeps the runtime it was launched on. Resume prints a warning naming "
+            "the pinned and live runtime (digest, delegate version, pin or promotion date) "
+            "whenever they differ; `workflow status` prints the same. Without --repin the "
+            "resumed supervisor still runs the pinned code, so fixes shipped since launch do "
+            "not reach it.",
+            "--repin replaces only the pinned runtime. The journal, step keys, frozen config, "
+            "personas, and credential namespace are kept, and the profile-identity check must "
+            "still pass. It is refused while a supervisor holds the workflow, while any child "
+            "run of the workflow is still running, and when the pin cannot be verified; nothing "
+            "is changed on a refusal.",
+            "Resume cancels every child the previous attempt still had in flight and relaunches "
+            "that work; it does not adopt live children.",
         ),
-        see_also=("workflow run", "workflow approve"),
+        see_also=("workflow run", "workflow approve", "workflow status"),
     ),
     "workflow check": CommandSpec(
         name="workflow check",
@@ -1632,7 +1661,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="workflow status",
         summary="Read a workflow status snapshot (reports stalled if the supervisor died).",
         usage=("delegate [--json] workflow status <wfId>",),
-        see_also=("workflow events", "workflow result"),
+        notes=(
+            "Prints a plain line when the runtime the workflow is pinned to differs from the "
+            "live runtime, and always reports the comparison as runtimePin in --json.",
+        ),
+        see_also=("workflow events", "workflow result", "workflow resume"),
     ),
     "workflow events": CommandSpec(
         name="workflow events",
@@ -1701,9 +1734,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--json] workflow approve <wfId>",
             "delegate [--json] workflow approve <wfId> --gate KEY --action NAME "
             "[--note TEXT] [--data JSON]",
+            "delegate [--json] workflow approve <wfId> --repin",
         ),
         arguments=(ArgSpec("wfId", True, "Workflow ID waiting on a gate."),),
         options=(
+            OptionSpec(
+                "--repin",
+                None,
+                "Approve and resume on the live runtime instead of the launch-time pin. "
+                "Same rules as `workflow resume --repin`.",
+            ),
             OptionSpec(
                 "--gate",
                 "KEY",
