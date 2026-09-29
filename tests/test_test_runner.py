@@ -52,6 +52,7 @@ class TestRunnerTests(unittest.TestCase):
             ("--", "--numprocesses=20"),
             ("--", "--dist=each"),
             ("--", "--tx=4*popen"),
+            ("--gate", "--", "tests/test_config.py"),
         ):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as caught:
                 self.main(*argv)
