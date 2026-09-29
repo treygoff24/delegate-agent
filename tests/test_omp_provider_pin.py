@@ -377,6 +377,8 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         model: str,
         *extra: str,
         aliases: dict | None = None,
+        group: str | None = None,
+        input_json: dict | None = None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -387,18 +389,27 @@ class OmpPinnedLaunchTests(unittest.TestCase):
             )
             cfg["omp"]["binary"] = str(self._fake_omp(root, provider, model))
             out, err = io.StringIO(), io.StringIO()
-            # `call` runs in the process cwd and refuses --cwd; a tracked run
-            # names its workspace.
-            where = [] if subcommand == ["call"] else ["--cwd", directory]
+            # An ungrouped `call` runs in the process cwd and refuses --cwd; a
+            # tracked run, grouped calls included (a workflow agent() always
+            # passes --group), names its workspace.
+            where = [] if subcommand == ["call"] and group is None else ["--cwd", directory]
+            if group is not None:
+                where = [*where, "--group", group]
+            argv = ["--json", *where, "omp", *subcommand, *extra, "Fixture prompt"]
+            if input_json is not None:
+                # `run --input-json` is what a workflow agent() launches through.
+                input_path = root / "input.json"
+                input_path.write_text(
+                    json.dumps({"engine": "omp", "prompt": "Fixture prompt", **input_json}),
+                    encoding="utf-8",
+                )
+                grouped = ["--group", group] if group is not None else []
+                argv = ["--json", *grouped, "run", "--input-json", str(input_path)]
             with (
                 mock.patch.object(request_build, "load_config", return_value=(cfg, "fixture")),
                 mock.patch.object(harness_discovery, "load_discovery_cache", return_value=None),
             ):
-                code = cli.main(
-                    ["--json", *where, "omp", *subcommand, *extra, "Fixture prompt"],
-                    stdout=out,
-                    stderr=err,
-                )
+                code = cli.main(argv, stdout=out, stderr=err)
             record = root / "launch.json"
             self.assertTrue(
                 record.exists(), f"omp never launched: {out.getvalue()} {err.getvalue()}"
@@ -488,6 +499,41 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "fireworks")
         self.assertEqual(payload["servedModel"], "glm-5p3")
+        # Visibility without refusal, as on a tracked run: the call succeeded and
+        # says, provider included, that another model answered.
+        self.assertTrue(payload["ok"])
+        substitutions = [w for w in payload["warnings"] if w.startswith("model_substitution")]
+        self.assertEqual(len(substitutions), 1, payload["warnings"])
+        self.assertIn("requested glm resolved to opencode-go/glm-5.3", substitutions[0])
+        self.assertIn("served fireworks/glm-5p3", substitutions[0])
+
+    def test_call_with_an_alias_answered_by_its_own_target_is_not_flagged(self):
+        code, out, err, _launch = self._run(
+            ["call"], "opencode-go", "glm-5.3", "--model", "glm", aliases=_GLM_ALIAS
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("model_substitution", json.dumps(json.loads(out).get("warnings")))
+
+    def test_a_pinned_call_on_an_alias_is_refused_when_another_provider_answers(self):
+        code, out, err, launch = self._run(
+            ["call"],
+            "fireworks",
+            "glm-5p3",
+            "--model",
+            "glm",
+            "--continuity-mode",
+            "pinned",
+            aliases=_GLM_ALIAS,
+        )
+
+        self.assertIsNotNone(launch["overlay"])
+        self.assertNotEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        self.assertIn("requested glm", payload["message"])
+        self.assertIn("fireworks/glm-5p3", payload["message"])
 
     def test_call_launches_omp_with_the_failover_overlay_file(self):
         code, out, err, launch = self._run(
@@ -506,6 +552,9 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "opencode-go")
         self.assertEqual(payload["servedModel"], "glm-5.3")
+        # The stream named the served model, so the pin was checked: the call
+        # must not claim it could not verify one.
+        self.assertNotIn("pinned_continuity_unverified", json.dumps(payload.get("warnings")))
 
     def test_call_with_the_fungible_opt_in_leaves_omp_failover_alone(self):
         code, _out, err, launch = self._run(
@@ -522,16 +571,99 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         self.assertNotIn("--config", launch["argv"])
         self.assertIsNone(launch["overlay"])
 
-    def test_call_names_the_provider_that_answered_when_it_differs(self):
-        # The overlay is the prevention; if a child answers from another provider
-        # anyway, the envelope has to say so rather than echo the request.
-        _code, out, _err, _launch = self._run(
+    def test_a_pinned_call_is_refused_when_another_provider_answers(self):
+        # The overlay is the prevention; if a child exits 0 while its stream says
+        # another provider answered anyway, the call is refused with the code a
+        # tracked pinned run uses, not returned as a success.
+        code, out, err, _launch = self._run(
             ["call"], "fireworks", "glm-5p3", "--model", "opencode-go/glm-5.3"
         )
 
+        self.assertNotEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        self.assertEqual(payload["failureKind"], "model_continuity")
+        self.assertIn("requested opencode-go/glm-5.3", payload["message"])
+        self.assertIn("tried to serve fireworks/glm-5p3", payload["message"])
+        # And the envelope still says who answered, rather than echoing the request.
+        self.assertEqual(payload["servedProvider"], "fireworks")
+        self.assertEqual(payload["servedModel"], "glm-5p3")
+
+    def test_a_pinned_call_through_input_json_is_refused_too(self):
+        code, out, err, launch = self._run(
+            [],
+            "fireworks",
+            "glm-5p3",
+            input_json={"mode": "call", "model": "opencode-go/glm-5.3"},
+        )
+
+        self.assertIsNotNone(launch["overlay"])
+        self.assertNotEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        self.assertIn("tried to serve fireworks/glm-5p3", payload["message"])
+
+    def test_a_pinned_call_refusal_prints_the_message_in_text_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = delegate_config.embedded_default_config()
+            cfg["omp"]["binary"] = str(self._fake_omp(root, "fireworks", "glm-5p3"))
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(request_build, "load_config", return_value=(cfg, "fixture")),
+                mock.patch.object(harness_discovery, "load_discovery_cache", return_value=None),
+            ):
+                code = cli.main(
+                    ["omp", "call", "--model", "opencode-go/glm-5.3", "Fixture prompt"],
+                    stdout=out,
+                    stderr=err,
+                )
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("tried to serve fireworks/glm-5p3", err.getvalue())
+        self.assertNotIn("the answer", out.getvalue())
+
+    def test_a_fungible_call_names_the_provider_that_answered_when_it_differs(self):
+        code, out, err, _launch = self._run(
+            ["call"],
+            "fireworks",
+            "glm-5p3",
+            "--model",
+            "opencode-go/glm-5.3",
+            "--continuity-mode",
+            "fungible",
+        )
+
+        self.assertEqual(code, 0, err)
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "fireworks")
         self.assertEqual(payload["servedModel"], "glm-5p3")
+        self.assertIn("served fireworks/glm-5p3", json.dumps(payload["warnings"]))
+
+    # -- the grouped call a workflow agent() launches is a tracked run -----------
+
+    def test_a_grouped_call_with_a_typed_id_is_refused_like_a_tracked_run(self):
+        code, out, err, launch = self._run(
+            ["call"], "fireworks", "glm-5p3", "--model", "opencode-go/glm-5.3", group="wf-1"
+        )
+
+        self.assertIsNotNone(launch["overlay"])
+        self.assertNotEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        self.assertIn("fireworks/glm-5p3", payload["message"])
+
+    def test_a_grouped_call_with_an_alias_keeps_failover_and_warns(self):
+        code, out, err, launch = self._run(
+            ["call"], "fireworks", "glm-5p3", "--model", "glm", aliases=_GLM_ALIAS, group="wf-1"
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("--config", launch["argv"])
+        self.assertEqual(json.loads(out)["servedProvider"], "fireworks")
+        self.assertIn("model_substitution", launch["report"])
+        self.assertIn("fireworks/glm-5p3", launch["report"])
 
     def test_a_retired_alias_fails_before_anything_launches(self):
         cfg = delegate_config.embedded_default_config()

@@ -144,8 +144,9 @@ but omp tried to serve fireworks/glm-5p3` means the run named an explicit
 provider and OMP moved it to another one anyway. A `provider/model` you typed
 yourself is pinned by default and launches with OMP's own retry failover
 switched off, so this is rare; an alias or `defaultModel` is not pinned unless
-you named `--continuity-mode pinned`. When it happens the run is stopped and its
-output is not the requested model's. To allow failover on purpose, rerun with
+you named `--continuity-mode pinned`. When it happens the run (or, for `delegate
+omp call`, the call, even if the child exited 0) is stopped and its output is
+not the requested model's. To allow failover on purpose, rerun with
 `--continuity-mode fungible`; the record then carries a `model_substitution`
 warning naming the provider that answered.
 
