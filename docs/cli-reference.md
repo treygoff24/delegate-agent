@@ -675,6 +675,10 @@ delegate [--json] workflow save <script.py> --name NAME
   command, for example `delegate --cwd /path/to/workspace workflow kill wf_...`.
   A workflow id found in several workspaces is listed, never guessed, and an id
   found nowhere keeps the plain `workflow_not_found` error.
+- `status` on a paused workflow adds `pause` (gate key, name, title, assignee,
+  declared actions, last failure, latest `agent_rejected` reason, `summary`, and
+  the `next` command); any status adds `timeouts` when agents timed out. See
+  `docs/delegate-workflows.md` (Reading a stopped workflow).
 - `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
   status record. It overrides `--json` buffering; ordinary `--json` still returns
   the existing single envelope. A successful watch observes the workflow; inspect
@@ -780,12 +784,12 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
 | `workflow_execution_failed` | Dry-run (or in-process) execution raised before detach. |
-| `workflow_locked` | Another supervisor already holds the workflow flock. |
+| `workflow_locked` | Another supervisor already holds the workflow flock. On `approve` the message adds that the workflow is still running and its gate is not open yet, and names `workflow wait`. |
 | `repin_children_running` | `--repin` was refused because a child run of the workflow is still running; the message names them. |
 | `invalid_option_combination` | `--repin` on a new run (it applies only to a resume) or together with `--dry-run`. |
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_gate_not_found` | `approve --gate KEY` names no unapproved gate; the message lists pending gates. |
-| `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
+| `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. The message names the status and, for failed, killed, or stalled workflows, the last failure and `delegate workflow resume <wfId>`. |
 | `workflow_reject_unresolved` | Rejection target does not resolve to one agent key. |
 | `workflow_running` | Rejection was refused because the supervisor is running or locked. |
 | `workflow_result_missing` | `result` before `result.json` exists. |
