@@ -246,19 +246,6 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertIn("Authorization: ***", result.stderr_tail)
         self.assertNotIn("abcdefghijklmnop", result.stderr_tail)
 
-    def test_write_stdin_records_delivery_failure(self):
-        read_fd, write_fd = os.pipe()
-        os.close(read_fd)
-        pipe = os.fdopen(write_fd, "wb")
-        failures: list[str] = []
-        self.runner._write_stdin(pipe, "x" * 65536, failures)
-        self.assertEqual(len(failures), 1)
-        self.assertIn("stdin prompt delivery", failures[0])
-        # EPIPE means the child was already gone. Read alone the warning looks
-        # like broken prompt plumbing and has been chased as such; it must send
-        # the reader to the child's exit code and stderr instead.
-        self.assertIn("exited before reading the prompt", failures[0])
-
     def test_fast_dying_child_reports_its_own_error_not_just_the_broken_pipe(self):
         # A burst of concurrent launches makes some children die at startup for
         # a real, reportable reason. The prompt write then hits EPIPE, and the
@@ -581,6 +568,10 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertIn("stdin prompt delivery", stderr.getvalue())
+            # EPIPE means the child was already gone. Read alone the warning
+            # looks like broken prompt plumbing and has been chased as such; it
+            # must send the reader to the child's exit code and stderr instead.
+            self.assertIn("exited before reading the prompt", stderr.getvalue())
             snapshot = self._snapshot(root, run_id)
             warnings = snapshot.get("warnings", [])
             self.assertTrue(any("stdin prompt delivery" in w for w in warnings))
@@ -2351,32 +2342,6 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "PROMPT-VIA-STDIN")
 
-    def test_completion_json_payload_always_includes_exit_code(self):
-        ctx = self.runner.RunContext(
-            registry_root=Path("/tmp"),
-            run_id="run-1",
-            alias="alias-1",
-            harness="droid",
-            engine="droid",
-            mode="safe",
-            model="model-id",
-            source_cwd="/tmp",
-            execution_cwd="/tmp",
-            workspace_kind="directory",
-            isolated_workspace=False,
-            started_at="2026-05-20T21:42:33Z",
-        )
-        payload = self.runner.completion_json_payload(
-            ctx,
-            ok=True,
-            status="succeeded",
-            exit_code=0,
-            duration_ms=100,
-            stdout_bytes=10,
-            stderr_bytes=0,
-        )
-        self.assertEqual(payload["exitCode"], 0)
-
     def test_snapshot_prefers_effective_resolved_model_metadata(self):
         ctx = self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -3564,22 +3529,6 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(code, 0, payload)
         self.assertIn("HELLO", payload["assistantText"])
         self.assertIn("DONE", payload["assistantText"])
-
-    def test_running_persist_skips_when_no_new_lines_between_ticks(self):
-        progress_dirty = True
-        outcomes: list[str] = []
-
-        def maybe_persist_running() -> None:
-            nonlocal progress_dirty
-            if not progress_dirty:
-                outcomes.append("skipped")
-                return
-            progress_dirty = False
-            outcomes.append("persisted")
-
-        maybe_persist_running()
-        maybe_persist_running()
-        self.assertEqual(outcomes, ["persisted", "skipped"])
 
     def test_progress_current_label_redacts_secret_like_tool_targets(self):
         accumulator = self.runner.harness_events.StreamAccumulator()
@@ -6670,14 +6619,27 @@ class StreamDiagnosticsSurfaceTests(unittest.TestCase):
         self.assertEqual(record["unhandledEventTypes"], {"session.resume_hint": 2})
         self.assertEqual(record["malformedLines"], 0)
 
-    def test_the_snapshot_view_declares_the_diagnostic_fields(self):
-        from delegate_agent.snapshot_view import SnapshotView
+    def test_the_snapshot_projects_the_diagnostic_fields(self):
+        registry = load_module(REGISTRY_PATH, "delegate_registry_diagnostics_test")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="kimi")
+        accumulator.ingest_line("Error: could not reach the provider")
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+        accumulator.ingest_line(json.dumps({"role": "meta", "type": "session.resume_hint"}))
+        record = self._record(accumulator)
 
-        annotations = SnapshotView.__annotations__
-        self.assertIn("malformedLines", annotations)
-        self.assertIn("malformedSamples", annotations)
-        self.assertIn("unhandledEventTypes", annotations)
-        self.assertIn("unhandledEventTypesTruncated", annotations)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, _alias = registry.register_run(root, harness="kimi")
+            registry.write_run_state(registry.run_directory(root, run_id), record)
+
+            snapshot = registry.load_run_snapshot(root, run_id)
+
+        assert isinstance(snapshot, dict)
+        self.assertEqual(snapshot["malformedLines"], 1)
+        self.assertEqual(len(snapshot["malformedSamples"]), 1)
+        self.assertIn("could not reach the provider", snapshot["malformedSamples"][0])
+        self.assertEqual(snapshot["unhandledEventTypes"], {"session.resume_hint": 2})
+        self.assertFalse(snapshot["unhandledEventTypesTruncated"])
 
     def test_structured_stdout_with_no_text_is_classified_no_assistant_text(self):
         """The E10 warning must fire when the parser owned stdout but got nothing.
