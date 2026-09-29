@@ -69,7 +69,7 @@ class AcceptanceToolchainTests(unittest.TestCase):
                 make_tool(root / ".venv/bin/pytest", "project-pytest", exit_code=pytest_exit)
             env = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "TRACE": str(trace)}
             result = subprocess.run(
-                ["/bin/sh", str(root / "tests/acceptance.sh")],
+                ["/bin/sh", str(root / "tests/acceptance.sh"), "--workers", "4"],
                 cwd=directory,
                 env=env,
                 capture_output=True,
@@ -135,7 +135,7 @@ class AcceptanceToolchainTests(unittest.TestCase):
             (tools / "dirname").symlink_to(dirname)
             env = {**os.environ, "PATH": str(tools), "TRACE": str(trace)}
             result = subprocess.run(
-                ["/bin/sh", str(root / "tests/acceptance.sh")],
+                ["/bin/sh", str(root / "tests/acceptance.sh"), "--workers", "4"],
                 cwd=directory,
                 env=env,
                 capture_output=True,
