@@ -447,7 +447,7 @@ def _render_tri_state_flag(label: str, value: object, stdout: TextIO) -> None:
 def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
     entries = payload.get("entries")
     print(
-        "alias        status   harness  age      branch                                      dirty branch-merged integrated",
+        "alias        status   harness  idle     branch                                      dirty branch-merged integrated",
         file=stdout,
     )
     if isinstance(entries, list):
