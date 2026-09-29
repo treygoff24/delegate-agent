@@ -86,6 +86,81 @@ class WaitingTextTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertIsNotNone(degraded.waiting_on_unfinished_work(text), text)
 
+    def test_quoted_or_code_text_is_not_the_childs_own_waiting(self):
+        for text in (
+            'Finished: the tool printed "Waiting on the gate." and exited zero.',
+            "Finished. The tool printed \u201cWaiting on the gate.\u201d and exited zero.",
+            "Finished: the log line `The suite is still running` was from an old run.",
+            "Finished.\n```\nWaiting on the gate.\n```\nThat was the tool output.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_a_real_wait_beside_a_quote_is_still_flagged(self):
+        text = 'The tool printed "done". Waiting on the gate.'
+        self.assertIsNotNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_waiting_on_a_third_partys_independent_result_is_not_unfinished_work(self):
+        for text in (
+            "Done. Waiting for CI to post its independent result.",
+            "All checks pass locally. I'll wait for the reviewer to finish.",
+            "Finished. Waiting on upstream to release the fix.",
+            "Done. Waiting on the design decision.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_each_third_party_marker_alone_excludes_a_wait_that_would_otherwise_match(self):
+        # "to finish" would make each of these the child's own work; only the named
+        # third party says otherwise.
+        for who in (
+            "CI",
+            "the reviewers",
+            "a reviewer",
+            "the review",
+            "a maintainer",
+            "the humans",
+            "upstream",
+            "a third-party service",
+            "an independent service",
+            "an external service",
+            "someone",
+            "somebody",
+            "my teammates",
+            "the owner",
+        ):
+            with self.subTest(who=who):
+                self.assertIsNone(
+                    degraded.waiting_on_unfinished_work(f"Waiting on {who} to finish.")
+                )
+
+    def test_each_kind_of_own_work_target_alone_makes_a_wait_the_childs_own(self):
+        for text in (
+            "Waiting on the gate.",
+            "Waiting on the suite.",
+            "Waiting on the build.",
+            "Waiting on it to finish.",
+            "Waiting on it to complete.",
+            "Waiting on them to be done.",
+            "Waiting on the thing to return.",
+            "Waiting on the thing to land.",
+            "Waiting on the thing to exit.",
+            "Waiting on the harness to wake me.",
+            "Waiting on the harness to notify me.",
+            "Waiting on the harness to ping me.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNotNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_waiting_on_a_job_the_child_ran_is_still_flagged_after_a_done_claim(self):
+        for text in (
+            "Tests pass. Waiting on the gate.",
+            "Done with the code. I'll wait for the build to finish.",
+            "Committed. I'll wait for the harness to wake me.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNotNone(degraded.waiting_on_unfinished_work(text))
+
     def test_each_waiting_pattern_family_is_exercised_by_a_message_only_it_matches(self):
         # The real fixtures above overlap (a message that says "still running" and
         # "will wake me" is caught by two patterns), so a dead pattern could hide.
@@ -124,6 +199,18 @@ class WaitingTextTests(unittest.TestCase):
             with self.subTest(text):
                 self.assertIsNone(degraded.waiting_on_unfinished_work(text))
 
+    def test_waiting_on_the_requester_to_approve_a_job_is_not_flagged(self):
+        # Each names a job the child would run, so only the requester guard (not the
+        # own-work target) keeps these out.
+        for text in (
+            "Waiting on your go-ahead to run the gate.",
+            "Waiting for approval to start the build.",
+            "I'll wait for the operator's confirmation to run the suite.",
+            "I'll wait for you to finish reviewing the build.",
+        ):
+            with self.subTest(text):
+                self.assertIsNone(degraded.waiting_on_unfinished_work(text))
+
     def test_denials_are_not_flagged(self):
         for text in (
             "Done. There is no need to wait on the gate; it already passed.",
@@ -134,7 +221,11 @@ class WaitingTextTests(unittest.TestCase):
                 self.assertIsNone(degraded.waiting_on_unfinished_work(text))
 
     def test_a_short_report_shaped_message_is_not_flagged(self):
-        text = "**Status:** done.\n- Fixed the parser.\n- Waiting on CI for the mirror only."
+        # The last bullet alone is a flaggable wait; the finished-report shape around
+        # it is what keeps the message out.
+        bullet = "- Waiting on the gate for the mirror only."
+        self.assertIsNotNone(degraded.waiting_on_unfinished_work(bullet))
+        text = f"**Status:** done.\n- Fixed the parser.\n{bullet}"
         self.assertIsNone(degraded.waiting_on_unfinished_work(text))
 
     def test_a_long_message_is_never_flagged_even_if_it_says_waiting(self):

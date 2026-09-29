@@ -398,3 +398,4 @@ class EngineBuildInput:
     persist_session: bool = False
     resumable: bool = False
     resume_session_id: str | None = None
+    timeout_seconds: int | None = None

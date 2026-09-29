@@ -54,17 +54,32 @@ _NOT_REQUESTER = (
     r"(?!\s+(?:your|you\b|the\s+user|the\s+operator|the\s+parent|the\s+maintainer|"
     r"approval|confirmation|a\s+decision|an\s+answer|input|a\s+reply|review\b|feedback))"
 )
-_JOB = (
-    r"(?:suite|suites|gate|tests?|build|builds|run|runs|job|jobs|checks?|enumeration|"
-    r"process|scan|lint|verify|pytest|ci|compile|deploy|migration|import|sweep|replay)"
+_JOB_WORDS = (
+    r"suite|suites|gate|tests?|build|builds|run|runs|job|jobs|checks?|enumeration|"
+    r"process|scan|lint|verify|pytest|compile|deploy|migration|import|sweep|replay"
+)
+_JOB = r"(?:" + _JOB_WORDS + r")"
+# "Waiting on X" describes the child's own unfinished work only when X is a job it
+# ran (or something completing, or the harness waking it), never a third party's
+# independent result: `Done. Waiting for CI to post its independent result.` is a
+# finished child handing off, not an abandoned gate.
+_OWN_WORK = (
+    r"(?=[^.;\n]{0,80}?\b(?:" + _JOB_WORDS + r"|finish(?:es|ed)?|complete[sd]?|done|returns?|"
+    r"lands?|exits?|wake|notify|ping)\b)"
+    r"(?![^.;\n]{0,80}?\b(?:ci|reviewers?|reviews?|maintainers?|humans?|upstream|third[- ]party|"
+    r"independent(?:ly)?|external(?:ly)?|someone|somebody|teammates?|owner)\b)"
 )
 
 _WAITING_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "Waiting on the full gate." / "Monitor armed; waiting for both suites".
-    re.compile(r"\bwaiting\s+(?:on|for)\b" + _NOT_REQUESTER, _I),
+    re.compile(r"\bwaiting\s+(?:on|for)\b" + _NOT_REQUESTER + _OWN_WORK, _I),
     # Possessive "(on|for)" so backtracking cannot skip it and defeat the requester guard.
     re.compile(
-        r"\b(?:" + _I_WILL + r"|let me|going to)\s+wait\b(?:\s+(?:on|for))?+" + _NOT_REQUESTER,
+        r"\b(?:"
+        + _I_WILL
+        + r"|let me|going to)\s+wait\b(?:\s+(?:on|for))?+"
+        + _NOT_REQUESTER
+        + _OWN_WORK,
         _I,
     ),
     # "The full suite is still running": a job noun near "still running".
@@ -103,6 +118,10 @@ _NEGATION = re.compile(
     r"(?:\w+\W+){0,3}$",
     re.IGNORECASE,
 )
+
+# What a child quotes (a tool's output, a log line, a code span) is not its own
+# statement: `the tool printed "Waiting on the gate."` reports on another program.
+_QUOTED = re.compile(r"```.*?```|`[^`\n]*`|\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d", re.DOTALL)
 
 _STATUS_LINE = re.compile(
     r"^\W*(?:status|verdict)\W*(?:\w+\W+){0,2}?(?:completed?|done|failed|blocked|passed|ok)\b",
@@ -188,9 +207,11 @@ def waiting_on_unfinished_work(text: str | None) -> str | None:
     stripped = text.strip()
     if not stripped or len(stripped) > WAITING_TEXT_MAX_CHARS or is_report_shaped(stripped):
         return None
+    # Same length as the message, so match offsets index the original text too.
+    own = _QUOTED.sub(lambda quoted: " " * len(quoted.group()), stripped)
     for pattern in _WAITING_PATTERNS:
-        for match in pattern.finditer(stripped):
-            if _NEGATION.search(stripped[max(0, match.start() - 40) : match.start()]):
+        for match in pattern.finditer(own):
+            if _NEGATION.search(own[max(0, match.start() - 40) : match.start()]):
                 continue
             return _clause(stripped, match.start(), match.end())
     return None

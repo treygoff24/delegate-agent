@@ -1452,7 +1452,10 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
   unfinished work ("Waiting on the gate.", "The suite is still running; I'll
   commit when it finishes."). Checked for every engine's tracked Run. A long or
   report-shaped final message never matches, and neither does waiting on the
-  requester ("waiting on your answer") or a denial ("no need to wait"). Schema-bound
+  requester ("waiting on your answer"), a denial ("no need to wait"), text the
+  child quotes (a tool's output in quotation marks, backticks, or a code fence),
+  or waiting on a third party's independent result ("Done. Waiting for CI to post
+  its result"): the wait has to be on a job the child ran. Schema-bound
   (`--output-schema`) Runs are not text-checked.
 - `background_work_unfinished_at_exit`: Claude Code's `background_tasks_changed`
   stream event still listed a running task when the turn's `result` event arrived,
@@ -1463,8 +1466,14 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
 Prevention for Claude work Runs (and followups of them): Delegate sets
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment, which removes
 Bash `run_in_background` and the automatic backgrounding of long commands, and
-adds `--disallowedTools Monitor`. `claude.disableBackgroundTasks: false` turns
-both off. Every framed `work` and `safe` prompt also carries a two-sentence
+adds `--disallowedTools Monitor`. Because a long gate must then run in the
+foreground, and Claude Code cuts a foreground command off at 2 minutes by default
+and 10 minutes at most, Delegate also sets `BASH_DEFAULT_TIMEOUT_MS` and
+`BASH_MAX_TIMEOUT_MS` to the run's own `--timeout`, never less than two hours (a
+Run with no `--timeout` gets two hours). `claude.disableBackgroundTasks: false`
+turns all of it off. An auth profile's `env` cannot undo these variables: Delegate
+keeps its own values and adds a `profile env NAME ignored` warning when the
+profile set a different one. Every framed `work` and `safe` prompt also carries a two-sentence
 rule, just before the completion-report requirement, that ending the turn ends the
 Run and that long jobs must run in the foreground and finish before the final
 message. Verbatim slash pass-through prompts are not rewritten and do not get it.
