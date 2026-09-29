@@ -810,6 +810,10 @@ class StreamAccumulator:
     _grok_sealed_response: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
     _last_error_message: str | None = field(default=None, repr=False)
+    # The exact `current` text an error event published. While `current` still
+    # equals it, the error is what the run "is doing" only until the child starts
+    # a retry, a new turn or thinking; `_supersede_error_current` then replaces it.
+    _error_current: str | None = field(default=None, repr=False)
     # The provider's own last unrecovered error as data: status, provider code, and a
     # redacted, bounded message (provider_errors.raw_error). Cleared by a successful
     # terminal, like `_last_error_message`; the runner classifies it at finalization.
@@ -1127,6 +1131,7 @@ class StreamAccumulator:
             return
         if event_type == "turn.started":
             self._codex_completion_candidate = None
+            self._supersede_error_current("thinking")
             return
         # Anything else with a "type" reached no handler. That includes benign
         # lines such as kimi 0.26.0's {"role":"meta","type":"session.resume_hint"},
@@ -1306,6 +1311,23 @@ class StreamAccumulator:
             self._last_error_message = redact_string(message)
             self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
             self.current = _bounded_current_line(self._last_error_message)
+            self._error_current = self.current
+
+    def _supersede_error_current(self, text: str) -> None:
+        """Replace an error shown as `current` once the child moves past it.
+
+        Only an error this accumulator itself published is replaced: `current`
+        that a later text or tool event already overwrote is left alone.
+        """
+        if self._error_current is not None and self.current == self._error_current:
+            self.current = text
+        self._error_current = None
+
+    def _retry_current(self) -> str:
+        status = (self.provider_error or {}).get("status")
+        if isinstance(status, int) and not isinstance(status, bool):
+            return f"retrying after provider error ({status})"
+        return "retrying after provider error"
 
     @property
     def unrecovered_error_message(self) -> str | None:
@@ -1805,6 +1827,7 @@ class StreamAccumulator:
             return
         part_type = part.get("type")
         if event_type == "step_start" and part_type == "step-start":
+            self._supersede_error_current("thinking")
             self._reset_opencode_step_text_state()
             return
         if event_type == "text" and part_type == "text":
@@ -1899,6 +1922,7 @@ class StreamAccumulator:
         )
         if reason:
             self.current = _bounded_current_line(reason)
+            self._error_current = self.current
 
     def _reset_pi_turn_text(self) -> None:
         # A new turn starts its own published text and completion candidate. The
@@ -1927,6 +1951,11 @@ class StreamAccumulator:
 
     def _ingest_pi_event(self, payload: JsonObject, event_type: str) -> None:
         if event_type == "auto_retry_start":
+            retry = self._retry_current()
+            self._supersede_error_current(retry)
+            if self.current == retry:
+                # The retry banner is itself a placeholder the next turn replaces.
+                self._error_current = retry
             self._clear_pi_terminal()
             self._pi_recovery_error = (
                 _string_field(payload, "errorMessage")
@@ -1963,11 +1992,14 @@ class StreamAccumulator:
                 )
             return
         if event_type == "turn_start":
+            self._supersede_error_current("thinking")
             self._reset_pi_turn_text()
             self._clear_pi_terminal()
             return
         if event_type == "message_update":
             update = payload.get("assistantMessageEvent")
+            if isinstance(update, dict) and str(update.get("type", "")).startswith("thinking"):
+                self._supersede_error_current("thinking")
             if isinstance(update, dict) and update.get("type") == "text_delta":
                 delta = update.get("delta")
                 if isinstance(delta, str):
