@@ -1271,6 +1271,8 @@ def execute_request(
                         else:
                             payload["message"] = "Child command failed."
                     payload["stderrTail"] = result.stderr_tail
+                    if result.provider_error is not None:
+                        payload["providerError"] = result.provider_error
                 call_response = (exit_code, payload)
                 return call_response
             emitted_warnings: set[str] = set()

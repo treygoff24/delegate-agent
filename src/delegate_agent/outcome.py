@@ -79,6 +79,7 @@ _REASON_KINDS: dict[str, str] = {
     "usage_limit_preflight": FAILURE_PROVIDER_QUOTA,
     "auth_failed": FAILURE_PROVIDER_AUTH,
     "binding_not_active": FAILURE_PROVIDER_AUTH,
+    "broker_rejected": FAILURE_PROVIDER_AUTH,
     "provider_error": FAILURE_PROVIDER_ERROR,
     "provider_refusal": FAILURE_PROVIDER_REFUSAL,
     "provider_max_turns": FAILURE_PROVIDER_MAX_TURNS,
