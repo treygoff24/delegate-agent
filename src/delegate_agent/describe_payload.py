@@ -1376,10 +1376,12 @@ def describe_payload(
                     "Reasoning effort maps directly to omp --thinking "
                     f"({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
-                    "An explicit provider/model ID is pinned by default: omp's retry failover is switched off "
+                    "A provider/model ID you type is pinned by default: omp's retry failover is switched off "
                     "for the run and a run served by another provider fails; --continuity-mode fungible "
-                    "allows failover. A bare name that is neither an omp alias nor a catalog model ID is "
-                    "refused (invalid_alias) once a catalog exists.",
+                    "allows failover. An alias or omp.defaultModel stays fungible (multi-subscription "
+                    "failover) and only records and warns which provider answered, unless you name "
+                    "--continuity-mode pinned. A bare name that is neither an omp alias nor a catalog "
+                    "model ID is refused (invalid_alias) once a catalog exists.",
                 ],
             },
         },

@@ -8,8 +8,11 @@ Live defects behind these tests (2026-09-28):
   catalog match and ran fireworks/kimi-k3.
 
 The fixes are a launch overlay that switches omp's retry failover off, a
-`pinned` default for provider-qualified ids, and an `invalid_alias` refusal for a
-bare name that is neither a configured alias nor a real catalog id.
+`pinned` default for a provider/model id the caller typed, and an `invalid_alias`
+refusal for a bare name that is neither a configured alias nor a real catalog id.
+A delegate alias (a key of `omp.models`) and `omp.defaultModel` stay fungible
+even though their targets carry a provider: aliases are how the fleet gets
+failover across subscriptions.
 """
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
 
 OVERLAY_PLACEHOLDER = prompt_transport.OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER
+# The loaded config validates alias objects, so the fixture names a thinking level.
+_GLM_ALIAS = {"glm": {"model": "opencode-go/glm-5.3", "thinking": "low"}}
 
 
 def _catalog(*selectors):
@@ -101,17 +106,59 @@ class OmpProviderPinRequestTests(CommandTestBase):
         self.assertEqual(request.continuity_mode, "pinned")
         self.assertIn("--config", request.argv)
 
-    def test_an_alias_that_resolves_to_a_provider_id_is_pinned(self):
+    def test_a_typed_id_in_the_positional_slot_is_pinned_like_a_flag_id(self):
+        request = self._request(None, alias="opencode-go/glm-5.3")
+        self.assertEqual(request.continuity_mode, "pinned")
+        self.assertEqual(request.argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
+
+    # -- aliases and the configured default keep multi-subscription failover ---
+
+    def test_an_alias_with_a_provider_target_stays_fungible(self):
+        # Every live alias points at a provider/model target, and aliases are how
+        # the fleet gets failover across subscriptions: no overlay, no refusal.
         config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
         request = self._request("builder", config=config)
         self.assertEqual(request.model, "openai-codex/gpt-5.6-sol")
-        self.assertEqual(request.continuity_mode, "pinned")
-        self.assertIn("--config", request.argv)
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertNotIn("--config", request.argv)
+        self.assertIsNone(request.agent_config_text)
 
-    def test_the_positional_alias_form_is_pinned_too(self):
+    def test_the_positional_alias_form_stays_fungible_too(self):
         config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
         request = self._request(None, config=config, alias="builder")
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertNotIn("--config", request.argv)
+
+    def test_an_alias_key_wins_over_the_raw_id_reading(self):
+        # A key of omp.models is an alias even when it looks like provider/model,
+        # exactly as it is when the model is resolved.
+        config = _config_with_aliases(**{"opencode-go/glm-5.3": "fireworks/glm-5p3"})
+        request = self._request("opencode-go/glm-5.3", config=config)
+        self.assertEqual(request.model, "fireworks/glm-5p3")
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertNotIn("--config", request.argv)
+
+    def test_the_configured_default_model_stays_fungible(self):
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
+        config["omp"]["defaultModel"] = "opencode-go/glm-5.3"
+        request = self._request(None, config=config)
+        self.assertEqual(request.model, "opencode-go/glm-5.3")
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertNotIn("--config", request.argv)
+        self.assertIsNone(request.agent_config_text)
+
+    def test_naming_pinned_on_an_alias_still_pins_it(self):
+        config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
+        request = self._request("builder", config=config, continuity_mode="pinned")
         self.assertEqual(request.continuity_mode, "pinned")
+        self.assertEqual(request.argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
+        self.assertIsNotNone(request.agent_config_text)
+
+    def test_naming_pinned_on_the_configured_default_still_pins_it(self):
+        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
+        config["omp"]["defaultModel"] = "opencode-go/glm-5.3"
+        request = self._request(None, config=config, continuity_mode="pinned")
+        self.assertEqual(request.argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
 
     # -- the opt-in: naming a mode allows failover ----------------------------
 
@@ -226,20 +273,25 @@ class OmpProviderPinRequestTests(CommandTestBase):
         )
 
     def test_the_input_json_path_defaults_the_same_way(self):
+        # This is also the path a workflow agent(model=...) takes: a literal
+        # provider/model is pinned, an alias is not.
+        config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
         with tempfile.TemporaryDirectory() as tmp:
-            for extra, expected in (
-                ({}, "pinned"),
-                ({"continuityMode": "fungible"}, "fungible"),
-                ({"continuityMode": "pinned"}, "pinned"),
+            for model, extra, expected in (
+                ("opencode-go/glm-5.3", {}, "pinned"),
+                ("opencode-go/glm-5.3", {"continuityMode": "fungible"}, "fungible"),
+                ("opencode-go/glm-5.3", {"continuityMode": "pinned"}, "pinned"),
+                ("builder", {}, "fungible"),
+                ("builder", {"continuityMode": "pinned"}, "pinned"),
             ):
-                with self.subTest(extra=extra):
+                with self.subTest(model=model, extra=extra):
                     task = Path(tmp) / "task.json"
                     task.write_text(
                         json.dumps(
                             {
                                 "engine": "omp",
                                 "mode": "work",
-                                "model": "opencode-go/glm-5.3",
+                                "model": model,
                                 "cwd": tmp,
                                 "prompt": "hello",
                                 **extra,
@@ -254,9 +306,7 @@ class OmpProviderPinRequestTests(CommandTestBase):
                     with mock.patch.object(
                         harness_discovery, "load_discovery_cache", return_value=None
                     ):
-                        request = request_build.request_from_input_json(
-                            parsed, delegate_config.embedded_default_config()
-                        )
+                        request = request_build.request_from_input_json(parsed, config)
                     self.assertEqual(request.continuity_mode, expected)
                     self.assertEqual("--config" in request.argv, expected == "pinned")
 
@@ -320,10 +370,21 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         executable.chmod(0o755)
         return executable
 
-    def _run(self, subcommand: list[str], provider: str, model: str, *extra: str):
+    def _run(
+        self,
+        subcommand: list[str],
+        provider: str,
+        model: str,
+        *extra: str,
+        aliases: dict | None = None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cfg = delegate_config.embedded_default_config()
+            cfg = (
+                _config_with_aliases(**aliases)
+                if aliases
+                else delegate_config.embedded_default_config()
+            )
             cfg["omp"]["binary"] = str(self._fake_omp(root, provider, model))
             out, err = io.StringIO(), io.StringIO()
             # `call` runs in the process cwd and refuses --cwd; a tracked run
@@ -338,7 +399,17 @@ class OmpPinnedLaunchTests(unittest.TestCase):
                     stdout=out,
                     stderr=err,
                 )
-            launch = json.loads((root / "launch.json").read_text(encoding="utf-8"))
+            record = root / "launch.json"
+            self.assertTrue(
+                record.exists(), f"omp never launched: {out.getvalue()} {err.getvalue()}"
+            )
+            launch = json.loads(record.read_text(encoding="utf-8"))
+            # The substitution warning is delegate-authored text in the run's
+            # completion report, which lives in the workspace removed below.
+            launch["report"] = ""
+            report_path = json.loads(out.getvalue() or "{}").get("completionReportPath")
+            if report_path and (root / report_path).exists():
+                launch["report"] = (root / report_path).read_text(encoding="utf-8")
             return code, out.getvalue(), err.getvalue(), launch
 
     def test_a_tracked_run_gets_the_overlay_file_and_refuses_a_swap(self):
@@ -367,6 +438,56 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "opencode-go")
         self.assertEqual(payload["continuityMode"], "pinned")
+
+    def test_a_tracked_alias_run_keeps_failover_and_names_the_provider_that_answered(self):
+        # An alias carries multi-subscription failover: omp's retry chain stays on,
+        # a cross-provider serve is not refused, and the run says who answered.
+        code, out, err, launch = self._run(
+            ["work"], "fireworks", "glm-5p3", "--model", "glm", aliases=_GLM_ALIAS
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("--config", launch["argv"])
+        self.assertIsNone(launch["overlay"])
+        payload = json.loads(out)
+        self.assertEqual(payload["continuityMode"], "fungible")
+        self.assertEqual(payload["servedProvider"], "fireworks")
+        self.assertEqual(payload["servedModel"], "glm-5p3")
+        # Visibility without refusal: the report names the provider that answered.
+        self.assertIn("model_substitution", launch["report"])
+        self.assertIn("fireworks/glm-5p3", launch["report"])
+
+    def test_a_tracked_alias_run_with_pinned_named_gets_the_overlay_and_refuses_a_swap(self):
+        code, out, err, launch = self._run(
+            ["work"],
+            "fireworks",
+            "glm-5p3",
+            "--model",
+            "glm",
+            "--continuity-mode",
+            "pinned",
+            aliases=_GLM_ALIAS,
+        )
+
+        self.assertEqual(
+            json.loads(launch["overlay"]),
+            {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+        )
+        self.assertNotEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        self.assertIn("fireworks/glm-5p3", payload["message"])
+
+    def test_call_with_an_alias_leaves_failover_alone_and_names_the_provider(self):
+        code, out, err, launch = self._run(
+            ["call"], "fireworks", "glm-5p3", "--model", "glm", aliases=_GLM_ALIAS
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("--config", launch["argv"])
+        payload = json.loads(out)
+        self.assertEqual(payload["servedProvider"], "fireworks")
+        self.assertEqual(payload["servedModel"], "glm-5p3")
 
     def test_call_launches_omp_with_the_failover_overlay_file(self):
         code, out, err, launch = self._run(
@@ -531,6 +652,20 @@ class ModelDiscoveryHelperTests(unittest.TestCase):
         ):
             with self.subTest(selector=selector):
                 self.assertIs(model_discovery.is_provider_qualified(selector), expected)
+
+    def test_is_explicit_provider_id_is_a_typed_id_that_is_not_an_alias_key(self):
+        aliases = {"glm": {"model": "opencode-go/glm-5.3"}, "acme/fast": {"model": "x/y"}}
+        explicit = model_discovery.is_explicit_provider_id
+        self.assertTrue(explicit("opencode-go/glm-5.3", aliases))
+        self.assertTrue(explicit("gateway/acme/model-pro", {}))
+        self.assertTrue(explicit("opencode-go/glm-5.3", None))
+        # An alias key wins even when it looks like provider/model.
+        self.assertFalse(explicit("acme/fast", aliases))
+        # Neither an alias name nor a bare token is a typed provider id.
+        self.assertFalse(explicit("glm", aliases))
+        self.assertFalse(explicit("glm-5.3", aliases))
+        self.assertFalse(explicit(None, aliases))
+        self.assertFalse(explicit("", aliases))
 
     def test_catalog_display_name_reads_only_the_named_engine_and_selector(self):
         discovery = {
