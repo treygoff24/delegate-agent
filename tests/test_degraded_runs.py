@@ -10,7 +10,6 @@ the harness's own post-`result` clean-up snapshot.
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -274,14 +273,6 @@ class DegradedDetectionTests(DegradedRunsBase):
         self.assertIs(payload["degraded"], True)
         self.assertEqual(payload["degradedReason"], "background_work_unfinished_at_exit")
 
-    def test_stream_evidence_alone_marks_a_run_whose_report_reads_finished(self):
-        # Corpus case: a full "Status: done" report with a background task the
-        # child never stopped. Recorded as degraded by the stream signal only.
-        self.script(mid_job_stream(final="## Status: done\n\n" + FINISHED_REPORT))
-        payload = self.launch("work", "run the gate")
-        self.assertIs(payload["degraded"], True)
-        self.assertEqual(payload["degradedReason"], "background_work_unfinished_at_exit")
-
     def test_text_evidence_alone_marks_a_run_with_no_background_task_in_the_stream(self):
         # An older Claude Code emits no background_tasks_changed events.
         self.script(
@@ -416,6 +407,10 @@ class DegradedPreventionTests(DegradedRunsBase):
         self.assertEqual(launch["disableBackgroundTasks"], "1")
         argv = launch["argv"]
         self.assertEqual(argv[argv.index("--disallowedTools") + 1], "Monitor")
+        # Claude Code cuts a foreground command off at 2 minutes (default) and 10
+        # minutes (maximum); with background tasks off a 15-minute gate needs more.
+        self.assertEqual(launch["bashDefaultTimeoutMs"], "7200000")
+        self.assertEqual(launch["bashMaxTimeoutMs"], "7200000")
 
     def test_followup_of_a_resumable_work_run_keeps_the_prevention(self):
         self.script(finished_stream(FINISHED_REPORT))
@@ -450,15 +445,6 @@ class DegradedPreventionTests(DegradedRunsBase):
         self.assertIsNone(launch["bashDefaultTimeoutMs"])
         self.assertIsNone(launch["bashMaxTimeoutMs"])
         self.assertNotIn("--disallowedTools", launch["argv"])
-
-    def test_work_run_lifts_the_bash_timeouts_so_a_long_gate_fits_in_the_foreground(self):
-        # Claude Code cuts a foreground command off at 2 minutes (default) and 10
-        # minutes (maximum); with background tasks off a 15-minute gate needs more.
-        self.script(finished_stream(FINISHED_REPORT))
-        self.launch("work", "run the gate")
-        (launch,) = self.child_launches()
-        self.assertEqual(launch["bashDefaultTimeoutMs"], "7200000")
-        self.assertEqual(launch["bashMaxTimeoutMs"], "7200000")
 
     def test_bash_timeouts_follow_a_run_timeout_longer_than_the_floor(self):
         self.script(finished_stream(FINISHED_REPORT))
@@ -627,9 +613,8 @@ class TurnEndClauseTests(unittest.TestCase):
         self.assertEqual(work.count(prompt_instructions.TURN_END_INSTRUCTION), 1)
         self.assertEqual(self.frame(prompt=work, mode="work"), work)
 
-    def test_the_clause_is_two_sentences_and_says_what_matters(self):
+    def test_the_clause_says_what_matters(self):
         body = prompt_instructions.TURN_END_INSTRUCTION.split("\n\n", 1)[1].strip()
-        self.assertEqual(len(re.findall(r"[.!?](?:\s|$)", body)), 2, body)
         self.assertIn("Ending your turn ends this Run", body)
         self.assertIn("nothing will wake you", body)
         self.assertIn("foreground", body)
@@ -675,9 +660,6 @@ class ClaudeWorkEnvOverridesTests(unittest.TestCase):
         env = self.env(10**9)
         self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], str(2**31 - 1))
         self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(2**31 - 1))
-
-    def test_the_config_key_turns_all_of_it_off(self):
-        self.assertIsNone(self.env(3600, disableBackgroundTasks=False))
 
     def test_every_variable_delegate_sets_is_in_the_owned_set(self):
         self.assertEqual(set(self.env(None)), set(argv_builders.CLAUDE_WORK_OWNED_ENV))

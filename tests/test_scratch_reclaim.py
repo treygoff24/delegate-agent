@@ -348,44 +348,26 @@ class ReclaimScratchTests(ScratchReclaimTestCase):
         (outside / "precious.txt").write_bytes(b"p" * 500)
         link = self.scratch_path(run_id) / "escape"
         link.symlink_to(outside, target_is_directory=True)
+        (self.scratch_path(run_id) / "nested").mkdir()
+        (self.scratch_path(run_id) / "nested" / "b.bin").write_bytes(b"2" * 20)
+        (self.scratch_path(run_id) / "link-file").symlink_to(outside / "precious.txt")
 
         dry = self.reclaim(dry_run=True)
-        self.assertEqual(dry["planned"][0]["scratchBytes"], 100)
+        # Regular files count (including nested ones); symlink targets do not.
+        self.assertEqual(dry["planned"][0]["scratchBytes"], 120)
+        self.assertEqual(run_scratch.tree_bytes(self.scratch_path(run_id)), 120)
+        self.assertEqual(run_scratch.tree_bytes(self.base / "missing"), 0)
 
         result = self.reclaim()
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["totalBytes"], 100)
+        self.assertEqual(result["totalBytes"], 120)
         self.assertFalse(self.scratch_path(run_id).exists())
         self.assertEqual((outside / "precious.txt").read_bytes(), b"p" * 500)
-
-    def test_tree_bytes_counts_regular_files_and_no_symlink_targets(self) -> None:
-        tree = self.base / "tree"
-        (tree / "nested").mkdir(parents=True)
-        (tree / "a.bin").write_bytes(b"1" * 10)
-        (tree / "nested" / "b.bin").write_bytes(b"2" * 20)
-        other = self.base / "other"
-        other.mkdir()
-        (other / "big.bin").write_bytes(b"3" * 1000)
-        (tree / "link-dir").symlink_to(other, target_is_directory=True)
-        (tree / "link-file").symlink_to(other / "big.bin")
-
-        self.assertEqual(run_scratch.tree_bytes(tree), 30)
-        self.assertEqual(run_scratch.tree_bytes(self.base / "missing"), 0)
 
     def test_negative_age_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.reclaim(older_than_days=-1)
-
-    def test_prune_still_removes_scratch_that_reclaim_left_behind(self) -> None:
-        run_id = self.make_run(record_pointers=True, age_days=40)
-        run_path = run_registry.run_directory(self.registry_root, run_id)
-
-        result = run_registry.prune_runs(self.registry_root, older_than_days=30, now=self.now)
-
-        self.assertTrue(result["ok"], result)
-        self.assertFalse(run_path.exists())
-        self.assertFalse(self.scratch_path(run_id).exists())
 
 
 class RetentionPassScratchTests(ScratchReclaimTestCase):

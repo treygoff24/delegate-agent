@@ -86,7 +86,7 @@ class RunsDeadlineTests(unittest.TestCase):
 
     def test_running_run_without_a_timeout_and_terminal_runs_carry_neither_field(self):
         no_timeout = self._write_run(status="running", timeout=None, started_ago=10)
-        done = self._write_run(status="completed", timeout=1800, started_ago=10)
+        done = self._write_run(status="succeeded", timeout=1800, started_ago=10)
         rows = self._rows()
         for alias in (no_timeout, done):
             self.assertNotIn("deadlineAt", rows[alias])

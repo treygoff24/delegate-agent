@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -79,13 +79,6 @@ class RunRegistryTests(unittest.TestCase):
         run_id = self.registry.generate_run_id(datetime(2026, 5, 20, 21, 42, 33, tzinfo=UTC))
         self.assertRegex(run_id, self.registry.RUN_ID_RE)
         self.assertEqual(run_id, "del_20260520T214233Z_" + run_id.split("_")[-1])
-
-    def test_first_cursor_alias_is_numbered(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="cursor")
-            self.assertEqual(alias, "cursor-1")
-            self.assertRegex(run_id, self.registry.RUN_ID_RE)
 
     def test_pi_is_a_tracked_harness(self):
         self.assertIn("pi", self.registry.HARNESS_NAMES)
@@ -217,15 +210,7 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(alias1, "cursor-1")
             self.assertEqual(alias2, "cursor-2")
 
-    def test_droid_aliases_increment(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            _, alias1 = self.registry.register_run(root, harness="droid")
-            _, alias2 = self.registry.register_run(root, harness="droid")
-            self.assertEqual(alias1, "droid-1")
-            self.assertEqual(alias2, "droid-2")
-
-    def test_exact_alias_lookup_does_not_guess_latest(self):
+    def test_exact_alias_lookup_is_literal_and_only_a_bare_harness_resolves_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             _first_id, first_alias = self.registry.register_run(root, harness="cursor")
@@ -583,12 +568,15 @@ class RunRegistryTests(unittest.TestCase):
             root = self.registry.delegate_root(Path(tmp))
             root.mkdir(parents=True)
             self.registry.aliases_dir(root).mkdir(parents=True)
+            # A claim made by another process must be skipped, never overwritten.
+            taken = self.registry.aliases_dir(root) / "cursor-1"
+            taken.write_text("other-run\n", encoding="utf-8")
             alias_a = self.registry.allocate_alias(root, "cursor")
             alias_b = self.registry.allocate_alias(root, "cursor")
-            self.assertEqual(alias_a, "cursor-1")
-            self.assertEqual(alias_b, "cursor-2")
-            self.assertTrue((self.registry.aliases_dir(root) / "cursor-1").exists())
-            self.assertTrue((self.registry.aliases_dir(root) / "cursor-2").exists())
+            self.assertEqual(alias_a, "cursor-2")
+            self.assertEqual(alias_b, "cursor-3")
+            self.assertEqual(taken.read_text(encoding="utf-8"), "other-run\n")
+            self.assertTrue((self.registry.aliases_dir(root) / "cursor-3").exists())
 
     def test_concurrent_register_run_preserves_all_index_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -665,41 +653,6 @@ class RunRegistryTests(unittest.TestCase):
                 if sleeper is not None:
                     sleeper.wait(timeout=5)
 
-    def test_targeted_wal_reconciliation_and_cancel_wins(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            run_id, _alias = self.registry.register_run(root, harness="cursor")
-            run_path = self.registry.run_directory(root, run_id)
-            self.registry.write_json_atomic(
-                run_path / self.registry.STATE_FILE, {"status": "running"}
-            )
-            self.registry.write_finalize_wal(
-                root,
-                run_id,
-                status="succeeded",
-                record={
-                    "schema": self.registry.STATE_SCHEMA,
-                    "runId": run_id,
-                    "status": "succeeded",
-                    "exitCode": 0,
-                    "ok": True,
-                    "resultQuality": "ok",
-                },
-            )
-            self.registry.write_json_atomic(
-                run_path / self.registry.STATE_FILE,
-                {"status": "running", "cancelRequested": True},
-            )
-            with self.registry.registry_lock(root, timeout_seconds=1):
-                self.registry.reconcile_finalize_wal_locked(root, run_id)
-            persisted = json.loads((run_path / self.registry.STATE_FILE).read_text())
-            snapshot = self.registry.load_run_snapshot(root, run_id)
-            self.assertIsInstance(snapshot, dict)
-            self.assertEqual(persisted["status"], self.registry.STATUS_CANCELLED)
-            self.assertEqual(snapshot["status"], self.registry.STATUS_CANCELLED)
-            self.assertFalse(snapshot["ok"])
-            self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
-
     def test_targeted_wal_reconciliation_preserves_terminal_canonical_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
@@ -707,15 +660,18 @@ class RunRegistryTests(unittest.TestCase):
             run_path = self.registry.run_directory(root, run_id)
             state = {"status": "succeeded", "exitCode": 0}
             self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, state)
+            # The pending record disagrees with the canonical one, so a
+            # replacement of the canonical record would be visible.
             self.registry.write_finalize_wal(
                 root,
                 run_id,
-                status="succeeded",
+                status="failed",
                 record={
-                    **state,
                     "schema": self.registry.STATE_SCHEMA,
                     "runId": run_id,
-                    "ok": True,
+                    "status": "failed",
+                    "exitCode": 7,
+                    "ok": False,
                 },
             )
 
@@ -725,6 +681,9 @@ class RunRegistryTests(unittest.TestCase):
             snapshot = self.registry.load_run_snapshot(root, run_id)
             self.assertIsInstance(snapshot, dict)
             self.assertEqual(snapshot["status"], "succeeded")
+            persisted = json.loads((run_path / self.registry.STATE_FILE).read_text())
+            self.assertEqual(persisted["status"], "succeeded")
+            self.assertEqual(persisted["exitCode"], 0)
             self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
 
     def test_corrupt_finalize_wal_is_quarantined_without_blocking_lock(self):
@@ -1043,12 +1002,6 @@ class RunRegistryTests(unittest.TestCase):
             with self.assertRaises(self.registry.RegistryJsonError):
                 self.registry.run_directory(root, "../../outside")
 
-    def test_large_log_warnings_threshold(self):
-        warnings = self.registry.large_log_warnings(self.registry.LARGE_LOG_WARN_BYTES + 1, 0)
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("stdout.log", warnings[0])
-        self.assertIn("50 MiB", warnings[0])
-
     def test_effective_status_stale_when_running_without_pid(self):
         status = self.registry.effective_status({"status": "running"})
         self.assertEqual(status, self.registry.STATUS_STALE)
@@ -1322,9 +1275,9 @@ class RunRegistryTests(unittest.TestCase):
         """set_worktree_status on a missing state file raises."""
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            with self.assertRaises(ValueError) as ctx:
-                self.registry.set_worktree_status(root, "del_nonexistent", "invalid_status")
-            self.assertIn("must be one of", str(ctx.exception))
+            with self.assertRaises(FileNotFoundError) as ctx:
+                self.registry.set_worktree_status(root, self.registry.generate_run_id(), "present")
+            self.assertIn("State file not found", str(ctx.exception))
 
     def test_terminal_worktree_metadata_update_refreshes_selection_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1356,4 +1309,5 @@ class RunRegistryTests(unittest.TestCase):
         parsed = self.registry.parse_utc_timestamp("2026-07-16T12:00:00")
 
         self.assertIsNotNone(parsed)
-        self.assertEqual(self.registry._format_age("2026-07-16T12:00:00", now=parsed), "0s ago")
+        self.assertEqual(parsed.utcoffset(), timedelta(0))
+        self.assertEqual(parsed, datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC))

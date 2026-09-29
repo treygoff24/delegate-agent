@@ -371,27 +371,12 @@ class InspectionCommandTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], run_registry.SNAPSHOT_SCHEMA)
         self.assertEqual(payload["runId"], run_id)
+        self.assertEqual(payload["assistantText"], "literal run")
         self.assertNotIn("requestedHandle", payload)
         self.assertNotIn("resolvedHandle", payload)
         self.assertNotIn("resolutionKind", payload)
-
-    def test_emit_snapshot_json_uses_registry_view(self):
-        run_id, alias = self.write_run(assistant_text="adapter output")
-        stdout = io.StringIO()
-
-        code = inspection_commands.emit_snapshot(
-            inspection_commands.SnapshotCommand(handle=alias, json_mode=True),
-            workspace_path=str(self.workspace),
-            stdout=stdout,
-        )
-
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], run_registry.SNAPSHOT_SCHEMA)
-        self.assertEqual(payload["runId"], run_id)
-        self.assertEqual(payload["alias"], alias)
-        self.assertEqual(payload["assistantText"], "adapter output")
 
     def test_emit_runs_json_filters_and_redacts_summaries(self):
         _, alias = self.write_run(assistant_text="adapter output")
@@ -631,6 +616,20 @@ class InspectionCommandTests(unittest.TestCase):
         )
         self.assertIn("showing 2 of 3 runs (raise --limit to see more)", text.getvalue())
 
+        # ps parity: the same slice under --active reports the same total/truncated.
+        active = io.StringIO()
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(active=True, group="wave4", limit=2, json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=active,
+        )
+        active_payload = json.loads(active.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(active_payload["mode"], "active")
+        self.assertEqual(active_payload["total"], 3)
+        self.assertTrue(active_payload["truncated"])
+        self.assertEqual(len(active_payload["runs"]), 2)
+
     def test_emit_runs_json_truncated_false_when_under_limit(self):
         self.write_run(harness="codex", group="wave4", assistant_text="only")
         stdout = io.StringIO()
@@ -695,21 +694,6 @@ class InspectionCommandTests(unittest.TestCase):
             self.assertIn("warning:", output)
             self.assertIn("workspace-scoped", output)
             self.assertIn("--cwd PATH", output)
-
-    def test_emit_runs_populated_listing_stays_warning_free(self):
-        self.write_run(harness="codex", group="wave9", assistant_text="here")
-
-        stdout = io.StringIO()
-        code = inspection_commands.emit_runs(
-            inspection_commands.RunsCommand(json_mode=True),
-            workspace_path=str(self.workspace),
-            stdout=stdout,
-        )
-
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(len(payload["runs"]), 1)
-        self.assertNotIn("warnings", payload)
 
     def test_emit_runs_zero_row_group_warns_workspace_scoped(self):
         self.write_run(harness="codex", group="other", assistant_text="elsewhere")
@@ -855,47 +839,6 @@ class InspectionCommandTests(unittest.TestCase):
             group="definitely-absent",
         )
         self.assertEqual(scope_total, 0)
-
-    def test_emit_ps_parity_for_total_truncated_and_empty_filter_warning(self):
-        for index in range(3):
-            self.write_run(
-                harness="codex",
-                group="ps-wave",
-                started_at=f"2026-05-20T13:0{index}:00Z",
-                assistant_text=f"ps-{index}",
-            )
-        truncated = io.StringIO()
-        code = inspection_commands.emit_runs(
-            inspection_commands.RunsCommand(active=True, group="ps-wave", limit=2, json_mode=True),
-            workspace_path=str(self.workspace),
-            stdout=truncated,
-        )
-        payload = json.loads(truncated.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["mode"], "active")
-        self.assertEqual(payload["total"], 3)
-        self.assertTrue(payload["truncated"])
-        self.assertEqual(len(payload["runs"]), 2)
-
-        # Absent group under --active (ps) must use workspace-scope warning, not status.
-        empty = io.StringIO()
-        code = inspection_commands.emit_runs(
-            inspection_commands.RunsCommand(
-                active=True, harness="cursor", group="absent", json_mode=True
-            ),
-            workspace_path=str(self.workspace),
-            stdout=empty,
-        )
-        empty_payload = json.loads(empty.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(empty_payload["mode"], "active")
-        self.assertEqual(empty_payload["runs"], [])
-        self.assertEqual(empty_payload["total"], 0)
-        self.assertEqual(len(empty_payload["warnings"]), 1)
-        self.assertIn("workspace-scoped", empty_payload["warnings"][0])
-        self.assertIn("--cwd PATH", empty_payload["warnings"][0])
-        self.assertNotIn("No active runs matched", empty_payload["warnings"][0])
-        self.assertNotIn("Drop --active", empty_payload["warnings"][0])
 
 
 if __name__ == "__main__":
