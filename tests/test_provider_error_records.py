@@ -370,6 +370,26 @@ class CallModeProviderErrorTests(unittest.TestCase):
         self.assertEqual(result.provider_error["signature"], "payment_required")
         self.assertIn("Kimi credits", result.provider_error["hint"])
 
+    def test_cursor_auth_hint_in_call_mode_names_the_resolved_profile(self):
+        # execute_call must hand its resolved auth profile to the hint, or the
+        # hint falls back to the environment's profile (personal here).
+        script = (
+            "import sys\n"
+            "sys.stderr.write('Authentication required. Please run agent login first\\n')\n"
+            "sys.exit(1)\n"
+        )
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.dict(os.environ, {"AI_PROFILE": "personal"}),
+        ):
+            result = runner.execute_call(
+                [sys.executable, "-c", script], workspace, harness="cursor", auth_profile="work"
+            )
+        self.assertEqual(result.provider_error["signature"], "cursor_auth_required")
+        hint = result.provider_error["hint"]
+        self.assertIn("for the work realm this run used", hint)
+        self.assertIn("--auth-profile personal", hint)
+
 
 if __name__ == "__main__":
     unittest.main()
