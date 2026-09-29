@@ -149,7 +149,9 @@ def tool(name: str, *, version: str | None = None) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workers", type=int, choices=range(1, 9), default=4)
+    parser.add_argument(
+        "--workers", type=int, choices=range(1, 9), default=2 if sys.platform == "darwin" else 4
+    )
     parser.add_argument(
         "--scheduler", choices=("loadfile", "worksteal", "load"), default="worksteal"
     )
@@ -177,6 +179,9 @@ def main() -> int:
         parser.error("--durations must be non-negative")
     if args.gate and not args.fast and pytest_args:
         parser.error("the full gate cannot filter tests; use --fast or a focused test run")
+    # Ambient filters must not silently turn a full gate into a subset.
+    os.environ.pop("PYTEST_ADDOPTS", None)
+    contain(args.cpu_limit, gate=args.gate)
     pytest_command = [sys.executable, "-m", "pytest"]
     ruff = None
     if args.gate:
@@ -197,7 +202,6 @@ def main() -> int:
         print(f"python: {sys.executable}\npytest: {pytest}\n{version}", flush=True)
         if run([sys.executable, "--version"]):
             return 1
-    contain(args.cpu_limit, gate=args.gate)
     with lock_path().open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -241,5 +245,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
     raise SystemExit(main())

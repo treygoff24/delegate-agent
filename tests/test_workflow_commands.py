@@ -6165,7 +6165,8 @@ class WorkflowCommandTests(unittest.TestCase):
             (root / "result.json").unlink()
         # Budget covers each key once; a double-claim on resume would exceed it.
         resumed = self.run_delegate(
-            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "2"]
+            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "2"],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "0"},
         )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "30"])
@@ -6221,7 +6222,10 @@ class WorkflowCommandTests(unittest.TestCase):
         status_path.write_text(json.dumps(status, sort_keys=True), encoding="utf-8")
         if (root / "result.json").exists():
             (root / "result.json").unlink()
-        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "0"},
+        )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
         self.assertEqual(waited.returncode, 0, waited.stderr)

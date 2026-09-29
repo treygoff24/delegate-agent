@@ -27,6 +27,12 @@ from delegate_agent import cli, run_registry, runner, wait_cancel_commands  # no
 
 class WaitCancelCommandTests(unittest.TestCase):
     def setUp(self) -> None:
+        # These tests own and reap children after checking cancellation; an
+        # unreaped child otherwise consumes the real five-second grace period.
+        # Signal assertions stay real and per-test grace overrides still win.
+        self.enterContext(
+            unittest_mock.patch.object(wait_cancel_commands, "CANCEL_GRACE_SECONDS", 0.2)
+        )
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name).resolve()

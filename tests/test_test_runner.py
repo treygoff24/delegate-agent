@@ -42,6 +42,12 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-n") + 1], "2")
         self.assertEqual(argv[argv.index("--dist") + 1], "load")
         self.assertEqual(argv[-1], "tests/test_config.py")
+        self.command.reset_mock()
+        self.assertEqual(self.main(), 0)
+        argv = self.command.call_args.args[0]
+        self.assertEqual(
+            argv[argv.index("-n") + 1], "2" if test_runner.sys.platform == "darwin" else "4"
+        )
 
     def test_worker_and_cpu_limits_cannot_be_bypassed_through_pytest_arguments(self):
         for argv in (
@@ -58,6 +64,9 @@ class TestRunnerTests(unittest.TestCase):
                 self.main(*argv)
             self.assertEqual(caught.exception.code, 2)
         self.command.assert_not_called()
+        with mock.patch.dict(test_runner.os.environ, {"PYTEST_ADDOPTS": "-n auto -k absent"}):
+            self.assertEqual(self.main(), 0)
+            self.assertNotIn("PYTEST_ADDOPTS", test_runner.os.environ)
 
     def test_an_existing_repository_lock_refuses_to_start_tests(self):
         with self.lock.open("a") as owner:
