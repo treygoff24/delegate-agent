@@ -34,6 +34,7 @@ FAST_FILES = (
     "tests/test_delegate_parser.py",
     "tests/test_delegate_validation.py",
     "tests/test_test_runner.py",
+    "tests/test_acceptance_toolchain.py",
 )
 
 
