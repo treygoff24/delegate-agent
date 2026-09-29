@@ -25,6 +25,7 @@ suggested correction.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 --notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` after a tracked launch or resume; dry-run shows the plan. Rejected by call and --pass-through.
 --no-mail                     Skip workspace-mail setup, prompt suffix, and sandbox grants for this launch. Explicit `mail` commands and --notify still work.
+--force-launch                Launch even when the lane is marked known-bad after a persistent provider failure (exit 4 `lane_known_bad` otherwise). A success clears the marker.
 ```
 
 The notification contains the run ID, terminal status, engine/model, elapsed
@@ -963,7 +964,11 @@ that fixed file, not whatever `sys.argv[0]` happens to be, so the console
 script, `python -m delegate_agent.cli`, and the profile shell shim all report
 the same thing. JSON (`delegate.doctor.v1`) fields:
 `runtimeDigest`, `entrypoint`, `entrypointDigest`, `promotion`,
-`promotionMatchesRuntime`, `activeSupervisors`, `warnings`.
+`promotionMatchesRuntime`, `activeSupervisors`, `knownBadLanes`, `warnings`.
+`knownBadLanes` lists the live known-bad lane markers (lane, signature, class,
+hint, `expiresAt`, `secondsLeft`); see
+[troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume).
+Expired markers are dropped from the view.
 
 Doctor's config-derived warnings, resolved best effort (an unreadable or invalid
 config produces none of them rather than an error):
@@ -1441,8 +1446,20 @@ callers can branch on: `exit_nonzero`, `no_assistant_text`, `provider_quota`,
 `provider_auth`, `provider_error`, `provider_refusal`, `provider_max_turns`,
 `session_lost`, `deliverable_missing`, `structured_invalid`, `policy_violation`,
 `model_continuity`, `output_limit`, `stalled`, `runner_lost`, `workspace_setup`,
-`timeout`, or `cancelled`. `workspace_setup` means a `--setup` command failed or
-timed out before any child launched. `wait` reports `runner_lost` when a running record's runner
+`lane_known_bad`, `provider_exhausted`, `timeout`, or `cancelled`.
+`workspace_setup` means a `--setup` command failed or
+timed out before any child launched. `lane_known_bad` means the launch was
+refused, with no child started, because its lane is marked known-bad (exit code
+4, below). `provider_exhausted` appears only as a workflow `agent()` outcome, for
+a call skipped because its stage stopped launching on the lane; no run exists
+for it. A provider failure also carries a structured `providerError`
+(`status`, `providerCode`, `message`, `engine`, `signature`, `class`, `hint`),
+where `class` is `persistent`, `transient`, or `unknown`; see
+[troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume)
+for the signature table. A run that Delegate continued after a transient drop
+carries `autoResume` (`automatic`, `attempt`, `of`, `trigger`) on the
+continuation's envelope, or `attempted: false` with a `reason` on the first run's
+envelope when the continuation could not be built. `wait` reports `runner_lost` when a running record's runner
 process is gone (`staleReason` `dead_pid` or `missing_pid`); `stalled` is kept
 for the stall watchdog.
 `failureReason` keeps the more specific remediation code, and
@@ -1705,6 +1722,7 @@ Worktree management exits 0 only when top-level `ok` is true. Safety refusals re
 | 0 | Delegate command completed successfully. For child launches, child exit code was 0. |
 | 2 | Usage, config, validation, or worktree-management safety failure. JSON mode emits `ok: false`. |
 | 3 | Missing child binary for a real launch. Dry-run does not require the binary. |
+| 4 | `lane_known_bad`: the launch was refused before any child started because its lane is marked known-bad. Override with `--force-launch`. |
 | Child exit code | For tracked child launches, Delegate returns the child runtime's exit code and includes it in JSON as `exitCode`. |
 
 JSON error payloads use this shape:
