@@ -140,57 +140,6 @@ class TrackedTimeoutTests(ExecutionTestBase):
 
     # -- Persistent worktree execution (worktree_execution call site) ---------
 
-    def test_persistent_worktree_work_timeout_terminates_child_and_fails_run(self):
-        with (
-            tempfile.TemporaryDirectory() as fake_home,
-            mock.patch.dict(os.environ, {"HOME": fake_home}),
-        ):
-            repo, _git_cd = self._make_git_repo_with_commit()
-            fake_bin = self.make_sleeping_fake_bin("agent")
-            workspace = request_build.resolve_workspace(repo.name)
-            request = self._make_persistent_worktree_request(
-                "cursor",
-                "work",
-                repo.name,
-                delegate_config.embedded_default_config(),
-            )
-            request = request_models.Request(
-                request.engine,
-                request.mode,
-                request.workspace,
-                request.prompt,
-                [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
-                request.model,
-                dry_run=False,
-                workspace_kind=request.workspace_kind,
-                isolation_context=request.isolation_context,
-                timeout=1,
-            )
-            with (
-                mock.patch.dict(
-                    os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
-                ),
-                self.assertRaises(errors.DelegateError) as ctx,
-            ):
-                self.delegate.execute_request(
-                    request,
-                    json_mode=False,
-                    config=delegate_config.embedded_default_config(),
-                    pass_through=False,
-                    completion_report_mode="none",
-                    source_workspace=workspace,
-                    stdout=io.StringIO(),
-                    stderr=io.StringIO(),
-                )
-            self.assertEqual(ctx.exception.error, "call_timeout")
-            self.assertEqual(ctx.exception.exit_code, 1)
-            registry_root = Path(repo.name) / ".delegate"
-            run_dirs = list((registry_root / "runs").glob("del_*"))
-            self.assertTrue(run_dirs)
-            state = json.loads((run_dirs[0] / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state.get("status"), "failed")
-            self.assertEqual(state.get("error"), "call_timeout")
-
     def test_persistent_worktree_timeout_preserves_realized_worktree_metadata(self):
         # The worktree and branch are created before the child launches, so a
         # child-launch failure (here: timeout) must keep the realized metadata

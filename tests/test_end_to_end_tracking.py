@@ -31,7 +31,7 @@ RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
 ASSISTANT_MARKER = "E2E assistant summary"
 COMPLETION_MARKER = "E2E completion report body"
 STDERR_MARKER = "E2E_STDERR_LINE"
-SECRET_TOKEN = "***************************************"
+SECRET_TOKEN = "sk-ant-api03-SECRETVALUE1234567890abcdef"
 CODEX_ASSISTANT_MARKER = "Codex completed"
 
 
@@ -762,6 +762,12 @@ class EndToEndTrackingTests(unittest.TestCase):
         stdout_out = self.run_cli(["run-output", alias, "--stdout", "--raw", "--no-redact"])
         self.assertEqual(stdout_out.returncode, 0, stdout_out.stderr)
         self.assertIn(SECRET_TOKEN, stdout_out.stdout)
+
+        # Control: the same read with redaction left on hides the token.
+        redacted = self.run_cli(["run-output", alias, "--stdout", "--raw"])
+        self.assertEqual(redacted.returncode, 0, redacted.stderr)
+        self.assertNotIn(SECRET_TOKEN, redacted.stdout)
+        self.assertIn("token ", redacted.stdout)
 
     def test_snapshot_and_run_output_by_run_id(self):
         completed = self.run_tracked_droid("run id lookup")

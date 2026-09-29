@@ -331,9 +331,11 @@ class CallModeTimeoutKeepsPartialOutputTests(CommandTestBase):
         )
 
     def test_runner_call_timeout_returns_the_draft_it_read(self):
+        # A later chatter turn follows the review: the review stays the partial text.
+        events = [*pi_events()[:4], *chatter_turn("Running the tests now.")]
         with tempfile.TemporaryDirectory() as temp:
             script = Path(temp) / "child.py"
-            script.write_text(self.omp_stream_script(), encoding="utf-8")
+            script.write_text(self.omp_stream_script(events=events), encoding="utf-8")
             with self.assertRaises(runner.RunnerLaunchError) as caught:
                 runner.execute_call([sys.executable, str(script)], temp, harness="omp", timeout=2)
         self.assertEqual(caught.exception.error, "call_timeout")
@@ -374,15 +376,6 @@ class CallModeTimeoutKeepsPartialOutputTests(CommandTestBase):
         self.assertIn("[REDACTED]", diagnostics["partialText"])
         self.assertLess(len(diagnostics["partialText"]), 31_000)
         self.assertLessEqual(len(diagnostics["stdoutTail"]), runner.CALL_PARTIAL_STDOUT_TAIL_CHARS)
-
-    def test_partial_text_is_the_review_not_the_later_chatter(self):
-        events = [*pi_events()[:4], *chatter_turn("Running the tests now.")]
-        with tempfile.TemporaryDirectory() as temp:
-            script = Path(temp) / "child.py"
-            script.write_text(self.omp_stream_script(events=events), encoding="utf-8")
-            with self.assertRaises(runner.RunnerLaunchError) as caught:
-                runner.execute_call([sys.executable, str(script)], temp, harness="omp", timeout=2)
-        self.assertEqual(caught.exception.diagnostics["partialText"], REVIEW)
 
     def test_unstructured_stdout_is_returned_as_the_partial_text(self):
         with tempfile.TemporaryDirectory() as temp:

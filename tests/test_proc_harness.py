@@ -145,21 +145,29 @@ class ProcessHarnessTests(unittest.TestCase):
         env.pop("DELEGATE_WORKFLOW_PIN", None)
         env.pop("PYTHONPATH", None)
         env["TMPDIR"] = "/tmp"
-        process = subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            start_new_session=True,
-        )
-        pgid = process.pid
-        try:
-            process.wait(timeout=10)
-            self.assertNotEqual(process.returncode, 0)
-        finally:
-            proc_harness.reap_process_group(pgid)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=5)
+        # A file, not a pipe: a helper the harness leaves running in the group
+        # would hold a pipe open and hide the child's exit from `communicate`.
+        with tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                env=env,
+                start_new_session=True,
+            )
+            pgid = process.pid
+            try:
+                process.wait(timeout=10)
+                self.assertNotEqual(process.returncode, 0)
+                stderr_file.seek(0)
+                stderr = stderr_file.read().decode("utf-8", "replace")
+                # The exit must come from the live-group check, not an import error or crash.
+                self.assertIn("test process groups still live", stderr)
+                self.assertIn(str(pgid), stderr)
+            finally:
+                proc_harness.reap_process_group(pgid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=5)
 
     def test_suite_end_assertion_rejects_a_live_recorded_group(self) -> None:
         with (

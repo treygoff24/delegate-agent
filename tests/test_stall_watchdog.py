@@ -89,20 +89,12 @@ class OmpStreamTests(unittest.TestCase):
         watchdog, now = self._run(lines)
         self.assertIsNotNone(watchdog.stalled_for(now))
 
-    def test_fence_alternating_with_newlines_stalls(self):
-        lines = [omp_delta("\n" if index % 2 else "```", seq=index) for index in range(40)]
-        watchdog, now = self._run(lines)
-        self.assertIsNotNone(watchdog.stalled_for(now))
-
-    def test_distinct_thinking_deltas_do_not_stall(self):
-        lines = [omp_delta(f"step {index}", seq=index) for index in range(40)]
-        watchdog, now = self._run(lines)
-        self.assertIsNone(watchdog.stalled_for(now))
-
-    def test_distinct_text_deltas_do_not_stall(self):
-        lines = [omp_delta(f"word{index} ", kind="text_delta", seq=index) for index in range(40)]
-        watchdog, now = self._run(lines)
-        self.assertIsNone(watchdog.stalled_for(now))
+    def test_distinct_deltas_do_not_stall(self):
+        for kind in ("thinking_delta", "text_delta"):
+            with self.subTest(kind=kind):
+                lines = [omp_delta(f"step {index} ", kind=kind, seq=index) for index in range(40)]
+                watchdog, now = self._run(lines)
+                self.assertIsNone(watchdog.stalled_for(now))
 
     def test_tool_execution_in_flight_never_stalls(self):
         start = json.dumps(
@@ -163,6 +155,22 @@ class OmpStreamTests(unittest.TestCase):
 
 
 class ClaudeStreamTests(unittest.TestCase):
+    def test_fence_alternating_with_newlines_stalls(self):
+        # claude deltas are the bare block text (omp prefixes the event type, so a
+        # whitespace-only omp delta never normalizes to nothing). The whitespace
+        # delta arrives after the threshold: it must not restart the idle clock.
+        watchdog = stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="claude")
+        fence = claude_assistant({"type": "text", "text": "```"})
+        blank = claude_assistant({"type": "text", "text": "\n"})
+        watchdog.observe_line(fence, now=1.0)
+        watchdog.observe_line(fence, now=10.0)
+        self.assertIsNone(watchdog.stalled_for(30.0))
+        watchdog.observe_line(blank, now=100.0)
+        idle = watchdog.stalled_for(105.0)
+        self.assertIsNotNone(idle)
+        # Idle time still counts from the last real progress, not the blank line.
+        self.assertGreater(idle, 100.0 - 1.0 - 1.0)
+
     def test_long_running_command_is_never_stalled(self):
         watchdog = stall_watchdog.StallWatchdog(stall_seconds=60.0, harness="claude")
         watchdog.observe_line(
@@ -647,9 +655,6 @@ class FixLoopResetTests(unittest.TestCase):
                 fed.feed(line, now)
         return fed.watchdog.stall_detail(0.0).get("stallReason")
 
-    def test_codex_patch_between_failing_runs_does_not_trip(self):
-        self.assertEqual(self.run_fix_loop("codex", with_edit=True), "idle")
-
     def test_every_engine_resets_on_a_successful_edit_and_still_trips_without_one(self):
         for engine in FIX_LOOP_LINES:
             with self.subTest(engine=engine):
@@ -873,11 +878,11 @@ class CompletionReportTests(unittest.TestCase):
             with self.subTest(line=line):
                 text = f"report\n{line}\n- Files: none"
                 self.assertEqual(stall_watchdog.completion_report_status(text), status)
-
-    def test_trailing_report_status_is_found(self):
-        text = "worked a while\n\n## Completion report\n- **Status:** completed\n- did it"
-        self.assertEqual(stall_watchdog.completion_report_status(text), "completed")
+        # The status line may be the whole text (a match at position zero), or
+        # sit at the end of a long preamble.
         self.assertEqual(stall_watchdog.completion_report_status("Status: blocked"), "blocked")
+        preamble = "worked a while\n\n## Completion report\n- **Status:** completed\n- did it"
+        self.assertEqual(stall_watchdog.completion_report_status(preamble), "completed")
 
     def test_no_report_or_a_distant_one_is_none(self):
         self.assertIsNone(stall_watchdog.completion_report_status("still working on it"))
