@@ -13,6 +13,10 @@ from unittest import mock
 
 from delegate_agent import run_registry, runner, stream_capture
 
+# The tracked stream cap used to default to 16 MiB. The default is now no cap; the
+# floods below stay this large so they prove a run gets past the old ceiling.
+OLD_DEFAULT_CAP = 16 * 1024 * 1024
+
 
 def thinking_line(text="thinking" * 512):
     return (
@@ -50,7 +54,7 @@ def final_line():
 class OmpOutputCaptureTests(unittest.TestCase):
     def noisy_script(self, ending=None):
         line = thinking_line()
-        count = runner.TRACKED_STREAM_MAX_BYTES // len(line) + 100
+        count = OLD_DEFAULT_CAP // len(line) + 100
         return (
             f"import os\nline={line!r}\n"
             f"for _ in range({count}): os.write(1,line)\n"
@@ -91,7 +95,7 @@ class OmpOutputCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["assistantText"], "completed after bounded telemetry")
             capture = payload["stdoutCapture"]
-            self.assertGreater(capture["transportBytes"], runner.TRACKED_STREAM_MAX_BYTES)
+            self.assertGreater(capture["transportBytes"], OLD_DEFAULT_CAP)
             self.assertGreater(capture["omittedThinkingRecords"], 0)
             self.assertTrue(capture["truncated"])
             raw = (run_path / runner.STDOUT_LOG).read_bytes()
@@ -142,11 +146,13 @@ class OmpOutputCaptureTests(unittest.TestCase):
             self.assertEqual(call.text, "partial answer")
 
     def test_infinite_thinking_hits_transport_limit_and_reaps_child(self):
+        # The transport ceiling belongs to an opted-in cap; with no cap it never fires.
         script = f"import os\nwhile True: os.write(1,{thinking_line()!r})\n"
         started = time.monotonic()
         with (
             tempfile.TemporaryDirectory() as temp,
             mock.patch.object(stream_capture, "OMP_TRANSPORT_MAX_BYTES", 16384),
+            mock.patch.object(runner, "_tracked_stream_max_bytes", return_value=1024 * 1024),
         ):
             with self.assertRaises(runner.RunnerLaunchError) as error:
                 self.tracked(Path(temp), script)

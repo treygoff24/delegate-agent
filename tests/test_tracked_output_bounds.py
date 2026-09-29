@@ -161,20 +161,32 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             self.assertEqual(state["outputLimit"], {"stream": "stdout", "bytes": 8192})
             self.assertLessEqual((run_path / run_registry.STDOUT_LOG).stat().st_size, 8192)
 
-    def test_pi_family_default_differs_from_codex(self):
+    def test_tracked_stream_cap_is_off_by_default_for_every_engine(self):
         configured = config.embedded_default_config()
 
-        self.assertEqual(
-            config.resolve_tracked_stream_max_bytes(configured, "codex"),
-            16 * 1024 * 1024,
-        )
-        self.assertEqual(
-            config.resolve_tracked_stream_max_bytes(configured, "pi"),
-            64 * 1024 * 1024,
-        )
+        for engine in config.KNOWN_ENGINES:
+            section = configured.get(engine)
+            if not isinstance(section, dict) or "trackedStreamMaxBytes" not in section:
+                continue
+            with self.subTest(engine=engine):
+                self.assertIsNone(section["trackedStreamMaxBytes"])
+                self.assertEqual(
+                    config.resolve_tracked_stream_max_bytes(configured, engine),
+                    config.TRACKED_STREAM_UNCAPPED,
+                )
+        for engine in ("codex", "pi", "omp"):
+            self.assertIn("trackedStreamMaxBytes", configured[engine])
+
+    def test_configured_cap_and_explicit_null_resolve(self):
+        configured = config.embedded_default_config()
+        configured["codex"]["trackedStreamMaxBytes"] = 4096
+        configured["omp"]["trackedStreamMaxBytes"] = None
+
+        config.validate_config(configured)
+        self.assertEqual(config.resolve_tracked_stream_max_bytes(configured, "codex"), 4096)
         self.assertEqual(
             config.resolve_tracked_stream_max_bytes(configured, "omp"),
-            64 * 1024 * 1024,
+            config.TRACKED_STREAM_UNCAPPED,
         )
 
     def test_config_rejects_non_positive_or_non_integer_tracked_stream_limit(self):
@@ -218,9 +230,13 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             stream_lines = [event for event in events if event["kind"] == "stream.line"]
             markers = [event for event in events if event["kind"] == "stream.lines_truncated"]
             self.assertEqual(len(stream_lines), runner.harness_events.EVENT_LIMIT)
+            self.assertEqual(len(markers), 1)
             self.assertEqual(
-                markers, [{"kind": "stream.lines_truncated", "limit": 500, "stream": "stdout"}]
+                {key: value for key, value in markers[0].items() if key != "note"},
+                {"kind": "stream.lines_truncated", "limit": 500, "stream": "stdout"},
             )
+            # The marker says the mirror is what stopped, not the child or its log.
+            self.assertIn("stdout.log keeps", markers[0]["note"])
 
     def test_explicit_terminal_success_stops_lingering_harness(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3300,7 +3300,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 args=(read_fd, log_path, byte_counter),
                 kwargs={
                     "on_line": None,
-                    "max_bytes": self.runner.TRACKED_STREAM_MAX_BYTES,
+                    "max_bytes": None,
                     "limit_signal": self.runner.StreamLimitSignal(),
                     "stream": "stdout",
                 },
@@ -3329,7 +3329,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 log_path,
                 counter,
                 on_line=flaky,
-                max_bytes=self.runner.TRACKED_STREAM_MAX_BYTES,
+                max_bytes=None,
                 limit_signal=self.runner.StreamLimitSignal(),
                 stream="stdout",
                 handler_failures=failures,
@@ -3356,7 +3356,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 log_path,
                 counter,
                 on_line=decoded.append,
-                max_bytes=self.runner.TRACKED_STREAM_MAX_BYTES,
+                max_bytes=None,
                 limit_signal=self.runner.StreamLimitSignal(),
                 stream="stdout",
             )
