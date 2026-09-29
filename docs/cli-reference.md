@@ -1450,12 +1450,16 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
 - `ended_waiting_on_background_work`: the child's own final message is short,
   not shaped like a finished report, and says it is waiting on or will act after
   unfinished work ("Waiting on the gate.", "The suite is still running; I'll
-  commit when it finishes."). Checked for every engine's tracked Run. A long or
-  report-shaped final message never matches, and neither does waiting on the
-  requester ("waiting on your answer"), a denial ("no need to wait"), text the
+  commit when it finishes."). Checked for every engine's tracked Run. A long
+  final message never matches. A short one shaped like a finished report matches
+  only an explicit present-tense statement that the child's own job is still
+  running ("Status: completed implementation; the full gate is still running").
+  Nothing matches waiting on, or acting after, the requester ("waiting on your
+  answer", "I'll commit when you approve"), a denial ("no need to wait"), text the
   child quotes (a tool's output in quotation marks, backticks, or a code fence),
-  or waiting on a third party's independent result ("Done. Waiting for CI to post
-  its result"): the wait has to be on a job the child ran. Schema-bound
+  or a third party's independent result ("Done. Waiting for CI to post its
+  result", "I'll report after CI posts it"): the wait has to be on a job the child
+  ran. Schema-bound
   (`--output-schema`) Runs are not text-checked.
 - `background_work_unfinished_at_exit`: Claude Code's `background_tasks_changed`
   stream event still listed a running task when the turn's `result` event arrived,
@@ -1473,7 +1477,8 @@ and 10 minutes at most, Delegate also sets `BASH_DEFAULT_TIMEOUT_MS` and
 Run with no `--timeout` gets two hours). `claude.disableBackgroundTasks: false`
 turns all of it off. An auth profile's `env` cannot undo these variables: Delegate
 keeps its own values and adds a `profile env NAME ignored` warning when the
-profile set a different one. Every framed `work` and `safe` prompt also carries a two-sentence
+profile set a different one; a workspace `--env` for one of these names is
+overridden the same way, with a `workspace env NAME ignored` warning. Every framed `work` and `safe` prompt also carries a two-sentence
 rule, just before the completion-report requirement, that ending the turn ends the
 Run and that long jobs must run in the foreground and finish before the final
 message. Verbatim slash pass-through prompts are not rewritten and do not get it.

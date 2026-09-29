@@ -63,12 +63,16 @@ _JOB = r"(?:" + _JOB_WORDS + r")"
 # ran (or something completing, or the harness waking it), never a third party's
 # independent result: `Done. Waiting for CI to post its independent result.` is a
 # finished child handing off, not an abandoned gate.
+_THIRD_PARTY_WORDS = (
+    r"ci|reviewers?|reviews?|maintainers?|humans?|upstream|third[- ]party|"
+    r"independent(?:ly)?|external(?:ly)?|someone|somebody|teammates?|owner"
+)
+_NOT_THIRD_PARTY = r"(?![^.;\n]{0,80}?\b(?:" + _THIRD_PARTY_WORDS + r")\b)"
 _OWN_WORK = (
     r"(?=[^.;\n]{0,80}?\b(?:" + _JOB_WORDS + r"|finish(?:es|ed)?|complete[sd]?|done|returns?|"
-    r"lands?|exits?|wake|notify|ping)\b)"
-    r"(?![^.;\n]{0,80}?\b(?:ci|reviewers?|reviews?|maintainers?|humans?|upstream|third[- ]party|"
-    r"independent(?:ly)?|external(?:ly)?|someone|somebody|teammates?|owner)\b)"
+    r"lands?|exits?|wake|notify|ping)\b)" + _NOT_THIRD_PARTY
 )
+_THIRD_PARTY = re.compile(r"\b(?:" + _THIRD_PARTY_WORDS + r")\b", re.IGNORECASE)
 
 _WAITING_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "Waiting on the full gate." / "Monitor armed; waiting for both suites".
@@ -100,17 +104,34 @@ _WAITING_PATTERNS: tuple[re.Pattern[str], ...] = (
         _I,
     ),
     # "I'll commit when it finishes", "I'll pick this up when they complete".
+    # The condition must be the child's own job: "I'll commit when you approve"
+    # and "I'll report after CI posts the result" are handoffs, not abandoned work.
     re.compile(
         r"\b" + _I_WILL + r"\s+"
         r"(?:pick\s+(?:this|it)\s+up|finish|commit|write|continue|resume|come\s+back|"
         r"check\s+back|circle\s+back|report|wrap\s+up|follow\s+up|proceed)\b"
-        r"[^.\n]{0,100}?\b(?:when|once|after|as\s+soon\s+as)\b",
+        r"[^.\n]{0,100}?\b(?:when|once|after|as\s+soon\s+as)\b" + _NOT_REQUESTER + _OWN_WORK,
         _I,
     ),
     # "The commit and report follow once both are back.", "results come next".
     re.compile(
-        r"\bfollows?\s+(?:once|when|after)\b|\bresults?\s+(?:come|comes|coming)\s+next\b", _I
+        r"\bfollows?\s+(?:once|when|after)\b"
+        + _NOT_REQUESTER
+        + _NOT_THIRD_PARTY
+        + r"|\bresults?\s+(?:come|comes|coming)\s+next\b",
+        _I,
     ),
+)
+# Checked even in a message shaped like a finished report: an explicit
+# present-tense statement that the child's own job is still running ("Status:
+# completed implementation; the full gate is still running") is not a finished
+# job however the message is laid out. Past tense ("was still running when I
+# checked") and third-party work do not match.
+_EXPLICIT_UNFINISHED = re.compile(
+    r"\b"
+    + _JOB
+    + r"\b[^.;\n]{0,40}\b(?:is|are)\s+still\s+(?:running|going|in\s+progress|executing)\b",
+    _I,
 )
 # "not waiting", "no need to wait", "without waiting": the match is a denial.
 _NEGATION = re.compile(
@@ -205,16 +226,29 @@ def waiting_on_unfinished_work(text: str | None) -> str | None:
     if not text:
         return None
     stripped = text.strip()
-    if not stripped or len(stripped) > WAITING_TEXT_MAX_CHARS or is_report_shaped(stripped):
+    if not stripped or len(stripped) > WAITING_TEXT_MAX_CHARS:
         return None
     # Same length as the message, so match offsets index the original text too.
     own = _QUOTED.sub(lambda quoted: " " * len(quoted.group()), stripped)
-    for pattern in _WAITING_PATTERNS:
+    patterns = (_EXPLICIT_UNFINISHED,) if is_report_shaped(stripped) else _WAITING_PATTERNS
+    for pattern in patterns:
         for match in pattern.finditer(own):
             if _NEGATION.search(own[max(0, match.start() - 40) : match.start()]):
                 continue
+            if pattern is _EXPLICIT_UNFINISHED and _THIRD_PARTY.search(
+                _clause_text(own, match.start(), match.end())
+            ):
+                continue
             return _clause(stripped, match.start(), match.end())
     return None
+
+
+def _clause_text(text: str, start: int, end: int) -> str:
+    """The sentence around a match, unbounded and unredacted."""
+    left = max(text.rfind(mark, 0, start) for mark in (". ", "! ", "? ", "; ", "\n")) + 1
+    right_candidates = [text.find(mark, end) for mark in (". ", "! ", "? ", "; ", "\n")]
+    right = min((pos for pos in right_candidates if pos != -1), default=len(text) - 1)
+    return text[left : right + 1].strip()
 
 
 def _clause(text: str, start: int, end: int) -> str:

@@ -1828,7 +1828,24 @@ def _apply_workspace_spec(request: Request, launch: LaunchOptions) -> None:
     if env:
         # Beneath Delegate's own variables: reserved names are already refused,
         # and a profile's auth variables must keep winning.
-        request.env_overrides = {**env, **(request.env_overrides or {})}
+        owned = request.env_overrides or {}
+        ignored = [
+            key
+            for key in CLAUDE_WORK_OWNED_ENV
+            if request.engine == "claude" and key in env and key in owned and env[key] != owned[key]
+        ]
+        request.env_overrides = {**env, **owned}
+        if ignored:
+            # Delegate's value wins, as for a profile; say so rather than record
+            # an --env value the child never saw.
+            request.warnings = (
+                *request.warnings,
+                *(
+                    f"workspace env {key} ignored: Delegate sets it for Claude work runs "
+                    "(set claude.disableBackgroundTasks to false to let --env decide)"
+                    for key in ignored
+                ),
+            )
 
 
 def request_from_parsed(
