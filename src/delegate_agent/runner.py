@@ -28,6 +28,7 @@ from delegate_agent import (
     child_failures,
     failover_state,
     harness_events,
+    lane_health,
     mail,
     mail_push,
     notify,
@@ -244,6 +245,10 @@ class RunContext:
     # record is non-terminal and this process is verifiably alive, no prune
     # path reaps the worktree, whatever the child pid shows.
     launcher_pid: int | None = None
+    # Lane identity and provider-error policy: what a finished run tells the
+    # known-bad lane marker (lane_health.observe).
+    lane: lane_health.Lane | None = None
+    provider_policy: lane_health.Policy = field(default_factory=lane_health.Policy)
 
 
 def _process_group_grace_seconds(ctx: RunContext) -> float:
@@ -3316,6 +3321,49 @@ def _safe_mode_network_warning(
     )
 
 
+def _observe_lane_health(
+    ctx: RunContext,
+    *,
+    status: str,
+    provider_error: JsonObject | None,
+    delegate_established: bool,
+    merged_extra: JsonObject,
+) -> None:
+    """Tell the known-bad lane marker how this run ended.
+
+    A success clears the marker; a persistent failure the provider itself reported
+    writes it. A failure Delegate established on its own (timeout, stall, output
+    cap, commit policy, continuity pause, provider terminal state) says nothing
+    about the lane. Codex usage limits with a fallback profile stay with the
+    profile-failover store, which swaps accounts instead of refusing the launch.
+    """
+    if ctx.lane is None:
+        return
+    succeeded = status == run_registry.STATUS_SUCCEEDED
+    if not succeeded and (status != run_registry.STATUS_FAILED or delegate_established):
+        return
+    if (
+        ctx.engine == "codex"
+        and ctx.fallback_env_overrides
+        and provider_error is not None
+        and provider_errors.reason_for_record(provider_error) == "usage_limit"
+    ):
+        return
+    marker_result = lane_health.observe(
+        ctx.lane,
+        ctx.provider_policy,
+        succeeded=succeeded,
+        record=provider_error,
+        run_id=ctx.run_id,
+        alias=ctx.alias,
+    )
+    if marker_result == "written":
+        merged_extra["laneMarked"] = {
+            "lane": ctx.lane.public(),
+            "expiresInSeconds": int(ctx.provider_policy.known_bad_seconds),
+        }
+
+
 def _finalize_tracked_run(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -3497,6 +3545,16 @@ def _finalize_tracked_run(
     failure_message = failure.message if failure is not None else None
     if status == run_registry.STATUS_FAILED and provider_error is not None:
         merged_extra["providerError"] = provider_error
+    if not cancel_requested and merged_extra.get("codexAuthFallback") is None:
+        _observe_lane_health(
+            ctx,
+            status=status,
+            provider_error=provider_error,
+            delegate_established=(
+                established_reason is not None or provider_terminal_state is not None
+            ),
+            merged_extra=merged_extra,
+        )
     if failure_reason is not None:
         merged_extra["failureReason"] = failure_reason
         if status != run_registry.STATUS_CANCELLED:

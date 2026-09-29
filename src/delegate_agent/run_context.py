@@ -123,4 +123,6 @@ def from_request(
         persona_file=request.persona_file,
         persona_text=request.persona_text,
         account_binding_command=request.account_binding_command,
+        lane=request.lane,
+        provider_policy=request.provider_policy,
     )

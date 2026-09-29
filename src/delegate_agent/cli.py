@@ -19,6 +19,7 @@ from delegate_agent import (
     command_errors,
     command_help,
     harness_discovery,
+    lane_health,
     personas,
     profile_guard,
     profiles,
@@ -460,6 +461,41 @@ def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Reques
     if stall_seconds == request.stall_seconds:
         return request
     return dc_replace(request, stall_seconds=stall_seconds)
+
+
+def _apply_provider_policy(request: Request, config: JsonObject, *, force_launch: bool) -> Request:
+    """Attach the launch's lane and provider-error policy (known-bad refusal, auto-resume)."""
+    lane = lane_health.derive_lane(
+        engine=request.engine,
+        model=request.model,
+        auth_profile=request.auth_profile,
+        env=request.env_overrides,
+        codex_identity=request.codex_failover_identity,
+    )
+    policy = lane_health.policy_from_config(config, force_launch=force_launch)
+    return dc_replace(request, lane=lane, provider_policy=policy)
+
+
+def _enforce_lane_health(request: Request) -> Request:
+    """Refuse a launch on a known-bad lane before anything spawns.
+
+    Raises the ``lane_known_bad`` refusal unless ``--force-launch`` was given; a
+    forced launch (and an unreadable marker) is recorded as a request warning.
+    """
+    lane, policy = request.lane, request.provider_policy
+    if lane is None or not policy.markers_enabled:
+        return request
+    marker, warnings = lane_health.check(lane)
+    if marker is not None and not policy.force_launch:
+        raise lane_health.refusal(marker, lane)
+    if marker is not None:
+        warnings.append(
+            f"{lane_health.FORCE_LAUNCH_FLAG}: launching on lane {lane.label}, marked known-bad "
+            f"({marker.signature}); a success clears the marker."
+        )
+    if not warnings:
+        return request
+    return dc_replace(request, warnings=(*request.warnings, *warnings))
 
 
 def _binary_config_key(engine: str | None) -> str | None:
@@ -1027,6 +1063,7 @@ def execute_request(
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_execution
 
+    request = _enforce_lane_health(request)
     _set_child_root_env(request, source_workspace)
     initiator_root = _apply_initiator_root(request)
     profiles.strip_mail_identity(request.env_overrides)
@@ -1171,6 +1208,14 @@ def execute_request(
             status = call_outcome.status
             exit_code = call_outcome.exit_code
             empty_failure = call_outcome.failure_kind == _outcome.FAILURE_NO_ASSISTANT_TEXT
+            # Only a call whose child exited and reported a provider error can mark
+            # the lane; a timeout or a bad output never reaches provider_error.
+            lane_health.observe(
+                request.lane,
+                request.provider_policy,
+                succeeded=call_outcome.ok,
+                record=result.provider_error,
+            )
             if json_mode:
                 payload: JsonObject = {
                     "ok": call_outcome.ok,
@@ -1735,6 +1780,7 @@ def main(
             if action in command_help.WORKFLOW_ACTION_KINDS:
                 error_command = f"workflow {action}"
         global_options = parsed.global_options
+        parsed_force_launch = global_options.force_launch
         workspace_origin = _workspace_origin(parsed, global_options)
         workspace: _request_models.ResolvedWorkspace | None = None
         json_mode = global_options.json_mode
@@ -1758,10 +1804,12 @@ def main(
                 stderr=stderr,
             )
         if parsed.subcommand == "doctor":
+            known_bad_lanes, lane_warnings = lane_health.live_public()
             return _workflow_pinning.emit_doctor(
                 stdout=stdout,
                 json_mode=global_options.json_mode,
-                extra_warnings=_doctor_config_warnings(global_options),
+                extra_warnings=(*_doctor_config_warnings(global_options), *lane_warnings),
+                known_bad_lanes=known_bad_lanes,
             )
         if parsed.subcommand == "promote":
             return emit_promote_command(parsed, stdout)
@@ -1966,6 +2014,7 @@ def main(
         if followup_plan is not None:
             request = _followup_command.apply_followup_to_request(request, followup_plan)
         request = _apply_stall_watchdog_policy(request, config)
+        request = _apply_provider_policy(request, config, force_launch=parsed_force_launch)
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (

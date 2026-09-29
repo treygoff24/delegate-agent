@@ -57,6 +57,7 @@ FLAG_GLOBAL_OPTIONS = frozenset(
         "--pass-through",
         "--no-completion-report",
         "--no-mail",
+        "--force-launch",
     }
 )
 
@@ -513,6 +514,15 @@ def parse_runtime_subcommand(
 
 
 def parse_cli(argv: list[str]) -> ParsedCommand:
+    parsed = _parse_cli_command(argv)
+    # --force-launch is a launch-time global; the per-command builders below never
+    # see it, so it is stamped on the finished command in one place.
+    if "--force-launch" in _normalize_global_options(argv)[0]:
+        parsed.global_options.force_launch = True
+    return parsed
+
+
+def _parse_cli_command(argv: list[str]) -> ParsedCommand:
     if not argv or argv[0] in ("--help", "-h"):
         return ParsedCommand("help")
     if argv[0] == "--version":
@@ -522,6 +532,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     completion_report_flag = False
     no_completion_report_flag = False
     no_mail = False
+    force_launch = False
 
     json_mode = False
     cwd: str | None = None
@@ -550,6 +561,10 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             continue
         if token == "--no-mail":
             no_mail = True
+            i += 1
+            continue
+        if token == "--force-launch":
+            force_launch = True
             i += 1
             continue
         if token == "--no-completion-report":
@@ -635,6 +650,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "--completion-report": completion_report_flag,
             "--no-completion-report": no_completion_report_flag,
             "--no-mail": no_mail,
+            "--force-launch": force_launch,
             "--isolation": isolation,
             "--auth-profile": auth_profile,
             "--group": group,

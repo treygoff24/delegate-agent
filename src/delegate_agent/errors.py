@@ -15,6 +15,8 @@ from delegate_agent.json_types import JsonObject
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_MISSING_BINARY = 3
+# A launch refused because its lane is marked known-bad (see lane_health).
+EXIT_LANE_KNOWN_BAD = 4
 
 
 def command_suggestions(value: str, candidates: Iterable[str]) -> list[str]:
