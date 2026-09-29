@@ -65,6 +65,7 @@ def engine_home_candidates(engine: str, env: Mapping[str, str], home: str) -> tu
 
 def _facts(
     *,
+    argv: Sequence[str],
     cwd: str,
     env: Mapping[str, str],
     engine: str,
@@ -80,6 +81,7 @@ def _facts(
         registry_root=registry_root,
         run_roots=tuple(run_roots),
         home_candidates=engine_home_candidates(engine, env, home),
+        launcher_roots=write_guard.estate_launcher_roots(argv, env, home),
     )
 
 
@@ -170,6 +172,7 @@ def apply_write_guard(
 
     def facts() -> GuardFacts:
         return _facts(
+            argv=argv,
             cwd=cwd,
             env=env,
             engine=engine,
@@ -360,8 +363,10 @@ def preview_payload(
             "reason": reason,
             "onUnavailable": settings.on_unavailable,
         }
+    guard_home = home or write_guard.default_home()
     facts = GuardFacts(
-        home=home or write_guard.default_home(),
+        home=guard_home,
+        launcher_roots=write_guard.estate_launcher_roots(argv, os.environ, guard_home),
         exec_root=exec_root,
         git_common_dir=git_common_dir(git_cwd or exec_root)
         if os.path.isdir(git_cwd or exec_root)

@@ -296,6 +296,7 @@ class PlanTests(HomeTestCase):
         # No variable Delegate knows for this engine: nothing, however many name a profile.
         self.assertEqual(launch.engine_home_candidates("droid", env, str(self.home)), ())
         facts = launch._facts(
+            argv=["droid"],
             cwd=str(self.home / "Code/repo"),
             env={**env, "HOME": str(self.home)},
             engine="droid",
@@ -305,6 +306,7 @@ class PlanTests(HomeTestCase):
         )
         self.assertEqual(facts.home_candidates, ())
         self.assertEqual(facts.run_roots, ())
+        self.assertEqual(facts.launcher_roots, ())
 
     def test_remove_drops_a_default_and_add_protects_an_extra_path(self):
         (self.home / "vault").mkdir()
@@ -659,7 +661,7 @@ class FallbackTests(HomeTestCase):
 class EngineHomeLaunchTests(HomeTestCase):
     """What the launch seam reopens under ~/.ai-profiles, seen through the bwrap argv."""
 
-    def apply(self, env_extra, *, engine="claude"):
+    def apply(self, env_extra, *, engine="claude", argv=("engine",)):
         env = {"HOME": str(self.home), **env_extra}
         with (
             mock.patch.object(sys, "platform", "linux"),
@@ -668,7 +670,7 @@ class EngineHomeLaunchTests(HomeTestCase):
         ):
             return launch.apply_write_guard(
                 WriteGuardSettings(),
-                argv=["engine"],
+                argv=list(argv),
                 cwd=str(self.home / "Code" / "repo"),
                 env=env,
                 engine=engine,
@@ -717,6 +719,91 @@ class EngineHomeLaunchTests(HomeTestCase):
             engine="droid",
         )
         self.assertNotIn(self.real(".ai-profiles/accounts/claude/personal"), self.rw_binds(result))
+
+
+class EstateLauncherTests(HomeTestCase):
+    """A lane started through an estate launcher gets the profiles root reopened.
+
+    Live 2026-09-28: estate-claude under the Seatbelt guard died before Claude
+    started, on chmod of ~/.ai-profiles/personas/work/claude-plugins, because the
+    launcher picks an account, refreshes its token, and writes plugin, session and
+    lock state under the profiles root on every launch.
+    """
+
+    apply = EngineHomeLaunchTests.apply
+    rw_binds = staticmethod(EngineHomeLaunchTests.rw_binds)
+
+    @staticmethod
+    def ro_binds(result):
+        argv = result.argv
+        return [argv[i + 1] for i, token in enumerate(argv) if token == "--ro-bind"]
+
+    def test_an_estate_launcher_lane_can_write_the_profiles_root(self):
+        for argv0 in ("estate-claude", "/home/agent/.local/bin/estate-codex"):
+            with self.subTest(argv0=argv0):
+                result = self.apply({}, argv=(argv0, "-p"))
+                profiles = self.real(".ai-profiles")
+                self.assertNotIn(profiles, self.ro_binds(result))
+                self.assertNotIn(profiles, result.record["protected"])
+                self.assertIn(
+                    {"path": profiles, "reason": write_guard.ESTATE_LAUNCHER_REASON},
+                    result.record["writable"],
+                )
+                # Everything else stays protected.
+                self.assertIn(self.real(".ssh"), self.ro_binds(result))
+                self.assertIn(self.real("Code"), self.ro_binds(result))
+
+    def test_a_lane_started_any_other_way_keeps_the_profiles_root_protected(self):
+        for argv0 in ("devin", "/usr/local/bin/claude", "my-estate-claude"):
+            with self.subTest(argv0=argv0):
+                result = self.apply({}, argv=(argv0,))
+                self.assertIn(self.real(".ai-profiles"), self.ro_binds(result))
+                self.assertNotIn(self.real(".ai-profiles"), self.rw_binds(result))
+
+    def test_the_launchers_own_root_override_is_followed(self):
+        other = self.home / "profiles-elsewhere"
+        other.mkdir()
+        for var in ("ESTATE_AI_PROFILES_ROOT", "AI_PROFILES_ROOT"):
+            with self.subTest(var=var):
+                roots = write_guard.estate_launcher_roots(
+                    ["estate-omp"], {var: str(other)}, str(self.home)
+                )
+                self.assertEqual([r.path for r in roots], [str(other)])
+        roots = write_guard.estate_launcher_roots(
+            ["estate-omp"],
+            {"ESTATE_AI_PROFILES_ROOT": str(other), "AI_PROFILES_ROOT": "/nope"},
+            str(self.home),
+        )
+        self.assertEqual([r.path for r in roots], [str(other)])
+        self.assertEqual(write_guard.estate_launcher_roots([], {}, str(self.home)), ())
+
+    def test_dry_run_preview_shows_the_reopen(self):
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/bwrap"),
+        ):
+            payload = launch.preview_payload(
+                WriteGuardSettings(),
+                engine="claude",
+                argv=["estate-claude", "-p"],
+                exec_root=str(self.home / "Code" / "repo"),
+                registry_root=None,
+                home=str(self.home),
+            )
+        self.assertIn(
+            {"path": self.real(".ai-profiles"), "reason": write_guard.ESTATE_LAUNCHER_REASON},
+            payload["writable"],
+        )
+        self.assertNotIn(self.real(".ai-profiles"), payload["protected"])
+
+    def test_a_codex_native_sandbox_never_gets_the_profiles_root(self):
+        facts = GuardFacts(
+            home=str(self.home),
+            exec_root=str(self.home / "Code" / "repo"),
+            launcher_roots=write_guard.estate_launcher_roots(["estate-codex"], {}, str(self.home)),
+        )
+        roots = write_guard.native_writable_roots(WriteGuardSettings(), facts)
+        self.assertNotIn(self.real(".ai-profiles"), [r.path for r in roots])
 
 
 class BwrapLaunchShapeTests(HomeTestCase):

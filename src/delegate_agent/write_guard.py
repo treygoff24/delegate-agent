@@ -167,6 +167,10 @@ class GuardFacts:
     # The selected engine's home. It comes from the environment, so it is checked
     # before it may reopen anything inside a protected path (see plan_guard).
     home_candidates: tuple[Reopen, ...] = ()
+    # Paths the launcher process itself writes before the engine starts (the estate
+    # launcher's profiles root). Reopened as given; never a Codex native root, since
+    # the launcher runs outside Codex's own sandbox.
+    launcher_roots: tuple[Reopen, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -529,6 +533,8 @@ def plan_guard(settings: WriteGuardSettings, facts: GuardFacts, *, backend: str)
     reopen(facts.registry_root, "run registry")
     for root in facts.run_roots:
         reopen(root.path, root.reason)
+    for root in facts.launcher_roots:
+        reopen(root.path, root.reason)
     refused: list[Reopen] = []
     for candidate in facts.home_candidates:
         if not candidate.path or not os.path.isdir(candidate.path):
@@ -558,6 +564,28 @@ def plan_guard(settings: WriteGuardSettings, facts: GuardFacts, *, backend: str)
     return replace(
         plan, writable=tuple(entry for entry in plan.writable if entry.path in effective)
     )
+
+
+# The estate launchers (estate-claude, estate-codex, estate-omp, ...) pick an
+# account, refresh its token, and write session, plugin and lock state under the
+# profiles root on every launch, before the engine starts. Protecting that root
+# from such a lane makes the launcher itself fail (live 2026-09-28: estate-harness
+# died on chmod of personas/work/claude-plugins under Seatbelt), so a lane started
+# through one gets the root reopened. Lanes started any other way keep it protected.
+ESTATE_LAUNCHER_PREFIX = "estate-"
+ESTATE_LAUNCHER_REASON = "estate launcher writes profile state"
+
+
+def estate_launcher_roots(
+    argv: Sequence[str], env: Mapping[str, str], home: str
+) -> tuple[Reopen, ...]:
+    """The profiles root to reopen when ``argv`` starts an estate launcher, else nothing."""
+    if not argv or not os.path.basename(argv[0]).startswith(ESTATE_LAUNCHER_PREFIX):
+        return ()
+    # The launcher's own resolution order (estate-harness get_profiles_root).
+    root = env.get("ESTATE_AI_PROFILES_ROOT") or env.get("AI_PROFILES_ROOT")
+    path = os.path.expanduser(root) if root else os.path.join(home, ".ai-profiles")
+    return (Reopen(path, ESTATE_LAUNCHER_REASON),)
 
 
 def native_writable_roots(settings: WriteGuardSettings, facts: GuardFacts) -> tuple[Reopen, ...]:

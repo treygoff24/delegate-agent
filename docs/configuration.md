@@ -845,7 +845,10 @@ for the full boundary and fail-closed conditions.
 
 The work write guard keeps work lanes off a named list of irreplaceable paths
 (credential stores, `~/.ai-profiles`, the installed Delegate runtime, and the
-code root) while everything else stays writable. Every key is optional; an
+code root) while everything else stays writable. A lane started through an
+estate launcher (`estate-claude`, `estate-codex`, ...) gets `~/.ai-profiles`
+re-opened, because the launcher writes account and session state there on every
+launch. Every key is optional; an
 unknown key or a wrong type fails config validation (`invalid_isolation_config`).
 See the [security model](security-model.md#work-write-guard) for the default
 protected list, the writable re-opens every run gets, and the backends.
