@@ -231,6 +231,12 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         # A workflow stage stops launching cells on a lane after this many
         # results in a row share one persistent signature. 0 turns it off.
         "stageStopAfter": 3,
+        # Read-only health commands `capabilities refresh` runs to record auth
+        # health per engine. Absent commands record `unknown`; null disables one.
+        "authProbes": {
+            "cursor": ["estate-cursor", "status"],
+            "omp": ["estate-omp", "usage"],
+        },
     },
 }
 
@@ -654,12 +660,30 @@ def _validate_provider_errors_section(section: JsonValue) -> None:
         return
     if not isinstance(section, dict):
         raise ConfigError("invalid_provider_errors_config", "providerErrors must be an object.")
-    unknown = set(section) - {"knownBadLaneMinutes", "autoResume", "stageStopAfter"}
+    unknown = set(section) - {"knownBadLaneMinutes", "autoResume", "stageStopAfter", "authProbes"}
     if unknown:
         raise ConfigError(
             "invalid_provider_errors_config",
             f"providerErrors has unknown keys: {', '.join(sorted(unknown))}.",
         )
+    probes = section.get("authProbes")
+    if probes is not None:
+        if not isinstance(probes, dict) or set(probes) - {"cursor", "omp"}:
+            raise ConfigError(
+                "invalid_provider_errors_config",
+                "providerErrors.authProbes must be an object with only cursor and omp keys.",
+            )
+        for engine, argv in probes.items():
+            if argv is not None and not (
+                isinstance(argv, list)
+                and argv
+                and all(isinstance(part, str) and part for part in argv)
+            ):
+                raise ConfigError(
+                    "invalid_provider_errors_config",
+                    f"providerErrors.authProbes.{engine} must be a non-empty list of strings "
+                    "or null to disable the probe.",
+                )
     minutes = section.get("knownBadLaneMinutes")
     if minutes is not None and (
         isinstance(minutes, bool)

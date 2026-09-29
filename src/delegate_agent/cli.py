@@ -16,6 +16,7 @@ from delegate_agent import (
     VERSION,
     account_binding,
     argv_utils,
+    auth_health,
     auto_resume,
     command_errors,
     command_help,
@@ -1903,6 +1904,7 @@ def main(
                 json_mode=global_options.json_mode,
                 extra_warnings=(*_doctor_config_warnings(global_options), *lane_warnings),
                 known_bad_lanes=known_bad_lanes,
+                auth_health=auth_health.load(),
             )
         if parsed.subcommand == "promote":
             return emit_promote_command(parsed, stdout)

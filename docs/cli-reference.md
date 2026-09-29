@@ -964,8 +964,9 @@ that fixed file, not whatever `sys.argv[0]` happens to be, so the console
 script, `python -m delegate_agent.cli`, and the profile shell shim all report
 the same thing. JSON (`delegate.doctor.v1`) fields:
 `runtimeDigest`, `entrypoint`, `entrypointDigest`, `promotion`,
-`promotionMatchesRuntime`, `activeSupervisors`, `knownBadLanes`, `warnings`.
-`knownBadLanes` lists the live known-bad lane markers (lane, signature, class,
+`promotionMatchesRuntime`, `activeSupervisors`, `knownBadLanes`, `authHealth`,
+`warnings`. `authHealth` is the last per-engine reading `capabilities refresh`
+recorded (empty until a refresh has run). `knownBadLanes` lists the live known-bad lane markers (lane, signature, class,
 hint, `expiresAt`, `secondsLeft`); see
 [troubleshooting](troubleshooting.md#provider-errors-known-bad-lanes-and-automatic-resume).
 Expired markers are dropped from the view.
@@ -1183,6 +1184,17 @@ harnesses — useful when one harness ships a new model — while every other
 harness keeps its last-known-good record. It no longer writes `.delegate/capabilities/reasoning.json`; that
 workspace file remains a lower-precedence, read-only compatibility source and
 should not be committed.
+
+A successful refresh also records per-engine auth health under `authHealth` in
+its JSON, and in `~/.delegate/state/auth-health.json` for `delegate doctor`. It
+runs the read-only probes named in `providerErrors.authProbes` (by default
+`estate-cursor status` for `cursor` and `estate-omp usage` for `omp`) and reads
+only what they clearly say: `ok`, `logged_out` (Cursor reports it is not signed
+in), or `limit_reached` (an OMP quota window is at 100%). A probe that is
+missing, slow, exits non-zero without a recognisable message, or prints
+something unexpected records `unknown` with a `reason`; unknown is never a
+failure and never refuses a launch. The probe's raw output is not stored. A
+subset refresh probes only the named engines and keeps the others' last reading.
 
 ### Help and discovery
 

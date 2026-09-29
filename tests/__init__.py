@@ -104,6 +104,11 @@ os.environ.pop("TMPDIR", None)
 os.environ.pop("TMP", None)
 os.environ.pop("TEMP", None)
 tempfile.tempdir = None
+# `capabilities refresh` runs the configured auth probes (`estate-cursor status`,
+# `estate-omp usage`) when they are on PATH. On a developer machine they are, and
+# they reach real accounts; the suite must never depend on them. Tests of the
+# probes themselves clear this switch and supply their own scripts.
+os.environ["DELEGATE_AUTH_PROBES"] = "off"
 
 # Stashed for the rare test that must run a real credentialed binary (the
 # live omp write-probe): everything credential-bearing lives under the real
