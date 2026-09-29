@@ -4,7 +4,7 @@
 
 ## Load order
 
-From lowest to highest precedence: embedded defaults, `~/.delegate/config.json`, workspace `.delegate/config.json`, `DELEGATE_CONFIG`, then internal CLI overrides.
+From lowest to highest precedence: embedded defaults, `~/.delegate/config.json`, workspace `.delegate/config.json`, then `DELEGATE_CONFIG`.
 
 ## Sections
 

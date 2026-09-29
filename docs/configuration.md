@@ -11,7 +11,6 @@ From lowest to highest precedence:
 3. Its machine-local overlay: `~/.delegate/config.local.json`.
 4. `DELEGATE_CONFIG=/path/to/config.json`, when set.
 5. That file's machine-local overlay, if the file is in `~/.delegate`.
-6. Internal CLI overrides used by some commands.
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
 
