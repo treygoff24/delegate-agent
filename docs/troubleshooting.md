@@ -485,8 +485,11 @@ carries `autoResume` with `attempted: false` and a `reason`.
   `provider_unavailable`. Safe mode has no durable side effects and starts from a
   fresh isolated copy, so a rerun is safe. No saved session is needed. This
   covers the Codex "websocket closed by server before response.completed" drop.
-- A launch the broker refused with `broker_binding_inactive` (HTTP 403, in any
-  mode; no vendor process ran). Delegate waits a jittered 1 to 3 seconds and
+- A tracked launch (not ungrouped `call`) the broker refused with
+  `broker_binding_inactive` (HTTP 403; no vendor process ran) and that shows no
+  child output: zero stdout bytes and events, no assistant text, and no recorded
+  workspace changes. A broker-looking error line after the child already worked
+  is not retried and marks the lane as before. Delegate waits a jittered 1 to 3 seconds and
   relaunches once. The first refusal does not mark the lane known-bad (the run
   reports `laneMarkerDeferred: "broker_binding_retry"`); if the retry is refused
   too, the failure is final and the lane is marked as before.

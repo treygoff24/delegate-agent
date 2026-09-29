@@ -240,6 +240,18 @@ class AutoResumeTests(FakeCodexCase):
         self.assertTrue(low <= self.slept[0] <= high)
         self.assertEqual(self.marker_files(), [])
 
+    def test_a_broker_line_after_partial_work_is_not_retried_and_marks_as_before(self):
+        self.set_plan("work_then_broker403", "ok")
+
+        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(self.invocation_count(), 1, "the child already produced output")
+        self.assertNotIn("autoResume", payload)
+        self.assertNotIn("laneMarkerDeferred", payload)
+        self.assertEqual(self.slept, [])
+        self.assertEqual(len(self.marker_files()), 1)
+
     def test_two_broker_refusals_fail_as_before_and_mark_the_lane(self):
         self.set_plan("broker403", "broker403", "ok")
 
@@ -304,6 +316,7 @@ def _note(**overrides):
         "session_id": "thr_fake_session",
         "isolation_lifecycle": "none",
         "structured": False,
+        "no_child_output": False,
     }
     fields.update(overrides)
     return auto_resume.RunNote(**fields)
@@ -397,8 +410,20 @@ class RerunSkipReasonTests(unittest.TestCase):
         record = {"signature": "broker_binding_inactive", "class": "persistent"}
         for mode in ("work", "safe"):
             with self.subTest(mode):
-                self.assertIsNone(self.reason(_note(mode=mode, provider_error=record)))
+                self.assertIsNone(
+                    self.reason(_note(mode=mode, provider_error=record, no_child_output=True))
+                )
+        self.assertEqual(
+            self.reason(_note(provider_error=record)),
+            "child_produced_output",
+            "no positive launch-time evidence fails closed",
+        )
         self.assertGreater(auto_resume.broker_backoff_seconds(_note(provider_error=record)), 0)
+        self.assertFalse(
+            auto_resume.defers_lane_marker(
+                record, enabled=True, already_automatic=False, no_child_output=False
+            )
+        )
         self.assertEqual(auto_resume.broker_backoff_seconds(_note(mode="safe")), 0.0)
 
 

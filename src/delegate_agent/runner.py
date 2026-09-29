@@ -3662,6 +3662,7 @@ def _observe_lane_health(
     provider_error: JsonObject | None,
     delegate_established: bool,
     merged_extra: JsonObject,
+    no_child_output: bool = False,
 ) -> None:
     """Tell the known-bad lane marker how this run ended.
 
@@ -3687,6 +3688,7 @@ def _observe_lane_health(
         provider_error,
         enabled=ctx.provider_policy.auto_resume,
         already_automatic=ctx.auto_resume is not None,
+        no_child_output=no_child_output,
     ):
         # One broker binding refusal is launch-slot contention; the automatic
         # retry decides whether the lane is really bad.
@@ -3888,6 +3890,14 @@ def _finalize_tracked_run(
     failure_message = failure.message if failure is not None else None
     if status == run_registry.STATUS_FAILED and provider_error is not None:
         merged_extra["providerError"] = provider_error
+    accumulator = capture.accumulator
+    no_child_output = (
+        capture.stdout_bytes == 0
+        and accumulator.events.total == 0
+        and not accumulator.assistant_chunks
+        and accumulator.completion_text is None
+        and not outcome.work_summary_shows_changes(merged_extra.get("workSummary"))
+    )
     if not cancel_requested and merged_extra.get("codexAuthFallback") is None:
         _observe_lane_health(
             ctx,
@@ -3897,6 +3907,7 @@ def _finalize_tracked_run(
                 established_reason is not None or provider_terminal_state is not None
             ),
             merged_extra=merged_extra,
+            no_child_output=no_child_output,
         )
     if not cancel_requested:
         auto_resume.note_run(
@@ -3912,6 +3923,7 @@ def _finalize_tracked_run(
                 session_id=(capture.accumulator.harness_session_id if ctx.resumable else None),
                 isolation_lifecycle=ctx.isolation_lifecycle,
                 structured=ctx.output_schema_text is not None or ctx.structured_retry,
+                no_child_output=no_child_output,
             )
         )
     if failure_reason is not None:
