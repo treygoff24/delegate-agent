@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TypedDict, cast
 
+from delegate_agent import pending_tool, run_metadata, run_registry, usage_record
 from delegate_agent import retention as delegate_retention
-from delegate_agent import run_metadata, run_registry, usage_record
 from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.redaction import redact_value
 
@@ -29,6 +29,7 @@ class SnapshotView(TypedDict, total=False):
     lastActivityAt: str
     finishedAt: str
     current: str
+    pendingTool: JsonObject
     error: str
     message: str
     plannedBranch: str | None
@@ -133,6 +134,11 @@ def merge_snapshot_view(
     status = run_registry.status_fields(state)
     view.update(status)
     effective_status = status.get("effectiveStatus")
+    pending = pending_tool.read_view(state) if state else None
+    if pending is not None and effective_status == run_registry.STATUS_RUNNING:
+        view["pendingTool"] = pending
+    else:
+        view.pop("pendingTool", None)
     completion_report = view.get("completionReport")
     completion_report = completion_report if isinstance(completion_report, dict) else None
     source_cwd = first_string(

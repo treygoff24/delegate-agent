@@ -814,6 +814,9 @@ class StreamAccumulator:
     # equals it, the error is what the run "is doing" only until the child starts
     # a retry, a new turn or thinking; `_supersede_error_current` then replaces it.
     _error_current: str | None = field(default=None, repr=False)
+    # The oldest in-flight tool call (name, target, seconds), set by the runner
+    # from the stall watchdog while the run is live. Observation only.
+    pending_tool: JsonObject | None = None
     # The provider's own last unrecovered error as data: status, provider code, and a
     # redacted, bounded message (provider_errors.raw_error). Cleared by a successful
     # terminal, like `_last_error_message`; the runner classifies it at finalization.
