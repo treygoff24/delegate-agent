@@ -1,4 +1,5 @@
 import io
+import time
 import unittest
 
 from tests.snapshot_commands_test_base import SnapshotCommandTestBase
@@ -205,9 +206,16 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
         )
 
     def test_redact_string_pem_scan_is_linear_in_marker_count(self):
-        payload = "note -----BEGIN PRIVATE KEY----- absent here\n" * 8_000
-        expected = "note ***PRIVATE KEY REDACTED*** absent here\n" * 8_000
-        self.assertEqual(self.redaction.redact_string(payload), expected)
+        # 32,000 unterminated markers take about 0.2s with the single end-marker
+        # scan and about 8s if each marker rescans for an END line; the 2s bound
+        # leaves ten times headroom for a loaded machine.
+        payload = "note -----BEGIN PRIVATE KEY----- absent here\n" * 32_000
+        expected = "note ***PRIVATE KEY REDACTED*** absent here\n" * 32_000
+        started = time.perf_counter()
+        redacted = self.redaction.redact_string(payload)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(redacted, expected)
+        self.assertLess(elapsed, 2.0)
 
     def test_redact_string_masks_short_final_base64_line(self):
         payload = (
