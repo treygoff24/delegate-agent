@@ -106,6 +106,30 @@ class UnreadMailSummaryTests(UnreadMailBase):
         self.assertEqual(self.unread()["unreadMail"]["count"], 1)
 
 
+class UnreadMailDamageTests(UnreadMailBase):
+    def test_a_malformed_file_does_not_hide_a_valid_unread_message(self):
+        good = self.send("the real correction")
+        inbox = self.root / "mail" / "boxes" / self.ctx.run_id / "inbox"
+        (inbox / "20260101-000000-abcdef.mail").write_bytes(b"not an envelope")
+        extra = mail.unread_mail_extra(self.root, self.ctx.run_id, self.ctx.alias, mail_push=False)
+        record = extra["unreadMail"]
+        self.assertEqual(record["count"], 1)
+        self.assertEqual(record["messages"][0]["msgId"], good)
+        self.assertEqual(record["unreadable"], 1)
+        self.assertIn("damaged or unreadable", extra["warnings"][0])
+        self.assertIn("never read by it", extra["warnings"][0])
+
+    def test_only_a_malformed_file_is_still_visible(self):
+        self.send("placeholder")
+        inbox = self.root / "mail" / "boxes" / self.ctx.run_id / "inbox"
+        for path in inbox.glob("*.mail"):
+            path.write_bytes(b"junk")
+        extra = mail.unread_mail_extra(self.root, self.ctx.run_id, self.ctx.alias, mail_push=False)
+        self.assertEqual(extra["unreadMail"]["count"], 0)
+        self.assertEqual(extra["unreadMail"]["unreadable"], 1)
+        self.assertIn("damaged or unreadable", extra["warnings"][0])
+
+
 class UnreadMailFinalizationTests(UnreadMailBase):
     def test_run_that_never_read_its_mail_records_it_on_state_envelope_and_report(self):
         self.send("the P4 restore always refuses")

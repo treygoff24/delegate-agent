@@ -435,6 +435,58 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
 
+    def _send_coordinator_mail(self, alias: str, subject: str) -> None:
+        from delegate_agent import mail
+
+        mail.send(
+            self.registry_root,
+            mail.MailCommand(action="send", to=alias, subject=subject, body="correction"),
+            env={},
+        )
+
+    def test_cancel_records_mail_the_lane_never_read(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        self._send_coordinator_mail(alias, "abort the P4 restore")
+        code, _out, err = self.run_cli(["--json", "cancel", alias])
+        self.assertEqual(code, 0, err)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["unreadMail"]["count"], 1)
+        self.assertEqual(state["unreadMail"]["messages"][0]["subject"], "abort the P4 restore")
+        self.assertTrue(any("never read by it" in w for w in state["warnings"]))
+
+    def test_urgent_cancel_records_mail_the_lane_never_read(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        self._send_coordinator_mail(alias, "abort the P4 restore")
+        fd = self._hold_registry_lock()
+
+        def release_when_child_exits() -> None:
+            proc.wait(timeout=20)
+            self._release_registry_lock(fd)
+
+        self.addCleanup(self._release_registry_lock, fd)
+        releaser = threading.Thread(target=release_when_child_exits, daemon=True)
+        releaser.start()
+        self.addCleanup(releaser.join, 21)
+        with unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}):
+            payload = wait_cancel_commands._cancel_target(
+                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
+            )
+        self.assertTrue(payload["registryLockBypassed"])
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["unreadMail"]["count"], 1)
+
     def _hold_registry_lock(self) -> int:
         """Hold the registry lock on a separate open file, the way another process would."""
         lock_path = run_registry.registry_lock_path(self.registry_root)

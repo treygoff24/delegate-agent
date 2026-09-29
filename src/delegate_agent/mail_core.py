@@ -962,21 +962,38 @@ def unread_mail_for_run(
 
     ``read_message`` moves a consumed message out of ``inbox/``, so whatever is
     still there was delivered and never read. ``seen_through_seq`` excludes
-    messages a push hook already injected into the model's context.
+    messages a push hook already injected into the model's context. A damaged
+    file never hides the readable ones: it is counted in ``unreadable`` so the
+    damage is visible, and the readable messages are still reported.
     """
+    folder = _box_dir(registry_root, run_id) / "inbox"
+    rows: list[JsonObject] = []
+    unreadable = 0
     try:
-        rows = [
-            envelope
-            for _path, envelope, _body in _iter_box_messages(registry_root, run_id, limit=None)
-            if not isinstance(envelope.get("seq"), int)
-            or isinstance(envelope.get("seq"), bool)
-            or envelope["seq"] > seen_through_seq
-        ]
-    except (MailError, OSError):
+        if not folder.is_dir() or folder.is_symlink():
+            return None
+        paths = sorted(folder.glob("*.mail"))
+    except OSError:
+        return {"count": 0, "unreadable": 1, "messages": []}
+    for path in paths:
+        if path.is_symlink():
+            continue
+        try:
+            envelope, _body = _envelope_from_message(path)
+            _message_id(envelope.get("msgId"))
+        except (MailError, OSError):
+            unreadable += 1
+            continue
+        seq = envelope.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool) and seq <= seen_through_seq:
+            continue
+        rows.append(envelope)
+    if not rows and not unreadable:
         return None
-    if not rows:
-        return None
-    return {
+    rows.sort(
+        key=lambda e: (e.get("seq") if isinstance(e.get("seq"), int) else 0, str(e.get("msgId")))
+    )
+    record: JsonObject = {
         "count": len(rows),
         "messages": [
             {
@@ -988,26 +1005,39 @@ def unread_mail_for_run(
             for envelope in rows[:MAIL_UNREAD_SAMPLE_LIMIT]
         ],
     }
+    if unreadable:
+        record["unreadable"] = unreadable
+    return record
 
 
 def unread_mail_warning(unread: JsonObject, alias: str) -> str:
     count = unread.get("count")
+    unreadable = unread.get("unreadable")
     messages = [m for m in unread.get("messages") or [] if isinstance(m, dict)]
-    listed = "; ".join(
-        f"{m.get('msgId')} from {m.get('from')}"
-        + (f' "{m["subject"]}"' if m.get("subject") else "")
-        for m in messages
-    )
-    more = count - len(messages) if isinstance(count, int) else 0
-    if more > 0:
-        listed += f"; and {more} more"
-    noun = "message was" if count == 1 else "messages were"
-    return (
-        f"{count} mail {noun} delivered to this run and never read by it: {listed}. "
-        "They may have corrected the task. If they change the work, send the correction "
-        f'again with `delegate followup {alias} "<correction>"`; '
-        "`delegate mail status <id>` shows each message's delivery."
-    )
+    parts: list[str] = []
+    if isinstance(count, int) and count > 0:
+        listed = "; ".join(
+            f"{m.get('msgId')} from {m.get('from')}"
+            + (f' "{m["subject"]}"' if m.get("subject") else "")
+            for m in messages
+        )
+        more = count - len(messages)
+        if more > 0:
+            listed += f"; and {more} more"
+        noun = "message was" if count == 1 else "messages were"
+        parts.append(
+            f"{count} mail {noun} delivered to this run and never read by it: {listed}. "
+            "They may have corrected the task. If they change the work, send the correction "
+            f'again with `delegate followup {alias} "<correction>"`; '
+            "`delegate mail status <id>` shows each message's delivery."
+        )
+    if isinstance(unreadable, int) and unreadable > 0:
+        parts.append(
+            f"{unreadable} file(s) in this run's mail inbox were damaged or unreadable and could "
+            "not be counted; look in the run's boxes/<runId>/inbox directory under "
+            "`.delegate/mail` for the raw files."
+        )
+    return " ".join(parts)
 
 
 def _current_recipient(identity: MailIdentity) -> str:

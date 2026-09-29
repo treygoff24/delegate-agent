@@ -87,12 +87,17 @@ completion envelope, `snapshot`, and `wait` carry `unreadMail`
 (`delegate followup <alias> "<correction>"` when they change the work), the
 completion report opens with the same line in its Delegate notice, and the
 `wait` table prints an `unread mail:` line. `wait --structural` includes
-`unreadMail`. The field is absent when nothing is unread.
+`unreadMail`. The field is absent when nothing is unread. Cancelling a Run
+(including the urgent path taken when the registry lock is held) stamps
+`unreadMail` on the cancelled record the same way. A damaged file in the inbox
+is skipped rather than hiding the readable messages: it is counted in
+`unreadMail.unreadable` and named in a warning.
 
 Each tracked work launch also records `mailInbox` in its manifest, dry-run
 payload, and completion envelope: `host` (this machine), `root` (the mail
-root), `laneInbox`, `coordinatorInbox` (where the lane's reports land), and
-`crossHostDelivery: false`. Mail is workspace-local and pull-based, so a lane
+root), `coordinatorInbox` (where the lane's reports land),
+`crossHostDelivery: false`, and, in the manifest and completion envelope only,
+`laneInbox` (the dry-run block omits it because no run id exists yet). Mail is workspace-local and pull-based, so a lane
 launched on another machine sends reports to that host's coordinator inbox, and
 a `delegate mail inbox` on your machine will not show them; read them on that
 host (for example over ssh) or use the completion report.
