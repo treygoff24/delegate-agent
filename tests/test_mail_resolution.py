@@ -159,26 +159,34 @@ class MailResolutionTests(unittest.TestCase):
             except BaseException as exc:  # surfaced below, preserving thread failures
                 send_error.append(exc)
 
-        with mock.patch.object(
-            private_io, "write_bytes_atomic_if_absent", side_effect=blocked_publish
-        ):
-            send_thread = threading.Thread(target=do_send)
-            send_thread.start()
-            self.assertTrue(publication_started.wait(timeout=5))
+        send_thread = threading.Thread(target=do_send)
+        prune_thread = None
+        try:
+            with mock.patch.object(
+                private_io, "write_bytes_atomic_if_absent", side_effect=blocked_publish
+            ):
+                send_thread.start()
+                self.assertTrue(publication_started.wait(timeout=5))
 
-            def do_prune() -> None:
-                mail.prune(self.root, mail.MailCommand(action="prune", dry_run=True))
-                prune_finished.set()
+                def do_prune() -> None:
+                    mail.prune(self.root, mail.MailCommand(action="prune", dry_run=True))
+                    prune_finished.set()
 
-            prune_thread = threading.Thread(target=do_prune)
-            prune_thread.start()
-            time.sleep(0.1)
-            self.assertTrue(prune_finished.is_set())
+                prune_thread = threading.Thread(target=do_prune)
+                prune_thread.start()
+                time.sleep(0.1)
+                self.assertTrue(prune_finished.is_set())
+        finally:
             release_publication.set()
-            send_thread.join(timeout=5)
-            prune_thread.join(timeout=5)
+            if send_thread.ident is not None:
+                send_thread.join(timeout=5)
+            if prune_thread is not None:
+                prune_thread.join(timeout=5)
 
         self.assertFalse(send_error)
+        self.assertFalse(send_thread.is_alive())
+        if prune_thread is not None:
+            self.assertFalse(prune_thread.is_alive())
         self.assertTrue(prune_finished.is_set())
 
 

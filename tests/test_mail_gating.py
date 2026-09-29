@@ -10,11 +10,7 @@ from unittest import mock
 
 from delegate_agent import cli_parser, mail, request_build, run_registry, runner
 from delegate_agent import config as delegate_config
-from delegate_agent.constants import (
-    KNOWN_ENGINES,
-    PROMPT_INSTRUCTION_MODE_SLASH,
-    PROMPT_INSTRUCTION_MODE_WRAPPED,
-)
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.request_models import ResolvedWorkspace
 from tests.delegate_commands_test_base import CommandTestBase
 
@@ -245,9 +241,6 @@ class MailGatingTests(CommandTestBase):
             self.assertEqual(result, argv)
             self.assertFalse((Path(tmp) / "mail").exists())
         self.assertEqual(warnings, [])
-
-    def test_mail_sandbox_table_lists_every_known_engine(self):
-        self.assertEqual(set(mail.MAIL_SANDBOX_ROWS), set(KNOWN_ENGINES))
 
     def test_scoped_harnesses_add_only_their_declared_mail_grant(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:

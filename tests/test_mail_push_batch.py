@@ -74,16 +74,14 @@ class MailPushBatchTests(unittest.TestCase):
         (self.cursor_path.parent / mail.MAIL_PUSH_PENDING_FILE_NAME).unlink(missing_ok=True)
 
     def test_count_bound_is_exact_and_defers_only_the_overage(self) -> None:
-        messages = [
-            self._send(f"message-{number}") for number in range(mail.MAIL_PUSH_MAX_MESSAGES + 1)
-        ]
+        messages = [self._send(f"message-{number}") for number in range(51)]
 
         response, _payload = self._pump()
         injected = json.loads(response["reason"])["messages"]
-        self.assertEqual(len(injected), mail.MAIL_PUSH_MAX_MESSAGES)
+        self.assertEqual(len(injected), 50)
         self.assertEqual(
             [row["message"]["msgId"] for row in injected],
-            [message["msgId"] for message in messages[: mail.MAIL_PUSH_MAX_MESSAGES]],
+            [message["msgId"] for message in messages[:50]],
         )
         self.assertEqual(
             json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"],
@@ -94,7 +92,7 @@ class MailPushBatchTests(unittest.TestCase):
         self.assertEqual(response, {})
         self.assertEqual(
             json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"],
-            messages[mail.MAIL_PUSH_MAX_MESSAGES - 1]["seq"],
+            messages[49]["seq"],
         )
 
         response, _payload = self._pump()

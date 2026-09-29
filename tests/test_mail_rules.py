@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -106,6 +107,12 @@ class MailRulesTests(unittest.TestCase):
         self.assertEqual(rows[blocked]["outcome"], "blocked")
         self.assertEqual(rows[blocked]["reason"], "not this member")
         self.assertEqual(rows[allowed]["outcome"], "delivered")
+        ledger = json.loads(
+            (mail.sent_root(self.root) / f"{payload['message']['msgId']}.json").read_text()
+        )
+        persisted = {row["recipient"]: row for row in ledger["recipients"]}
+        self.assertEqual(persisted[blocked]["outcome"], "blocked")
+        self.assertEqual(persisted[blocked]["reason"], "not this member")
 
 
 if __name__ == "__main__":

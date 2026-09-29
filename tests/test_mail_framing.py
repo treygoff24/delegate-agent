@@ -99,6 +99,8 @@ class MailFramingTests(unittest.TestCase):
         )
 
         inbox = mail.inbox(self.registry_root, mail.MailCommand(action="inbox"), env=lane_env)
+        self.assertEqual(list(inbox).count("framing"), 1)
+        self.assertIsInstance(inbox["framing"], dict)
         self.assertEqual(inbox["framing"], mail.LANE_FRAMING)
         self.assertEqual(len(inbox["messages"]), 2)
         self.assertTrue(all("framing" not in message for message in inbox["messages"]))
@@ -115,33 +117,6 @@ class MailFramingTests(unittest.TestCase):
                 )
                 self.assertEqual(read["framing"], mail.LANE_FRAMING)
                 self.assertEqual(read["message"]["body"], body)
-
-    def test_inbox_has_one_structured_framing_object_not_one_per_message(self):
-        _run_id, alias = self._running_lane()
-        with (
-            mock.patch.object(
-                mail,
-                "_next_message_id",
-                side_effect=["20260801-120000-a1b2c3", "20260801-120001-d4e5f6"],
-            ),
-            mock.patch.object(run_registry, "utc_now_iso", return_value="2026-08-01T12:00:00Z"),
-        ):
-            for body in ("one", "two"):
-                mail.send(
-                    self.registry_root,
-                    mail.MailCommand(action="send", to=alias, body=body),
-                )
-        response = mail.inbox(
-            self.registry_root,
-            mail.MailCommand(action="inbox"),
-            env={
-                "DELEGATE_RUN_ID": _run_id,
-                "DELEGATE_MAIL_SELF": alias,
-            },
-        )
-        self.assertEqual(list(response).count("framing"), 1)
-        self.assertIsInstance(response["framing"], dict)
-        self.assertEqual(len(response["messages"]), 2)
 
 
 if __name__ == "__main__":

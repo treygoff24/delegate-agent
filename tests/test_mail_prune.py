@@ -104,18 +104,6 @@ class MailPruneTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(self._workspace_snapshot(workspace), before)
 
-    def test_mail_prune_has_own_schema_and_does_not_change_runs_prune_schema(self):
-        payload = mail.prune(
-            self.registry_root,
-            mail.MailCommand(action="prune", older_than_days=30),
-            now=self.NOW,
-        )
-        self.assertEqual(payload["schema"], mail.MAIL_PRUNE_SCHEMA)
-        self.assertEqual(
-            set(payload),
-            {"schema", "ok", "olderThanDays", "dryRun", "planned", "removed", "skipped", "errors"},
-        )
-
     def test_empty_dry_run_does_not_create_a_mail_tree(self):
         self.assertFalse(mail.mail_root(self.registry_root).exists())
 

@@ -49,7 +49,7 @@ class MailBoundsTests(unittest.TestCase):
             private_io.write_bytes_atomic_if_absent(box / "inbox" / f"{message_id}.mail", body)
 
     def test_body_boundary_accepts_256_kib_and_rejects_one_more_byte(self):
-        exact = "x" * mail.MAIL_MAX_BODY_BYTES
+        exact = "x" * (256 * 1024)
         result = mail.send(
             self.registry_root,
             mail.MailCommand(action="send", to=mail.COORDINATOR_BOX, body=exact),
@@ -61,7 +61,7 @@ class MailBoundsTests(unittest.TestCase):
                 mail.MailCommand(
                     action="send",
                     to=mail.COORDINATOR_BOX,
-                    body="x" * (mail.MAIL_MAX_BODY_BYTES + 1),
+                    body="x" * (256 * 1024 + 1),
                 ),
             ),
             "message_too_large",
@@ -91,7 +91,7 @@ class MailBoundsTests(unittest.TestCase):
                 ),
                 "message_too_large",
             )
-        self.assertEqual(handle.read_sizes, [mail.MAIL_MAX_BODY_BYTES + 1])
+        self.assertEqual(handle.read_sizes, [256 * 1024 + 1])
 
     def test_replaced_mail_record_surfaces_transient_error(self):
         mail._ensure_mail_tree(self.registry_root)
@@ -126,18 +126,18 @@ class MailBoundsTests(unittest.TestCase):
             mail.MailCommand(
                 action="send",
                 to=mail.COORDINATOR_BOX,
-                subject="s" * mail.MAIL_MAX_SUBJECT_CHARS,
+                subject="s" * 200,
                 body="subject boundary",
             ),
         )
-        self.assertEqual(result["message"]["subject"], "s" * mail.MAIL_MAX_SUBJECT_CHARS)
+        self.assertEqual(result["message"]["subject"], "s" * 200)
         self.assert_mail_error(
             lambda: mail.send(
                 self.registry_root,
                 mail.MailCommand(
                     action="send",
                     to=mail.COORDINATOR_BOX,
-                    subject="s" * (mail.MAIL_MAX_SUBJECT_CHARS + 1),
+                    subject="s" * 201,
                     body="too long",
                 ),
             ),
@@ -159,14 +159,14 @@ class MailBoundsTests(unittest.TestCase):
         )
 
     def test_rules_boundary_accepts_64_kib_and_500_rules_but_rejects_each_overage(self):
-        self.write_rules(mail.MAIL_MAX_RULES, exact_bytes=mail.MAIL_MAX_RULES_BYTES)
+        self.write_rules(500, exact_bytes=64 * 1024)
         accepted = mail.send(
             self.registry_root,
             mail.MailCommand(action="send", to=mail.COORDINATOR_BOX, body="rules boundary"),
         )
         self.assertTrue(accepted["ok"])
 
-        self.write_rules(mail.MAIL_MAX_RULES, exact_bytes=mail.MAIL_MAX_RULES_BYTES + 1)
+        self.write_rules(500, exact_bytes=64 * 1024 + 1)
         self.assert_mail_error(
             lambda: mail.send(
                 self.registry_root,
@@ -175,7 +175,7 @@ class MailBoundsTests(unittest.TestCase):
             "rules_too_large",
         )
 
-        self.write_rules(mail.MAIL_MAX_RULES + 1)
+        self.write_rules(501)
         self.assert_mail_error(
             lambda: mail.send(
                 self.registry_root,
@@ -185,17 +185,17 @@ class MailBoundsTests(unittest.TestCase):
         )
 
     def test_inbox_listing_cap_is_exactly_1000_items(self):
-        for count in (mail.MAIL_MAX_INBOX_ITEMS, mail.MAIL_MAX_INBOX_ITEMS + 1):
+        for count in (1000, 1001):
             with self.subTest(count=count):
                 box = mail.boxes_root(self.registry_root) / mail.COORDINATOR_BOX
                 if box.exists():
                     shutil.rmtree(box)
                 self.write_inbox_messages(count)
                 result = mail.inbox(self.registry_root, mail.MailCommand(action="inbox"))
-                self.assertEqual(len(result["messages"]), mail.MAIL_MAX_INBOX_ITEMS)
+                self.assertEqual(len(result["messages"]), 1000)
 
     def test_watch_batch_cap_is_exactly_1000_items(self):
-        for count in (mail.MAIL_MAX_WATCH_ITEMS, mail.MAIL_MAX_WATCH_ITEMS + 1):
+        for count in (1000, 1001):
             with self.subTest(count=count):
                 box = mail.boxes_root(self.registry_root) / mail.COORDINATOR_BOX
                 if box.exists():
@@ -209,7 +209,7 @@ class MailBoundsTests(unittest.TestCase):
                 )
                 self.assertEqual(exit_code, 0)
                 lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), mail.MAIL_MAX_WATCH_ITEMS)
+                self.assertEqual(len(lines), 1000)
                 self.assertTrue(all(json.loads(line)["type"] == "mail" for line in lines))
 
     def test_non_once_watch_emits_static_mail_only_once(self):

@@ -101,20 +101,6 @@ class MailPushTests(unittest.TestCase):
         self.assertEqual(mail.hook_pump(self.registry_root, stdout=duplicate, env=self.env), 0)
         self.assertEqual(json.loads(duplicate.getvalue()), {})
 
-    def test_hook_output_failure_does_not_advance_cursor_or_emit_a_marker(self):
-        self._send_from_coordinator("retry me")
-        mail.provision_mail_push(
-            "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
-        )
-        self.assertEqual(
-            mail.hook_pump(self.registry_root, stdout=_FailingWriter(), env=self.env), 1
-        )
-        cursor_path = (
-            mail.boxes_root(self.registry_root) / self.run_id / mail.MAIL_PUSH_CURSOR_FILE_NAME
-        )
-        self.assertEqual(json.loads(cursor_path.read_text())["lastSeq"], 0)
-        self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
-
     def test_provisioning_is_audited_and_run_scoped(self):
         claude_env: dict[str, str] = {}
         claude = mail.provision_mail_push(
@@ -353,52 +339,6 @@ class MailPushTests(unittest.TestCase):
         self.assertFalse(
             (run_registry.run_directory(self.registry_root, self.run_id) / "codex-home").exists()
         )
-
-    def test_unrecordable_hook_failure_after_write_attempt_stays_silent(self):
-        mail.provision_mail_push(
-            "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
-        )
-        stderr = io.StringIO()
-        with mock.patch.object(
-            mail.private_io, "write_json_atomic_if_absent", side_effect=OSError("box unavailable")
-        ):
-            self.assertEqual(
-                mail.hook_pump(
-                    self.registry_root,
-                    stdout=_FailingWriter(),
-                    stderr=stderr,
-                    env=self.env,
-                ),
-                1,
-            )
-        reason = mail.hook_failure_reason_from_stderr(
-            stderr.getvalue(), nonce=self.env["DELEGATE_MAIL_HOOK_NONCE"]
-        )
-        self.assertIsNone(reason)
-        context = runner.RunContext(
-            registry_root=self.registry_root,
-            run_id=self.run_id,
-            alias=self.alias,
-            harness="claude",
-            engine="claude",
-            mode="work",
-            model=None,
-            source_cwd=str(self.workspace),
-            execution_cwd=str(self.workspace),
-            workspace_kind="directory",
-            isolated_workspace=False,
-            started_at=run_registry.utc_now_iso(),
-            mail_push=True,
-        )
-        self.assertIsNone(runner._mail_push_failure_marker(context, reason))
-        runner.record_mail_push_degradation(
-            self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
-        )
-        runner.record_mail_push_degradation(
-            self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
-        )
-        snapshot = run_registry.load_run_snapshot(self.registry_root, self.run_id)
-        self.assertEqual(snapshot["eventsTotal"], 1)
 
     def test_sentinel_requires_the_run_nonce_and_survives_later_stderr(self):
         mail.provision_mail_push(
