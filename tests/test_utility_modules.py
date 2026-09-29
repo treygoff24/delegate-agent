@@ -468,6 +468,23 @@ class WriteJsonAtomicIfAbsentTests(unittest.TestCase):
             self.assertEqual(component_error.exception.errno, errno.ELOOP)
             self.assertFalse((real_root / "config.json").exists())
 
+    def test_rejects_fully_existing_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            real_parent = base / "real" / "nested"
+            real_parent.mkdir(parents=True)
+            linked_parent = base / "linked"
+            linked_parent.symlink_to(real_parent.parent, target_is_directory=True)
+
+            with self.assertRaises(OSError) as caught:
+                private_io.write_json_atomic_if_absent(
+                    linked_parent / "nested" / "config.json",
+                    {"unsafe": True},
+                )
+
+            self.assertEqual(caught.exception.errno, errno.ELOOP)
+            self.assertFalse((real_parent / "config.json").exists())
+
     def test_creates_missing_prefix_before_delegate_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
