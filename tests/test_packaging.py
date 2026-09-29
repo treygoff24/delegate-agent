@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import tomllib
 import unittest
 from pathlib import Path
@@ -26,9 +27,15 @@ class PackagingTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"## [{version}]", changelog)
 
-    def test_delegate_workflows_doc_is_shipped(self):
-        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-        self.assertIn("include docs/delegate-workflows.md", manifest)
+    def test_docs_linked_from_readme_are_shipped(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        linked = set(re.findall(r"\]\((docs/[^)#\s]+\.md)", readme))
+        self.assertIn("docs/delegate-workflows.md", linked)
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+        for doc in sorted(linked):
+            with self.subTest(doc=doc):
+                self.assertTrue((ROOT / doc).is_file(), f"{doc} linked but missing")
+                self.assertIn(f"include {doc}", manifest)
 
 
 if __name__ == "__main__":

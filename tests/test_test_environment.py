@@ -1,5 +1,6 @@
 import json
 import os
+import pwd
 import subprocess
 import sys
 import unittest
@@ -36,7 +37,7 @@ class TestEnvironmentTests(unittest.TestCase):
         self.assertIsNone(payload["attempt"])
         self.assertIsNone(payload["stall"])
         self.assertFalse(root.exists(), "suite exit must clean only its private root")
-        self.assertNotEqual(payload["home"], os.environ["HOME"])
+        self.assertNotEqual(payload["home"], pwd.getpwuid(os.getuid()).pw_dir)
 
 
 if __name__ == "__main__":
