@@ -549,13 +549,20 @@ class RepinTests(RepinTestCase):
         self.assertEqual(self.pin_bytes(), after)
         self.assertEqual(backup.parent.stat().st_mode & 0o777, 0o500)
 
-    def test_a_backup_that_cannot_be_removed_does_not_fail_a_finished_launch(self) -> None:
+    def test_a_backup_that_cannot_be_removed_raises_and_reseals(self) -> None:
+        # The supervisor calls commit before any step; a backup it cannot retire
+        # must stop it, or a later resume would roll the pin back under work
+        # that ran on the new runtime.
         self.create_pin(older=True)
         workflow_pinning.repin_to_live(WF_ID, home=self.home)
 
-        with mock.patch.object(Path, "unlink", side_effect=PermissionError("sealed")):
+        with (
+            mock.patch.object(Path, "unlink", side_effect=PermissionError("sealed")),
+            self.assertRaises(PermissionError),
+        ):
             workflow_pinning.commit_repin(WF_ID, home=self.home)
 
+        self.assertTrue(workflow_pinning.repin_backup_path(WF_ID, home=self.home).exists())
         self.assertEqual(
             workflow_pinning.pin_directory(WF_ID, home=self.home).stat().st_mode & 0o777, 0o500
         )
@@ -593,8 +600,9 @@ class RepinTests(RepinTestCase):
         # journal, so the event follows attempt_config and precedes the launch.
         self.assertLess(events.index("attempt_config"), events.index("runtime_repinned"))
         self.assertNotIn("runtime_repin_rolled_back", events)
-        # The launch succeeded, so the way back is gone.
-        self.assertFalse(workflow_pinning.repin_backup_path(WF_ID, home=self.home).exists())
+        # A launch is not proof that anything ran on the new pin: the way back
+        # stays until the supervisor retires it before its first step.
+        self.assertTrue(workflow_pinning.repin_backup_path(WF_ID, home=self.home).exists())
 
     def test_resume_with_repin_prints_the_move_in_text_mode(self) -> None:
         old = self.create_pin(older=True)
@@ -648,7 +656,8 @@ class RepinTests(RepinTestCase):
         self.assertIn("runtime_repinned", events)
         (repinned,) = self.journal(root, "runtime_repinned")
         self.assertEqual(repinned["fromDigest"], old.runtime_digest)
-        self.assertFalse(workflow_pinning.repin_backup_path(WF_ID).exists())
+        # The supervisor, not the launching resume, retires the backup.
+        self.assertTrue(workflow_pinning.repin_backup_path(WF_ID).exists())
 
     def test_a_resume_that_fails_after_the_repin_restores_the_old_pin(self) -> None:
         self.create_pin(older=True)
@@ -786,7 +795,9 @@ class RepinTests(RepinTestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(stdout)["runtimePin"]["previous"]["digest"], old_digest)
-        self.assertFalse(workflow_pinning.repin_backup_path(WF_ID).exists())
+        # The new repin's backup is the recovered pin, kept until its supervisor runs.
+        backup_text = workflow_pinning.repin_backup_path(WF_ID).read_text(encoding="utf-8")
+        self.assertEqual(workflow_pinning._document_runtime_digest(backup_text), old_digest)
         records = [
             event["type"]
             for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
@@ -872,7 +883,14 @@ class RepinTests(RepinTestCase):
         with (
             mock.patch.object(workflow_runtime, "detach_supervisor"),
             mock.patch.object(
-                workflow_pinning, "commit_repin", side_effect=RuntimeError("after the launch")
+                workflow_pinning,
+                "temporarily_apply_environment",
+                return_value={"DELEGATE_REPIN_TEST_MARKER": None},
+            ),
+            mock.patch.object(
+                workflow_pinning,
+                "restore_environment",
+                side_effect=RuntimeError("after the launch"),
             ),
             self.assertRaisesRegex(RuntimeError, "after the launch"),
         ):
@@ -976,7 +994,7 @@ class RepinTests(RepinTestCase):
         self.assertEqual(code, 0)
         self.assertIs(json.loads(stdout)["runtimePin"]["repinned"], True)
 
-    def register_child(self, pid: int | None, *, status: str = "running") -> str:
+    def register_child(self, pid: int | None, *, status: str = "running", **extra: object) -> str:
         registry_root = run_registry.ensure_registry(self.workspace, workspace_kind="plain")
         run_id, alias = run_registry.register_run(
             registry_root, harness="codex", metadata={"group": WF_ID}
@@ -989,6 +1007,7 @@ class RepinTests(RepinTestCase):
         }
         if pid is not None:
             state["pid"] = pid
+        state.update(extra)
         run_registry.write_json_atomic(
             run_registry.run_directory(registry_root, run_id) / "state.json", state
         )
@@ -1067,6 +1086,140 @@ class RepinTests(RepinTestCase):
         self.assertEqual(fresh.exception.error, "invalid_option_combination")
         self.assertEqual(dry.exception.error, "invalid_option_combination")
         self.assertIn("--dry-run", str(dry.exception))
+
+    # Round-three fixes: only a supervisor that runs on the new pin retires the
+    # backup; the removal is durable; a child that has not published its pid
+    # yet still blocks a repin.
+
+    def seed_supervisable_workflow(self) -> Path:
+        root = self.seed_workflow(status="running")
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        status["workflowKeyVersion"] = workflow_runtime.WORKFLOW_KEY_VERSION
+        workflow_registry.write_status(root, status)
+        return root
+
+    def run_supervisor_with(self, execute: mock.MagicMock) -> int:
+        with (
+            mock.patch.object(workflow_runtime, "execute_workflow", execute),
+            mock.patch.object(workflow_runtime._SupervisorWatchdog, "start"),
+            mock.patch.object(workflow_runtime._SignalRelay, "start"),
+        ):
+            return workflow_runtime.run_supervisor(
+                workspace=self.workspace, wf_id=WF_ID, cli_argv=[], config={}
+            )
+
+    def test_the_resume_leaves_the_backup_for_the_supervisor_to_retire(self) -> None:
+        self.create_pin(older=True)
+        self.seed_workflow()
+
+        code, _stdout, _stderr, detach = self.resume(repin=True)
+
+        self.assertEqual(code, 0)
+        detach.assert_called_once()
+        # The launch alone proves nothing ran on the new pin.
+        self.assertTrue(workflow_pinning.repin_backup_path(WF_ID, home=self.home).exists())
+
+    def test_the_supervisor_retires_the_backup_before_its_first_step(self) -> None:
+        self.create_pin(older=True)
+        self.seed_supervisable_workflow()
+        workflow_pinning.repin_to_live(WF_ID, home=self.home)
+        backup = workflow_pinning.repin_backup_path(WF_ID, home=self.home)
+        seen: list[bool] = []
+
+        def execute(_state: object) -> object:
+            seen.append(backup.exists())
+            raise RuntimeError("stop after the first step")
+
+        self.run_supervisor_with(mock.MagicMock(side_effect=execute))
+
+        self.assertEqual(seen, [False])
+        self.assertFalse(backup.exists())
+
+    def test_a_supervisor_that_cannot_retire_the_backup_runs_nothing(self) -> None:
+        self.create_pin(older=True)
+        root = self.seed_supervisable_workflow()
+        workflow_pinning.repin_to_live(WF_ID, home=self.home)
+        execute = mock.MagicMock(return_value=None)
+
+        with mock.patch.object(
+            workflow_pinning, "commit_repin", side_effect=PermissionError("sealed")
+        ):
+            code = self.run_supervisor_with(execute)
+
+        self.assertNotEqual(code, 0)
+        execute.assert_not_called()
+        self.assertTrue(workflow_pinning.repin_backup_path(WF_ID, home=self.home).exists())
+        self.assertTrue(self.journal(root, "workflow_failed"))
+
+    def test_commit_syncs_the_directory_after_the_backup_is_gone(self) -> None:
+        self.create_pin(older=True)
+        workflow_pinning.repin_to_live(WF_ID, home=self.home)
+        backup = workflow_pinning.repin_backup_path(WF_ID, home=self.home)
+        synced: list[tuple[Path, bool]] = []
+        real_sync = workflow_pinning._sync_directory
+
+        def sync(directory: Path) -> None:
+            synced.append((directory, backup.exists()))
+            real_sync(directory)
+
+        with mock.patch.object(workflow_pinning, "_sync_directory", side_effect=sync):
+            workflow_pinning.commit_repin(WF_ID, home=self.home)
+
+        self.assertEqual(synced, [(backup.parent, False)])
+
+    def test_directory_sync_raises_real_errors_and_tolerates_unsupported(self) -> None:
+        import errno
+
+        for code, raises in ((errno.EIO, True), (errno.EINVAL, False), (errno.ENOTSUP, False)):
+            with (
+                self.subTest(errno=errno.errorcode[code]),
+                mock.patch.object(os, "fsync", side_effect=OSError(code, "sync")),
+            ):
+                if raises:
+                    with self.assertRaises(OSError):
+                        workflow_pinning._sync_directory(self.home)
+                else:
+                    workflow_pinning._sync_directory(self.home)
+
+    def test_repin_refuses_a_child_that_has_not_published_its_pid_yet(self) -> None:
+        now = run_registry.utc_now_iso()
+        old = "2026-01-01T00:00:00Z"
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        cases = (
+            ("recent row, no launcher", {"lastActivityAt": now}, True),
+            ("old row, live launcher", {"lastActivityAt": old, "launcherPid": os.getpid()}, True),
+            ("recent row, dead launcher", {"lastActivityAt": now, "launcherPid": dead.pid}, False),
+            ("old row, no launcher", {"lastActivityAt": old}, False),
+        )
+        for label, extra, refused in cases:
+            with self.subTest(label):
+                other = tempfile.TemporaryDirectory()
+                self.addCleanup(other.cleanup)
+                base = Path(other.name)
+                self.home = base / "home"
+                (self.home / ".delegate" / "personas").mkdir(parents=True)
+                self.workspace = base / "workspace"
+                self.workspace.mkdir()
+                with (
+                    mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+                    mock.patch.object(
+                        workflow_runtime, "cancel_workflow_children", return_value=[]
+                    ),
+                ):
+                    self.create_pin(older=True)
+                    self.seed_workflow()
+                    before = self.pin_bytes()
+                    alias = self.register_child(None, **extra)
+                    if refused:
+                        with self.assertRaises(DelegateError) as raised:
+                            self.resume(repin=True)
+                        self.assertEqual(raised.exception.error, "repin_children_running")
+                        self.assertIn(alias, str(raised.exception))
+                        self.assertEqual(self.pin_bytes(), before)
+                    else:
+                        code, _stdout, _stderr, _detach = self.resume(repin=True)
+                        self.assertEqual(code, 0)
 
 
 class RepinParserTests(unittest.TestCase):

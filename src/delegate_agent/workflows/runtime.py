@@ -25,6 +25,7 @@ from delegate_agent import (
     personas,
     profiles,
     reasoning,
+    record_io,
     redaction,
     run_registry,
     structured_output,
@@ -5581,13 +5582,24 @@ def workflow_terminal_child_run_ids(workspace: Path, wf_id: str) -> set[str]:
     return terminal
 
 
-def live_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
+CHILD_STARTING_GRACE_SECONDS = 300
+
+
+def live_workflow_children(
+    workspace: Path, wf_id: str, *, include_starting: bool = False
+) -> list[JsonObject]:
     """Children of a workflow whose process is still alive.
 
     A row whose pid is dead or was never published is not live: resume seals
     those as orphans without disturbing any work. A live one is a lane still
     doing paid work, which is what an operator has to decide about before a
     resume that cancels it.
+
+    ``include_starting`` also counts a running row that has not published its
+    pid yet but may still: its launcher is alive, or, with no launcher on
+    record, it was written within ``CHILD_STARTING_GRACE_SECONDS``. A repin
+    uses it, because the workflow lock does not fence child registration and a
+    child a dead supervisor launched can still come up after the check.
     """
     root = run_registry.registry_root_if_exists(workspace)
     if root is None:
@@ -5595,7 +5607,10 @@ def live_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
     live: list[JsonObject] = []
     for run_id in _workflow_child_run_ids(root, wf_id):
         state = run_registry.load_run_state_or_none(root, run_id)
-        if run_registry.status_fields(state).get("effectiveStatus") != run_registry.STATUS_RUNNING:
+        fields = run_registry.status_fields(state)
+        if fields.get("effectiveStatus") != run_registry.STATUS_RUNNING and not (
+            include_starting and _child_may_still_start(state, fields)
+        ):
             continue
         alias = state.get("alias") if isinstance(state, dict) else None
         pid = state.get("pid") if isinstance(state, dict) else None
@@ -5607,6 +5622,21 @@ def live_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
             }
         )
     return live
+
+
+def _child_may_still_start(state: JsonObject | None, fields: JsonObject) -> bool:
+    if not isinstance(state, dict) or fields.get("staleReason") != "missing_pid":
+        return False
+    launcher = state.get("launcherPid")
+    if isinstance(launcher, int) and not isinstance(launcher, bool) and launcher > 0:
+        return run_registry.process_alive(launcher) is not False
+    written = state.get("lastActivityAt") or state.get("startedAt")
+    parsed = record_io.parse_utc_timestamp(written if isinstance(written, str) else None)
+    if parsed is None:
+        # An unreadable age cannot prove the child is gone; fail closed.
+        return True
+    age = time.time() - parsed.timestamp()
+    return age < CHILD_STARTING_GRACE_SECONDS
 
 
 def _workflow_child_run_ids(root: Path, wf_id: str) -> list[str]:
@@ -6215,6 +6245,14 @@ def run_supervisor(
         signal_relay = _SignalRelay(state, watchdog, lock_handle=lock_handle)
         signal_relay.start()
         try:
+            # A repinned resume keeps the pin it replaced as a backup until a
+            # supervisor runs on the new one. This supervisor is that proof, so
+            # the backup is retired before any step runs; if that fails the
+            # workflow fails here having run nothing, and the next resume puts
+            # the old pin back (commands._recover_interrupted_repin).
+            from delegate_agent import workflow_pinning
+
+            workflow_pinning.commit_repin(wf_id)
             result = execute_workflow(state)
         except GateExit as exc:
             # A gate must carry metadata all the way to the supervisor.  A

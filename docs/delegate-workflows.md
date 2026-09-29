@@ -277,11 +277,13 @@ keeps:
 - The new pin is written beside the old one as `pin.json.staged`, loaded back
   and validated there, and only then renamed over `pin.json`, so a replacement
   that does not validate never becomes the pin. Before the rename the old pin is
-  copied to `pin.json.pre-repin`, which stays until the resume has launched
-  (then it is deleted) or failed (then its bytes are restored over `pin.json`).
-  If the process dies in between, the next resume (not a `--dry-run`) finds the
-  backup, puts the old pin back under the workflow lock, and, when the journal
-  still says the workflow moved, adds `runtime_repin_rolled_back` with
+  copied to `pin.json.pre-repin`. The supervisor started on the new pin deletes
+  it, durably, before it runs any step; a supervisor that cannot delete it
+  fails without running anything. If the resume fails first, the backup's
+  bytes are restored over `pin.json`. A backup still on disk therefore always
+  means nothing ran on the new runtime: the next resume (not a `--dry-run`)
+  puts the old pin back under the workflow lock and, when the journal still
+  says the workflow moved, adds `runtime_repin_rolled_back` with
   `reason: interrupted`. A failed `--repin` therefore leaves the workflow as it
   was. Until that recovery runs, `workflow status` reads the pin on disk, which
   is the new one.
@@ -291,7 +293,9 @@ keeps:
 `--repin` is refused, with the reason, in these cases: a child of the workflow
 is still running (`repin_children_running`, naming the run ids and pids; stop
 it with `workflow kill` or wait for it, because a resume would cancel it and
-the runtime would change underneath it in the same command); another resume
+the runtime would change underneath it in the same command). A child that has
+not published its pid yet counts as running while its launcher is alive or,
+with no launcher on record, for five minutes after its last activity; another resume
 holds the workflow lock (`workflow_locked`); the existing pin cannot be
 verified (a pin from before the runtime files were recorded fails to load, and
 so cannot be resumed either); or the identity check above fails.
