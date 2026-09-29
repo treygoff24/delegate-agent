@@ -4370,7 +4370,22 @@ def _materialize_empty_retry(
     temp_base: Path | None = None,
 ) -> tuple[list[str], str | None, str | None]:
     if stdin_text is not None:
-        return list(argv), _append_empty_retry_instruction(stdin_text), None
+        # The prompt travels on stdin, but the argv can still carry an agent
+        # config or persona placeholder (omp's pinned no-fallback overlay rides
+        # `--config <placeholder>`); a retry launched without materializing it
+        # would hand the child the placeholder string as a path.
+        retry_argv, retry_dir = _materialize_prompt_file_argv(
+            argv,
+            prompt_file_text=None,
+            prompt_file_placeholder=None,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            agent_config_dir=agent_config_dir,
+            persona_file_text=persona_file_text,
+            persona_file_placeholder=persona_file_placeholder,
+            temp_base=temp_base,
+        )
+        return retry_argv, _append_empty_retry_instruction(stdin_text), retry_dir
     if prompt_file_text is not None:
         retry_argv, retry_dir = _materialize_prompt_file_argv(
             argv,
@@ -5397,6 +5412,30 @@ def _claude_model_resolved(event: JsonObject) -> str | None:
     return max(candidates)[1] if candidates else None
 
 
+def _claude_served_model(event: JsonObject) -> str | None:
+    """The model Claude's result says answered, only when that is unambiguous.
+
+    ``modelUsage`` is a per-run aggregate, not a per-answer record: Claude Code
+    also bills side models (titles, subagents, a ``--fallback-model`` retry)
+    there. Only a map where exactly one model produced output names what
+    answered; anything else stays unverified instead of guessing by volume.
+    """
+
+    model_usage = event.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    producing = [
+        model
+        for model, values in model_usage.items()
+        if isinstance(model, str)
+        and isinstance(values, dict)
+        and isinstance(values.get("outputTokens"), int)
+        and not isinstance(values.get("outputTokens"), bool)
+        and values["outputTokens"] > 0
+    ]
+    return producing[0] if len(producing) == 1 else None
+
+
 def _claude_usage(event: JsonObject) -> JsonObject:
     usage = event.get("usage")
     if not isinstance(usage, dict):
@@ -5413,15 +5452,20 @@ def _claude_usage(event: JsonObject) -> JsonObject:
 
 def _parse_claude_call_json(
     stdout_text: str, *, pure: bool
-) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None]:
+) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None, str | None]:
+    """Parse Claude's call JSON.
+
+    Returns ``(text, exit, warnings, model_resolved, usage, error, message,
+    served_model)``; ``served_model`` is ``_claude_served_model`` of the result.
+    """
     try:
         events = json.loads(stdout_text)
     except json.JSONDecodeError:
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     if isinstance(events, dict):
         events = [events]
     elif not isinstance(events, list):
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     result = next(
         (
             event
@@ -5431,7 +5475,7 @@ def _parse_claude_call_json(
         None,
     )
     if not isinstance(result, dict):
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     result_text = harness_events.claude_result_text(result)
     if result_text is None:
         # `claude_result_text` requires a non-blank string because a blank one is
@@ -5442,7 +5486,7 @@ def _parse_claude_call_json(
         # transport, and `is_error` remains what decides the exit code.
         raw_result = result.get("result")
         if not isinstance(raw_result, str):
-            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
         result_text = raw_result
     denials = result.get("permission_denials")
     if pure:
@@ -5455,6 +5499,7 @@ def _parse_claude_call_json(
                 _claude_usage(result),
                 "pure_boundary_unverified",
                 "Pure boundary unverified: permission_denials missing or malformed.",
+                _claude_served_model(result),
             )
         if denials:
             return (
@@ -5465,6 +5510,7 @@ def _parse_claude_call_json(
                 _claude_usage(result),
                 "pure_boundary_violation",
                 f"Pure boundary violation: {len(denials)} permission denial(s).",
+                _claude_served_model(result),
             )
     exit_code = 1 if result.get("is_error") is True else 0
     return (
@@ -5475,6 +5521,7 @@ def _parse_claude_call_json(
         _claude_usage(result),
         "child_failed" if exit_code else None,
         None,
+        _claude_served_model(result),
     )
 
 
@@ -5657,7 +5704,7 @@ def _execute_call_once(
     stdout_text = (stdout_data or b"").decode("utf-8", errors="replace")
     stderr_tail = _call_stderr_tail(stderr_data or b"", sensitive_texts)
     if harness == "claude" and (pure or structured_output):
-        raw_text, parsed_exit, warnings, model_resolved, usage, error, message = (
+        raw_text, parsed_exit, warnings, model_resolved, usage, error, message, served = (
             _parse_claude_call_json(stdout_text, pure=pure)
         )
         text = _bounded_call_fallback_text(raw_text)
@@ -5686,7 +5733,7 @@ def _execute_call_once(
             error=error,
             message=message,
             model_resolved=model_resolved,
-            served_model=model_resolved,
+            served_model=served,
             usage=usage,
             result_quality=(
                 RESULT_QUALITY_EMPTY

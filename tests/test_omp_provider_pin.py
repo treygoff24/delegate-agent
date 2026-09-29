@@ -33,6 +33,7 @@ from delegate_agent import (
     request_build,
     run_context,
     run_status,
+    runner,
 )
 from delegate_agent import config as delegate_config
 from delegate_agent import request_models as request_types
@@ -683,6 +684,110 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         text = out.getvalue() + err.getvalue()
         self.assertIn("invalid_alias", text)
         self.assertIn("kimi", text)
+
+
+class CoordinatorRoundThreeTests(unittest.TestCase):
+    """Round-2 review findings: guessed Claude provenance, text printed on a
+    refused call, and an empty-result retry that lost the pin overlay."""
+
+    def test_claude_served_model_is_named_only_when_one_model_produced_output(self):
+        def result(model_usage):
+            return json.dumps(
+                {
+                    "type": "result",
+                    "result": "answer",
+                    "is_error": False,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "modelUsage": model_usage,
+                }
+            )
+
+        cases = {
+            "single": ({"claude-sonnet-5-5": {"outputTokens": 40}}, "claude-sonnet-5-5"),
+            # A side model that produced nothing does not make the answer ambiguous.
+            "side-model-idle": (
+                {"claude-sonnet-5-5": {"outputTokens": 40}, "claude-haiku": {"outputTokens": 0}},
+                "claude-sonnet-5-5",
+            ),
+            # Two producing models: the aggregate cannot say which one answered,
+            # so nothing is claimed (the old code picked the larger one).
+            "two-producing": (
+                {
+                    "claude-sonnet-5-5": {"outputTokens": 40},
+                    "claude-opus-5-5": {"outputTokens": 90},
+                },
+                None,
+            ),
+            "absent": (None, None),
+        }
+        for label, (usage, expected) in cases.items():
+            with self.subTest(label):
+                parsed = runner._parse_claude_call_json(result(usage), pure=False)
+                self.assertEqual(parsed[7], expected)
+
+    def test_a_refused_call_prints_no_text_it_held_from_before_the_switch(self):
+        # The stream reader stops ingesting at the switch, but a call result can
+        # still carry text published before it. That text is not an answer from
+        # the pinned model, so text mode prints none of it (JSON keeps it next
+        # to the error for diagnosis).
+        refused = runner.CallResult(
+            text="EARLY-TEXT-FROM-PINNED",
+            exit_code=1,
+            duration_ms=1,
+            stdout_bytes=1,
+            stderr_bytes=0,
+            text_chars=22,
+            text_truncated=False,
+            error="model_continuity_paused",
+            message="Pinned model continuity refused a substitution: requested "
+            "opencode-go/glm-5.3, but omp tried to serve fireworks/glm-5p3.",
+        )
+        cfg = delegate_config.embedded_default_config()
+        for json_mode in (False, True):
+            with self.subTest(json_mode=json_mode):
+                out, err = io.StringIO(), io.StringIO()
+                argv = ["omp", "call", "--model", "opencode-go/glm-5.3", "Fixture prompt"]
+                with (
+                    mock.patch.object(request_build, "load_config", return_value=(cfg, "fixture")),
+                    mock.patch.object(harness_discovery, "load_discovery_cache", return_value=None),
+                    mock.patch.object(runner, "execute_call", return_value=refused),
+                ):
+                    code = cli.main(
+                        ["--json", *argv] if json_mode else argv, stdout=out, stderr=err
+                    )
+
+                self.assertNotEqual(code, 0)
+                if json_mode:
+                    payload = json.loads(out.getvalue())
+                    self.assertEqual(payload["error"], "model_continuity_paused")
+                    self.assertEqual(payload["assistantText"], "EARLY-TEXT-FROM-PINNED")
+                else:
+                    self.assertIn("tried to serve fireworks/glm-5p3", err.getvalue())
+                    self.assertNotIn("EARLY-TEXT-FROM-PINNED", out.getvalue())
+
+    def test_a_stdin_prompt_empty_retry_materializes_the_config_overlay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            argv = ["omp", "--config", OVERLAY_PLACEHOLDER, "--mode", "json"]
+
+            retry_argv, retry_stdin, _retry_dir = runner._materialize_empty_retry(
+                argv,
+                stdin_text="the prompt",
+                prompt_file_text=None,
+                prompt_file_placeholder=None,
+                agent_config_text=argv_api.OMP_NO_MODEL_FALLBACK_OVERLAY,
+                agent_config_placeholder=OVERLAY_PLACEHOLDER,
+                agent_config_dir=run_dir,
+            )
+
+            self.assertNotIn(OVERLAY_PLACEHOLDER, retry_argv)
+            config_path = Path(retry_argv[retry_argv.index("--config") + 1])
+            self.assertEqual(
+                json.loads(config_path.read_text(encoding="utf-8")),
+                {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+            )
+            self.assertTrue(retry_stdin.startswith("the prompt"))
+            self.assertNotEqual(retry_stdin, "the prompt")
 
 
 class ServedProvenancePlumbingTests(CommandTestBase):

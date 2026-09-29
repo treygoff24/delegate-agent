@@ -1307,7 +1307,11 @@ def execute_request(
                     print(result.message, file=stderr)
                 elif result.stderr_tail:
                     print(result.stderr_tail, file=stderr)
-            if result.text:
+            # A pinned call refused for a model switch may already hold text from
+            # the turn before the switch; that text is not an answer from the
+            # requested model, so text mode prints none (JSON keeps it with the
+            # error for diagnosis).
+            if result.text and result.error != "model_continuity_paused":
                 print(result.text, file=stdout)
             call_response = (exit_code, None)
             return call_response
