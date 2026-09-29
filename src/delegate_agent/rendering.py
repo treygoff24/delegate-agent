@@ -30,6 +30,17 @@ def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
     return f"{seconds}s"
 
 
+def format_remaining(seconds: int) -> str:
+    """Compact time left, e.g. ``12m left`` or ``1h5m left``."""
+    minutes, secs = divmod(max(seconds, 0), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes}m left"
+    if minutes:
+        return f"{minutes}m left"
+    return f"{secs}s left"
+
+
 SnapshotTextField = tuple[str, str]
 
 
@@ -285,6 +296,10 @@ def render_runs_text(
             current = f"[degraded] {current}" if isinstance(current, str) else "[degraded]"
         if isinstance(current, str) and len(current) > 40:
             current = current[:37] + "..."
+        remaining = summary.get("remainingSeconds")
+        if isinstance(remaining, int) and not isinstance(remaining, bool):
+            left = format_remaining(remaining)
+            current = f"{left}; {current}" if current else left
         if show_group:
             group = summary.get("group") if isinstance(summary.get("group"), str) else ""
             print(
