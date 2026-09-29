@@ -227,6 +227,26 @@ def mask_recorded_env(text: str, env: Mapping[str, str] | None) -> str:
         text = masked
 
 
+_REDACT_MASK_ROUNDS = 8
+
+
+def redact_and_mask_recorded_env(text: str, env: Mapping[str, str] | None) -> str:
+    """Recorded-value masking and generic redaction, repeated until stable.
+
+    Generic redaction replaces a token with ``***`` too, so it can join the
+    neighbours of a mask-containing recorded value (``ABC.<jwt>.EFG`` becomes
+    ``ABC.***.EFG``). Alternate the two until a round changes nothing; if that
+    has not happened after a few rounds, return only the mask rather than
+    text that may still hold a recorded value.
+    """
+    for _ in range(_REDACT_MASK_ROUNDS):
+        masked = mask_recorded_env(redaction.redact_string(mask_recorded_env(text, env)), env)
+        if masked == text:
+            return text
+        text = masked
+    return ENV_VALUE_MASK
+
+
 def mask_recorded_env_fragments(text: str, env: Mapping[str, str] | None) -> str:
     """Mask merged spans covered by recorded values' 8-character substrings.
 
@@ -606,11 +626,11 @@ def run_setup(
     # value and expose its suffix when replacements shrink the window. Then
     # mask fragments from values whose writer wrapped them across lines.
     text = mask_recorded_env_values(data.decode("utf-8", errors="replace"), mask_values)
-    tail = mask_recorded_env(text[-SETUP_TAIL_CHARS:], mask_values)
+    tail = redact_and_mask_recorded_env(text[-SETUP_TAIL_CHARS:], mask_values)
     return SetupResult(
         exit_code=exit_code,
         duration_ms=duration_ms,
         timed_out=timed_out,
         log_path=log_path,
-        output_tail=redaction.redact_string(tail),
+        output_tail=tail,
     )
