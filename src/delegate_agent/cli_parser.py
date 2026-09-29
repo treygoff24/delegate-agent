@@ -3034,6 +3034,7 @@ def _parse_workflow_path_action(
     args_json: str | None = None
     budget: int | None = None
     dry_run = False
+    repin = False
     resume: str | None = None
     name: str | None = None
     env: dict[str, str] = {}
@@ -3077,6 +3078,10 @@ def _parse_workflow_path_action(
             continue
         if token == "--dry-run" and action == "run":
             dry_run = True
+            i += 1
+            continue
+        if token == "--repin" and action == "run":
+            repin = True
             i += 1
             continue
         if token == "--resume" and action == "run":
@@ -3142,6 +3147,7 @@ def _parse_workflow_path_action(
             notify=notify,
             env=tuple(env.items()),
             env_files=tuple(env_files),
+            repin=repin,
         ),
     )
 
@@ -3162,6 +3168,7 @@ def _parse_workflow_id_action(
     timeout: int | None = None
     result_field: str | None = None
     approve_options: dict[str, str] = {}
+    repin = False
     i = 0
     while i < len(args):
         token = args[i]
@@ -3176,6 +3183,10 @@ def _parse_workflow_id_action(
             continue
         if token == "--jsonl" and action == "watch":
             jsonl = True
+            i += 1
+            continue
+        if token == "--repin" and action == "approve":
+            repin = True
             i += 1
             continue
         if token == "--since" and action in {"events", "watch"}:
@@ -3252,6 +3263,7 @@ def _parse_workflow_id_action(
             gate_action=approve_options.get("--action"),
             gate_note=approve_options.get("--note"),
             gate_data_json=approve_options.get("--data"),
+            repin=repin,
         ),
     )
 

@@ -179,6 +179,9 @@ class WorkflowCommand:
     # directory and applied to every child on every attempt, resume included.
     env: tuple[tuple[str, str], ...] = ()
     env_files: tuple[str, ...] = ()
+    # workflow resume/approve --repin: move the workflow's pin onto the runtime
+    # executing this command. Never implied; a resume keeps the pin by default.
+    repin: bool = False
 
 
 @dataclass(frozen=True)
@@ -311,6 +314,18 @@ def emit_run(
     config_source: str = "command-config",
     gate_choice: GateChoice | None = None,
 ) -> int:
+    if command.repin and not command.resume:
+        raise DelegateError(
+            "invalid_option_combination",
+            "workflow run --repin applies only to a resume: a new workflow pins the live "
+            "runtime already.",
+        )
+    if command.repin and command.dry_run:
+        raise DelegateError(
+            "invalid_option_combination",
+            "workflow resume --repin does not apply to --dry-run: a dry run launches no "
+            "supervisor and never moves the pin.",
+        )
     warnings: list[str] = []
     gate_decision: JsonObject | None = None
     operational_environment = {
@@ -389,6 +404,30 @@ def emit_run(
     attempt: workflow_attempts.WorkflowAttempt | None = None
     source_script: str | None = None
     script_hash: str | None = None
+    repin_result: workflow_pinning.RepinResult | None = None
+    runtime_pin: JsonObject | None = None
+    repin_attempted = False
+    repin_event_journaled = False
+    launched = False
+
+    def rollback_repin() -> None:
+        # A resume that fails after the pin moved must leave the workflow on the
+        # runtime it had, the way it restores status.json and the approval file.
+        # The way back is the pre-repin backup on disk, so it works even when
+        # repin_to_live raised before returning a result. Once the supervisor has
+        # launched there is nothing to undo: it runs on the new pin.
+        if not repin_attempted or launched:
+            return
+        try:
+            undone = workflow_pinning.rollback_repin(wf_id)
+        except (OSError, workflow_pinning.WorkflowPinError):
+            # The backup stays where it is; the next resume puts the pin back.
+            return
+        if undone is not None and repin_event_journaled:
+            # The journal said the workflow moved; say that it did not.
+            with contextlib.suppress(OSError):
+                append_run_event("runtime_repin_rolled_back", reason="launch_failed", **undone)
+
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
@@ -398,19 +437,41 @@ def emit_run(
                 f"Workflow not found: {wf_id}. {_workflow_state_hint(workspace)}",
             )
         _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
+        if not command.dry_run:
+            _recover_interrupted_repin(root, wf_id)
         try:
-            pin = workflow_pinning.load_pin(wf_id)
-            if pin is None:
-                raise workflow_pinning.WorkflowPinError(
-                    "invalid_pin", "workflow pin is missing; start a new workflow"
-                )
-            if not command.dry_run:
-                attempt = workflow_attempts.create(
-                    pin,
-                    workflow_attempts.prepare(
-                        pin, config, config_source, environment=operational_environment
+            if command.repin:
+                # The pin moves under the workflow lock, after the checks below,
+                # and the attempt snapshot is bound to whichever pin results, so
+                # only the operational config can be validated this early.
+                workflow_attempts.operational_values(config, environment=operational_environment)
+            else:
+                pin = workflow_pinning.load_pin(wf_id)
+                if pin is None:
+                    raise workflow_pinning.WorkflowPinError(
+                        "invalid_pin", "workflow pin is missing; start a new workflow"
+                    )
+                # load_pin already vouched for the pin, so a description that
+                # still fails is reported as unchecked; the notice is advisory
+                # and must never be the reason a resume is refused.
+                runtime_pin = _describe_runtime_pin(wf_id)
+                notice = workflow_pinning.runtime_drift_notice(
+                    runtime_pin,
+                    workflow_id=wf_id,
+                    resume_hint=(
+                        "Resume keeps the pinned runtime, so fixes shipped since then do not "
+                        "reach this workflow; pass --repin to run it on the live runtime instead."
                     ),
                 )
+                if notice is not None:
+                    warnings.append(notice)
+                if not command.dry_run:
+                    attempt = workflow_attempts.create(
+                        pin,
+                        workflow_attempts.prepare(
+                            pin, config, config_source, environment=operational_environment
+                        ),
+                    )
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
         # Acquire the lock before any approval/budget mutation so a failed
@@ -420,6 +481,26 @@ def emit_run(
             status = registry.read_json(root / registry.STATUS_FILE) or {}
             _require_current_workflow(status)
             previous_status = dict(status)
+            if command.repin:
+                # Checked before anything is touched. A resume cancels the prior
+                # attempt's live children; a repin would add a runtime move on
+                # top of losing that work, and the operator should choose both.
+                live_children = runtime.live_workflow_children(
+                    workspace, wf_id, include_starting=True
+                )
+                if live_children:
+                    named = ", ".join(
+                        str(child.get("alias") or child["runId"]) for child in live_children[:5]
+                    )
+                    more = len(live_children) - 5
+                    raise DelegateError(
+                        "repin_children_running",
+                        f"cannot repin {wf_id}: {len(live_children)} of its child run(s) are "
+                        f"still running ({named}{f', and {more} more' if more > 0 else ''}). "
+                        "Resume cancels them, and a repin would move the runtime under work "
+                        "still in flight. Wait for them to finish, stop them with "
+                        f"`delegate workflow kill {wf_id}`, or resume without --repin.",
+                    )
             if approve_gate:
                 # Recover gate evidence only after acquiring the supervisor
                 # lock; an approval racing a draining supervisor must not
@@ -465,6 +546,26 @@ def emit_run(
                     # below must not restore the clobbered projection.
                     registry.write_status(root, status)
                     previous_status = registry.read_json(root / registry.STATUS_FILE) or {}
+            if command.repin:
+                repin_attempted = True
+                try:
+                    repin_result = workflow_pinning.repin_to_live(wf_id)
+                    pin = repin_result.pin
+                    attempt = workflow_attempts.create(
+                        pin,
+                        workflow_attempts.prepare(
+                            pin, config, config_source, environment=operational_environment
+                        ),
+                    )
+                    runtime_pin = workflow_pinning.runtime_drift(
+                        workflow_pinning.pinned_runtime_summary(wf_id)
+                    )
+                    runtime_pin["checked"] = True
+                except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
+                    raise DelegateError(exc.error, exc.message) from exc
+                if repin_result.changed:
+                    runtime_pin["repinned"] = True
+                    runtime_pin["previous"] = repin_result.previous
             # This lock is only available because the prior attempt's
             # supervisor is gone. Any child it still had in flight is an
             # orphan: its row sits at rawStatus=running with a dead pid, lists
@@ -552,6 +653,7 @@ def emit_run(
                 registry.write_status(root, status)
         except BaseException:
             try:
+                rollback_repin()
                 restore_approval()
             finally:
                 with contextlib.suppress(OSError):
@@ -701,13 +803,32 @@ def emit_run(
         systemd_warning = _systemd_detach_warning()
         if systemd_warning is not None and systemd_warning not in warnings:
             warnings.append(systemd_warning)
+        if repin_result is not None and repin_result.changed:
+            # As late as the parent can write: once the supervisor starts it owns
+            # the journal, so this cannot follow the launch. A launch that fails
+            # after this line journals runtime_repin_rolled_back (see above).
+            previous_runtime = repin_result.previous or {}
+            append_run_event(
+                "runtime_repinned",
+                fromDigest=previous_runtime.get("digest"),
+                fromVersion=previous_runtime.get("version"),
+                fromPinnedAt=previous_runtime.get("pinnedAt"),
+                toDigest=pin.runtime_digest,
+                toVersion=(runtime_pin or {}).get("pinned", {}).get("version"),
+            )
+            repin_event_journaled = True
         previous_environment = workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
         try:
             runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+            launched = True
         finally:
             if previous_environment:
                 workflow_pinning.restore_environment(previous_environment)
+        # The pre-repin backup is retired by the supervisor itself, before its
+        # first step (runtime.run_supervisor): only a supervisor that actually
+        # runs on the new pin may make the move permanent.
     except BaseException:
+        rollback_repin()
         restore_approval()
         if previous_status is not None:
             registry.write_json(root / registry.STATUS_FILE, previous_status)
@@ -732,6 +853,8 @@ def emit_run(
         payload["effectiveConfigPath"] = str(attempt.config_path)
     payload["profileIdentityPinned"] = True
     payload["profileIdentity"] = pin.profile_identity
+    if runtime_pin is not None:
+        payload["runtimePin"] = runtime_pin
     if source_script is not None:
         payload["sourceScript"] = source_script
     if script_hash is not None:
@@ -744,6 +867,16 @@ def emit_run(
         for warning in warnings:
             print(f"warning: {warning}", file=stderr)
         print(f"wfId: {wf_id}", file=stdout)
+        if repin_result is not None and runtime_pin is not None:
+            pinned_now = workflow_pinning.describe_runtime(runtime_pin["pinned"])
+            if repin_result.changed:
+                previous_runtime = workflow_pinning.describe_runtime(runtime_pin["previous"])
+                print(f"runtimeRepinned: {previous_runtime} -> {pinned_now}", file=stdout)
+            else:
+                print(
+                    f"runtimeRepinned: no change, already on the live runtime {pinned_now}",
+                    file=stdout,
+                )
         print(f"journalPath: {payload['journalPath']}", file=stdout)
         print(f"scriptPath: {payload['scriptPath']}", file=stdout)
         if source_script is not None:
@@ -881,17 +1014,54 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
             f"Workflow status not found: {command.wf_id} (looked in {root}).",
         )
     view = _status_view(root, payload)
+    runtime_pin, runtime_notice = _status_runtime_pin(root.name, view.get("status"))
+    view["runtimePin"] = runtime_pin
     if command.json_mode:
         rendering.print_json(view, stdout)
     else:
         print(f"{view.get('wfId')}: {view.get('status')}", file=stdout)
         print(f"journalPath: {view.get('journalPath')}", file=stdout)
+        if runtime_notice is not None:
+            print(runtime_notice, file=stdout)
         if view.get("status") == "stalled":
             print(
                 f"supervisor dead; resume with: workflow run --resume {view.get('wfId')}",
                 file=stdout,
             )
     return EXIT_OK
+
+
+def _describe_runtime_pin(wf_id: str) -> JsonObject:
+    """Pinned-versus-live runtime facts, or ``checked: false`` with why they are unknown."""
+    try:
+        drift = workflow_pinning.runtime_drift(workflow_pinning.pinned_runtime_summary(wf_id))
+    except workflow_pinning.WorkflowPinError as exc:
+        return {"checked": False, "error": exc.error, "message": exc.message}
+    drift["checked"] = True
+    return drift
+
+
+def _status_runtime_pin(wf_id: str, status: object) -> tuple[JsonObject, str | None]:
+    """The pinned-versus-live runtime view for ``status``, and its notice when they differ.
+
+    ``status`` must keep working when the pin cannot be described (a workflow
+    that predates pinning, a deleted pin), so that reports ``checked: false``
+    with the reason instead of failing the command.
+    """
+    drift = _describe_runtime_pin(wf_id)
+    if not drift["checked"]:
+        return drift, None
+    if status in {"succeeded", "dry_run"}:
+        # Nothing left to move: a finished workflow's pin is history.
+        return drift, None
+    resumable = status in {"stalled", "failed", "killed", "paused"}
+    hint = (
+        f"A resume keeps the pinned runtime; `delegate workflow resume {wf_id} --repin` "
+        "moves it onto the live runtime."
+        if resumable
+        else "This supervisor keeps running on the pinned runtime."
+    )
+    return drift, workflow_pinning.runtime_drift_notice(drift, workflow_id=wf_id, resume_hint=hint)
 
 
 def emit_events(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
@@ -1088,7 +1258,9 @@ def emit_approve(
                 "invalid_workflow_gate_data", f"workflow approve --data is not valid JSON: {exc}"
             ) from exc
         gate_choice = replace(gate_choice, data=data, has_data=True)
-    resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
+    resumed = WorkflowCommand(
+        "run", resume=command.wf_id, json_mode=command.json_mode, repin=command.repin
+    )
     result = emit_run(
         resumed,
         workspace=workspace,
@@ -1603,6 +1775,44 @@ def _parse_args(raw: str | None) -> JsonValue:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise DelegateError("invalid_workflow_args", "workflow --args must be valid JSON.") from exc
+
+
+def _recover_interrupted_repin(root: Path, wf_id: str) -> None:
+    """Undo a repin that no supervisor ever ran on.
+
+    A repin keeps the pin it replaced in a backup, and only a supervisor
+    running on the new pin removes it (durably, before its first step), so a
+    backup found here means nothing ran on the repinned runtime: the resume
+    failed, or its process or supervisor died first. It is put back under the
+    workflow lock, and the journal, which may already say the workflow moved,
+    gets the matching rollback record.
+    """
+    if not workflow_pinning.repin_backup_path(wf_id).exists():
+        return
+    lock_fd = _acquire_workflow_lock(root, wf_id)
+    try:
+        try:
+            undone = workflow_pinning.rollback_repin(wf_id)
+        except workflow_pinning.WorkflowPinError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+        if undone is not None and _repin_journaled_for(root, undone.get("abandonedDigest")):
+            _append_command_event(root, "runtime_repin_rolled_back", reason="interrupted", **undone)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
+
+
+def _repin_journaled_for(root: Path, digest: object) -> bool:
+    """Whether the journal's latest repin record is an unretracted move to ``digest``."""
+    latest: JsonObject | None = None
+    for event in registry.iter_journal(root / registry.JOURNAL_FILE):
+        if event.get("type") in {"runtime_repinned", "runtime_repin_rolled_back"}:
+            latest = event
+    return (
+        latest is not None
+        and latest.get("type") == "runtime_repinned"
+        and latest.get("toDigest") == digest
+    )
 
 
 def _append_command_event(root: Path, event_type: str, **payload: JsonValue) -> None:
