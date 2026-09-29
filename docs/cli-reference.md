@@ -1264,11 +1264,11 @@ persistent-worktree isolation semantics are unchanged.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural|--summary]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--summary | [--limit N] [--structural]]
 delegate runs prune [--older-than DAYS] [--dry-run]
-delegate ps [--harness HARNESS] [--group NAME] [--limit N]
+delegate ps [--harness HARNESS] [--group NAME] [--summary | [--limit N] [--structural]]
 delegate snapshot (<handle>|--latest HARNESS) [--no-redact]
-delegate run-output (<handle>|--latest HARNESS) [--completion-report] [--stdout] [--stderr] [--raw | [--tail N] [--max-chars N]] [--no-redact]
+delegate run-output (<handle>|--latest HARNESS) [--completion-report] [--no-redact] [(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]
 delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
@@ -1317,6 +1317,8 @@ creating a Run or writing a prompt record.
 `delegate runs` defaults to recent runs. In a repository's main worktree it also lists runs registered in linked worktrees, tagged with `registryWorkspace` (see [Worktrees](worktrees.md#prune-many-worktrees)). `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
+`--summary` prints counts by status, harness, and group for every matching run and no rows,
+so it is refused together with `--limit` or `--structural`.
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
 and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
 `showing N of M runs (raise --limit to see more)` when truncated. An empty result adds a

@@ -296,7 +296,7 @@ class PsHelpContractTests(unittest.TestCase):
         payload = command_help.command_help_payload(spec)
 
         self.assertIn("--structural", text)
-        self.assertIn("[--structural|--summary]", payload["usage"][0])
+        self.assertIn("[--summary | [--limit N] [--structural]]", payload["usage"][0])
         self.assertIn("--structural", {option["flag"] for option in payload["options"]})
 
 

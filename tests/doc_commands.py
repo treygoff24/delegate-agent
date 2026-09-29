@@ -12,15 +12,18 @@ questions and nothing else:
   argv lists a parser can be asked about? (``expand_usage``.)
 
 The expander is deliberately not a full enumeration: a synopsis with nine optional
-groups has hundreds of combinations, and a parser that accepts every option alone
-and all of them together does not reject any documented pair for a reason the
-synopsis could hide. It emits the minimal form, the maximal form, and the minimal
-form plus each single alternative of each group, so every documented flag and
-every documented alternative is exercised at least once.
+groups has hundreds of combinations. It emits the minimal form, the maximal form,
+the minimal form plus each single alternative of each group, and the minimal form
+plus every pair of groups (each pair at every combination of their alternatives).
+Singles catch a flag the parser does not know; the maximal form and the pairs catch
+options the parser refuses to combine (``runs --limit 5 --summary``), which a
+synopsis of independent brackets silently claims are fine. Three-way conflicts are
+not searched for.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -272,8 +275,18 @@ def _walk(
             yield from _walk(alt, (*ancestors, (node, index)))
 
 
+def _forcing(
+    node: Opt | Req, index: int, ancestors: tuple[tuple[Opt | Req, int], ...]
+) -> dict[Opt | Req, int]:
+    """Choices that make ``node`` render its alternative ``index``, ancestors included."""
+    forced = {node: index}
+    for ancestor, ancestor_index in ancestors:
+        forced.setdefault(ancestor, ancestor_index)
+    return forced
+
+
 def usage_variants(nodes: tuple[Node, ...]) -> list[list[Word]]:
-    """Minimal, maximal, and one-alternative-at-a-time renderings of ``nodes``."""
+    """Minimal, maximal, single-alternative, and pairwise renderings of ``nodes``."""
 
     def build(forced: dict[Opt | Req, int], *, everything_on: bool) -> list[Word]:
         def choose(node: Opt | Req) -> int | None:
@@ -286,12 +299,18 @@ def usage_variants(nodes: tuple[Node, ...]) -> list[list[Word]]:
         return list(_render(nodes, choose))
 
     variants = [build({}, everything_on=False), build({}, everything_on=True)]
+    atoms: list[dict[Opt | Req, int]] = []
     for node, ancestors in _walk(nodes):
         for index in range(len(node.alts)):
-            forced = {node: index}
-            for ancestor, ancestor_index in ancestors:
-                forced.setdefault(ancestor, ancestor_index)
-            variants.append(build(forced, everything_on=False))
+            atoms.append(_forcing(node, index, ancestors))
+    for forced in atoms:
+        variants.append(build(forced, everything_on=False))
+    for first, second in itertools.combinations(atoms, 2):
+        merged = dict(first)
+        # Two alternatives of one group, or a group beside its own ancestor's other
+        # alternative, cannot appear together.
+        if all(merged.setdefault(node, index) == index for node, index in second.items()):
+            variants.append(build(merged, everything_on=False))
     unique: list[list[Word]] = []
     seen: set[tuple[tuple[str, bool], ...]] = set()
     for variant in variants:

@@ -16,8 +16,11 @@ present as a command:
 
 A line written as a synopsis (``[--flag VALUE]``, ``{safe,work}``, ``(A|B)``,
 ``<handle>``, ``[prompt...]``) is expanded into concrete argv lists by
-``tests/doc_commands.py``: the minimal form, the maximal form, and the minimal form
-plus each single alternative of each group. Every one must be accepted by
+``tests/doc_commands.py``: the minimal form, the maximal form, the minimal form
+plus each single alternative of each group, and the minimal form plus every pair of
+groups (a synopsis of independent brackets claims any two flags may appear
+together, and the pairs are where the parser says otherwise). Three-way conflicts
+are not searched for. Every one must be accepted by
 ``parse_cli`` (parse only; nothing runs) unless its concrete text is on
 ``REJECTED_BY_DESIGN`` with the reason.
 
@@ -31,17 +34,21 @@ never claimed to show).
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-from delegate_agent import command_help
+from delegate_agent import command_help, mail, run_registry
 from delegate_agent.cli_parser import parse_cli
 from delegate_agent.errors import DelegateError
 from tests import doc_commands as dc
+from tests.mail_test_helpers import mail_temporary_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI_REFERENCE = ROOT / "docs" / "cli-reference.md"
@@ -51,10 +58,15 @@ CLI_REFERENCE = ROOT / "docs" / "cli-reference.md"
 # entry must still be rejected (an accepted entry is stale) and must still be
 # produced by some line (a vanished entry is stale).
 REJECTED_BY_DESIGN: dict[str, str] = {
-    "delegate run-output codex-1 --max-chars 5": (
-        "A usage synopsis lists independent optional flags and cannot say that "
-        "--max-chars needs --stdout or --stderr. The prose next to it does, and the "
-        "parser enforces it on purpose."
+    "delegate --isolation none devin work --forbid-commit": (
+        "--forbid-commit needs a persistent worktree, so it cannot follow an explicit "
+        "--isolation none. A synopsis of independent brackets cannot say so; the "
+        "cli-reference prose does, and the parser refuses on purpose. Devin is the only "
+        "engine whose synopsis is work-only, so it is the only one where the pair is "
+        "generated (the same conflict for the other engines needs three options at once)."
+    ),
+    "delegate --isolation none dry-run devin work --forbid-commit": (
+        "The same --isolation none / --forbid-commit conflict, through dry-run."
     ),
 }
 
@@ -301,6 +313,32 @@ class UsageExpansionTests(unittest.TestCase):
             ["run h", "run --a --b n h", "run --a h", "run --b n h"],
         )
 
+    def test_every_pair_of_optional_groups_is_combined(self) -> None:
+        # Independent brackets claim any two flags may appear together. The old
+        # runs synopsis said so about --limit and --summary; the parser disagrees, and
+        # only a variant carrying both can show it.
+        variants = self.expand("delegate x [--a] [--b] [--c NAME] [--d]")
+        for pair in ("--a --b", "--a --c n", "--b --d", "--c n --d"):
+            self.assertIn(f"x {pair}", variants)
+        self.assertNotIn("x --a --b --c n", variants, "three at once is not searched")
+
+    def test_pairs_span_every_alternative_of_each_group(self) -> None:
+        variants = self.expand("delegate x [--mode auto|none] [--a]")
+        self.assertIn("x --mode auto --a", variants)
+        self.assertIn("x --mode none --a", variants)
+
+    def test_pairs_never_combine_exclusive_alternatives(self) -> None:
+        # The corrected shape: --summary excludes both flags of its sibling group.
+        variants = self.expand("delegate x [--summary | [--limit N] [--structural]]")
+        self.assertIn("x --limit 5 --structural", variants)
+        self.assertIn("x --summary", variants)
+        self.assertNotIn("x --summary --limit 5", variants)
+        self.assertNotIn("x --summary --structural", variants)
+        # The old shape, where the independent [--limit N] beside [--structural|--summary]
+        # claimed the pair the parser refuses.
+        old = self.expand("delegate x [--limit N] [--structural|--summary]")
+        self.assertIn("x --limit 5 --summary", old)
+
     def test_brace_choice_and_value_enumeration(self) -> None:
         self.assertEqual(self.expand("delegate x {safe,work} y"), ["x safe y", "x work y"])
         self.assertEqual(
@@ -409,6 +447,58 @@ class MailSendStdinTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv):
                 parse_cli(argv)
+
+    def test_bare_dash_delivers_the_bytes_on_stdin(self) -> None:
+        """parse_cli accepting ``-`` says nothing about the runtime reading stdin.
+
+        Runs the real launcher with a redirected HOME and a real pipe on stdin, then
+        reads the delivered message back off disk.
+        """
+        body = (
+            "First line.\ncaf\u00e9 \u2014 second line.\n\nlast line, trailing newline.\n".encode()
+        )
+        with (
+            mail_temporary_directory("delegate-mail-stdin-workspace-") as workspace_dir,
+            mail_temporary_directory("delegate-mail-stdin-home-") as home_dir,
+        ):
+            workspace = Path(workspace_dir).resolve()
+            home = Path(home_dir).resolve()
+            registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"AI_PROFILE", "DELEGATE_PROFILE", "DELEGATE_CONFIG"}
+            }
+            env["HOME"] = str(home)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "bin" / "delegate.py"),
+                    "--json",
+                    "--cwd",
+                    str(workspace),
+                    "mail",
+                    "send",
+                    "--to",
+                    "coordinator",
+                    "-",
+                ],
+                cwd=ROOT,
+                env=env,
+                input=body,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+            message_id = json.loads(completed.stdout)["message"]["msgId"]
+            delivered = (
+                mail.boxes_root(registry_root)
+                / mail.COORDINATOR_BOX
+                / "inbox"
+                / f"{message_id}.mail"
+            ).read_bytes()
+        _envelope, delivered_body = delivered.split(mail.MESSAGE_SEPARATOR, 1)
+        self.assertEqual(delivered_body, body)
 
     def test_synopsis_expansion_exercises_the_stdin_dash(self) -> None:
         spec = command_help.COMMAND_SPECS["mail send"]

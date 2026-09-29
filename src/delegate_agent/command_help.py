@@ -1054,7 +1054,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
         usage=(
             "delegate [--json] runs [--active|--running|--stale|--recent] "
-            "[--harness HARNESS] [--group NAME] [--limit N] [--structural|--summary]",
+            "[--harness HARNESS] [--group NAME] [--summary | [--limit N] [--structural]]",
         ),
         options=(
             OptionSpec(
@@ -1330,8 +1330,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="ps",
         summary="List active tracked runs (alias for runs --active).",
         usage=(
-            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] "
-            "[--structural|--summary]",
+            "delegate [--json] ps [--harness HARNESS] [--group NAME] "
+            "[--summary | [--limit N] [--structural]]",
         ),
         options=(
             OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
@@ -1367,8 +1367,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Inspect a tracked run's completion report or captured stdout/stderr.",
         usage=(
             "delegate [--json] run-output (<handle>|--latest HARNESS) "
-            "[--completion-report] [--stdout] [--stderr] [--raw | [--tail N] [--max-chars N]] "
-            "[--no-redact]",
+            "[--completion-report] [--no-redact] "
+            "[(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]",
         ),
         arguments=(
             ArgSpec(
