@@ -1269,6 +1269,7 @@ delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--summary | [--limit N] [--structural]]
 delegate snapshot (<handle>|--latest HARNESS) [--no-redact]
 delegate run-output (<handle>|--latest HARNESS) [--completion-report] [--no-redact] [(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]
+delegate run-output (<handle>|--latest HARNESS) [--no-redact] (--raw | --tail N)
 delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
