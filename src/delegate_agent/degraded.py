@@ -11,7 +11,7 @@ Status deliberately stays ``succeeded`` (a quiet Run whose changes landed must
 stay adoptable; see ``outcome.py``). A Run that ends this way carries
 ``degraded: true`` and a ``degradedReason`` instead, so ``wait``, snapshots,
 the launch envelope, the completion-report view, and workflow ``agent_meta()``
-can tell a finished job from an abandoned one. Two independent signals, each
+can tell a finished job from an abandoned one. Independent signals, each
 chosen to keep false positives low against real Runs:
 
 - Text (every engine): the final message is short, is not shaped like a
@@ -21,6 +21,12 @@ chosen to keep false positives low against real Runs:
 - Stream (Claude): Claude Code's ``background_tasks_changed`` snapshot still
   listed a running task when the ``result`` event arrived. That task was killed
   with the session, so whatever it was verifying never finished.
+- Announced next step (every engine): the final message is short, not report
+  shaped, and its last sentence announces an action the child is about to take
+  ("Now let me write my report."). The turn ended before the action ran.
+- Awaiting input (work mode): a short final message says the child is awaiting
+  approval, confirmation, or an answer before it will implement anything, and the
+  Run changed no files. Nobody can answer during a Run, so the job never started.
 """
 
 from __future__ import annotations
@@ -35,7 +41,16 @@ from delegate_agent.redaction import redact_string
 # Closed enum, like ``outcome.FAILURE_KINDS``: consumers may switch on it.
 DEGRADED_ENDED_WAITING = "ended_waiting_on_background_work"
 DEGRADED_BACKGROUND_UNFINISHED = "background_work_unfinished_at_exit"
-DEGRADED_REASONS = frozenset({DEGRADED_ENDED_WAITING, DEGRADED_BACKGROUND_UNFINISHED})
+DEGRADED_ANNOUNCED_NEXT_STEP = "ended_announcing_next_step"
+DEGRADED_AWAITING_INPUT = "ended_awaiting_input"
+DEGRADED_REASONS = frozenset(
+    {
+        DEGRADED_ENDED_WAITING,
+        DEGRADED_BACKGROUND_UNFINISHED,
+        DEGRADED_ANNOUNCED_NEXT_STEP,
+        DEGRADED_AWAITING_INPUT,
+    }
+)
 # The record keys a degraded verdict writes (see ``Degraded.extra``).
 DEGRADED_KEYS = ("degraded", "degradedReason", "degradedEvidence")
 DEGRADED_WARNING_PREFIX = "degraded="
@@ -183,6 +198,20 @@ def degraded_warning(reason: str) -> str:
             "background work was still running when the child ended its turn and was killed "
             "with the session, so whatever it was checking never finished"
         )
+    elif reason == DEGRADED_ANNOUNCED_NEXT_STEP:
+        detail = (
+            "the child's final message announced its next step and stopped, so that step never "
+            "ran (a report or deliverable it was about to write may not exist). Check the "
+            "deliverable exists; if not, continue the Run with: "
+            'delegate resume <handle> "Do the step you announced, then finish with a full report"'
+        )
+    elif reason == DEGRADED_AWAITING_INPUT:
+        detail = (
+            "the child ended its turn awaiting approval or an answer nobody can give during a "
+            "Run, and changed no files, so the job never started. Re-run or resume with the "
+            'approval stated: delegate resume <handle> "Approved: carry out the task now, do not '
+            'ask for confirmation"'
+        )
     else:
         detail = "the Run ended before its work did"
     return (
@@ -243,6 +272,94 @@ def waiting_on_unfinished_work(text: str | None) -> str | None:
     return None
 
 
+# The child's last sentence announces an action it is about to take. Deliberately a
+# closed verb list: "Let me know ..." and "I'll leave the rest to you" are sign-offs.
+_ANNOUNCE_VERBS = (
+    r"write|writing|run|running|apply|fix|check|read|create|update|implement|start|begin|verify|"
+    r"look|review|compile|produce|draft|put|make|add|commit|generate|finish|summari[sz]e|compose|"
+    r"prepare|assemble|compile|save|edit|patch|test|inspect|examine|go|do|proceed|continue|"
+    r"kick|launch|execute|build|search|grep|open|dig"
+)
+_ANNOUNCE = re.compile(
+    r"^\W*(?:(?:ok(?:ay)?|alright|so|and|now|next|then|first|finally|right)\b[\s,:;-]*)*"
+    r"(?:(?:let me|let\u2019s|let's)|" + _I_WILL + r"(?:\s+now)?|i(?:'m|\u2019m| am) going to|"
+    r"i(?:'m|\u2019m| am) about to)"
+    r"\s+(?:now\s+|just\s+|also\s+|go\s+ahead\s+and\s+)?(?:" + _ANNOUNCE_VERBS + r")\b",
+    re.IGNORECASE,
+)
+# A conditional or handed-off action is an offer, not an announcement.
+_ANNOUNCE_HEDGE = re.compile(
+    r"\b(?:if|unless|when|whenever|once|should|otherwise|in case|want|need me)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+ANNOUNCE_TEXT_MAX_CHARS = 400
+
+
+def announcing_next_step(text: str | None) -> str | None:
+    """The last sentence when a short, non-report message ends announcing an action."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped or len(stripped) > ANNOUNCE_TEXT_MAX_CHARS or is_report_shaped(stripped):
+        return None
+    sentences = [part.strip() for part in _SENTENCE_SPLIT.split(stripped) if part.strip()]
+    if not sentences:
+        return None
+    last = sentences[-1]
+    if not _ANNOUNCE.match(last) or _ANNOUNCE_HEDGE.search(last):
+        return None
+    return _clause(last, 0, len(last))
+
+
+# Work-mode self-gate: the child stopped for an approval nobody can give.
+_AWAITING_INPUT = re.compile(
+    r"\b(?:awaiting|waiting\s+(?:on|for)|pending)\s+(?:your\s+|the\s+(?:user|operator|parent|"
+    r"maintainer)(?:'s|\u2019s)?\s+|human\s+)?(?:approval|confirmation|go-?ahead|sign-?off|"
+    r"a\s+decision|an\s+answer|a\s+(?:reply|response)|(?:input|reply|response|decision|answer)\b)",
+    re.IGNORECASE,
+)
+_GATED_JOB = re.compile(
+    r"\b(?:implement\w*|design|plan|proceed\w*|changes?|fix(?:es)?|edit\w*|appl(?:y|ied|ying)|"
+    r"execut\w+|begin|start|approach|patch\w*|refactor\w*|migrat\w+)\b",
+    re.IGNORECASE,
+)
+# "The plan is complete." then "Awaiting approval of the implementation": a plan-only
+# task that finished its deliverable is a report, not a parked Run.
+_DELIVERED = re.compile(r"\b(?:complete[d]?|done|delivered|attached|finished)\b", re.IGNORECASE)
+_ASKS_TO_PROCEED = re.compile(
+    r"\b(?:should|shall)\s+i\s+(?:proceed|go\s+ahead|implement|apply|continue)\b[^.!]*\?\W*$"
+    r"|\bdo\s+you\s+want\s+me\s+to\s+(?:proceed|go\s+ahead|implement|apply)\b[^.!]*\?\W*$"
+    r"|\bplease\s+(?:approve|confirm)\b[^.!]{0,80}\b(?:proceed|continue|implement)",
+    re.IGNORECASE,
+)
+
+
+def awaiting_input(text: str | None) -> str | None:
+    """The clause where a short final message parks on an approval, else None."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped or len(stripped) > WAITING_TEXT_MAX_CHARS:
+        return None
+    own = _QUOTED.sub(lambda quoted: " " * len(quoted.group()), stripped)
+    for pattern in (_AWAITING_INPUT, _ASKS_TO_PROCEED):
+        for match in pattern.finditer(own):
+            if _NEGATION.search(own[max(0, match.start() - 40) : match.start()]):
+                continue
+            # The message must not say the requested deliverable is already complete:
+            # "The plan is complete. Should I proceed?" is a finished plan-only Run.
+            sentence = _clause_text(own, match.start(), match.end())
+            rest = own.replace(sentence, " ")
+            if _DELIVERED.search(rest):
+                continue
+            # An "awaiting approval" clause must also gate unfinished work.
+            if pattern is _AWAITING_INPUT and not _GATED_JOB.search(sentence):
+                continue
+            return _clause(stripped, match.start(), match.end())
+    return None
+
+
 def _clause_text(text: str, start: int, end: int) -> str:
     """The sentence around a match, unbounded and unredacted."""
     left = max(text.rfind(mark, 0, start) for mark in (". ", "! ", "? ", "; ", "\n")) + 1
@@ -278,12 +395,16 @@ def assess(
     report_text: str | None,
     *,
     background_tasks: Sequence[str] = (),
+    mode: str | None = None,
+    files_changed: bool | None = None,
 ) -> Degraded | None:
     """Judge a succeeded Run's final message and stream for an abandoned job.
 
     ``report_text`` is the child's own final message. ``background_tasks`` are
     the descriptions of tasks the stream showed still running when the turn
-    ended (empty when the harness reports none or is not Claude).
+    ended (empty when the harness reports none or is not Claude). ``mode`` is the
+    Run mode; only ``work`` can be awaiting input. ``files_changed`` is the work
+    summary's verdict (None when the Run has no work summary to consult).
     """
     clause = waiting_on_unfinished_work(report_text)
     evidence: list[str] = []
@@ -298,6 +419,19 @@ def assess(
         return Degraded(DEGRADED_ENDED_WAITING, tuple(evidence))
     if background_tasks:
         return Degraded(DEGRADED_BACKGROUND_UNFINISHED, tuple(evidence))
+    if mode == "work" and files_changed is not True:
+        parked = awaiting_input(report_text)
+        if parked is not None:
+            return Degraded(
+                DEGRADED_AWAITING_INPUT,
+                (f'final message is waiting for input nobody can give: "{parked}"',),
+            )
+    announced = announcing_next_step(report_text)
+    if announced is not None:
+        return Degraded(
+            DEGRADED_ANNOUNCED_NEXT_STEP,
+            (f'final message ends announcing a step that never ran: "{announced}"',),
+        )
     return None
 
 

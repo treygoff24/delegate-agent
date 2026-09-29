@@ -507,7 +507,7 @@ adoptable) but marks it `degraded: true` with a `degradedReason`, a `degraded=..
 warning, and `degradedEvidence` saying what it saw. `wait`, `snapshot`, `runs`, the
 launch envelope, `run-output --completion-report`, and a workflow's `agent_meta()`
 all carry the flag; see [Degraded runs](cli-reference.md#degraded-runs-the-child-ended-its-turn-mid-job)
-for the two reasons.
+for the four reasons.
 
 What to do: treat the unfinished job as not done. Run it yourself (or `followup` a
 resumable Run and tell it to run the job in the foreground), then accept the work.
@@ -523,6 +523,19 @@ found another way (a shell `&` or `nohup` inside a foreground command), only the
 after-the-fact detection remains. A false flag on a finished Run means its final
 message was short, not shaped like a report, and matched a waiting phrase; the
 `degradedEvidence` line quotes the phrase. Report the wording as a papercut.
+
+Two more reasons cover Runs that stopped early with nothing pending in the
+background. `ended_announcing_next_step`: the final message ends "Now let me write
+my report." (or "Next, I'll run the tests."), so the announced step never ran and
+the deliverable may not exist. Check for it; if missing, `delegate resume <handle>
+"Do the step you announced, then finish with a full report"`. For a long review,
+pass `--expect-file <path>` so a missing report fails the Run outright.
+`ended_awaiting_input`: a `work` Run said "Awaiting approval of the bounded
+implementation design" and changed no files. Nobody can answer during a Run (a
+loaded skill that gates implementation behind approval is the usual cause); work
+prompts now say so. Recover with `delegate resume <handle> "Approved: carry out the
+task now, do not ask for confirmation"`, and put "pre-approved, do not ask" in the
+brief when the task is architectural.
 
 ## Need one-hop output instead of a tracked run
 
