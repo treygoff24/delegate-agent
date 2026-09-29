@@ -3088,6 +3088,10 @@ class EngineArgvTests(CommandTestBase):
             ],
         )
         self.assertEqual(request.stdin_text, "implement")
+        # An alias carries multi-subscription failover even though its target
+        # names a provider, so it launches without the no-failover overlay.
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertIsNone(request.agent_config_text)
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
         self.assertEqual(request.reasoning_capability_source, "harness-compatibility")

@@ -2524,6 +2524,110 @@ class RunnerCaptureTests(unittest.TestCase):
         (warning,) = record["warnings"]
         self.assertIn("glm-4.6", warning)
 
+    def test_an_omp_cross_provider_swap_warning_names_the_provider(self):
+        """Same model id, different provider: the warning must say so.
+
+        Live defect: `opencode-go/glm-5.3` ran on Fireworks. A warning that
+        printed only "served glm-5.3" read as the requested model.
+        """
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model="opencode-go/glm-5.3",
+            model_resolved="opencode-go/glm-5.3",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-5.3"
+        accumulator.served_model_provider = "fireworks"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        (warning,) = record["warnings"]
+        self.assertTrue(warning.startswith(self.runner.MODEL_SUBSTITUTION_WARNING_PREFIX))
+        self.assertIn("served fireworks/glm-5.3", warning)
+
+    def test_the_envelope_names_the_served_model_and_provider(self):
+        ctx = self.runner.replace(
+            self._pinned_context("omp"),
+            model="opencode-go/glm-5.3",
+            model_resolved="opencode-go/glm-5.3",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
+        accumulator.served_model = "glm-5.3"
+        accumulator.served_model_provider = "opencode-go"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertEqual(record["servedModel"], "glm-5.3")
+        self.assertEqual(record["servedProvider"], "opencode-go")
+        self.assertEqual(record["modelProvenance"]["servedModel"], "glm-5.3")
+
+    def test_the_envelope_omits_served_fields_nobody_observed(self):
+        # A field the harness never reported must be absent, not a null or a
+        # copy of the request that would read as provenance.
+        ctx = self._pinned_context("codex")
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("servedModel", record)
+        self.assertNotIn("servedProvider", record)
+        accumulator.served_model = "gpt-5.6-sol"
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+        self.assertEqual(record["servedModel"], "gpt-5.6-sol")
+        self.assertNotIn("servedProvider", record)
+
+    def test_a_cursor_context_window_label_is_not_a_substitution(self):
+        """Live defect: grok-4.7-xhigh served as "Grok 4.7 256K Extra High"."""
+        ctx = self.runner.replace(
+            self._pinned_context("cursor"),
+            model="grok-4.7-xhigh",
+            model_resolved="grok-4.7-xhigh",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+        accumulator.served_model = "Grok 4.7 256K Extra High"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        self.assertNotIn("warnings", record)
+
+    def test_a_cursor_catalog_display_name_on_the_context_is_not_a_substitution(self):
+        # The selector cannot spell this label at all; only the catalog's
+        # displayName, carried on the run context, can vouch for it.
+        ctx = self.runner.replace(
+            self._pinned_context("cursor"),
+            model="cursor-mystery-1",
+            model_resolved="cursor-mystery-1",
+            model_display_name="Mystery One",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+        accumulator.served_model = "Mystery One"
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+        self.assertNotIn("warnings", record)
+
+        accumulator.served_model = "Mystery Two"
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+        (warning,) = record["warnings"]
+        self.assertIn("Mystery Two", warning)
+
+    def test_a_cursor_context_window_label_never_hides_a_different_model(self):
+        ctx = self.runner.replace(
+            self._pinned_context("cursor"),
+            model="grok-4.7-xhigh",
+            model_resolved="grok-4.7-xhigh",
+            continuity_mode="fungible",
+        )
+        accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+        accumulator.served_model = "Grok 4.8 256K Extra High"
+
+        record = self.runner.build_run_record(ctx, status="succeeded", accumulator=accumulator)
+
+        (warning,) = record["warnings"]
+        self.assertIn("Grok 4.8 256K Extra High", warning)
+
     def test_a_cursor_display_name_is_not_a_substitution(self):
         ctx = self.runner.replace(
             self._pinned_context("cursor"),
@@ -5251,6 +5355,183 @@ class RunnerCaptureTests(unittest.TestCase):
                 "mid_session_model_switch",
             )
             self.assertEqual(payload["handoffCheckpoint"]["turn"], 2)
+
+    def _run_fake_omp(self, workspace: str, providers_and_models, *, continuity_mode: str):
+        """Run a tracked omp lane whose child announces the given (provider, model) pairs."""
+        lines = []
+        for provider, model in providers_and_models:
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "role": "assistant",
+                            "provider": provider,
+                            "model": model,
+                            "content": [],
+                        },
+                    }
+                )
+            )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "the answer"}],
+                    },
+                }
+            )
+        )
+        script = Path(workspace) / "omp"
+        script.write_text(
+            "#!/usr/bin/env bash\n" + "".join(f"printf '%s\\n' '{line}'\n" for line in lines),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = self.registry.register_run(root, harness="omp")
+        ctx = self.runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="omp",
+            engine="omp",
+            mode="work",
+            model="opencode-go/glm-5.3",
+            model_requested="opencode-go/glm-5.3",
+            model_resolved="opencode-go/glm-5.3",
+            continuity_mode=continuity_mode,
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-09-28T17:00:00Z",
+        )
+        code, payload = self.runner.execute_tracked(
+            [str(script), "task"],
+            workspace,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+        return code, payload, self._snapshot(root, run_id)
+
+    def test_pinned_omp_run_refuses_a_cross_provider_substitution_and_names_it(self):
+        """Live defect: opencode-go/glm-5.3 was silently served by fireworks/glm-5p3."""
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, snapshot = self._run_fake_omp(
+                workspace, [("fireworks", "glm-5p3")], continuity_mode="pinned"
+            )
+
+        self.assertEqual(code, 1)
+        assert payload is not None
+        self.assertEqual(payload["terminalState"], "blocked_dependency")
+        self.assertEqual(payload["error"], "model_continuity_paused")
+        for text in (payload["message"], payload["failoverNotice"]):
+            self.assertIn("opencode-go/glm-5.3", text)
+            self.assertIn("fireworks/glm-5p3", text)
+        violation = payload["modelContinuityViolation"]
+        self.assertEqual(violation["servedProvider"], "fireworks")
+        self.assertEqual(violation["servedModel"], "glm-5p3")
+        self.assertEqual(payload["servedProvider"], "fireworks")
+        self.assertEqual(payload["servedModel"], "glm-5p3")
+        self.assertEqual(snapshot["servedProvider"], "fireworks")
+        self.assertEqual(snapshot["status"], "failed")
+
+    def test_pinned_omp_run_refuses_a_mid_session_provider_swap(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, _snapshot = self._run_fake_omp(
+                workspace,
+                [("opencode-go", "glm-5.3"), ("fireworks", "glm-5p3")],
+                continuity_mode="pinned",
+            )
+
+        self.assertEqual(code, 1)
+        assert payload is not None
+        self.assertEqual(payload["modelContinuityViolation"]["reason"], "mid_session_model_switch")
+        self.assertIn("fireworks/glm-5p3", payload["message"])
+
+    def test_pinned_omp_run_served_by_the_pinned_provider_succeeds(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, _snapshot = self._run_fake_omp(
+                workspace, [("opencode-go", "glm-5.3")], continuity_mode="pinned"
+            )
+
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertNotIn("modelContinuityViolation", payload)
+        self.assertEqual(payload["servedProvider"], "opencode-go")
+        self.assertEqual(payload["servedModel"], "glm-5.3")
+
+    def test_pinned_cursor_run_takes_its_display_name_from_the_run_context(self):
+        """The catalog label is the only thing that can vouch for an unspellable name.
+
+        `cursor-mystery-1` cannot be rebuilt into "Mystery One" from the
+        selector, so a pinned run is refused unless the context's catalog display
+        name reaches the stream check.
+        """
+        for served, expected_code in (("Mystery One", 0), ("Mystery Two", 1)):
+            with self.subTest(served=served), tempfile.TemporaryDirectory() as workspace:
+                init = json.dumps({"type": "system", "subtype": "init", "model": served})
+                result = json.dumps({"type": "result", "subtype": "success", "result": "Done."})
+                script = Path(workspace) / "agent"
+                script.write_text(
+                    f"#!/usr/bin/env bash\nprintf '%s\\n' '{init}'\nprintf '%s\\n' '{result}'\n",
+                    encoding="utf-8",
+                )
+                script.chmod(0o755)
+                root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+                run_id, alias = self.registry.register_run(root, harness="cursor")
+                ctx = self.runner.RunContext(
+                    registry_root=root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="cursor",
+                    engine="cursor",
+                    mode="work",
+                    model="cursor-mystery-1",
+                    model_requested="cursor-mystery-1",
+                    model_resolved="cursor-mystery-1",
+                    model_display_name="Mystery One",
+                    continuity_mode="pinned",
+                    source_cwd=workspace,
+                    execution_cwd=workspace,
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at="2026-09-28T17:00:00Z",
+                )
+
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+                self.assertEqual(code, expected_code, payload)
+                assert payload is not None
+                self.assertEqual("modelContinuityViolation" in payload, expected_code == 1)
+
+    def test_fungible_omp_run_allows_failover_but_names_the_provider(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, snapshot = self._run_fake_omp(
+                workspace, [("fireworks", "glm-5p3")], continuity_mode="fungible"
+            )
+
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertNotIn("modelContinuityViolation", payload)
+        (warning,) = snapshot["warnings"]
+        self.assertTrue(warning.startswith(self.runner.MODEL_SUBSTITUTION_WARNING_PREFIX))
+        self.assertIn("served fireworks/glm-5p3", warning)
+        self.assertEqual(payload["servedProvider"], "fireworks")
+        self.assertEqual(snapshot["servedProvider"], "fireworks")
 
     def test_fallback_configured_single_attempt_keeps_stderr_unprefixed(self):
         with tempfile.TemporaryDirectory() as workspace:

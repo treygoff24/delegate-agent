@@ -7,6 +7,11 @@ DROID_PROMPT_FILE_ARG_PLACEHOLDER = PROMPT_FILE_ARG_PLACEHOLDER
 DROID_PROMPT_FILE_DISPLAY = PROMPT_FILE_DISPLAY
 DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER = "<delegate-devin-agent-config>"
 DEVIN_AGENT_CONFIG_DISPLAY = "<devin agent config>"
+# The agent-config channel (a private file materialized next to the prompt and
+# substituted for one argv placeholder) is not devin-specific: omp uses it to
+# hand `--config` its no-model-fallback overlay.
+OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER = DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
+OMP_CONFIG_OVERLAY_DISPLAY = "<omp config overlay>"
 PERSONA_FILE_ARG_PLACEHOLDER = "<delegate-persona-file>"
 PERSONA_FILE_DISPLAY = "<persona file>"
 
@@ -24,6 +29,14 @@ def devin_display_argv(argv: list[str]) -> list[str]:
         else PROMPT_FILE_DISPLAY
         if item == PROMPT_FILE_ARG_PLACEHOLDER
         else item
+        for item in argv
+    ]
+
+
+def omp_display_argv(argv: list[str]) -> list[str]:
+    """Map omp's config-overlay placeholder to its parent-facing display token."""
+    return [
+        OMP_CONFIG_OVERLAY_DISPLAY if item == OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER else item
         for item in argv
     ]
 

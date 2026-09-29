@@ -340,6 +340,68 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": "Mystery One"}))
         self.assertIsNone(acc.continuity_violation)
 
+    def test_cursor_context_window_label_is_the_same_model(self):
+        """The catalog label carries the window ("256K"), the selector never does.
+
+        Live defect: `--model grok-4.7-xhigh` was served as "Grok 4.7 256K Extra
+        High" and delegate warned model_substitution for a run that got exactly
+        the model it asked for.
+        """
+        matches = self.events.served_model_matches_requested
+        for requested, served in (
+            ("grok-4.7-xhigh", "Grok 4.7 256K Extra High"),
+            ("grok-4.7-xhigh", "Grok 4.7 1M Extra High"),
+            ("grok-4.7-xhigh", "Grok 4.7  Extra High"),
+            ("gpt-5.6-sol-xhigh", "GPT-5.6 Sol 1M Extra High"),
+            ("composer-2.5-fast", "Composer 2.5 Fast"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                self.assertTrue(matches("cursor", requested, served))
+
+    def test_cursor_context_window_label_never_hides_a_different_model(self):
+        matches = self.events.served_model_matches_requested
+        for requested, served in (
+            # A different family or version keeps its number: "4.7" is not a window.
+            ("grok-4.7-xhigh", "Grok 4.8 256K Extra High"),
+            ("grok-4.7-xhigh", "Grok 4.7 256K High"),
+            ("grok-4.7-xhigh", "Composer 2.5 256K Extra High"),
+            ("composer-2.5", "Composer 2.6 1M"),
+        ):
+            with self.subTest(requested=requested, served=served):
+                self.assertFalse(matches("cursor", requested, served))
+
+    def test_cursor_display_name_with_a_context_window_matches_its_bare_label(self):
+        """A catalog displayName that spells the window still matches the stream."""
+        matches = self.events.served_model_matches_requested
+        self.assertTrue(
+            matches(
+                "cursor",
+                "cursor-mystery-1",
+                "Mystery One 256K",
+                display_name="Mystery One 1M",
+            )
+        )
+        self.assertFalse(
+            matches(
+                "cursor",
+                "cursor-mystery-1",
+                "Mystery Two 256K",
+                display_name="Mystery One 1M",
+            )
+        )
+
+    def test_pinned_cursor_run_is_not_paused_by_the_context_window_label(self):
+        acc = self.events.StreamAccumulator(
+            harness="cursor",
+            requested_model="grok-4.7-xhigh",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(
+            json.dumps({"type": "system", "subtype": "init", "model": "Grok 4.7 256K Extra High"})
+        )
+        self.assertIsNone(acc.continuity_violation)
+        self.assertEqual(acc.terminal_status, None)
+
     def test_pinned_claude_accepts_the_dated_served_id_for_an_alias(self):
         """claude L4: every documented alias trips a pinned run today."""
         for requested, served in (
@@ -479,6 +541,87 @@ class HarnessEventsTests(unittest.TestCase):
                     (acc.continuity_violation or {}).get("reason"), "mid_session_model_switch"
                 )
                 self.assertEqual(acc.model_fallback_hops_total, 1)
+
+    @staticmethod
+    def _omp_message_start(provider, model):
+        return json.dumps(
+            {
+                "type": "message_start",
+                "message": {
+                    "role": "assistant",
+                    "provider": provider,
+                    "model": model,
+                    "content": [],
+                },
+            }
+        )
+
+    def test_pinned_omp_refusal_names_the_provider_that_was_tried(self):
+        """Live defect: opencode-go/glm-5.3 was served by fireworks/glm-5p3.
+
+        The refusal has to say WHICH provider omp tried, because the model id
+        alone ("glm-5p3") does not say the spend went somewhere forbidden.
+        """
+        acc = self.events.StreamAccumulator(
+            harness="omp",
+            requested_model="opencode-go/glm-5.3",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(self._omp_message_start("fireworks", "glm-5p3"))
+
+        violation = acc.continuity_violation
+        self.assertEqual(violation["reason"], "served_model_mismatch")
+        self.assertEqual(violation["servedModel"], "glm-5p3")
+        self.assertEqual(violation["servedProvider"], "fireworks")
+        self.assertIn("fireworks/glm-5p3", acc.terminal_event["reason"])
+        self.assertEqual(acc.model_observations[0]["provider"], "fireworks")
+
+    def test_pinned_omp_mid_run_refusal_names_both_identities(self):
+        acc = self.events.StreamAccumulator(
+            harness="omp",
+            requested_model="opencode-go/glm-5.3",
+            continuity_mode="pinned",
+        )
+        acc.ingest_line(self._omp_message_start("opencode-go", "glm-5.3"))
+        acc.ingest_line(self._omp_message_start("fireworks", "glm-5p3"))
+
+        violation = acc.continuity_violation
+        self.assertEqual(violation["reason"], "mid_session_model_switch")
+        self.assertEqual(violation["servedProvider"], "fireworks")
+        reason = acc.terminal_event["reason"]
+        self.assertIn("opencode-go/glm-5.3", reason)
+        self.assertIn("fireworks/glm-5p3", reason)
+
+    def test_fungible_omp_hop_records_both_providers(self):
+        """A failover that keeps the model id still names the provider change."""
+        acc = self.events.StreamAccumulator(
+            harness="omp",
+            requested_model="opencode-go/glm-5.3",
+            continuity_mode="fungible",
+        )
+        acc.ingest_line(self._omp_message_start("opencode-go", "glm-5.3"))
+        acc.ingest_line(self._omp_message_start("fireworks", "glm-5.3"))
+
+        self.assertIsNone(acc.continuity_violation)
+        self.assertEqual(acc.model_fallback_hops_total, 1)
+        hop = acc.model_fallback_hops[0]
+        self.assertEqual(hop["fromProvider"], "opencode-go")
+        self.assertEqual(hop["toProvider"], "fireworks")
+
+    def test_hops_without_a_provider_keep_their_original_shape(self):
+        acc = self.events.StreamAccumulator(harness="codex", continuity_mode="fungible")
+        for model in ("model-a", "model-b"):
+            acc.ingest_line(
+                json.dumps(
+                    {
+                        "type": "message_start",
+                        "message": {"role": "assistant", "model": model, "content": []},
+                    }
+                )
+            )
+        self.assertEqual(acc.model_fallback_hops_total, 1)
+        self.assertNotIn("fromProvider", acc.model_fallback_hops[0])
+        self.assertNotIn("toProvider", acc.model_fallback_hops[0])
 
     def test_mid_run_model_switch_check_is_unchanged_for_cursor(self):
         acc = self.events.StreamAccumulator(

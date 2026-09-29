@@ -1145,6 +1145,14 @@ def execute_request(
                     structured_output=request.output_schema is not None,
                     sensitive_texts=tuple(sensitive_texts),
                     process_group_grace_seconds=request.process_group_termination_grace_sec,
+                    # The same identity a tracked run's context carries, so a
+                    # pinned call is refused on a swap and a fungible one warns.
+                    call_model=delegate_runner.CallModelIdentity(
+                        compared=request.model,
+                        label=request.model_requested or request.model_alias or request.model,
+                        display_name=request.model_display_name,
+                        continuity_mode=request.continuity_mode,
+                    ),
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(
@@ -1209,6 +1217,12 @@ def execute_request(
                     "durationMs": result.duration_ms,
                 }
                 run_metadata.add_model_payload_fields(payload, request)
+                if result.served_model is not None:
+                    # The requested/resolved fields above name the request; these
+                    # name what the child's stream said answered.
+                    payload["servedModel"] = result.served_model
+                    if result.served_provider is not None:
+                        payload["servedProvider"] = result.served_provider
                 if request.warnings:
                     payload["warnings"] = list(request.warnings)
                 if result.warnings:
@@ -1225,11 +1239,12 @@ def execute_request(
                     request.continuity_mode == "pinned"
                     and result.error is None
                     and result.exit_code == 0
-                    and not (request.engine == "claude" and result.model_resolved)
+                    and result.served_model is None
                 ):
                     # An ungrouped call never builds a run record, so the
-                    # tracked-path warning does not reach it; only Claude's call
-                    # result carries a served model.
+                    # tracked-path warning does not reach it. A call whose stream
+                    # named a served model (Claude's resolved model, omp's
+                    # provider/model) was checked, so only silence warrants it.
                     from delegate_agent import runner as delegate_runner
 
                     payload.setdefault("warnings", []).append(
@@ -1294,7 +1309,11 @@ def execute_request(
                     print(result.message, file=stderr)
                 elif result.stderr_tail:
                     print(result.stderr_tail, file=stderr)
-            if result.text:
+            # A pinned call refused for a model switch may already hold text from
+            # the turn before the switch; that text is not an answer from the
+            # requested model, so text mode prints none (JSON keeps it with the
+            # error for diagnosis).
+            if result.text and result.error != "model_continuity_paused":
                 print(result.text, file=stdout)
             call_response = (exit_code, None)
             return call_response
