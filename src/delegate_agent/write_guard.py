@@ -465,11 +465,6 @@ def scan_for_nested_home(directory: str) -> NestedHomeScan:
     return NestedHomeScan()
 
 
-def other_profile_home_within(directory: str) -> str | None:
-    """A directory below ``directory`` that looks like another engine or profile home."""
-    return scan_for_nested_home(directory).found
-
-
 def home_candidate_problem(real: str, protected: Sequence[str]) -> str | None:
     """Why an engine-home candidate must not reopen protected ground, or None.
 

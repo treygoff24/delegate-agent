@@ -15,6 +15,7 @@ from delegate_agent import isolation as isolation_api
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
 from delegate_agent import safe_workspace as safe_api
+from delegate_agent import worktree_execution as worktree_execution_api
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -194,9 +195,64 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed):
             return safe_workspace.dirty_submodule_paths("/repo")
 
+    def _assert_persistent_preflight_refuses(self, status: bytes) -> None:
+        """Drive the persistent-worktree preflight with this porcelain status and expect refusal."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        isolation = isolation_api.IsolationContext(
+            source_workspace=repo.name,
+            effective_isolation="worktree",
+            isolation_mode="worktree",
+            isolation_lifecycle="persistent",
+            preserved_workspace=True,
+            source_git_root=repo.name,
+        )
+        request = request_types.Request(
+            "cursor",
+            "work",
+            repo.name,
+            "hello",
+            ["agent", "--workspace", repo.name, "-p", "--trust", "hello"],
+            "composer-2.5",
+            workspace_kind="git",
+            isolation_context=isolation,
+        )
+
+        def binary_validator(_argv, _engine):
+            self.fail("the preflight reached the binary check instead of refusing the submodule")
+
+        execution = worktree_execution_api.PersistentWorktreeExecution(
+            request=request,
+            json_mode=True,
+            config=config_api.embedded_default_config(),
+            pass_through=False,
+            completion_report_mode="none",
+            source_workspace=request_api.resolve_workspace(repo.name),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            binary_validator=binary_validator,
+        )
+        real_run_git_bytes = safe_workspace._run_git_bytes
+        submodule_status_args = ["status", "--porcelain=v2", "-z", "--ignore-submodules=none"]
+
+        def run_git_bytes(git_root, args, *call_args, **kwargs):
+            if list(args) == submodule_status_args:
+                return subprocess.CompletedProcess(["git"], 0, status, b"")
+            return real_run_git_bytes(git_root, args, *call_args, **kwargs)
+
+        with (
+            mock.patch.object(safe_workspace, "_run_git_bytes", side_effect=run_git_bytes),
+            self.assertRaises(worktree_execution_api.PersistentWorktreeError) as ctx,
+        ):
+            worktree_execution_api._validate_persistent_worktree_request(execution)
+        self.assertEqual(ctx.exception.error, "dirty_source_workspace")
+        self.assertIn("Submodule dirt cannot be synced", ctx.exception.message)
+        self.assertIn("'sub'", ctx.exception.message)
+
     def test_submodule_new_commit_is_blocked_when_gitlink_diff_cannot_sync(self):
         status = b"1 .M SC.. 160000 160000 160000 old new sub\0"
         self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+        self._assert_persistent_preflight_refuses(status)
 
     def test_git_check_ignore_preserves_surrogateescaped_paths(self):
         path = os.fsdecode(b"bad-\xff-name")
@@ -211,10 +267,12 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
     def test_submodule_nested_content_dirt_is_blocked(self):
         status = b"1 .M S.M. 160000 160000 160000 old old sub\0"
         self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+        self._assert_persistent_preflight_refuses(status)
 
     def test_staged_gitlink_update_is_blocked_when_gitlink_diff_cannot_sync(self):
         status = b"1 M. S... 160000 160000 160000 old new sub\0"
         self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+        self._assert_persistent_preflight_refuses(status)
 
     def test_renamed_gitlink_porcelain_record_consumes_origin_path(self):
         status = b"2 R. S... 160000 160000 160000 old new R100 renamed\0sub\0"
@@ -562,10 +620,8 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 copied.resolve().read_text(encoding="utf-8"),
                 "inside\n",
             )
-            self.assertNotIn(
-                safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
-                warnings,
-            )
+            for warning in warnings:
+                self.assertNotIn(safe_api.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warning)
         finally:
             safe_api.cleanup_safe_isolated_workspace(
                 git_root=repo.name,

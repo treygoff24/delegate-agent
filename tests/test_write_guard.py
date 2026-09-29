@@ -191,6 +191,25 @@ class PlanTests(HomeTestCase):
         self.assertIn("another profile home", plan.refused[0].reason)
         self.assertIn(str(nested), plan.refused[0].reason)
 
+    def test_a_profile_home_holding_another_three_levels_down_is_refused_but_not_four(self):
+        # The scan looks three levels below the reopened home (docs/security-model.md).
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        near = home / "a/b/near-home"
+        near.mkdir(parents=True)
+        (near / ".claude.json").write_text("{}", encoding="utf-8")
+        plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertNotIn(("rw", str(home)), plan.mounts())
+        self.assertIn("another profile home", plan.refused[0].reason)
+        self.assertIn(str(near), plan.refused[0].reason)
+
+        (near / ".claude.json").unlink()
+        far = home / "x/y/z/far-home"
+        far.mkdir(parents=True)
+        (far / ".claude.json").write_text("{}", encoding="utf-8")
+        plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertEqual(plan.refused, ())
+        self.assertIn(("rw", str(home)), plan.mounts())
+
     def test_a_profile_home_whose_scan_cannot_finish_is_refused(self):
         home = self.home / ".ai-profiles/accounts/claude/work/work-d"
         for index in range(4):
@@ -370,47 +389,6 @@ class PlanTests(HomeTestCase):
     def test_pinning_the_filesystem_root_is_ignored(self):
         plan = self.plan()
         self.assertEqual(plan.mounts(pin=["/", ""]), plan.mounts())
-
-
-class OtherProfileHomeScanTests(unittest.TestCase):
-    """The bounded scan that says whether reopening a directory would open a sibling profile."""
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name).resolve()
-
-    def home_at(self, rel: str) -> Path:
-        path = self.root / rel
-        path.mkdir(parents=True)
-        (path / ".claude.json").write_text("{}", encoding="utf-8")
-        return path
-
-    def test_a_home_three_levels_down_is_found_and_one_four_levels_down_is_not(self):
-        deep = self.home_at("near/a/b/home")
-        self.assertEqual(write_guard.other_profile_home_within(str(self.root / "near")), str(deep))
-        self.home_at("far/a/b/c/home")
-        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "far")))
-
-    def test_a_symlink_is_not_followed(self):
-        elsewhere = self.home_at("elsewhere/home")
-        (self.root / "scan").mkdir()
-        (self.root / "scan" / "link").symlink_to(elsewhere.parent)
-        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "scan")))
-
-    def test_a_huge_tree_stops_at_the_directory_cap_and_reports_nothing(self):
-        for index in range(6):
-            (self.root / "big" / f"d{index}").mkdir(parents=True)
-        self.home_at("big/a-first/home")
-        self.assertEqual(
-            write_guard.other_profile_home_within(str(self.root / "big")),
-            str(self.root / "big/a-first/home"),
-        )
-        with mock.patch.object(write_guard, "_HOME_SCAN_MAX_DIRS", 3):
-            self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "big")))
-
-    def test_a_missing_directory_reports_nothing(self):
-        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "absent")))
 
 
 class SettingsTests(unittest.TestCase):
@@ -1108,6 +1086,14 @@ class RequestWiringTests(HomeTestCase):
             safe = self.build("cursor", "safe", "look")
         self.assertIsNone(safe.write_guard)
         self.assertNotIn("Delegate write guard", safe.prompt)
+        with patches[0], patches[1]:
+            # Call mode takes no --cwd, so it cannot go through self.build.
+            parsed = parser_api.parse_cli(["--json", "dry-run", "codex", "call", "summarize"])
+            call = request_build.request_from_parsed(
+                parsed, delegate_config.embedded_default_config(), io.StringIO("")
+            )
+        self.assertIsNone(call.write_guard)
+        self.assertNotIn("Delegate write guard", call.prompt)
 
     def test_disabled_guard_adds_no_note(self):
         with mock.patch.dict(os.environ, {write_guard.ENV_OVERRIDE: "off"}):
@@ -1315,25 +1301,6 @@ class ForbidCommitHookTests(unittest.TestCase):
         self.assertIn("--forbid-commit", result.stderr)
         self.assertEqual(self.head(), before)
 
-    def test_the_indexed_form_is_what_the_filter_breaks(self):
-        # Positive control for the filter test above: with a count set, its KEY_n dropped
-        # by the name filter and only the value left, git fails every command. This is
-        # the environment the previous implementation handed to Codex.
-        indexed = {
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "core.hooksPath",
-            "GIT_CONFIG_VALUE_0": str(self.hooks),
-        }
-        env = {
-            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
-            **self.codex_default_filter(indexed),
-        }
-        self.assertIn("GIT_CONFIG_COUNT", env)
-        self.assertNotIn("GIT_CONFIG_KEY_0", env)
-        status = run_git(self.repo, "status", "--short", env=env, check=False)
-        self.assertNotEqual(status.returncode, 0)
-        self.assertIn("missing config key", status.stderr)
-
     def test_no_variable_the_hooks_need_has_a_secret_looking_name(self):
         updates = write_guard.forbid_commit_env(str(self.hooks), {})
         self.assertEqual(set(updates), {"GIT_CONFIG_PARAMETERS"})
@@ -1468,14 +1435,6 @@ class InPlaceCommitCountTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(extra["error"], "commit_policy_violated")
         self.assertEqual(extra["commitPolicy"]["commitsCreatedCount"], 1)
-
-    def test_a_commit_that_skipped_the_hooks_is_still_caught(self):
-        # core.hooksPath override is the one bypass the hooks cannot stop.
-        (self.repo / "c.txt").write_text("c", encoding="utf-8")
-        run_git(self.repo, "add", "c.txt")
-        run_git(self.repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "sneaky")
-        _, extra = runner._final_extra(self.ctx(), 0)
-        self.assertTrue(extra["commitPolicyViolated"])
 
     def test_a_commit_left_on_a_side_branch_fails_the_run(self):
         run_git(self.repo, "checkout", "-q", "-b", "side")

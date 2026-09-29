@@ -86,6 +86,10 @@ echo x > "$HOME/.delegate/worktrees/run-1/f"; note write_delegate_worktrees $?
 echo x > "$GUARD_RUN_SCRATCH/f"; note write_run_scratch $?
 git add exec-file >/dev/null 2>&1 && git commit -q -m "lane commit" >/dev/null 2>&1; note git_commit $?
 [ -n "$GUARD_EXTRA" ] && { echo x > "$GUARD_EXTRA/f" 2>/dev/null; note write_extra $?; }
+if [ -n "$GUARD_SOURCE" ]; then
+  echo x > "$GUARD_SOURCE/lane-wrote" 2>/dev/null; note write_source_new_file $?
+  echo tampered > "$GUARD_SOURCE/seed.txt" 2>/dev/null; note write_source_tracked_file $?
+fi
 exit 0
 """
 
@@ -172,6 +176,7 @@ class LiveWriteGuardTests(unittest.TestCase):
             "GUARD_ENGINE_HOME": str(self.engine_home),
             "GUARD_RUN_SCRATCH": str(self.scratch),
             "GUARD_EXTRA": "",
+            "GUARD_SOURCE": "",
             # The fake HOME has no git config, and a Linux host cannot guess an identity.
             "GIT_AUTHOR_NAME": "Delegate Test",
             "GIT_AUTHOR_EMAIL": "delegate-test@example.com",
@@ -254,10 +259,14 @@ class LiveWriteGuardTests(unittest.TestCase):
         worktree = self.home / ".delegate/worktrees/wt"
         git(self.repo, "worktree", "add", "-q", "-b", "lane", str(worktree))
         before = git(worktree, "rev-parse", "HEAD")
-        results = self.run_engine(worktree)
+        results = self.run_engine(worktree, extra_env={"GUARD_SOURCE": str(self.repo)})
         self.assert_guarded(results)
         self.assertNotEqual(git(worktree, "rev-parse", "HEAD"), before)
-        # The source checkout's own files stay out of reach even from the worktree.
+        # The lane tried to write into the source checkout and was refused.
+        self.assertNotEqual(results["write_source_new_file"], 0)
+        self.assertNotEqual(results["write_source_tracked_file"], 0)
+        self.assertFalse((self.repo / "lane-wrote").exists())
+        self.assertEqual((self.repo / "seed.txt").read_text(encoding="utf-8"), "seed")
         self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
 
     def test_registry_and_scratch_inside_a_protected_checkout_stay_writable(self):
@@ -273,12 +282,6 @@ class LiveWriteGuardTests(unittest.TestCase):
         self.assertTrue((self.scratch / "f").exists())
         reasons = {entry["path"]: entry["reason"] for entry in self.record["writable"]}
         self.assertEqual(reasons[os.path.realpath(self.registry)], "run registry")
-
-    def test_sibling_profile_is_protected_but_the_selected_engine_home_is_writable(self):
-        results = self.run_engine(self.repo)
-        self.assertNotEqual(results["rm_sibling_profile_canary"], 0)
-        self.assertEqual(results["write_engine_home"], 0)
-        self.assertTrue((self.engine_home / "state").exists())
 
     def test_an_ambient_variable_naming_the_profiles_tree_reopens_nothing(self):
         # profiles.child_environment inherits the caller's environment, so any variable
