@@ -210,6 +210,7 @@ is absent.
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
     "resumable": true,
+    "disableBackgroundTasks": true,
     "bare": false
   },
   "grok": {
@@ -535,6 +536,7 @@ different. Delegate warns when:
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
     "resumable": true,
+    "disableBackgroundTasks": true,
     "bare": false
   }
 }
@@ -549,6 +551,7 @@ different. Delegate warns when:
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
 - `resumable`: defaults to `true`. A Claude **work** Run saves its native session, so `delegate followup <handle>` works without remembering `--resumable` at launch. `false` restores the old opt-in default. `--resumable` or `--no-resumable` (JSON `resumable`) on a launch beats this key. Safe and call Runs and `--pass-through` Runs never default to resumable. See [Native session files](#native-session-files-and-the-resumable-default).
 - `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to runs that are **not** resumable: safe and call Runs, `--no-resumable` Runs, and every Run while `resumable` is `false`. It does not switch resumability off; a work Run stays resumable under `noSessionPersistence: true` unless it opts out.
+- `disableBackgroundTasks`: defaults to `true`. For tracked `work` runs (and followups of them) Delegate sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment, which removes Bash `run_in_background` and the automatic backgrounding of long commands, and adds `--disallowedTools Monitor`. Because a long gate then runs in the foreground, it also sets `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` to the run's `--timeout` (never less than two hours) so Claude Code's own 2-minute default and 10-minute maximum for a foreground command do not cut it off; an auth profile's `env` cannot override these three variables (Delegate warns and keeps its own). A headless `claude -p` child ends when the model stops, and background tasks and Monitors die with the session, so a child that backgrounds its test gate and then "waits" abandons it. Set `false` to allow background tasks; a Run that still ends mid-job is marked [`degraded`](cli-reference.md#degraded-runs-the-child-ended-its-turn-mid-job) either way. Safe runs are unchanged: their tool allowlist already excludes Monitor.
 - `bare`: opt-in `--bare` mode for runs that should skip Claude Code customizations and auto-discovery. Defaults to `false`, which is consistent with how the other harnesses use their own installed configuration. Be aware of the footprint: with `bare: false`, a delegated run loads the operator's full Claude Code environment — hooks, skills, plugins, output styles, and auto-memory. `--strict-mcp-config` suppresses MCP servers, but nothing else, so each run carries that ambient system-prompt context (extra latency and token cost) and is not hermetic. Set `bare: true` for cost-sensitive or reproducible runs that should ignore local customizations.
 - Claude safe mode uses `claude -p`, stdin prompt delivery, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
 

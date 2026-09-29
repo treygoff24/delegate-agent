@@ -87,6 +87,45 @@ class CancelTerminalOverrideTests(unittest.TestCase):
             _assert_operator_cancel_receipt(_read_json(run_path / run_registry.STATE_FILE))
             _assert_operator_cancel_receipt(_snapshot(root, run_id))
 
+    def test_wal_replay_operator_cancel_drops_degraded_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = run_registry.register_run(root, harness="claude")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {"status": "running", "cancelRequested": True},
+            )
+            run_registry.write_finalize_wal(
+                root,
+                run_id,
+                status=run_registry.STATUS_CANCELLED,
+                record={
+                    "schema": run_registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "status": run_registry.STATUS_CANCELLED,
+                    "ok": False,
+                    "exitCode": 1,
+                    "degraded": True,
+                    "degradedReason": "ended_waiting_on_background_work",
+                    "degradedEvidence": ["final message: Waiting on the gate."],
+                    "warnings": ["degraded=ended_waiting_on_background_work: x"],
+                },
+            )
+
+            with run_registry.registry_lock(root, timeout_seconds=1):
+                run_registry.reconcile_finalize_wal_locked(root, run_id)
+
+            for persisted in (
+                _read_json(run_path / run_registry.STATE_FILE),
+                _snapshot(root, run_id),
+            ):
+                _assert_operator_cancel_receipt(persisted)
+                assert "degraded" not in persisted
+                assert "degradedReason" not in persisted
+                assert "degradedEvidence" not in persisted
+                assert persisted.get("warnings", []) == []
+
     def test_wal_replay_without_cancel_request_preserves_provider_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
@@ -214,3 +253,143 @@ class CancelTerminalOverrideTests(unittest.TestCase):
             assert "Failure reason: cancelled_by_user" in report
             assert "Harness error:" not in report
             assert provider_reason not in report
+
+    def test_runner_finalization_of_cancelled_run_carries_no_degraded_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="claude")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {"status": "running", "cancelRequested": True},
+            )
+            ctx = runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="claude",
+                engine="claude",
+                mode="work",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+            accumulator = harness_events.StreamAccumulator(harness="claude")
+            for event in (
+                {
+                    "type": "system",
+                    "subtype": "background_tasks_changed",
+                    "tasks": [{"task_id": "t1", "task_type": "local_bash", "description": "gate"}],
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "Waiting on the gate.",
+                },
+            ):
+                accumulator.ingest_line(json.dumps(event))
+            capture = runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+            )
+
+            finalization = runner._finalize_tracked_run(
+                runner.TrackedRunFiles(
+                    run_path=run_path,
+                    stdout_log=run_path / run_registry.STDOUT_LOG,
+                    stderr_log=run_path / run_registry.STDERR_LOG,
+                ),
+                ctx,
+                capture,
+                completion_report_mode="off",
+            )
+
+            assert finalization.status == run_registry.STATUS_CANCELLED
+            assert "degraded" not in finalization.extra
+            assert "degradedReason" not in finalization.extra
+            assert "degradedEvidence" not in finalization.extra
+            assert not any(
+                isinstance(warning, str) and warning.startswith("degraded=")
+                for warning in finalization.extra.get("warnings", [])
+            )
+
+    def test_runner_finalization_of_run_already_ended_failed_carries_no_degraded_verdict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="claude")
+            run_path = run_registry.run_directory(root, run_id)
+            run_registry.write_json_atomic(
+                run_path / run_registry.STATE_FILE,
+                {"status": "failed", "failureReason": "stale_run"},
+            )
+            ctx = runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="claude",
+                engine="claude",
+                mode="work",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-09-01T17:00:00Z",
+            )
+            accumulator = harness_events.StreamAccumulator(harness="claude")
+            for event in (
+                {
+                    "type": "system",
+                    "subtype": "background_tasks_changed",
+                    "tasks": [{"task_id": "t1", "task_type": "local_bash", "description": "gate"}],
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "Waiting on the gate.",
+                },
+            ):
+                accumulator.ingest_line(json.dumps(event))
+            capture = runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+            )
+
+            finalization = runner._finalize_tracked_run(
+                runner.TrackedRunFiles(
+                    run_path=run_path,
+                    stdout_log=run_path / run_registry.STDOUT_LOG,
+                    stderr_log=run_path / run_registry.STDERR_LOG,
+                ),
+                ctx,
+                capture,
+                completion_report_mode="off",
+            )
+
+            assert finalization.status == run_registry.STATUS_FAILED
+            assert "degraded" not in finalization.extra
+            assert "degradedReason" not in finalization.extra
+            assert "degradedEvidence" not in finalization.extra
+            assert not any(
+                isinstance(warning, str) and warning.startswith("degraded=")
+                for warning in finalization.extra.get("warnings", [])
+            )

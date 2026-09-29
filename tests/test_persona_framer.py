@@ -114,6 +114,7 @@ class PersonaFramerTests(CommandTestBase):
                         self._PERSONA,
                         PERSISTENT_WORKTREE_CONTEXT_NOTE.strip(),
                         self._USER,
+                        prompt_instructions.TURN_END_INSTRUCTION.strip(),
                         prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                     ],
                 )
@@ -138,6 +139,7 @@ class PersonaFramerTests(CommandTestBase):
                         argv_builders.SAFE_REVIEW_PREFIX_BY_ENGINE[engine].strip(),
                         PERSISTENT_WORKTREE_CONTEXT_NOTE.strip(),
                         self._USER,
+                        prompt_instructions.TURN_END_INSTRUCTION.strip(),
                         completion,
                     ],
                 )
@@ -189,6 +191,7 @@ class PersonaFramerTests(CommandTestBase):
                             prompt_instructions.SKILL_REVIEW_PREFIX.rstrip(),
                             safe,
                             user,
+                            prompt_instructions.TURN_END_INSTRUCTION,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                             mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
@@ -227,6 +230,7 @@ class PersonaFramerTests(CommandTestBase):
                             persona,
                             safe,
                             user,
+                            prompt_instructions.TURN_END_INSTRUCTION,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                             mail.MAIL_PROMPT_SUFFIX if mode == "work" else None,
                         )
@@ -268,6 +272,7 @@ class PersonaFramerTests(CommandTestBase):
                         worktree_execution.PERSISTENT_WORKTREE_COMMIT_NOTE,
                         PERSISTENT_WORKTREE_CONTEXT_NOTE,
                         user,
+                        prompt_instructions.TURN_END_INSTRUCTION,
                         prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                     )
                 )
@@ -422,6 +427,7 @@ class PersonaFramerTests(CommandTestBase):
                             persona,
                             PERSISTENT_WORKTREE_CONTEXT_NOTE,
                             user,
+                            prompt_instructions.TURN_END_INSTRUCTION,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                             mail.MAIL_PROMPT_SUFFIX,
                         )

@@ -413,3 +413,4 @@ class EngineBuildInput:
     # The caller's continuity mode exactly as given: None means "not named", which
     # an engine may resolve to its own default before the global one applies.
     continuity_mode: str | None = None
+    timeout_seconds: int | None = None

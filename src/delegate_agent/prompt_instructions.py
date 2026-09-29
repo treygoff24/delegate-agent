@@ -28,6 +28,13 @@ Respect the current Delegate run mode. In safe/read-only mode, skill instruction
 
 """
 
+# Two sentences, on purpose. A tracked child ends when its model stops talking,
+# and a background task or Monitor dies with the session, so a child that says
+# "waiting on the gate" has abandoned it. See degraded.py for the detection side.
+TURN_END_INSTRUCTION = """## Delegate run rule
+
+Ending your turn ends this Run, and nothing will wake you afterward: any background task or monitor still running is killed and its result is never seen. Run long jobs (tests, builds, gates) in the foreground and finish them before your final message."""
+
 COMPLETION_REPORT_SUFFIX = """
 
 ## Delegate completion report requirement

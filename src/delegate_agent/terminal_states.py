@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, TypeAlias
 
+from delegate_agent.degraded import strip_degraded
 from delegate_agent.json_types import JsonObject
 
 TerminalState: TypeAlias = Literal[
@@ -69,3 +70,5 @@ def apply_operator_cancel_override(extra: JsonObject) -> None:
         "outcomeEvidence",
     ):
         extra.pop(key, None)
+    # A cancelled Run is not "succeeded but degraded".
+    strip_degraded(extra)
