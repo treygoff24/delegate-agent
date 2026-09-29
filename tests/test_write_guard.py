@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -146,9 +147,9 @@ class PlanTests(HomeTestCase):
         # every sibling profile writable through one reopen.
         for rel, reason in (
             (".ai-profiles", "itself a protected path"),
-            (".ai-profiles/accounts", "another profile home"),
-            (".ai-profiles/accounts/claude", "another profile home"),
-            (".ai-profiles/accounts/claude/work", "another profile home"),
+            (".ai-profiles/accounts", "not itself a profile home"),
+            (".ai-profiles/accounts/claude", "not itself a profile home"),
+            (".ai-profiles/accounts/claude/work", "not itself a profile home"),
         ):
             with self.subTest(candidate=rel):
                 plan = self.plan(home_candidates=(Reopen(str(self.home / rel), "engine home"),))
@@ -161,6 +162,70 @@ class PlanTests(HomeTestCase):
                 self.assertIn(reason, plan.refused[0].reason)
                 self.assertIn("engine home not reopened", plan.refused[0].reason)
                 self.assertEqual(plan.payload()["refused"][0]["path"], self.real(rel))
+
+    def test_a_parent_whose_profiles_carry_no_identity_file_is_still_refused(self):
+        # The scan below a parent cannot see a profile that has no identity file yet (a fresh
+        # login, a different engine's layout). The parent is refused for lacking one itself.
+        for rel in ("work/work-d/.claude.json", "personal/.claude.json"):
+            (self.home / ".ai-profiles/accounts/claude" / rel).unlink()
+        parent = ".ai-profiles/accounts/claude"
+        plan = self.plan(home_candidates=(Reopen(str(self.home / parent), "engine home"),))
+        self.assertNotIn(("rw", self.real(parent)), plan.mounts())
+        self.assertEqual([entry.path for entry in plan.refused], [self.real(parent)])
+        self.assertIn("not itself a profile home", plan.refused[0].reason)
+
+    def test_a_marked_candidate_below_a_credential_directory_is_refused(self):
+        # Only the protected path itself was refused before; a child of ~/.ssh is not a profile.
+        (self.home / ".ssh/keys").mkdir()
+        plan = self.plan(home_candidates=(Reopen(str(self.home / ".ssh/keys"), "engine home"),))
+        self.assertNotIn(("rw", self.real(".ssh/keys")), plan.mounts())
+        self.assertIn("not itself a profile home", plan.refused[0].reason)
+
+    def test_a_profile_home_holding_another_profile_is_refused(self):
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        nested = home / "backup/old-profile"
+        nested.mkdir(parents=True)
+        (nested / ".credentials.json").write_text("{}", encoding="utf-8")
+        plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertNotIn(("rw", str(home)), plan.mounts())
+        self.assertIn("another profile home", plan.refused[0].reason)
+        self.assertIn(str(nested), plan.refused[0].reason)
+
+    def test_a_profile_home_whose_scan_cannot_finish_is_refused(self):
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        for index in range(4):
+            (home / f"d{index}").mkdir()
+        with mock.patch.object(write_guard, "_HOME_SCAN_MAX_DIRS", 3):
+            plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertNotIn(("rw", str(home)), plan.mounts())
+        self.assertIn("could not be proven", plan.refused[0].reason)
+        self.assertIn("more than 3 directories", plan.refused[0].reason)
+
+    def test_a_profile_home_with_an_unlistable_directory_is_refused(self):
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        locked = home / "locked"
+        locked.mkdir()
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if os.fspath(path) == str(locked):
+                raise PermissionError(13, "Permission denied", str(locked))
+            return real_scandir(path)
+
+        with mock.patch.object(write_guard.os, "scandir", side_effect=scandir):
+            plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertNotIn(("rw", str(home)), plan.mounts())
+        self.assertIn("could not be proven", plan.refused[0].reason)
+        self.assertIn(str(locked), plan.refused[0].reason)
+
+    def test_a_symlink_inside_a_profile_home_does_not_block_it(self):
+        # A write through the link lands on its target, which a reopen by real path does not
+        # cover; the outer read-only mount still holds the sibling.
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        (home / "sibling-link").symlink_to(self.home / ".ai-profiles/accounts/claude/personal")
+        plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertIn(("rw", self.real(".ai-profiles/accounts/claude/work/work-d")), plan.mounts())
+        self.assertEqual(plan.refused, ())
 
     def test_a_leaf_profile_home_full_of_content_is_still_reopened(self):
         # Skills, projects and plugins are content, not sibling profiles: an identity-looking
@@ -181,16 +246,20 @@ class PlanTests(HomeTestCase):
         self.assertIn(("rw", self.real(".ai-profiles/accounts/claude/work/work-d")), plan.mounts())
         self.assertEqual(plan.refused, ())
 
-    def test_a_codex_style_home_pair_counts_as_another_profile_home(self):
-        codex = self.home / ".ai-profiles/accounts/codex/personal"
-        codex.mkdir(parents=True)
-        (codex / "auth.json").write_text("{}", encoding="utf-8")
-        (codex / "config.toml").write_text("", encoding="utf-8")
-        plan = self.plan(
-            home_candidates=(Reopen(str(self.home / ".ai-profiles/accounts/codex"), "engine home"),)
-        )
+    def test_a_codex_style_home_pair_marks_a_profile_home_both_ways(self):
+        codex = self.home / ".ai-profiles/accounts/codex/work"
+        nested = codex / "archive/personal"
+        for directory in (codex, nested):
+            directory.mkdir(parents=True)
+            (directory / "auth.json").write_text("{}", encoding="utf-8")
+            (directory / "config.toml").write_text("", encoding="utf-8")
+        plan = self.plan(home_candidates=(Reopen(str(codex), "engine home"),))
         self.assertEqual(len(plan.refused), 1)
-        self.assertIn(self.real(".ai-profiles/accounts/codex/personal"), plan.refused[0].reason)
+        self.assertIn(str(nested), plan.refused[0].reason)
+        (nested / "auth.json").unlink()
+        plan = self.plan(home_candidates=(Reopen(str(codex), "engine home"),))
+        self.assertEqual(plan.refused, ())
+        self.assertIn(("rw", str(codex)), plan.mounts())
 
     def test_a_candidate_outside_every_protected_path_is_harmless(self):
         elsewhere = self.home / "elsewhere"
@@ -637,7 +706,7 @@ class EngineHomeLaunchTests(HomeTestCase):
         result = self.apply({"CLAUDE_CONFIG_DIR": parent})
         self.assertNotIn(parent, self.rw_binds(result))
         self.assertEqual([entry["path"] for entry in result.record["refused"]], [parent])
-        self.assertIn("another profile home", result.record["refused"][0]["reason"])
+        self.assertIn("not itself a profile home", result.record["refused"][0]["reason"])
         self.assertIn(parent, result.warning)
         self.assertIn("isolation.writeGuard.writable", result.warning)
         self.assertEqual(result.record["status"], "enforced")
@@ -696,7 +765,9 @@ class BwrapLaunchShapeTests(HomeTestCase):
         self.assertIn(self.real(".ssh"), self.binds(result, "--ro-bind"))
         self.assertIn(self.real(".ai-profiles"), self.binds(result, "--ro-bind"))
         self.assertEqual(result.argv[0], "/usr/bin/bwrap")
-        self.assertEqual(result.record["status"], "enforced")
+        # A protected path is open this run, so the record must not claim "enforced".
+        self.assertEqual(result.record["status"], "partial")
+        self.assertTrue(result.warning.startswith("work write guard is PARTIAL"), result.warning)
         self.assertEqual(
             [(e["path"], e["mode"]) for e in result.record["unbound"]], [(gnupg, "ro")]
         )
@@ -717,6 +788,9 @@ class BwrapLaunchShapeTests(HomeTestCase):
         self.assertEqual(result.record["unbound"][0]["mode"], "rw")
         self.assertNotIn(self.real(rel), [e["path"] for e in result.record["writable"]])
         self.assertIn("not reopened", result.warning)
+        # Every protected path is still bound; only a reopen failed, so nothing is exposed.
+        self.assertEqual(result.record["status"], "enforced")
+        self.assertNotIn("PARTIAL", result.warning)
 
     def test_refuse_still_refuses_when_one_path_will_not_bind(self):
         with self.assertRaises(error_types.DelegateError) as ctx:
@@ -1274,6 +1348,7 @@ class InPlaceCommitCountTests(unittest.TestCase):
         run_git(self.repo, "add", "a.txt")
         run_git(self.repo, "commit", "-q", "-m", "a")
         self.base = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def ctx(self, **overrides):
         ctx = mock.Mock()
@@ -1283,6 +1358,7 @@ class InPlaceCommitCountTests(unittest.TestCase):
         ctx.creation_context = {"sourceHeadOid": self.base}
         ctx.execution_cwd = str(self.repo)
         ctx.workspace_kind = "git"
+        ctx.started_at = self.started_at
         for key, value in overrides.items():
             setattr(ctx, key, value)
         return ctx
@@ -1313,6 +1389,66 @@ class InPlaceCommitCountTests(unittest.TestCase):
         run_git(self.repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "sneaky")
         _, extra = runner._final_extra(self.ctx(), 0)
         self.assertTrue(extra["commitPolicyViolated"])
+
+    def test_a_commit_left_on_a_side_branch_fails_the_run(self):
+        run_git(self.repo, "checkout", "-q", "-b", "side")
+        self.commit()
+        run_git(self.repo, "checkout", "-q", "main")
+        self.assertEqual(run_git(self.repo, "rev-parse", "HEAD").stdout.strip(), self.base)
+        code, extra = runner._final_extra(self.ctx(), 0)
+        self.assertEqual(code, 1)
+        self.assertEqual(extra["error"], "commit_policy_violated")
+        self.assertEqual(extra["commitPolicy"]["commitsCreatedCount"], 1)
+
+    def test_a_commit_reset_away_fails_the_run(self):
+        self.commit()
+        run_git(self.repo, "reset", "-q", "--hard", self.base)
+        _, extra = runner._final_extra(self.ctx(), 0)
+        self.assertTrue(extra["commitPolicyViolated"])
+        self.assertEqual(extra["commitPolicy"]["commitsCreatedCount"], 1)
+
+    def test_a_worktree_run_also_counts_a_commit_left_behind(self):
+        # The worktree summary sees only the final HEAD; the reflog check covers the rest.
+        run_git(self.repo, "checkout", "-q", "-b", "side")
+        self.commit()
+        run_git(self.repo, "checkout", "-q", "main")
+        summary = {"commitsCreatedCount": 0}
+        with mock.patch.object(runner, "_persistent_work_summary", return_value=summary):
+            code, extra = runner._final_extra(self.ctx(isolation_lifecycle="persistent"), 0)
+        self.assertEqual(code, 1)
+        self.assertEqual(extra["commitPolicy"]["commitsCreatedCount"], 1)
+
+    def test_moving_to_existing_commits_and_older_history_are_not_counted(self):
+        # A commit made before launch, then a checkout and reset after it: nothing created.
+        run_git(self.repo, "checkout", "-q", "-b", "older")
+        (self.repo / "o.txt").write_text("o", encoding="utf-8")
+        run_git(self.repo, "add", "o.txt")
+        run_git(self.repo, "commit", "-q", "-m", "older")
+        older = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        run_git(self.repo, "checkout", "-q", "main")
+        later = datetime.now(UTC) + timedelta(seconds=3)
+        started_at = later.isoformat().replace("+00:00", "Z")
+        env = {**os.environ, "GIT_COMMITTER_DATE": f"@{int(later.timestamp()) + 1} +0000"}
+        # Reflog entries take their time from the committer-date environment.
+        run_git(self.repo, "checkout", "-q", "older", env=env)
+        run_git(self.repo, "reset", "-q", "--hard", self.base, env=env)
+        run_git(self.repo, "reset", "-q", "--hard", older, env=env)
+        ctx = self.ctx(started_at=started_at, creation_context={"sourceHeadOid": older})
+        self.assertEqual(runner._commits_made_since_launch(ctx), [])
+        self.assertEqual(runner._in_place_commits_created(ctx), 0)
+
+    def test_a_commit_left_behind_before_launch_is_not_counted(self):
+        run_git(self.repo, "checkout", "-q", "-b", "earlier")
+        self.commit()
+        run_git(self.repo, "checkout", "-q", "main")
+        later = datetime.now(UTC) + timedelta(seconds=5)
+        ctx = self.ctx(started_at=later.isoformat().replace("+00:00", "Z"))
+        self.assertEqual(runner._in_place_commits_created(ctx), 0)
+        # The same history with the launch before it is a violation.
+        self.assertEqual(runner._in_place_commits_created(self.ctx()), 1)
+
+    def test_an_unreadable_launch_time_is_unverified(self):
+        self.assertIsNone(runner._in_place_commits_created(self.ctx(started_at=None)))
 
     def test_an_unverifiable_run_is_reported_not_passed(self):
         code, extra = runner._final_extra(self.ctx(workspace_kind="directory"), 0)

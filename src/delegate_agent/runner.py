@@ -1916,18 +1916,60 @@ def _source_commits_missed(summary: JsonObject | None) -> int | None:
     return commits if isinstance(commits, int) and commits > 0 else None
 
 
-def _in_place_commits_created(ctx: RunContext) -> int | None:
-    """Commits a ``--forbid-commit`` child added to the caller's own checkout.
+# HEAD reflog actions that move to an existing commit rather than make one.
+_REFLOG_MOVES = ("checkout: ", "reset: ")
 
-    An in-place run has no worktree summary, so the count is taken from the HEAD
-    recorded at launch. ``None`` means it could not be verified.
+
+def _commits_made_since_launch(ctx: RunContext) -> list[str] | None:
+    """Commits this checkout's HEAD reflog says were made here since launch.
+
+    ``base..HEAD`` alone misses a commit the child made and then left: on a side
+    branch it switched away from, or one it reset off. Each checkout keeps its own
+    HEAD reflog, so another lane committing elsewhere in the repository does not
+    show up here. ``None`` means the reflog could not be read.
+    """
+    started = _parse_rfc3339(ctx.started_at) if isinstance(ctx.started_at, str) else None
+    if started is None:
+        return None
+    since = int(started.timestamp()) - 1  # reflog times are whole seconds
+    listed = git_utils.run_git(
+        ctx.execution_cwd,
+        ["log", "--walk-reflogs", "--date=unix", "--format=%H%x09%gd%x09%gs", "HEAD", "--"],
+        timeout_seconds=git_utils.GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if listed.returncode != 0:
+        return None
+    made: list[str] = []
+    for line in listed.stdout.splitlines():
+        oid, _, rest = line.partition("\t")
+        selector, _, action = rest.partition("\t")
+        try:
+            moment = int(selector[selector.index("{") + 1 : selector.rindex("}")])
+        except ValueError:
+            return None
+        if moment < since:
+            break  # newest first: everything further down predates the launch
+        if not action.startswith(_REFLOG_MOVES):
+            made.append(oid)
+    return made
+
+
+def _in_place_commits_created(ctx: RunContext) -> int | None:
+    """Commits a ``--forbid-commit`` child added to the checkout it ran in.
+
+    Counted from the HEAD recorded at launch: what HEAD now has beyond it, plus
+    any commit the HEAD reflog shows was made here since launch and then left
+    behind. ``None`` means it could not be verified.
     """
     if ctx.workspace_kind != "git":
         return None
     creation = ctx.creation_context if isinstance(ctx.creation_context, dict) else {}
     base = creation.get("sourceHeadOid")
     if isinstance(base, str) and base:
-        spec = f"{base}..HEAD"
+        made = _commits_made_since_launch(ctx)
+        if made is None:
+            return None
+        spec_args = ["HEAD", *dict.fromkeys(made), "--not", base]
     else:
         # The checkout had no commits at launch: any commit now is a violation.
         head = git_utils.run_git(
@@ -1937,10 +1979,10 @@ def _in_place_commits_created(ctx: RunContext) -> int | None:
         )
         if head.returncode != 0:
             return 0 if head.returncode == 1 and not head.stderr.strip() else None
-        spec = "HEAD"
+        spec_args = ["HEAD"]
     counted = git_utils.run_git(
         ctx.execution_cwd,
-        ["rev-list", "--count", spec],
+        ["rev-list", "--count", *spec_args, "--"],
         timeout_seconds=git_utils.GIT_QUICK_TIMEOUT_SECONDS,
     )
     if counted.returncode != 0:
@@ -2001,8 +2043,21 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         extra["warnings"] = warnings
 
     commits_created = worktree_summary.commits_created_count(summary)
-    if summary is None and ctx.forbid_commit:
-        commits_created = _in_place_commits_created(ctx)
+    if ctx.forbid_commit:
+        # The worktree summary counts only what the final HEAD holds; the reflog
+        # check also sees commits made and then left behind.
+        # A positive count from either is a violation even if the other failed; with
+        # none positive, one that could not be read leaves the policy unverified.
+        counts = [_in_place_commits_created(ctx)]
+        if summary is not None:
+            counts.append(commits_created)
+        known = [count for count in counts if count is not None]
+        if any(count > 0 for count in known):
+            commits_created = max(known)
+        elif len(known) < len(counts):
+            commits_created = None
+        else:
+            commits_created = 0
     if (
         summary is not None
         and commits_created is not None

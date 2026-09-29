@@ -860,8 +860,9 @@ protected list, the writable re-opens every run gets, and the backends.
   `warn` launches unguarded and records a warning; `refuse` fails the launch
   with `write_guard_unavailable`. On Linux with `warn`, a preflight that fails
   because one path will not bind drops only that path, not the whole guard: the
-  manifest lists it under `unbound` and the run gets a warning. `refuse` never
-  retries.
+  manifest lists it under `unbound` and the run gets a warning. If a dropped
+  path was a protected one, the guard status is `partial` instead of `enforced`.
+  `refuse` never retries.
 - `macosSeatbelt` (default `false`): opt in to the macOS Seatbelt guard for
   non-Codex engines. While it is `false` the Mac guard status is `off`, with no
   warning and no refusal. Codex is never wrapped; see the recipe below.
@@ -875,8 +876,9 @@ protected list, the writable re-opens every run gets, and the backends.
   `run --input-json` field). This is also how to open an engine's profile
   directory when Delegate has no home variable for the engine, or when the
   engine home was refused: only the selected engine's own home variable
-  re-opens anything by itself, and a home that contains another profile's home
-  is listed under `refused` in the manifest and stays read-only.
+  re-opens anything by itself, and a home that does not itself carry an
+  identity file, contains another profile's home, or is too large or unreadable
+  to check is listed under `refused` in the manifest and stays read-only.
 - `homeCaches`: package-manager cache directories under HOME. Backends that
   protect a list leave them writable by construction; the Codex native sandbox
   does not, so its writable roots include the ones that exist.
