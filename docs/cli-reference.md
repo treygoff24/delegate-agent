@@ -132,7 +132,11 @@ Run and call envelopes carry `servedModel` and, when the harness reports one,
 `servedProvider`: what the child's stream says actually answered. They sit at
 the top level beside `modelResolved` (which names the request) and repeat the
 same pair inside `modelProvenance`. They are absent when the harness reported no
-model, never a copy of the request.
+model, never a copy of the request. A Claude call reports only a per-run
+`modelUsage` total, so its `servedModel` is set only when exactly one model
+produced output there; with several, it is absent and a pinned call warns
+`pinned_continuity_unverified`. A refused pinned call prints no answer text in
+text mode; JSON keeps any text it had beside the error.
 
 `delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
 containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.

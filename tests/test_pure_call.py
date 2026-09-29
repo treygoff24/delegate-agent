@@ -273,9 +273,10 @@ class PureCallTests(CommandTestBase):
             )
         self.assertEqual(result.text, '{"answer": "documented"}')
         self.assertEqual(result.model_resolved, "substantive-model")
-        # The model Claude reported answering is also the served model; it has no
-        # provider field.
-        self.assertEqual(result.served_model, "substantive-model")
+        # modelResolved keeps its volume heuristic, but two models produced output
+        # in this aggregate, so nothing says which one answered: no served model
+        # is claimed (a single producing model is covered in test_omp_provider_pin).
+        self.assertIsNone(result.served_model)
         self.assertIsNone(result.served_provider)
         self.assertEqual(result.usage, {"inputTokens": 11, "outputTokens": 7, "basis": "exact"})
         self.assertEqual(result.exit_code, 1)
