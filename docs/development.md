@@ -71,20 +71,29 @@ See [Worktrees](worktrees.md) for the public lifecycle contract.
 
 ## Verification
 
-Run focused tests first, then the broader checks before handoff:
+Run affected tests while iterating, then the full gate before handoff:
 
 ```bash
-python3 -m compileall -q src tests bin
+python3 scripts/test.py -- tests/test_delegate_parser.py
+tests/acceptance.sh --fast
+tests/acceptance.sh
 git diff --check
-python3 -m pytest -q
 ```
 
-`tests/acceptance.sh` runs all four required gates, including Ruff lint and
-format checks. It reports Python and Ruff versions and selects the pinned Ruff
-from the checkout's `.venv`, the main checkout's `.venv` when in a linked
-worktree, or PATH when its version matches the dev extra. A mismatched ambient
-Ruff fails before running the gates; install the dev extra rather than accepting
-different lint behavior on different machines.
+`scripts/gate.sh` runs the same four checks through uv; `tests/acceptance.sh`
+uses the existing dev environment. Both report tool versions and require the
+pinned Ruff from the dev extra. Fast checks run a selected set of quick tests
+plus compile, lint, and format; add affected paths after `--`. Their success
+marker is `FAST CHECKS PASS`, distinct from the full `GATE PASS`.
+
+The runner uses four workers on Linux, two on macOS, individual-test scheduling,
+and low priority. When `testrun` is installed on Linux, its named scope limits
+all descendants to two cores. macOS has no hard CPU quota. A common Git-directory
+lock refuses overlapping runs across linked worktrees (exit 75); retry once the
+first run finishes. Explicit `--workers` and `--cpu-limit` overrides are available.
+Never use `-n auto` on a shared machine. The slowest 25 phases are reported; use
+`--durations 50` for a longer profile. Full gates refuse test filters and clear
+ambient `PYTEST_ADDOPTS` so they cannot silently run a subset.
 
 Collection imports `tests/__init__.py`, which shims `src` onto `sys.path`,
 installs a private HOME/temp environment, and strips ambient env.

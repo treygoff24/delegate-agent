@@ -1007,8 +1007,7 @@ That is expected. Required tests do not need real Cursor, Droid, Codex, Claude,
 Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries:
 
 ```bash
-python3 -m compileall -q src tests bin
-python3 -m pytest -q
+tests/acceptance.sh
 ```
 
 Integration tests that launch real child agents should be separate from required CI.

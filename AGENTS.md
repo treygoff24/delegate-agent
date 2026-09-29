@@ -18,33 +18,32 @@ repository change.
 
 ## Validation gate
 
-Pytest is the only test runner. Narrowest relevant check first, then the four
-commands CI runs:
+Pytest is the only test runner. Both entry points run the same four checks
+(pytest, compileall, Ruff lint, Ruff format) and report their tool versions:
 
 ```bash
-python3 -m pytest -q
-python3 -m compileall -q src tests bin
-ruff check .
-ruff format --check .
+scripts/gate.sh                       # uv selects the project dev extra
+tests/acceptance.sh                   # existing dev environment; no uv needed
+scripts/gate.sh --fast                # quick tests plus all static checks
+uv run --extra dev python scripts/test.py -- tests/test_delegate_parser.py
 ```
 
-`tests/acceptance.sh` runs those four in order from any checkout root, and
-`scripts/gate.sh` runs the pinned-tooling form through `uv`.
+Run affected tests while iterating and the full gate before merge. `--fast` is
+partial regression coverage; append affected paths after `--` when useful.
+The full gate refuses test filters and ignores ambient `PYTEST_ADDOPTS`.
+
+The shared runner uses individual-test scheduling, four workers on Linux and
+two on macOS, and low priority. With the estate's `testrun` installed on Linux,
+it enters a named scope and caps the entire process tree at two cores. macOS
+has low priority and bounded workers, not a hard CPU quota. A Git-common-dir
+lock prevents overlapping runs across linked worktrees; a second run exits 75.
+Worker and CPU overrides are explicit (`--workers`, `--cpu-limit`); never use
+`-n auto`. Each run reports its slowest 25 phases (`--durations` changes this).
 
 Collection imports `tests/__init__.py`, which shims `src` onto `sys.path` and
 strips ambient env. `pyproject.toml` sets `testpaths = ["tests"]`, so a test
-file placed anywhere else is never collected.
-
-`pytest` and `ruff` come from the `dev` extra
-(`python3 -m pip install -e ".[dev]"`); `ruff format .` applies formatting.
-
-The dev extra also ships pytest-xdist, so the same gate can run in parallel:
-
-```bash
-uv run --extra dev pytest -n 8 --dist loadfile
-```
-
-Use an explicit `-n` (never `-n auto`) on shared machines.
+file placed anywhere else is never collected. Install tooling with the `dev`
+extra (`python3 -m pip install -e ".[dev]"`); Ruff is pinned there.
 
 ## Runtime boundaries
 

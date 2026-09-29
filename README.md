@@ -61,14 +61,19 @@ python3 -m pip install -e .
 python3 bin/delegate.py --json describe
 ```
 
-Run the test suite with pytest, the validation gate. Add xdist workers for a
-faster local loop:
+Run affected tests while editing, then the full gate before merge:
 
 ```bash
 python3 -m pip install -e ".[dev]"
-python3 -m pytest -q                # gate
-python3 -m pytest -n 8 --dist loadfile   # same gate, in parallel
+tests/acceptance.sh                         # full suite, compile, lint, format
+tests/acceptance.sh --fast                  # quick tests and static checks
+python3 scripts/test.py -- tests/test_delegate_parser.py
 ```
+
+`scripts/gate.sh` runs the same gate through uv. Both gates share worker limits,
+low priority, and a lock across linked worktrees. Linux uses four workers and a
+two-core quota when `testrun` is installed; macOS uses two workers. Fast checks
+are partial coverage and do not replace the full gate.
 
 CI validates on Linux with Python 3.11, 3.12, 3.13, and 3.14, and on macOS with Python 3.12. Windows support is not claimed until it is covered by tests.
 

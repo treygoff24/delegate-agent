@@ -14,16 +14,10 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
       examples, config, metadata, and packaging rules. Treat any hit as either
       something to remove or something to explicitly justify before release.
 
-- [ ] Run Python compile check:
+- [ ] Run the full validation gate (tests, compile, lint, and format):
 
   ```bash
-  python3 -m compileall -q src tests bin
-  ```
-
-- [ ] Run tests:
-
-  ```bash
-  python3 -m pytest -q
+  tests/acceptance.sh
   ```
 
 - [ ] Run whitespace check:

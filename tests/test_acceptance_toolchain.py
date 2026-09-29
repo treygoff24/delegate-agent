@@ -33,7 +33,7 @@ class AcceptanceToolchainTests(unittest.TestCase):
         )
         path.chmod(0o755)
 
-    def run_gate(self, *, local_version=None, path_version="9.9.9", fail_tests=False):
+    def run_gate(self, *, local_version=None, path_version="9.9.9", fail_tests=False, fast=False):
         with tempfile.TemporaryDirectory(prefix="delegate gate ") as directory:
             root = Path(directory)
             (root / "tests").mkdir()
@@ -63,13 +63,26 @@ class AcceptanceToolchainTests(unittest.TestCase):
 
             pytest_exit = 1 if fail_tests else 0
             make_tool(tools / "ruff", "path-ruff", version=f"ruff {path_version}")
-            make_tool(tools / "pytest", "path-pytest", exit_code=pytest_exit)
+            make_tool(
+                tools / "pytest", "path-pytest", version="pytest 9.1.1", exit_code=pytest_exit
+            )
             if local_version is not None:
                 make_tool(root / ".venv/bin/ruff", "project-ruff", version=f"ruff {local_version}")
-                make_tool(root / ".venv/bin/pytest", "project-pytest", exit_code=pytest_exit)
+                make_tool(
+                    root / ".venv/bin/pytest",
+                    "project-pytest",
+                    version="pytest 9.1.1",
+                    exit_code=pytest_exit,
+                )
             env = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "TRACE": str(trace)}
             result = subprocess.run(
-                ["/bin/sh", str(root / "tests/acceptance.sh"), "--workers", "4"],
+                [
+                    "/bin/sh",
+                    str(root / "tests/acceptance.sh"),
+                    "--workers",
+                    "4",
+                    *(["--fast"] if fast else []),
+                ],
                 cwd=directory,
                 env=env,
                 capture_output=True,
@@ -91,7 +104,13 @@ class AcceptanceToolchainTests(unittest.TestCase):
         )
         self.assertIn("ruff 0.15.15", result.stdout)
         self.assertIn("Python", result.stdout)
+        self.assertIn("pytest 9.1.1", result.stdout)
         self.assertIn("GATE PASS", result.stdout)
+        fast_result, fast_trace = self.run_gate(local_version="0.15.15", fast=True)
+        self.assertEqual(fast_result.returncode, 0, fast_result.stderr)
+        self.assertIn("FAST CHECKS PASS", fast_result.stdout)
+        self.assertNotIn("GATE PASS", fast_result.stdout)
+        self.assertEqual(fast_trace[1:], trace[1:])
 
     def test_refuses_wrong_ambient_version_before_any_gate(self):
         result, trace = self.run_gate()

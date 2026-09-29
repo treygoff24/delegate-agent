@@ -252,8 +252,7 @@ Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries. Tests use dry-run paths and fak
 where needed:
 
 ```bash
-python3 -m compileall -q src tests bin
-python3 -m pytest -q
+tests/acceptance.sh
 ```
 
 Real runtime authentication is only required for integration smoke tests that intentionally launch a child agent.
