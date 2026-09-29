@@ -5,6 +5,18 @@ import unittest
 
 from delegate_agent import harness_events
 
+# The child stays quiet until the observer has read the expected live state.
+_WAIT_FOR_ACK = (
+    "import sys,time\n"
+    "from pathlib import Path\n"
+    "def wait_for_ack(name):\n"
+    "    deadline = time.monotonic() + 10\n"
+    "    while not (Path(sys.argv[1]) / name).exists():\n"
+    "        if time.monotonic() >= deadline:\n"
+    "            raise TimeoutError('observer did not acknowledge ' + name)\n"
+    "        time.sleep(0.01)\n"
+)
+
 
 def _feed(acc, *events):
     for event in events:
@@ -156,46 +168,54 @@ class PendingToolTests(unittest.TestCase):
         from delegate_agent import pending_tool, run_registry, runner
 
         script = (
-            "import json,time\n"
-            "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
+            "import json\n"
+            + _WAIT_FOR_ACK
+            + "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
             "'toolName':'mcp__brief','args':{}}),flush=True)\n"
-            "time.sleep(0.3)\n"
+            "wait_for_ack('pending-observed')\n"
             "print(json.dumps({'type':'tool_execution_end','toolCallId':'c1',"
             "'toolName':'mcp__brief','result':{}}),flush=True)\n"
-            "time.sleep(2.5)\n"
+            "wait_for_ack('cleared-observed')\n"
         )
         with tempfile.TemporaryDirectory() as workspace:
             root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = run_registry.register_run(root, harness="omp")
             ctx = _ctx(root=root, run_id=run_id, alias=alias, workspace=workspace)
             seen = {"pending": False, "cleared": False}
+            stop = threading.Event()
 
             def poll():
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and not seen["cleared"]:
+                while time.monotonic() < deadline and not stop.is_set() and not seen["cleared"]:
                     state = run_registry.load_run_state(root, run_id) or {}
                     if state.get("status") == "running":
                         if state.get("pendingTool"):
                             seen["pending"] = True
+                            (Path(workspace) / "pending-observed").touch()
                         elif seen["pending"]:
                             seen["cleared"] = True
+                            (Path(workspace) / "cleared-observed").touch()
                     time.sleep(0.05)
 
             thread = threading.Thread(target=poll)
             thread.start()
-            with (
-                mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
-                mock.patch.object(pending_tool, "REFRESH_SECONDS", 1000),
-            ):
-                runner.execute_tracked(
-                    [sys.executable, "-c", script],
-                    workspace,
-                    ctx,
-                    json_mode=True,
-                    stdout=io.StringIO(),
-                    stderr=io.StringIO(),
-                )
-            thread.join()
+            try:
+                with (
+                    mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
+                    mock.patch.object(pending_tool, "REFRESH_SECONDS", 1000),
+                ):
+                    runner.execute_tracked(
+                        [sys.executable, "-c", script, workspace],
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+            finally:
+                stop.set()
+                thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
         self.assertTrue(seen["pending"])
         self.assertTrue(seen["cleared"], "pendingTool stayed on the running record")
 
@@ -242,43 +262,54 @@ class PendingToolTests(unittest.TestCase):
         from delegate_agent import pending_tool, run_registry, runner, snapshot_view
 
         script = (
-            "import json,sys,time\n"
-            "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
+            "import json\n"
+            + _WAIT_FOR_ACK
+            + "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
             "'toolName':'mcp__hung','args':{}}),flush=True)\n"
-            "time.sleep(2.0)\n"
+            "wait_for_ack('pending-observed')\n"
         )
         with tempfile.TemporaryDirectory() as workspace:
             root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = run_registry.register_run(root, harness="omp")
             ctx = _ctx(root=root, run_id=run_id, alias=alias, workspace=workspace)
             seen: dict = {}
+            stop = threading.Event()
 
             def poll():
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and "state" not in seen:
+                while time.monotonic() < deadline and not stop.is_set() and "state" not in seen:
                     state = run_registry.load_run_state(root, run_id) or {}
-                    if state.get("pendingTool") and "waiting on tool" in state.get("current", ""):
+                    if (
+                        state.get("status") == "running"
+                        and state.get("pendingTool")
+                        and "waiting on tool" in state.get("current", "")
+                    ):
                         seen["state"] = state
                         seen["view"] = snapshot_view.merge_snapshot_view(
                             root, run_id, None, redact=True
                         )
+                        (Path(workspace) / "pending-observed").touch()
                     time.sleep(0.05)
 
             thread = threading.Thread(target=poll)
             thread.start()
-            with (
-                mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
-                mock.patch.object(pending_tool, "REFRESH_SECONDS", 0),
-            ):
-                runner.execute_tracked(
-                    [sys.executable, "-c", script],
-                    workspace,
-                    ctx,
-                    json_mode=True,
-                    stdout=io.StringIO(),
-                    stderr=io.StringIO(),
-                )
-            thread.join()
+            try:
+                with (
+                    mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
+                    mock.patch.object(pending_tool, "REFRESH_SECONDS", 0),
+                ):
+                    runner.execute_tracked(
+                        [sys.executable, "-c", script, workspace],
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+            finally:
+                stop.set()
+                thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
         self.assertEqual(seen["state"]["pendingTool"]["name"], "mcp__hung")
         self.assertEqual(seen["view"]["pendingTool"]["name"], "mcp__hung")
         self.assertIn("mcp__hung", seen["view"]["current"])
