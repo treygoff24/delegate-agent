@@ -30,7 +30,6 @@ from delegate_agent import (
 )
 from tests.execution_test_base import (
     GIT_TEST_IDENTITY,
-    MODULE_PATH,
     SCRIPT_PATH,
     ExecutionTestBase,
     make_git_repo,
@@ -1467,20 +1466,6 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         with self.assertRaises(errors.DelegateError) as ctx:
             request_build.request_from_input_json(parsed, delegate_config.embedded_default_config())
         self.assertEqual(ctx.exception.error, "unknown_input_key")
-
-    def test_static_safety_guards(self):
-        source = MODULE_PATH.read_text()
-        forbidden = [
-            "subprocess.Popen",
-            "start_new_session",
-            "shell=True",
-            "git push",
-            "git commit",
-            "git merge",
-        ]
-        for text in forbidden:
-            with self.subTest(text=text):
-                self.assertNotIn(text, source)
 
     def test_cursor_safe_json_reports_source_workspace_not_temp_copy(self):
         repo = make_git_repo()

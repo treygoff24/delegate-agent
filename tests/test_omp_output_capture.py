@@ -1,8 +1,11 @@
 """Finite local event fixtures, not live-provider evidence."""
 
+import contextlib
 import hashlib
 import io
 import json
+import os
+import signal
 import sys
 import tempfile
 import threading
@@ -145,18 +148,49 @@ class OmpOutputCaptureTests(unittest.TestCase):
             self.assertEqual(call.error, "provider_error")
             self.assertEqual(call.text, "partial answer")
 
+    def assert_child_reaped(self, pid_file, path):
+        pid = int(pid_file.read_text())
+        # Signal 0 succeeds for a live process and for an unreaped zombie, so a
+        # runner that killed but never waited on the child fails here too.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)  # our own probe child; do not leave it spinning
+        self.fail(f"{path} path left the flooding child {pid} running or unreaped")
+
     def test_infinite_thinking_hits_transport_limit_and_reaps_child(self):
         # The transport ceiling belongs to an opted-in cap; with no cap it never fires.
-        script = f"import os\nwhile True: os.write(1,{thinking_line()!r})\n"
         started = time.monotonic()
         with (
             tempfile.TemporaryDirectory() as temp,
             mock.patch.object(stream_capture, "OMP_TRANSPORT_MAX_BYTES", 16384),
             mock.patch.object(runner, "_tracked_stream_max_bytes", return_value=1024 * 1024),
         ):
+            tracked_pid = Path(temp) / "tracked.pid"
+            call_pid = Path(temp) / "call.pid"
+
+            def flood(pid_file):
+                # Ignore SIGPIPE and swallow write errors so a closed pipe cannot
+                # end the child on its own: only the runner's kill can reap it.
+                return (
+                    "import os, signal\n"
+                    "signal.signal(signal.SIGPIPE, signal.SIG_IGN)\n"
+                    f"open({str(pid_file)!r},'w').write(str(os.getpid()))\n"
+                    "while True:\n"
+                    "    try: os.write(1,"
+                    f"{thinking_line()!r})\n"
+                    "    except OSError: pass\n"
+                )
+
             with self.assertRaises(runner.RunnerLaunchError) as error:
-                self.tracked(Path(temp), script)
+                self.tracked(Path(temp), flood(tracked_pid))
             self.assertEqual(error.exception.error, "output_limit_exceeded")
+            self.assert_child_reaped(tracked_pid, "tracked")
             states = list((Path(temp) / ".delegate" / "runs").glob("*/state.json"))
             self.assertEqual(len(states), 1)
             state = json.loads(states[0].read_text())
@@ -166,8 +200,11 @@ class OmpOutputCaptureTests(unittest.TestCase):
                 state["stdoutCapture"]["transportBytes"], 16384 + runner.STREAM_READ_CHUNK_BYTES
             )
             with self.assertRaises(runner.RunnerLaunchError) as call_error:
-                runner.execute_call([sys.executable, "-c", script], temp, harness="omp", timeout=10)
+                runner.execute_call(
+                    [sys.executable, "-c", flood(call_pid)], temp, harness="omp", timeout=10
+                )
             self.assertEqual(call_error.exception.error, "call_stdout_overflow")
+            self.assert_child_reaped(call_pid, "call")
         self.assertLess(time.monotonic() - started, 5)
 
     def test_useful_and_malformed_floods_keep_retained_limit(self):
