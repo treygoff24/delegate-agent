@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import tempfile
@@ -44,9 +45,12 @@ class EnsureOwnedDirRaceTests(unittest.TestCase):
             target = Path(tmp) / "run-scratch"
             with (
                 mock.patch.object(os, "lstat", _lose_the_race("run-scratch", plant_symlink_to=tmp)),
-                self.assertRaises(OSError),
+                self.assertRaises(OSError) as caught,
             ):
                 private_io.ensure_private_owned_dir(target)
+            self.assertNotIsInstance(caught.exception, FileExistsError)
+            self.assertEqual(caught.exception.errno, errno.ELOOP)
+            self.assertIn("private directory is a symlink", str(caught.exception))
 
 
 if __name__ == "__main__":
