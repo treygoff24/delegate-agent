@@ -305,6 +305,9 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(payload["code"], "no_matching_worktrees")
             self.assertEqual(payload["group"], "nope")
             self.assertEqual(payload["matched"], 0)
+            self.assertEqual(payload["registryRoot"], str(self._registry_root(path)))
+            self.assertIn("delegate worktree list", payload["nextActions"])
+            self.assertIn("Registry", payload["message"])
             # The unrelated run is untouched.
             self.assertTrue(Path(other_wt).exists())
 
@@ -1062,6 +1065,234 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(total, 1)
             self.assertEqual(warnings, [])
             self.assertIn("scratch.txt", paths[0])
+
+    def _seed_parent_with_nested(self, fake_home: str, *, nested_dirty: bool):
+        _repo, path = self._make_repo()
+        parent_branch = "delegate/cursor-parent"
+        parent_wt = str(Path(fake_home) / "wt" / "cursor-parent")
+        self._seed_persistent_run(
+            path, alias="cursor-parent", branch=parent_branch, execution_cwd=parent_wt
+        )
+        self._create_worktree_at(path, parent_branch, parent_wt)
+        # A run launched with --cwd <parent worktree> registers in the parent
+        # worktree's own Registry, and its worktree is cut from the parent.
+        nested_branch = "delegate/codex-nested"
+        nested_wt = str(Path(fake_home) / "wt" / "codex-nested")
+        self._seed_persistent_run(
+            parent_wt,
+            alias="codex-nested",
+            harness="codex",
+            branch=nested_branch,
+            execution_cwd=nested_wt,
+        )
+        self._create_worktree_at(
+            parent_wt, nested_branch, nested_wt, dirty_file="scratch.txt" if nested_dirty else None
+        )
+        return path, parent_wt, nested_wt
+
+    def test_remove_parent_also_removes_clean_finished_nested_worktree(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, nested_wt = self._seed_parent_with_nested(
+                fake_home, nested_dirty=False
+            )
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                home=fake_home,
+            )
+
+            payload = json.loads(out)
+            self.assertEqual(code, 0, out)
+            self.assertFalse(Path(parent_wt).exists())
+            self.assertFalse(Path(nested_wt).exists())
+            self.assertEqual([item["alias"] for item in payload["nestedRemoved"]], ["codex-nested"])
+            listed = git("worktree", "list", "--porcelain", cwd=path).stdout
+            self.assertNotIn("codex-nested", listed)
+
+    def test_remove_parent_refuses_when_nested_worktree_is_dirty(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, nested_wt = self._seed_parent_with_nested(fake_home, nested_dirty=True)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                home=fake_home,
+            )
+
+            payload = json.loads(out)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            self.assertEqual(payload["code"], "nested_worktrees_block_remove")
+            self.assertEqual(payload["nestedWorktrees"][0]["alias"], "codex-nested")
+            self.assertEqual(payload["nestedWorktrees"][0]["reason"], "dirty_worktree")
+            self.assertIn(
+                f"delegate --cwd {parent_wt} worktree remove codex-nested --discard-uncommitted",
+                payload["nextActions"],
+            )
+            self.assertTrue(Path(parent_wt).exists())
+            self.assertTrue(Path(nested_wt).exists())
+
+            # The parent's --force never reaches a dirty nested worktree.
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--force"],
+                home=fake_home,
+            )
+            self.assertEqual(code, errors_api.EXIT_USAGE, out)
+            self.assertEqual(json.loads(out)["code"], "nested_worktrees_block_remove")
+            self.assertTrue(Path(parent_wt).exists())
+            self.assertTrue((Path(nested_wt) / "scratch.txt").exists())
+
+            # Naming the nested worktree with the flag is the explicit way through.
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    parent_wt,
+                    "--json",
+                    "worktree",
+                    "remove",
+                    "codex-nested",
+                    "--discard-uncommitted",
+                ],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(Path(nested_wt).exists())
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(Path(parent_wt).exists())
+
+    def test_nested_registry_locked_during_removal_and_failure_stops_parent(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, _nested_wt = self._seed_parent_with_nested(
+                fake_home, nested_dirty=False
+            )
+            nested_root = Path(parent_wt) / ".delegate"
+            held: list[bool] = []
+
+            def failing_branch_removal(*_args, **_kwargs):
+                try:
+                    with registry_api.registry_lock(nested_root, timeout_seconds=0.2):
+                        held.append(False)
+                except TimeoutError:
+                    held.append(True)
+                return worktree_remove_api.BranchRemovalResult(removed=False, error="boom")
+
+            with mock.patch.object(worktree_remove_api, "_remove_branch", failing_branch_removal):
+                code, out, _err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                    home=fake_home,
+                )
+
+            payload = json.loads(out)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["code"], "nested_worktree_remove_failed")
+            self.assertEqual(payload["nestedResult"]["branchRemovalError"], "boom")
+            self.assertTrue(payload["nextActions"])
+            self.assertEqual(held, [True])
+            self.assertTrue(Path(parent_wt).exists())
+
+    def _seed_parent_only(self, fake_home: str):
+        _repo, path = self._make_repo()
+        parent_branch = "delegate/cursor-parent"
+        parent_wt = str(Path(fake_home) / "wt" / "cursor-parent")
+        self._seed_persistent_run(
+            path, alias="cursor-parent", branch=parent_branch, execution_cwd=parent_wt
+        )
+        self._create_worktree_at(path, parent_branch, parent_wt)
+        return path, parent_wt
+
+    def test_nested_registry_dir_without_an_index_is_still_locked(self):
+        # A launch into the parent creates .delegate before it writes the index;
+        # the walk must hold that Registry's lock, not read "no index" as "empty".
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt = self._seed_parent_only(fake_home)
+            nested_root = Path(parent_wt) / ".delegate"
+            nested_root.mkdir()
+            held: list[bool] = []
+            real_blockers = worktree_remove_api._nested_blockers
+
+            def probe(*args, **kwargs):
+                try:
+                    with registry_api.registry_lock(nested_root, timeout_seconds=0.2):
+                        held.append(False)
+                except TimeoutError:
+                    held.append(True)
+                return real_blockers(*args, **kwargs)
+
+            with mock.patch.object(worktree_remove_api, "_nested_blockers", probe):
+                code, out, _err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--force"],
+                    home=fake_home,
+                )
+            self.assertEqual(code, 0, out)
+            self.assertEqual(held, [True])
+
+    def test_a_registry_created_during_the_walk_blocks_the_parent_delete(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt = self._seed_parent_only(fake_home)
+            real_blockers = worktree_remove_api._nested_blockers
+
+            def launch_lands_mid_walk(*args, **kwargs):
+                (Path(parent_wt) / ".delegate").mkdir()
+                return real_blockers(*args, **kwargs)
+
+            with mock.patch.object(worktree_remove_api, "_nested_blockers", launch_lands_mid_walk):
+                code, out, _err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--force"],
+                    home=fake_home,
+                )
+            payload = json.loads(out)
+            self.assertNotEqual(code, 0, out)
+            self.assertEqual(payload["code"], "nested_registry_appeared")
+            self.assertEqual(payload["nestedRegistry"], str(Path(parent_wt) / ".delegate"))
+            self.assertTrue(Path(parent_wt).exists())
+
+    def test_nested_run_appearing_after_selection_blocks_parent_delete(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, _nested_wt = self._seed_parent_with_nested(
+                fake_home, nested_dirty=False
+            )
+            calls = []
+            real = worktree_api._nested_run_block_reason
+
+            def late_run(registry_root, record):
+                if record.get("alias") != "cursor-parent":
+                    return real(registry_root, record)
+                calls.append(1)
+                # First look (the initial inspection) sees nothing; the recheck
+                # right before the parent delete sees a run that appeared since.
+                return None if len(calls) == 1 else "nested_run_active"
+
+            with mock.patch.object(worktree_api, "_nested_run_block_reason", late_run):
+                code, out, _err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                    home=fake_home,
+                )
+            self.assertNotEqual(code, 0)
+            self.assertEqual(json.loads(out)["code"], "nested_run_active")
+            self.assertTrue(Path(parent_wt).exists())
+            self.assertEqual(len(calls), 2)
+
+    def test_unreadable_nested_registry_fails_closed_even_with_kill_live(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, nested_wt = self._seed_parent_with_nested(
+                fake_home, nested_dirty=False
+            )
+            index = Path(parent_wt) / ".delegate" / "index.json"
+            index.write_text("{not json", encoding="utf-8")
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--kill-live"],
+                home=fake_home,
+            )
+
+            payload = json.loads(out)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["code"], "nested_registry_unreadable")
+            self.assertIn(str(Path(parent_wt) / ".delegate"), payload["message"])
+            self.assertTrue(Path(parent_wt).exists())
+            self.assertTrue(Path(nested_wt).exists())
 
 
 if __name__ == "__main__":

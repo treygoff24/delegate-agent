@@ -360,7 +360,13 @@ starts. Gitignored files remain excluded, and external symlinks are blocked with
 the same protections used by safe-mode workspace sync. Automatic sync emits a
 `dirty_source_auto_included` warning with tracked-modified and untracked counts.
 `--include-dirty` remains an explicit launch flag and is a no-op when the source
-is already clean. In safe mode it is also accepted as a no-op (safe already sees uncommitted files) with a warning; it is still refused for call mode and for work mode without `--isolation worktree`.
+is already clean; when it syncs files the launcher gets `dirty_source_included`
+(counts) and `dirty_source_included_paths` (up to five paths). In safe mode it is
+also accepted as a no-op (safe already sees uncommitted files) with a warning; it
+is still refused for call mode and for work mode without `--isolation worktree`.
+Safe runs with worktree isolation also mirror the dirty source; the launcher gets a
+`dirty_source_mirrored` warning (count plus up to five paths) in the envelope
+`warnings` and the dry run.
 JSON and text completion output report `includeDirty: true` / `syncedFiles`.
 `run --input-json` accepts the equivalent boolean field `includeDirty`.
 
