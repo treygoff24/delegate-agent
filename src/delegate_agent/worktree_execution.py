@@ -573,6 +573,7 @@ def _create_persistent_worktree_or_record_failure(
                     preflight.source_git_root,
                     registration.worktree_path,
                     snapshot=preflight.dirty_snapshot,
+                    persistent_worktree=True,
                 )
             )
             registration.creation_context["includeDirty"] = True

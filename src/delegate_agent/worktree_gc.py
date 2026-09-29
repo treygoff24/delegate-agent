@@ -16,8 +16,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-from delegate_agent import isolation, run_registry, worktree_remove
+from delegate_agent import config as delegate_config
+from delegate_agent import (
+    isolation,
+    run_registry,
+    worktree_procs,
+    worktree_remove,
+    worktree_summary,
+)
 from delegate_agent import worktree_mgmt as wm
+from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -53,6 +61,19 @@ def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -
     return entry
 
 
+LIVE_OWNER_HINT = (
+    "A live run holds this worktree. --force does not override that; "
+    "--kill-live does, and the run loses its workspace."
+)
+
+
+def _live_owner_skip(record: PersistentWorktreeRecord, reason: str) -> JsonObject:
+    entry = _entry_ref(record, reason=reason)
+    if reason in wm.LIVE_OWNER_REASONS:
+        entry["hint"] = LIVE_OWNER_HINT
+    return entry
+
+
 def prune_worktrees(
     registry_root: Path,
     *,
@@ -65,7 +86,14 @@ def prune_worktrees(
     discard_uncommitted: bool = False,
     force_branch: bool = False,
     force: bool = False,
+    kill_live: bool = False,
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> JsonObject:
+    """Remove worktrees matching the filters that pass the shared safety checks.
+
+    ``force`` is shorthand for ``discard_uncommitted`` plus ``force_branch``; it
+    never overrides a live owner run. ``kill_live`` does.
+    """
     if not merged and older_than_days is None:
         raise wm.WorktreeManagementError(
             wm._error_payload(
@@ -92,14 +120,15 @@ def prune_worktrees(
             registry_root,
             record,
             include_detached=include_detached,
-            force=force,
+            kill_live=kill_live,
             check_merge=merged and not force_branch,
+            retirement_ignore_globs=retirement_ignore_globs,
         )
         if inspection.attachments:
             skipped.append(_entry_ref(record, reason="live_attachment"))
             continue
-        if inspection.owner_block is not None and not force:
-            skipped.append(_entry_ref(record, reason=inspection.owner_block))
+        if inspection.owner_block is not None and not kill_live:
+            skipped.append(_live_owner_skip(record, inspection.owner_block))
             continue
         status = inspection.status
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):
@@ -121,7 +150,7 @@ def prune_worktrees(
             inspection,
             discard_uncommitted=discard_uncommitted,
             force_branch=force_branch,
-            force=force,
+            kill_live=kill_live,
             require_merged=merged,
             allow_unmerged_clean_keep=merged,
         )
@@ -155,8 +184,9 @@ def prune_worktrees(
                         discard_uncommitted=discard_uncommitted,
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
-                        force=force,
+                        kill_live=kill_live,
                         include_detached=include_detached,
+                        retirement_ignore_globs=retirement_ignore_globs,
                     )
                 )
                 if removed[-1].get("ok") is False:
@@ -345,15 +375,166 @@ def _reap_record_safety(
     registry_root: Path,
     record: PersistentWorktreeRecord,
     *,
-    force: bool,
+    kill_live: bool,
     discard_uncommitted: bool,
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> tuple[wm.WorktreeInspection, wm.WorktreeSafetyDecision]:
-    inspection = wm.inspect_worktree(registry_root, record, force=force, check_merge=False)
+    inspection = wm.inspect_worktree(
+        registry_root,
+        record,
+        kill_live=kill_live,
+        check_merge=False,
+        retirement_ignore_globs=retirement_ignore_globs,
+    )
     return inspection, wm.evaluate_worktree_safety(
         inspection,
         discard_uncommitted=discard_uncommitted,
-        force=force,
+        kill_live=kill_live,
     )
+
+
+class LinkedOrphanCheck(NamedTuple):
+    """Verdict on removing a pool path that Git links but no run record owns.
+
+    ``reason`` is the skip code, or None when every check passed. ``raw_dirty``
+    says whether Git will demand its own ``--force`` to remove the path (there
+    is dirt, effective or discounted, or its state could not be read).
+    """
+
+    reason: str | None = None
+    source_git_root: str | None = None
+    raw_dirty: bool = False
+    fields: JsonObject | None = None
+
+
+LINKED_ORPHAN_HINT = (
+    "No run record in this Registry owns this path, but Git still links it, so it "
+    "may be in use. --force removes it after checking for uncommitted work and for "
+    "processes whose cwd is inside it; the branch is kept."
+)
+
+
+def _canonical_path_text(path: str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return path
+
+
+def _same_directory(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except (OSError, RuntimeError):
+        return left == right
+
+
+def _record_in_other_registry(
+    source_git_root: str, path: Path, registry_root: Path | None
+) -> Path | None:
+    """The source repository's own Registry, when it holds a record for ``path``.
+
+    A path that looks record-less from the caller's workspace can still be owned
+    by a run recorded in the repository that created it. Removing it here would
+    skip that run's liveness check entirely, so it is refused instead.
+    """
+
+    other = run_registry.registry_root_if_exists(Path(source_git_root))
+    if other is None or (registry_root is not None and _same_directory(other, registry_root)):
+        return None
+    if any(_resolved_record_path(item) == path for item in load_persistent_records(other)):
+        return other
+    return None
+
+
+def _check_linked_orphan(
+    path: Path,
+    *,
+    registry_root: Path | None,
+    pool_warning: str | None,
+    force: bool,
+    kill_live: bool,
+    discard_uncommitted: bool,
+    ignore_globs: tuple[str, ...],
+) -> LinkedOrphanCheck:
+    """Decide whether ``reap --path P --force`` may remove a record-less, git-linked entry.
+
+    Pool validation and age have already passed. Without ``--force`` this stays
+    the conservative live verdict; with it, the entry must still be registered
+    with Git under a source repository whose own Registry does not own it, be
+    free of uncommitted work (unless ``--discard-uncommitted``), and have no
+    process working inside it (unless ``--kill-live``).
+    """
+
+    if pool_warning is not None:
+        return LinkedOrphanCheck(reason=pool_warning)
+    if not force:
+        return LinkedOrphanCheck(reason="live_backlink", fields={"hint": LINKED_ORPHAN_HINT})
+    common_dir = _resolved_git_common_dir(str(path))
+    source = (
+        str(common_dir.parent) if common_dir is not None and common_dir.name == ".git" else None
+    )
+    if source is None:
+        return LinkedOrphanCheck(reason="linked_source_unknown")
+    listed, _list_warning = wm._worktree_list_paths_with_warning(source)
+    if listed is None:
+        return LinkedOrphanCheck(reason="worktree_list_failed", source_git_root=source)
+    if not _registered_worktree_path_matches(listed, str(path)):
+        return LinkedOrphanCheck(reason="not_registered_with_git", source_git_root=source)
+    other = _record_in_other_registry(source, path, registry_root)
+    if other is not None:
+        return LinkedOrphanCheck(
+            reason="record_in_other_registry",
+            source_git_root=source,
+            fields={
+                "registryWorkspace": str(other.parent),
+                "hint": f"Run the same command with --cwd {other.parent}.",
+            },
+        )
+    fields: JsonObject = {}
+    lines, total, dirty_warnings = wm.porcelain_status(str(path))
+    if dirty_warnings:
+        fields["warnings"] = list(dirty_warnings)
+    raw_dirty = True
+    if lines is None or total is None:
+        fields["dirty"] = None
+        if not discard_uncommitted:
+            return LinkedOrphanCheck("dirty_unknown", source, True, fields)
+    else:
+        raw_dirty = bool(lines)
+        effective, effective_total, _raw = (
+            worktree_summary.effective_changed_files_from_porcelain_lines(
+                lines,
+                execution_cwd=str(path),
+                creation_context=None,
+                total=total,
+                ignore_globs=ignore_globs,
+            )
+        )
+        fields["dirty"] = effective_total > 0
+        if effective_total > 0:
+            fields["dirtyPaths"] = [str(item.get("path")) for item in effective]
+            if not discard_uncommitted:
+                return LinkedOrphanCheck("dirty", source, True, fields)
+    if not kill_live:
+        scan = worktree_procs.processes_with_cwd_inside(path)
+        if scan.holders:
+            fields["processes"] = [
+                {"pid": holder.pid, "command": holder.command}
+                for holder in scan.holders[: worktree_procs.MAX_HOLDERS_REPORTED]
+            ]
+            fields["hint"] = (
+                "A process has its cwd inside this worktree. End it, or pass --kill-live "
+                "to remove the path anyway."
+            )
+            return LinkedOrphanCheck("process_cwd_inside", source, raw_dirty, fields)
+        if not scan.checked:
+            fields.setdefault("warnings", []).append(
+                f"process cwd check unavailable ({scan.note}); nothing verified that no "
+                "process is working inside this path."
+            )
+        elif scan.note:
+            fields.setdefault("warnings", []).append(scan.note)
+    return LinkedOrphanCheck(None, source, raw_dirty, fields)
 
 
 def _reap_block_code(
@@ -362,13 +543,7 @@ def _reap_block_code(
     *,
     source_gone: bool,
 ) -> str | None:
-    if decision.reason in {
-        "run_active",
-        "run_not_terminal",
-        "process_group_alive",
-        "worktree_leased",
-        "live_attachment",
-    }:
+    if decision.reason in wm.LIVE_OWNER_REASONS or decision.reason == "live_attachment":
         return decision.reason
     if source_gone:
         return None
@@ -412,13 +587,24 @@ def reap_worktrees(
     yes: bool = False,
     force: bool = False,
     discard_uncommitted: bool = False,
+    kill_live: bool = False,
+    retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> JsonObject:
     """Retire old pooled worktrees after an explicit selector and confirmation.
 
     Source-gone pool entries have no Git command available to establish
     cleanliness, so they are retained unless the caller explicitly opts into
     discarding unknown dirt.  Such entries never have a branch deletion path.
+
+    A record-less entry that Git still links is the "orphan with no exit" case:
+    ``force`` removes it after ``_check_linked_orphan``. ``force`` never
+    overrides a live owner run; ``kill_live`` does.
     """
+    ignore_globs = (
+        DEFAULT_RETIREMENT_IGNORE_GLOBS
+        if retirement_ignore_globs is None
+        else retirement_ignore_globs
+    )
 
     # A pool-only caller may pass the pool as the first positional argument;
     # the command layer passes both registry and pool explicitly.
@@ -456,8 +642,11 @@ def reap_worktrees(
     pool = Path(pool_data_home).expanduser()
     pool_report = scan_worktree_pool(pool, required=True)
     orphan_by_path = _reap_pool_orphans(pool)
+    # Keyed by canonical path, like ``orphan_by_path`` and the candidates: the pool
+    # may be reached through an alias (macOS /tmp or /var), and a warning that
+    # missed its candidate would let an unsettled or unverifiable entry through.
     pool_warnings_by_path = {
-        str(item.get("path")): str(item.get("reason"))
+        _canonical_path_text(str(item.get("path"))): str(item.get("reason"))
         for item in pool_report.get("warnings", [])
         if isinstance(item, dict)
         and isinstance(item.get("path"), str)
@@ -573,20 +762,40 @@ def reap_worktrees(
             inspection, decision = _reap_record_safety(
                 registry_root,
                 record,
-                force=force,
+                kill_live=kill_live,
                 discard_uncommitted=discard_uncommitted,
+                retirement_ignore_globs=ignore_globs,
             )
         elif record is None and not source_gone:
             # A path that is not an orphan and has no reachable owner record is
-            # conservatively treated as live (most commonly a live backlink).
-            entry["reason"] = pool_warnings_by_path.get(str(candidate_path), "live_backlink")
-            skipped.append(entry)
+            # conservatively treated as live (most commonly a live backlink)
+            # until --force and the linked-orphan checks say otherwise.
+            linked = _check_linked_orphan(
+                candidate_path,
+                registry_root=registry_root,
+                pool_warning=pool_warnings_by_path.get(str(candidate_path)),
+                force=force,
+                kill_live=kill_live,
+                discard_uncommitted=discard_uncommitted,
+                ignore_globs=ignore_globs,
+            )
+            entry.update(linked.fields or {})
+            if linked.source_git_root is not None:
+                entry["sourceGitRoot"] = linked.source_git_root
+            if linked.reason is not None:
+                entry["reason"] = linked.reason
+                skipped.append(entry)
+                continue
+            entry["linkedOrphan"] = True
+            planned.append(entry)
             continue
         if inspection is not None:
             entry["dirty"] = inspection.dirty
             block_code = _reap_block_code(inspection, decision, source_gone=source_gone)
             if block_code is not None:
                 entry["reason"] = block_code
+                if block_code in wm.LIVE_OWNER_REASONS:
+                    entry["hint"] = LIVE_OWNER_HINT
                 if block_code == "live_attachment":
                     entry["attachedRuns"] = list(inspection.attachments)
                 if inspection.dirty_paths:
@@ -676,8 +885,9 @@ def reap_worktrees(
                         fresh_inspection, decision = _reap_record_safety(
                             registry_root,
                             fresh_record,
-                            force=force,
+                            kill_live=kill_live,
                             discard_uncommitted=discard_uncommitted,
+                            retirement_ignore_globs=ignore_globs,
                         )
                         block_code = _reap_block_code(
                             fresh_inspection,
@@ -692,7 +902,29 @@ def reap_worktrees(
                         continue
                     record = fresh_record
                     try:
-                        if record is not None and entry.get("sourceGone") is not True:
+                        if entry.get("linkedOrphan") is True:
+                            fresh_linked = _check_linked_orphan(
+                                target,
+                                registry_root=registry_root,
+                                pool_warning=pool_warnings_by_path.get(str(target)),
+                                force=force,
+                                kill_live=kill_live,
+                                discard_uncommitted=discard_uncommitted,
+                                ignore_globs=ignore_globs,
+                            )
+                            if fresh_linked.reason is not None or not fresh_linked.source_git_root:
+                                errors.append(
+                                    {**entry, "code": fresh_linked.reason or "toctou_changed"}
+                                )
+                                continue
+                            worktree_remove._remove_worktree_path(
+                                source_git_root=fresh_linked.source_git_root,
+                                execution_cwd=str(target),
+                                discard_uncommitted=fresh_linked.raw_dirty,
+                                record={"executionCwd": str(target)},
+                                alias=str(target),
+                            )
+                        elif record is not None and entry.get("sourceGone") is not True:
                             source = record.get("sourceGitRoot")
                             execution = record.get("executionCwd")
                             if not isinstance(source, str) or not isinstance(execution, str):
@@ -1685,6 +1917,7 @@ def maybe_auto_prune(
             merged=True,
             older_than_days=days,
             dry_run=False,
+            retirement_ignore_globs=delegate_config.retirement_ignore_globs(config),
         )
     except wm.WorktreeManagementError as exc:
         return dict(exc.payload)

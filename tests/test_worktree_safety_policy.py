@@ -63,17 +63,25 @@ class WorktreeSafetyPolicyTests(unittest.TestCase):
             "merge_check_failed",
         )
 
-    def test_policy_allows_explicit_force_but_not_attachment_bypass(self):
+    def test_policy_allows_explicit_kill_live_but_not_attachment_bypass(self):
         owner = self._inspection(owner_block="process_group_alive")
-        self.assertIsNone(worktree_mgmt.evaluate_worktree_safety(owner, force=True).reason)
+        self.assertIsNone(worktree_mgmt.evaluate_worktree_safety(owner, kill_live=True).reason)
 
         attached = self._inspection(
             owner_block="process_group_alive", attachments=({"runId": "del_attached"},)
         )
         self.assertEqual(
-            worktree_mgmt.evaluate_worktree_safety(attached, force=True).reason,
+            worktree_mgmt.evaluate_worktree_safety(attached, kill_live=True).reason,
             "live_attachment",
         )
+
+    def test_force_is_no_longer_a_policy_lever(self):
+        # `--force` is the discard-and-force-branch shorthand; the live-owner
+        # override is its own switch, so the policy has no `force` argument.
+        owner = self._inspection(owner_block="worktree_leased")
+        with self.assertRaises(TypeError):
+            worktree_mgmt.evaluate_worktree_safety(owner, force=True)
+        self.assertEqual(worktree_mgmt.evaluate_worktree_safety(owner).reason, "worktree_leased")
 
     def test_prune_can_remove_clean_unmerged_path_while_keeping_branch(self):
         decision = worktree_mgmt.evaluate_worktree_safety(
