@@ -7,11 +7,12 @@ import os
 import stat
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
 from delegate_agent import config as delegate_config
-from delegate_agent import lane_health, provider_errors
+from delegate_agent import lane_health, provider_errors, runner
 from delegate_agent.errors import EXIT_LANE_KNOWN_BAD
 
 
@@ -259,6 +260,65 @@ class ObserveTests(HomeCase):
         self.assertIsNone(
             lane_health.observe(None, self.policy, succeeded=False, record=PERSISTENT)
         )
+
+
+USAGE_LIMIT = record("codex", "You've hit your usage limit", status=429)
+
+
+class RunnerObservationTests(HomeCase):
+    """`runner._observe_lane_health`: which finished runs are allowed to speak for the lane."""
+
+    def observe(self, *, status="failed", rec=PERSISTENT, established=False, fallback=None):
+        ctx = types.SimpleNamespace(
+            lane=self.lane,
+            provider_policy=self.policy,
+            engine="codex",
+            fallback_env_overrides=fallback or {},
+            run_id="del_run",
+            alias="codex-1",
+        )
+        extra: dict = {}
+        runner._observe_lane_health(
+            ctx,
+            status=status,
+            provider_error=rec,
+            delegate_established=established,
+            merged_extra=extra,
+        )
+        return extra
+
+    def test_a_provider_reported_persistent_failure_marks_the_lane(self):
+        extra = self.observe()
+
+        self.assertIn("laneMarked", extra)
+        self.assertIsNotNone(lane_health.check(self.lane)[0])
+
+    def test_a_failure_delegate_established_says_nothing_about_the_lane(self):
+        # A timeout, stall, or output cap that also saw a stale provider error must not
+        # mark the lane; the control above proves the same record does mark it.
+        extra = self.observe(established=True)
+
+        self.assertEqual(extra, {})
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_a_cancelled_run_says_nothing_about_the_lane(self):
+        self.assertEqual(self.observe(status="cancelled"), {})
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_a_codex_usage_limit_with_a_fallback_profile_stays_with_the_failover_store(self):
+        self.assertEqual(provider_errors.reason_for_record(USAGE_LIMIT), "usage_limit")
+        self.assertTrue(lane_health.earns_marker(USAGE_LIMIT))
+
+        extra = self.observe(rec=USAGE_LIMIT, fallback={"CODEX_HOME": "/somewhere"})
+
+        self.assertEqual(extra, {})
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_a_codex_usage_limit_without_a_fallback_profile_marks_the_lane(self):
+        self.assertIn("laneMarked", self.observe(rec=USAGE_LIMIT))
+
+    def test_other_persistent_failures_still_mark_a_lane_that_has_a_fallback_profile(self):
+        self.assertIn("laneMarked", self.observe(fallback={"CODEX_HOME": "/somewhere"}))
 
 
 class RefusalTests(unittest.TestCase):

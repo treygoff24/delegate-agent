@@ -6,14 +6,16 @@ The fake drops the stream ("websocket closed") on the steps the plan names.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
 import subprocess
+import types
 import unittest
 from unittest import mock
 
-from delegate_agent import auto_resume, cli, followup_command
+from delegate_agent import auto_resume, cli, followup_command, lane_health, provider_errors
 from delegate_agent.errors import DelegateError
 from tests.provider_error_fakes import FakeCodexCase
 
@@ -276,3 +278,50 @@ class SkipReasonTests(unittest.TestCase):
         self.assertEqual(self.reason(_note(provider_error=None)), "not_a_transient_drop")
         provider = _note(provider_error={"signature": "provider_unavailable", "class": "transient"})
         self.assertIsNone(self.reason(provider))
+
+    def test_a_persistent_signature_is_never_resumed_even_if_the_table_opts_it_in(self):
+        opted_in = dataclasses.replace(
+            provider_errors.SIGNATURES_BY_ID["auth_rejected"], auto_resume=True
+        )
+        note = _note(provider_error={"signature": "auth_rejected", "class": "persistent"})
+
+        with mock.patch.object(provider_errors, "signature_for_record", return_value=opted_in):
+            self.assertEqual(self.reason(note), "not_a_transient_drop")
+
+    def test_only_the_two_drop_signatures_opt_in_and_both_are_transient(self):
+        opted_in = {
+            row.id: (row.klass, row.scope) for row in provider_errors.SIGNATURES if row.auto_resume
+        }
+
+        self.assertEqual(
+            opted_in,
+            {
+                "stream_disconnected": ("transient", "lane"),
+                "provider_unavailable": ("transient", "lane"),
+            },
+        )
+
+
+class AutomaticContinuationGuardTests(unittest.TestCase):
+    def test_an_automatic_continuation_is_never_resumed_again(self):
+        request = types.SimpleNamespace(
+            provider_policy=lane_health.Policy(), auto_resume={"automatic": True, "attempt": 1}
+        )
+        first = (1, {"ok": False, "status": "failed"})
+
+        with mock.patch.object(cli, "execute_request", side_effect=AssertionError("launched")):
+            result = cli._maybe_auto_resume(
+                first,
+                _note(),
+                request,
+                types.SimpleNamespace(json_mode=True),
+                config={},
+                config_source=None,
+                workspace=None,
+                stdin=io.StringIO(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertIs(result, first)
+        self.assertNotIn("autoResume", first[1])

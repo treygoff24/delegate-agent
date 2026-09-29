@@ -317,6 +317,115 @@ Run, or use `delegate resume <handle>` to carry the report into a new Run. A
 workflow structured retry that hits this falls back to a fresh relaunch on its
 own; see [workflows](delegate-workflows.md).
 
+## Provider errors, known-bad lanes, and automatic resume
+
+When a child dies on a provider error, the failed run's envelope, run record,
+and completion report carry a structured `providerError`:
+
+```json
+{
+  "status": 401,
+  "providerCode": "authentication_error",
+  "message": "invalid x-api-key",
+  "engine": "claude",
+  "signature": "auth_rejected",
+  "class": "persistent",
+  "hint": "Re-authenticate the claude CLI, then relaunch."
+}
+```
+
+The message is bounded and redacted. Classification looks at the HTTP status
+first, then the provider's error code, then message text. One engine-keyed
+signature table decides it, so `failureReason`, `failureKind`, the hint, and the
+class always agree. `class` is one of:
+
+- `persistent`: it will keep failing until someone changes something.
+- `transient`: it clears on its own; relaunching later is reasonable.
+- `unknown`: no signature matched. The record still carries the raw status and
+  message. Unknown errors never mark a lane and are never resumed.
+
+A `persistent` signature is either lane-scoped (the credentials, account,
+billing, or model access are wrong, so the next launch on that lane fails the
+same way) or request-scoped (this prompt is the problem, such as too many
+images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
+
+| Signature | Class | Meaning and next step |
+| --- | --- | --- |
+| `auth_rejected` | persistent | HTTP 401: the provider rejected this lane's credentials. Re-authenticate the engine CLI. |
+| `forbidden` | persistent | HTTP 403: the account may not use this model or region. Check access; re-authenticate if the login changed. |
+| `auth_token_rejected` | persistent | The harness reports an expired or rejected token. Re-authenticate. |
+| `claude_login_required` | persistent | Claude is not signed in or its login expired. Sign in again with `/login`. |
+| `cursor_auth_required` | persistent | Cursor is not signed in. Run `estate-cursor login`. |
+| `api_key_missing` | persistent | The provider behind an OMP, Pi, or OpenCode alias has no API key. Set it or pick another alias. |
+| `payment_required` | persistent | HTTP 402: no credit on the account. Add credit. |
+| `usage_limit` | persistent | Usage or quota limit reached (HTTP 429 with a quota message). Wait for the reset or use another account or lane. |
+| `usage_balance_exhausted` | persistent | The provider's usage balance is exhausted. Top up or wait for the reset. |
+| `model_unavailable` | persistent | HTTP 404: the account cannot use the requested model. Pick another alias (`delegate models`). |
+| `age_confirmation_required` | persistent | The provider wants an age confirmation on this account. Complete it, then relaunch. |
+| `harness_config_rejected` | persistent | The harness rejected its own configuration (an unsupported `-c` override or config key) before running. Fix the config or upgrade the harness. |
+| `broker_binding_inactive`, `broker_uid_unmapped`, `broker_principal_not_cell` | persistent | The estate broker refused the launch (HTTP 403); no vendor process ran. Launch from a bound, mapped cell. |
+| `request_image_limit` | persistent, this request only | HTTP 400, 413, or 422 naming an image count or size limit. This is not an auth failure. Attach fewer or smaller images. |
+| `request_too_large` | persistent, this request only | HTTP 413: the request exceeds the size or context limit. Shorten the prompt or attachments. |
+| `request_rejected` | persistent, this request only | HTTP 400 or 422: the provider called the request malformed. Fix what the message names. |
+| `content_flagged` | persistent, this request only | The provider flagged the request as a possible cybersecurity risk. Rephrase or use another lane. |
+| `thread_lost` | persistent, this request only | Codex could not find the saved thread. Relaunch without it; it is gone or lives under a different `CODEX_HOME`. |
+| `rate_limited` | transient | HTTP 429 throttling. Wait a moment and relaunch. |
+| `model_at_capacity` | transient | HTTP 503 or 529 saying the model is at capacity. Retry later or use another lane. |
+| `provider_unavailable` | transient | HTTP 500, 502, 503, 504, or 529, or an overloaded message. Eligible for one automatic resume. |
+| `stream_disconnected` | transient | The provider stream dropped before the response completed (for example Codex's websocket closing early). Eligible for one automatic resume. |
+
+### Known-bad lanes
+
+A lane is one engine on one provider, model, and account (the Codex failover
+identity, the Claude config directory, or the auth profile). When a run fails
+with a persistent lane-scoped signature, Delegate records a marker for that lane
+under `~/.delegate/state/lane-health/` for `providerErrors.knownBadLaneMinutes`
+(default 15). Until it expires, another launch on the lane is refused in
+milliseconds, before any child starts:
+
+```text
+Refusing to launch: lane claude claude-sonnet-5-5 is marked known-bad until
+...  after a persistent auth_rejected HTTP 401 failure. No child process was started.
+```
+
+The refusal exits `4` and the JSON error is `lane_known_bad`, with `signature`,
+`class`, `hint`, `expiresAt`, `secondsLeft`, and `markedRunId`. Transient,
+request-scoped, and unknown failures never write a marker, and a failure
+Delegate established itself (timeout, stall, output cap, cancel) says nothing
+about the lane. A success on the lane clears its marker. A Codex usage limit
+with `codex.fallbackProfile` set stays with the profile failover, which swaps
+accounts instead of refusing.
+
+- `delegate doctor` lists live markers under `knownBadLanes`.
+- `--force-launch` (a global option) launches on a marked lane anyway; a
+  success clears the marker, another persistent failure renews it.
+- `providerErrors.knownBadLaneMinutes: 0` turns the markers off. A corrupt marker
+  file is removed with a warning and the lane is treated as healthy.
+
+Workflows have their own stop on top of this: see
+[workflows](delegate-workflows.md) for `provider_exhausted` and
+`lane_known_bad` outcomes.
+
+### Automatic resume after a transient drop
+
+A Codex or Claude `work` run that fails with `stream_disconnected` or
+`provider_unavailable`, and saved its native session (the default; see
+`--no-resumable`), gets exactly one automatic continuation. Delegate launches it
+the way `delegate followup` does: the same session, a new run linked by
+`followupOf`. The continuation's envelope and manifest carry
+`autoResume: {"automatic": true, "attempt": 1, "of": {...}, "trigger": {...}}`
+so it never reads as an operator action. If the continuation drops too, the
+result is final; there is no second attempt. If the continuation cannot be
+built, the first run's envelope carries `autoResume` with `attempted: false` and
+a `reason`.
+
+It never applies to `safe` or `call` mode, pass-through, structured-output runs
+(the workflow supervisor owns that retry), runs with no saved session, runs in a
+temporary worktree (its files are gone), or any other error class. Set
+`providerErrors.autoResume` to `false` to opt out. Workflow children run
+unresumable unless the call passes `resumable=True`, so this applies to them
+only then.
+
 ## Long foreground run looks silent
 
 Tracked launches buffer child output so Delegate can return a bounded final
