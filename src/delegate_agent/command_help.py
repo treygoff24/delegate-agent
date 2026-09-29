@@ -1369,6 +1369,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--json] run-output (<handle>|--latest HARNESS) "
             "[--completion-report] [--no-redact] "
             "[(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]",
+            "delegate [--json] run-output (<handle>|--latest HARNESS) [--no-redact] (--raw | --tail N)",
         ),
         arguments=(
             ArgSpec(
