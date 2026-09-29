@@ -68,6 +68,11 @@ _ACCOUNT_SELECTOR = re.compile(
 # Delegate's own per-run variables (mail tokens, run ids) are not an account.
 _OWN_ENV_PREFIX = "DELEGATE_"
 _CREDENTIAL_TAG_LENGTH = 8
+# OpenCode takes provider keys inside OPENCODE_CONFIG_CONTENT. Delegate rewrites
+# that variable per run (persona prompts, permissions), so the whole value is not
+# an account; only its credential and gateway fields are.
+_OPENCODE_CONFIG_ENV = "OPENCODE_CONFIG_CONTENT"
+_CONFIG_AUTH_HEADER = re.compile(r"AUTHORI[SZ]ATION", re.IGNORECASE)
 _LOCK_TIMEOUT_SECONDS = 5.0
 _LOCK_POLL_SECONDS = 0.01
 
@@ -147,11 +152,16 @@ class Lane:
         return self.credentials[:_CREDENTIAL_TAG_LENGTH] if self.credentials else None
 
     @property
+    def shown_account(self) -> str | None:
+        """The account label with addresses masked (a profile may be named by email)."""
+        return provider_errors.scrub(self.account) if self.account else None
+
+    @property
     def label(self) -> str:
         target = self.model or "default model"
         text = f"{self.engine} {target}"
         if self.account:
-            text += f" (account {self.account})"
+            text += f" (account {self.shown_account})"
         if self.credential_tag:
             text += f" [credential {self.credential_tag}]"
         return text
@@ -162,7 +172,7 @@ class Lane:
             "engine": self.engine,
             "provider": self.provider,
             "model": self.model,
-            "account": self.account,
+            "account": self.shown_account,
             "credential": self.credential_tag,
         }
 
@@ -172,6 +182,46 @@ def _account_variable(name: str) -> bool:
     if name.startswith(_OWN_ENV_PREFIX) or name in redaction.SENSITIVE_ENV_KEYS:
         return False
     return redaction.key_looks_secret(name) or _ACCOUNT_SELECTOR.search(name) is not None
+
+
+def _opencode_config_credentials(raw: str) -> list[tuple[str, str]]:
+    """The credential and gateway fields inside an OpenCode config, by JSON path.
+
+    Unparseable content yields nothing: OpenCode cannot read it either, so it
+    names no account.
+    """
+    try:
+        loaded = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(loaded, dict):
+        return []
+    found: list[tuple[str, str]] = []
+
+    def walk(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if not isinstance(key, str):
+                    continue
+                child = f"{path}.{key}" if path else key
+                if isinstance(value, (dict, list)):
+                    walk(value, child)
+                elif (
+                    isinstance(value, str)
+                    and value
+                    and (
+                        redaction.key_looks_secret(key)
+                        or _ACCOUNT_SELECTOR.search(key) is not None
+                        or _CONFIG_AUTH_HEADER.search(key) is not None
+                    )
+                ):
+                    found.append((f"{_OPENCODE_CONFIG_ENV}:{child}", value))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+
+    walk(loaded, "")
+    return found
 
 
 def _salt_path() -> Path:
@@ -222,6 +272,9 @@ def credential_fingerprint(env: Mapping[str, str] | None = None) -> str | None:
         for name, value in effective.items()
         if isinstance(value, str) and value and _account_variable(name)
     )
+    config = effective.get(_OPENCODE_CONFIG_ENV)
+    if isinstance(config, str) and config:
+        pairs = sorted([*pairs, *_opencode_config_credentials(config)])
     if not pairs:
         return None
     digest = hmac.new(_machine_salt(), digestmod=hashlib.sha256)
@@ -548,10 +601,21 @@ def clear(lane: Lane | None) -> bool:
     """
     if lane is None or not store_dir().is_dir():
         return False
+    path = _marker_path(lane)
     try:
         with _store_lock():
-            _marker_path(lane).unlink()
-    except OSError:  # no marker (FileNotFoundError) or an unavailable store
+            path.unlink()
+    except FileNotFoundError:
+        return False
+    except TimeoutError:
+        # A stuck lock must not leave a lane that just succeeded refused on its next
+        # launch. The unlink is atomic; the only cost of skipping the lock is that a
+        # failure being recorded at this very moment could be removed with it.
+        try:
+            path.unlink()
+        except OSError:
+            return False
+    except OSError:  # an unavailable store
         return False
     return True
 
