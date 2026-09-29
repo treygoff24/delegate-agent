@@ -22,9 +22,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import redaction, workspace_spec
 from delegate_agent import run_registry as registry_api
 from delegate_agent import wait_cancel_commands as wait_cancel_api
-from delegate_agent import workspace_spec
 from delegate_agent import worktree_gc as worktree_gc_api
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
@@ -929,6 +929,20 @@ class SetupProcessUnitTests(unittest.TestCase):
         text = "EFGHQQQQIJKL"
         self.assertEqual(workspace_spec.mask_recorded_env_values(text, env), "EFGH***IJKL")
         self.assertEqual(workspace_spec.mask_recorded_env(text, env), "***")
+
+    def test_generic_redaction_cannot_assemble_a_recorded_value_in_the_tail(self):
+        jwt = (
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        )
+        env = {"SECRET": "ABC.***.EFG"}
+        text = f"ABC.{jwt}.EFG"
+        # Redaction alone turns the output into the recorded value itself.
+        self.assertEqual(redaction.redact_string(text), env["SECRET"])
+        self.assertEqual(workspace_spec.redact_and_mask_recorded_env(text, env), "***")
+        result = self._run_setup(f"printf '%s' '{text}'", mask_values=env)
+        self.assertNotIn(env["SECRET"], result.output_tail)
+        self.assertEqual(result.output_tail, "***")
 
     def test_a_sigterm_during_the_setup_pgid_clear_is_not_swallowed(self):
         """The clear waits on the registry lock, the launcher's longest window.
