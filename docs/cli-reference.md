@@ -356,7 +356,7 @@ Usage:
 
 ```bash
 delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] claude call [--read-only|--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -1065,7 +1065,9 @@ delegate --json help
 
 `describe` gives a compact public command index with version, engines, modes,
 and focused help pointers. It omits internal commands, option descriptions,
-and config bodies. Use `describe --full` for supported isolation values,
+and config bodies. `describe --summary` adds config resolution, launch options, profiles, and
+workflow metadata to that index, so it is larger than the default, not smaller.
+Use `describe --full` for supported isolation values,
 prompt transforms, effective policy, profile config metadata, representative
 argv shapes, and expanded command options. Use `help <command>` when only one
 command's contract is needed.
@@ -1212,7 +1214,7 @@ The JSON spec uses these keys:
   "ok": true,
   "command": "worktree remove",
   "summary": "Remove one persistent worktree and, by default, its branch.",
-  "usage": ["delegate [--cwd PATH] [--json] worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]"],
+  "usage": ["delegate [--cwd PATH] [--json] worktree remove <handle|--group NAME> [--discard-uncommitted] [--keep-branch | [--force-branch] [--force]]"],
   "arguments": [{"name": "<handle>", "required": true, "description": "Worktree handle to remove."}],
   "options": [{"flag": "--keep-branch", "argument": null, "description": "Remove the worktree but keep its branch."}],
   "examples": ["delegate worktree remove cursor-1"],
@@ -1262,11 +1264,11 @@ persistent-worktree isolation semantics are unchanged.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural|--summary]
 delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
-delegate snapshot [--latest HARNESS] [--no-redact] <handle>
-delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
+delegate snapshot (<handle>|--latest HARNESS) [--no-redact]
+delegate run-output (<handle>|--latest HARNESS) [--completion-report] [--stdout] [--stderr] [--raw | [--tail N] [--max-chars N]] [--no-redact]
 delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
@@ -1624,7 +1626,7 @@ commands before you read raw `.delegate/` files directly.
 delegate worktree list [--harness HARNESS] [--group NAME] [--status STATUS] [--limit N] [--no-auto-prune]
 delegate worktree show <handle>
 delegate worktree show --latest HARNESS
-delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
+delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--keep-branch | [--force-branch] [--force]]
 delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
 delegate worktree gc [--dry-run] [--all] [--pool PATH]
 ```
