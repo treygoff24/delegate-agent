@@ -450,8 +450,9 @@ SIGNATURES: tuple[Signature, ...] = (
         reason="provider_error",
         summary="The provider had a server-side failure.",
         hint=(
-            "Retry shortly; this clears on its own. Delegate resumes a saved codex or claude "
-            "work session once automatically."
+            "Retry shortly; this clears on its own. Codex and Claude work runs with a saved "
+            "session already got one automatic resume (providerErrors.autoResume); after that, "
+            "`delegate followup` the run."
         ),
         statuses=(500, 502, 503, 504, 529),
         status_alone=True,
@@ -465,8 +466,9 @@ SIGNATURES: tuple[Signature, ...] = (
         reason="provider_error",
         summary="The provider stream dropped before the response completed.",
         hint=(
-            "Relaunch; this clears on its own. Delegate resumes a saved codex or claude work "
-            "session once automatically."
+            "Relaunch; this clears on its own. Codex and Claude work runs with a saved "
+            "session already got one automatic resume (providerErrors.autoResume); after that, "
+            "`delegate followup` the run."
         ),
         patterns=_rx(
             r"\bwebsocket closed\b",

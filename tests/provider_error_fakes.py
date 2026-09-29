@@ -58,6 +58,44 @@ if step == "novel":
 raise SystemExit(f"unknown fake step {step!r}")
 """
 
+FAKE_CLAUDE = r"""#!/usr/bin/env python3
+import json, os, pathlib, sys
+
+state = pathlib.Path(os.environ["FAKE_CLAUDE_STATE"])
+state.mkdir(parents=True, exist_ok=True)
+plan = json.loads(pathlib.Path(os.environ["FAKE_CLAUDE_PLAN"]).read_text())
+counter = state / "count"
+attempt = int(counter.read_text()) if counter.exists() else 0
+counter.write_text(str(attempt + 1))
+with (state / "argv.log").open("a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")
+step = plan[min(attempt, len(plan) - 1)]
+SESSION = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+
+emit({"type": "system", "subtype": "init", "session_id": SESSION})
+if step == "ok":
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "claude done"}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": "claude done"})
+    raise SystemExit(0)
+if step == "overloaded":
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 529,
+            "result": "API Error: Overloaded",
+        }
+    )
+    raise SystemExit(1)
+raise SystemExit(f"unknown fake step {step!r}")
+"""
+
 
 class FakeCodexCase(unittest.TestCase):
     """A hermetic workspace, HOME, and fake `codex` on PATH; runs the real CLI."""
@@ -65,7 +103,9 @@ class FakeCodexCase(unittest.TestCase):
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
-        self.root = Path(self._temp.name)
+        # Resolved: a worktree attach refuses a path that resolves through a symlink
+        # alias (macOS /tmp -> /private/tmp).
+        self.root = Path(self._temp.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
         self.home = self.root / "home"
@@ -78,11 +118,26 @@ class FakeCodexCase(unittest.TestCase):
         codex = self.bin_dir / "codex"
         codex.write_text(FAKE_CODEX, encoding="utf-8")
         codex.chmod(0o755)
-        self.config: dict = {"codex": {"binary": "codex"}}
+        claude = self.bin_dir / "claude"
+        claude.write_text(FAKE_CLAUDE, encoding="utf-8")
+        claude.chmod(0o755)
+        self.claude_state_dir = self.root / "fake-claude-state"
+        self.claude_plan_path = self.root / "claude-plan.json"
+        self.config: dict = {"codex": {"binary": "codex"}, "claude": {"binary": "claude"}}
         self.set_plan("ok")
+        self.set_claude_plan("ok")
 
     def set_plan(self, *steps: str) -> None:
         self.plan_path.write_text(json.dumps(list(steps)), encoding="utf-8")
+
+    def set_claude_plan(self, *steps: str) -> None:
+        self.claude_plan_path.write_text(json.dumps(list(steps)), encoding="utf-8")
+
+    def claude_invocations(self) -> list[list[str]]:
+        log = self.claude_state_dir / "argv.log"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines() if line]
 
     def env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -95,6 +150,8 @@ class FakeCodexCase(unittest.TestCase):
             DELEGATE_CONFIG=str(config_path),
             FAKE_CODEX_STATE=str(self.state_dir),
             FAKE_CODEX_PLAN=str(self.plan_path),
+            FAKE_CLAUDE_STATE=str(self.claude_state_dir),
+            FAKE_CLAUDE_PLAN=str(self.claude_plan_path),
         )
         return env
 

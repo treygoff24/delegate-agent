@@ -492,6 +492,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "without a launch flag; the session files persist in CODEX_HOME. --no-resumable or "
             "codex.resumable: false opts out. The default outranks codex.ephemeral: --ephemeral "
             "applies only to Runs that are not resumable (safe, call, and opted-out Runs).",
+            "A work Run with a saved session that dies on a transient provider drop (stream "
+            "disconnect, 5xx) is continued once automatically as a new Run linked by followupOf "
+            "and marked autoResume; there is no second automatic retry. "
+            "providerErrors.autoResume: false opts out.",
             "codex.profile is a Codex CLI config overlay; top-level profiles selects "
             "Delegate-injected auth/env.",
         ),
@@ -548,6 +552,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "without a launch flag; the session files persist in the Claude account's projects "
             "directory. --no-resumable or claude.resumable: false opts out. The default outranks "
             "claude.noSessionPersistence, which applies only to Runs that are not resumable.",
+            "A work Run with a saved session that dies on a transient provider drop (stream "
+            "disconnect, 5xx) is continued once automatically as a new Run linked by followupOf "
+            "and marked autoResume; there is no second automatic retry. "
+            "providerErrors.autoResume: false opts out.",
         ),
         see_also=("cursor", "codex", "droid", "models", "agent-help"),
     ),

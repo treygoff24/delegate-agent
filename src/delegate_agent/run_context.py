@@ -125,4 +125,5 @@ def from_request(
         account_binding_command=request.account_binding_command,
         lane=request.lane,
         provider_policy=request.provider_policy,
+        auto_resume=request.auto_resume,
     )

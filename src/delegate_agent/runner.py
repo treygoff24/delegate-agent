@@ -25,6 +25,7 @@ from typing import BinaryIO, TextIO, cast
 
 from delegate_agent import (
     account_binding,
+    auto_resume,
     child_failures,
     failover_state,
     harness_events,
@@ -249,6 +250,8 @@ class RunContext:
     # known-bad lane marker (lane_health.observe).
     lane: lane_health.Lane | None = None
     provider_policy: lane_health.Policy = field(default_factory=lane_health.Policy)
+    # Present only on the run Delegate launched by itself after a transient drop.
+    auto_resume: JsonObject | None = None
 
 
 def _process_group_grace_seconds(ctx: RunContext) -> float:
@@ -739,6 +742,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["resumedFrom"] = ctx.resumed_from
     if ctx.followup_of is not None:
         payload["followupOf"] = ctx.followup_of
+    if ctx.auto_resume is not None:
+        payload["autoResume"] = ctx.auto_resume
     if ctx.structured_retry:
         payload["structuredRetryWorkspace"] = True
     if ctx.worktree_attachment is not None:
@@ -1567,6 +1572,8 @@ def completion_json_payload(
         payload["resumedFrom"] = ctx.resumed_from
     if ctx.followup_of is not None:
         payload["followupOf"] = ctx.followup_of
+    if ctx.auto_resume is not None:
+        payload["autoResume"] = ctx.auto_resume
     if ctx.resumable:
         payload["resumable"] = True
     if ctx.include_dirty:
@@ -3554,6 +3561,22 @@ def _finalize_tracked_run(
                 established_reason is not None or provider_terminal_state is not None
             ),
             merged_extra=merged_extra,
+        )
+    if not cancel_requested:
+        auto_resume.note_run(
+            auto_resume.RunNote(
+                run_id=ctx.run_id,
+                alias=ctx.alias,
+                engine=ctx.engine,
+                mode=ctx.mode,
+                status=status,
+                provider_error=provider_error,
+                # The same condition that persists harnessSessionId: an
+                # ephemeral run reports a thread id but saved no session.
+                session_id=(capture.accumulator.harness_session_id if ctx.resumable else None),
+                isolation_lifecycle=ctx.isolation_lifecycle,
+                structured=ctx.output_schema_text is not None or ctx.structured_retry,
+            )
         )
     if failure_reason is not None:
         merged_extra["failureReason"] = failure_reason
