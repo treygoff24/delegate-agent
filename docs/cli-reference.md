@@ -677,7 +677,7 @@ delegate [--json] workflow save <script.py> --name NAME
   found nowhere keeps the plain `workflow_not_found` error.
 - `status` on a paused workflow adds `pause` (gate key, name, title, assignee,
   declared actions, last failure, latest `agent_rejected` reason, `summary`, and
-  the `next` command); any status adds `timeouts` when agents timed out. See
+  `next`/`nextActions` built from those actions); any status adds `timeouts` when agents timed out. See
   `docs/delegate-workflows.md` (Reading a stopped workflow).
 - `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
   status record. It overrides `--json` buffering; ordinary `--json` still returns

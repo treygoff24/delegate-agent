@@ -1424,6 +1424,9 @@ class WorkflowState:
     args: JsonValue
     budget: Budget
     dry_run: bool = False
+    # A dry-run resume of an existing workflow journals only: it must not
+    # replace that workflow's status.json (a paused gate stays paused).
+    preserve_status: bool = False
     replay_journal: bool = True
     # Read once at supervisor start and re-emitted on every status write.
     # status.json is REBUILT from scratch by _write_status_locked rather than
@@ -1442,6 +1445,9 @@ class WorkflowState:
     started_after_tombstone: set[str] = field(default_factory=set)
     known_agent_keys: set[str] = field(default_factory=set)
     label_keys: dict[str, str] = field(default_factory=dict)
+    # The label (or None) each key's call carries in this lifetime; a replayed
+    # older label for the same key must not leak onto an unlabelled call.
+    call_labels: dict[str, str | None] = field(default_factory=dict)
     started_scopes: dict[str, str] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
     exhausted_keys: set[str] = field(default_factory=set)
@@ -1710,12 +1716,14 @@ class WorkflowState:
             return payload
         key = payload.get("key")
         filled = dict(payload)
-        if not filled.get("label") and isinstance(key, str):
-            filled["label"] = next(
-                (name for name, mapped in self.label_keys.items() if mapped == key), None
-            )
         if "label" not in filled:
-            filled["label"] = None
+            # Only an omitted label is looked up; an explicit None stays None.
+            if isinstance(key, str) and key in self.call_labels:
+                filled["label"] = self.call_labels[key]
+            else:
+                filled["label"] = next(
+                    (name for name, mapped in self.label_keys.items() if mapped == key), None
+                )
         if not filled.get("item"):
             scope = filled.get("scope")
             if scope is None and isinstance(key, str):
@@ -2056,7 +2064,7 @@ class WorkflowState:
             if self.dry_run:
                 # A dry run changes nothing on disk except its own journal:
                 # report what the live resume would cancel and reap.
-                self.append_event(
+                self.append_journal_only(
                     "agent_stale_scope_would_cancel",
                     key=old_key,
                     scope=scope,
@@ -2076,6 +2084,8 @@ class WorkflowState:
         last_event: JsonObject | None = None,
         extra: JsonObject | None = None,
     ) -> None:
+        if self.preserve_status:
+            return
         effective_status = "dry_run" if self.dry_run else status
         payload: JsonObject = {
             "ok": effective_status not in {"failed", "killed"},
@@ -3577,6 +3587,7 @@ class WorkflowDsl:
         launch: Callable[[], tuple[JsonValue | _StructuredNullType, str | None]],
     ) -> JsonValue:
         with self.state.journal_lock:
+            self.state.call_labels[key] = label
             if label is not None:
                 self.state.label_keys[label] = key
             cached = (

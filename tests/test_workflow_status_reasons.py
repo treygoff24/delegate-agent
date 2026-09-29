@@ -153,6 +153,43 @@ class PausedStatusTests(_Fixture):
             commands.WorkflowCommand("status", wf_id=WF_ID), workspace=self.workspace, stdout=out
         )
         self.assertIn("paused: paused at gate ship; actions: approve", out.getvalue())
+        self.assertIn("gate: g gateName=ship", out.getvalue())
+        self.assertIn(f"workflow approve {WF_ID}", out.getvalue())
+
+    def test_text_status_shows_the_question_title_and_assignee(self) -> None:
+        self.journal(
+            {
+                "type": "gate",
+                "key": "g",
+                "gateName": "ship",
+                "gateResultHash": "h",
+                "result": {"title": "Ship it?", "assignee": "atlas"},
+            },
+        )
+        self.write_status(status="paused", gateKey="g", gateResultHash="h")
+        out = io.StringIO()
+        commands.emit_status(
+            commands.WorkflowCommand("status", wf_id=WF_ID), workspace=self.workspace, stdout=out
+        )
+        self.assertIn("gate: g gateName=ship title=Ship it? assignee=atlas", out.getvalue())
+
+    def test_next_command_follows_the_gates_declared_actions(self) -> None:
+        self.journal(
+            {
+                "type": "gate",
+                "key": "g",
+                "gateName": "task-7",
+                "gateResultHash": "h",
+                "actions": ["retry", "accept"],
+                "result": {},
+            },
+        )
+        self.write_status(status="paused", gateKey="g", gateResultHash="h")
+        pause = self.status_json()["pause"]
+        self.assertIn("--gate task-7 --action retry", pause["next"])
+        self.assertNotEqual(pause["next"].split()[-1], WF_ID, "a bare approve is refused")
+        self.assertTrue(any("--action accept" in c for c in pause["nextActions"]))
+        self.assertFalse(any(c.endswith(f"approve {WF_ID}") for c in pause["nextActions"]))
 
     def test_non_paused_status_has_no_pause_block(self) -> None:
         self.journal({"type": "phase", "title": "x"})
@@ -177,6 +214,79 @@ class PausedStatusTests(_Fixture):
             (row["label"], row["item"], row["engine"], row["timeout"], row["nextEngine"]),
             ("verifier", "7", "gemini", 3600, "codex"),
         )
+
+
+class DryRunResumeTests(_Fixture):
+    def snapshot(self) -> dict[str, bytes]:
+        base = self.workspace / ".delegate"
+        return {
+            str(path.relative_to(base)): path.read_bytes()
+            for path in sorted(base.rglob("*"))
+            if path.is_file() and path.name not in {registry.JOURNAL_FILE, registry.LOCK_FILE}
+        }
+
+    def test_dry_run_resume_of_a_paused_workflow_changes_only_the_journal(self) -> None:
+        self.journal(
+            {
+                "type": "gate",
+                "key": "g",
+                "gateName": "ship",
+                "gateResultHash": "h",
+                "result": {},
+            },
+        )
+        self.write_status(status="paused", gateKey="g", gateResultHash="h", lastSeq=1)
+        status_before = (self.root / registry.STATUS_FILE).read_bytes()
+        before = self.snapshot()
+        pin = SimpleNamespace(
+            cli_argv=["delegate"], environment={}, profile_identity={"current": True}
+        )
+        with (
+            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=pin),
+            mock.patch.object(runtime, "detach_supervisor"),
+        ):
+            commands.emit_run(
+                commands.WorkflowCommand("run", resume=WF_ID, dry_run=True, json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual((self.root / registry.STATUS_FILE).read_bytes(), status_before)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.status_json()["status"], "paused")
+
+    def test_dry_run_resume_with_a_budget_leaves_status_alone(self) -> None:
+        self.write_status(status="paused", gateKey="g", gateResultHash="h")
+        status_before = (self.root / registry.STATUS_FILE).read_bytes()
+        pin = SimpleNamespace(
+            cli_argv=["delegate"], environment={}, profile_identity={"current": True}
+        )
+        with (
+            mock.patch.object(commands.workflow_pinning, "load_pin", return_value=pin),
+            mock.patch.object(runtime, "detach_supervisor"),
+        ):
+            commands.emit_run(
+                commands.WorkflowCommand(
+                    "run", resume=WF_ID, dry_run=True, budget=3, json_mode=True
+                ),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual((self.root / registry.STATUS_FILE).read_bytes(), status_before)
+
+    def test_stale_scope_would_cancel_row_leaves_status_alone(self) -> None:
+        self.write_status(status="paused", gateKey="g", gateResultHash="h")
+        status_before = (self.root / registry.STATUS_FILE).read_bytes()
+        state = self.state()
+        state.dry_run = True
+        state.started_scopes["old"] = "root/seq#0"
+        state.started_without_result.add("old")
+        state.cancel_stale_scope_children("root/seq#0", "new")
+        self.assertEqual(len(self.events("agent_stale_scope_would_cancel")), 1)
+        self.assertEqual((self.root / registry.STATUS_FILE).read_bytes(), status_before)
 
 
 class ApproveRefusalTests(_Fixture):
@@ -303,6 +413,25 @@ class AgentRowIdentityTests(_Fixture):
         (row,) = self.events("agent_timeout")
         self.assertEqual((row["item"], row["nextEngine"], row["engine"]), ("t9", "codex", "gemini"))
         self.assertIn("label", row)
+
+    def test_explicit_null_label_does_not_inherit_a_stale_label_for_the_key(self) -> None:
+        state = self.state()
+        # A replayed journal mapped an old label to this key.
+        state.label_keys["old-label"] = "k"
+        state.append_event("agent_started", key="k", scope="root/seq#0", label=None)
+        self.assertIsNone(self.events("agent_started")[-1]["label"])
+
+    def test_unlabelled_call_reusing_a_key_keeps_null_on_its_finished_row(self) -> None:
+        dsl = runtime.WorkflowDsl(self.state(), {"defaults": {"engine": "codex"}})
+        with mock.patch.object(
+            runtime.WorkflowDsl, "_run_agent_attempts", lambda *_a, **_k: "answer"
+        ):
+            dsl.agent("p")
+        key = self.events("agent_started")[-1]["key"]
+        # A replayed journal had mapped an old label to this key.
+        dsl.state.label_keys["stale"] = key
+        dsl.state.append_event("agent_finished", key=key, scope="root/seq#9", result=1)
+        self.assertIsNone(self.events("agent_finished")[-1]["label"])
 
     def test_started_row_records_the_timeout_and_deadline(self) -> None:
         dsl = runtime.WorkflowDsl(self.state(), {"defaults": {"engine": "codex"}})
