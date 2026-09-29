@@ -18,7 +18,7 @@ import select
 import shutil
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
@@ -1873,6 +1873,7 @@ def _build_normalized_launch(
                 and launch.resume_session_id is None
                 and not launch.replayed_from_manifest
             ),
+            preflight_workspace_env=_workspace_provider_env(launch),
         )
     except BaseException:
         if cleanup_workspace:
@@ -1949,6 +1950,23 @@ def _validate_workspace_spec(
             "invalid_option_combination",
             "--env/--env-file require work mode with --isolation worktree.",
         )
+
+
+def _workspace_provider_env(launch: LaunchOptions) -> dict[str, str]:
+    """Claude provider variables the child will get from --env/--env-file.
+
+    Only the presence of the keys in ``model_discovery.CLAUDE_PROVIDER_ENV``
+    matters to the model typo preflight, so nothing else is carried. A missing
+    or malformed env source yields nothing here: ``_apply_workspace_spec`` raises
+    its own error for it after the request builds, exactly as before.
+    """
+    if launch.engine != "claude" or not (launch.workspace_env or launch.workspace_env_files):
+        return {}
+    try:
+        env = workspace_spec.resolve_env(launch.workspace_env, launch.workspace_env_files)
+    except DelegateError:
+        return {}
+    return {name: "1" for name in model_discovery.CLAUDE_PROVIDER_ENV if env.get(name)}
 
 
 def _apply_workspace_spec(request: Request, launch: LaunchOptions) -> None:
@@ -2686,6 +2704,7 @@ def build_request(
     preserve_safe_workspace: bool = False,
     continuity_mode: str | None = None,
     preflight_claude_model: bool = False,
+    preflight_workspace_env: Mapping[str, str] | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -2921,6 +2940,7 @@ def build_request(
             preserve_safe_workspace=preserve_safe_workspace,
             continuity_mode=continuity_mode,
             preflight_claude_model=preflight_claude_model,
+            preflight_workspace_env=preflight_workspace_env,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -4006,6 +4026,7 @@ def _build_request_for_workspace(
     preserve_safe_workspace: bool = False,
     continuity_mode: str | None = None,
     preflight_claude_model: bool = False,
+    preflight_workspace_env: Mapping[str, str] | None = None,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -4174,7 +4195,9 @@ def _build_request_for_workspace(
         # table rewrote: a configured alias target is the operator's own (Bedrock
         # ARNs, gateways), and a followup/resume replays the source run's model.
         unknown_claude_model = model_discovery.claude_unknown_model_error(
-            parts.model, discovery, {**os.environ, **(parts.env_overrides or {})}
+            parts.model,
+            discovery,
+            {**os.environ, **(preflight_workspace_env or {}), **(parts.env_overrides or {})},
         )
         if unknown_claude_model is not None:
             raise unknown_claude_model
