@@ -334,8 +334,27 @@ class HelpSubcommandTests(HelpCliTestBase):
                 "--completion-report",
                 "--no-completion-report",
                 "--no-mail",
+                "--force-launch",
             },
         )
+
+    def test_force_launch_is_advertised_only_where_a_launch_can_be_refused(self):
+        for topic, expected in (
+            ("codex", True),
+            ("codex call", True),
+            ("resume", True),
+            ("followup", True),
+            ("dry-run", True),
+            ("runs", False),
+            ("workflow run", False),
+            ("doctor", False),
+        ):
+            with self.subTest(topic=topic):
+                code, out, err = self.run_main(["--json", "help", topic])
+                self.assertEqual(code, error_types.EXIT_OK, err)
+                payload = json.loads(out)
+                supported = {option["flag"] for option in payload["globalOptions"]}
+                self.assertEqual("--force-launch" in supported, expected)
 
     def test_describe_summary_text_renders_without_full_payload_keys(self):
         code, out, _err = self.run_main(["describe", "--summary"])

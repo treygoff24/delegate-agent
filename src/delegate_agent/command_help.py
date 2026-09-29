@@ -162,6 +162,13 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         None,
         "Disable mail prompt injection and sandbox grants for this launch; --notify is unchanged.",
     ),
+    OptionSpec(
+        "--force-launch",
+        None,
+        "Launch even when the lane (engine + model/provider + account) is marked known-bad by "
+        "an earlier persistent provider failure. Without it such a launch is refused before "
+        "anything spawns (error lane_known_bad, exit 4); a success clears the marker.",
+    ),
 )
 
 
@@ -1924,7 +1931,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "doctor": CommandSpec(
         name="doctor",
-        summary="Show the installed runtime digest, the last promotion stamp, and active workflow supervisors.",
+        summary="Show the installed runtime digest, the last promotion stamp, active workflow supervisors, and known-bad lanes.",
         usage=("delegate [--json] doctor",),
         examples=("delegate doctor", "delegate --json doctor"),
         notes=(
@@ -1933,8 +1940,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "the view without rewriting the index.",
             "Warns when the live runtime digest differs from the stamped one -- the "
             "installed runtime changed without 'delegate promote' -- or when no stamp exists.",
+            "Lists live known-bad lane markers from ~/.delegate/state/lane-health/: lanes "
+            "(engine + model/provider + account) that a persistent provider failure marked, "
+            "with signature, hint, and expiry. Launches on those lanes refuse until the marker "
+            "expires or --force-launch overrides it.",
             "JSON (delegate.doctor.v1) reports runtimeDigest, entrypoint, entrypointDigest, "
-            "promotion, promotionMatchesRuntime, activeSupervisors, and warnings.",
+            "promotion, promotionMatchesRuntime, activeSupervisors, knownBadLanes, and warnings.",
         ),
         see_also=("promote", "workflow list", "describe"),
         unsupported_global_options=(
@@ -2421,6 +2432,7 @@ _INSPECTION_GLOBAL_RESTRICTIONS = (
     "--completion-report",
     "--no-completion-report",
     "--no-mail",
+    "--force-launch",
     "--group",
     "--notify",
 )
