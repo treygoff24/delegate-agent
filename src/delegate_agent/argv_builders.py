@@ -11,6 +11,7 @@ read-only flag sets. Preserve those branches exactly.
 
 from __future__ import annotations
 
+import json
 import re
 
 from delegate_agent import reasoning
@@ -21,6 +22,7 @@ from delegate_agent.prompt_transport import (
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     KIMI_PROMPT_REDACTION,
+    OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER,
     PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
@@ -81,6 +83,19 @@ CLAUDE_SAFE_ALLOWED_TOOLS = (
 # read-only with no Delegate-side signal. Work capability is a property of the
 # invocation, not of ambient config.
 OMP_WORK_APPROVAL = ("--approval-mode", "yolo")
+
+# omp's own retry chain (`retry.fallbackChains`) moves a failing request to a
+# different model, often on a different provider and a metered key, and reports
+# it as an ordinary event. A pinned launch must not depend on noticing that after
+# the fact, so it hands `--config` an overlay that switches the chain off for the
+# run: overlays beat the user's config.yml, and the plain retry of the SAME model
+# (`retry.enabled`) is untouched. `usageAwareFallback` is a second door to the
+# same switch, closed for the same reason. The text is JSON, which omp's YAML
+# overlay loader reads as-is.
+OMP_NO_MODEL_FALLBACK_OVERLAY = json.dumps(
+    {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+    separators=(",", ":"),
+)
 
 PI_FAMILY_SAFE_LOCKDOWN = {
     "pi": (
@@ -593,6 +608,7 @@ def _build_pi_family_argv(
     pure: bool = False,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    no_model_fallback: bool = False,
 ) -> list[str]:
     _reject_pure(engine, mode, pure)
     if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
@@ -621,6 +637,8 @@ def _build_pi_family_argv(
         argv.extend(["--model", model])
     if thinking:
         argv.extend(["--thinking", thinking])
+    if no_model_fallback and engine == "omp":
+        argv.extend(["--config", OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER])
     # Both forks read the prompt from non-TTY stdin (omp 18.1.13 `src/main.ts`
     # reads piped input for every non-protocol mode, and `--mode json` is not a
     # protocol mode), so neither carries a positional prompt: no ARG_MAX ceiling,
@@ -659,6 +677,7 @@ def build_omp_argv(
     pure: bool = False,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    no_model_fallback: bool = False,
 ) -> list[str]:
     return _build_pi_family_argv(
         omp,
@@ -671,6 +690,7 @@ def build_omp_argv(
         pure=pure,
         persist_session=persist_session,
         resume_session_id=resume_session_id,
+        no_model_fallback=no_model_fallback,
     )
 
 

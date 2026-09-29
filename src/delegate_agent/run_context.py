@@ -70,6 +70,7 @@ def from_request(
         model_alias=request.model_alias,
         model_resolved=request.model,
         model_requested=request.model_requested,
+        model_display_name=request.model_display_name,
         capability_model=request.capability_model,
         capability_model_source=request.capability_model_source,
         continuity_mode=request.continuity_mode,

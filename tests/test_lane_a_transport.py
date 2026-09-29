@@ -528,10 +528,11 @@ class OmpCatalogWarningTests(CommandTestBase):
 
     omp resolves `--model` by exact `provider/modelId`, then exact bare id, then a
     provider-scoped fuzzy and substring pass, so a stale exact-form id does not
-    fail — it can silently land on a different concrete model. omp also runs
-    under `continuityMode: fungible`, so the substitution is not a violation
-    either. A warning is the whole fix: never a hard reject, never a rewrite of
-    the operator's alias.
+    fail — it can silently land on a different concrete model. A provider-
+    qualified selector is now pinned by default (see test_omp_provider_pin.py),
+    which stops a served-elsewhere run; this warning is for the stale selector
+    itself: never a hard reject for a provider/model id, never a rewrite of the
+    operator's alias.
     """
 
     @staticmethod

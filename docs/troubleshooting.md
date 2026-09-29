@@ -125,6 +125,29 @@ Inspect `configResolution.layers`; `DELEGATE_CONFIG` can override the user
 config. Workspace `.delegate/config.json` is reported but remains unapplied
 unless selected explicitly through `DELEGATE_CONFIG`.
 
+`omp` also raises `invalid_alias` for a bare model name that is not a key of
+`omp.models` and not exactly the model ID of an entry in the discovered omp
+catalog (`Unknown omp model alias 'kimi'`). OMP resolves a bare name by fuzzy
+match against its own catalog and may serve a different provider, so Delegate
+refuses instead of guessing. Use a configured alias or a full
+`provider/model` selector (`delegate models omp` lists them). If the model is
+real and new, refresh the catalog and retry:
+
+```bash
+delegate capabilities refresh
+```
+
+## `model_continuity_paused` on an OMP run
+
+`Pinned model continuity refused a substitution: requested opencode-go/glm-5.3,
+but omp tried to serve fireworks/glm-5p3` means the run named an explicit
+provider and OMP moved it to another one anyway. A `provider/model` selector is
+pinned by default and launches with OMP's own retry failover switched off, so
+this is rare; when it happens the run is stopped and its output is not the
+requested model's. To allow failover on purpose, rerun with
+`--continuity-mode fungible`; the record then carries a `model_substitution`
+warning naming the provider that answered.
+
 ## `unsupported_reasoning_effort`
 
 Delegate validates requested reasoning effort against the resolved harness and model before launch:

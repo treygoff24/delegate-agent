@@ -700,12 +700,37 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
 - `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
-- Under `--continuity-mode pinned`, use the full `provider/model-id` selector,
-  including the provider even when the model ID itself contains `/`. OMP reports
-  provider and model separately; Delegate compares their exact combined identity.
-  A slash-free bare model ID pins the exact model name, then binds the first
-  observed provider for subsequent switch detection. Ambiguous slash-bearing
-  bare IDs are not accepted as equivalent to provider-qualified selectors.
+- An explicit `provider/model-id` selector (from `--model`, an alias target, or
+  `defaultModel`) is pinned by default: the run behaves as `--continuity-mode
+  pinned`. Delegate launches OMP with a private `--config` overlay that sets
+  `retry.modelFallback` and `retry.usageAwareFallback` to `false`, so OMP's own
+  retry chains (`retry.fallbackChains`) cannot move the run to another model or
+  provider. Retrying the same model is unaffected. The overlay beats your
+  `config.yml`; the dry-run argv shows it as `--config <omp config overlay>`.
+  If a different provider or model is served anyway, the run fails
+  (`model_continuity_paused`) with a message naming what OMP tried to serve,
+  for example `requested opencode-go/glm-5.3, but omp tried to serve
+  fireworks/glm-5p3`.
+- Naming `--continuity-mode fungible` or `panel` is the opt-in to failover: the
+  overlay is not sent, OMP may fail over, and a served model that differs from
+  the request is recorded as a `model_substitution` warning that names the
+  served provider. A run with no model, or with a bare model ID, is `fungible`
+  unless you name a mode.
+- Use the full `provider/model-id` selector, including the provider even when the
+  model ID itself contains `/`. OMP reports provider and model separately;
+  Delegate compares their exact combined identity. A slash-free bare model ID
+  pins the exact model name, then binds the first observed provider for
+  subsequent switch detection. Ambiguous slash-bearing bare IDs are not accepted
+  as equivalent to provider-qualified selectors.
+- `--model` accepts three shapes: a key of `omp.models` (an alias), a
+  `provider/model-id` selector (a raw ID, split at the first slash), or a bare
+  name. OMP resolves a bare name by exact ID and then by fuzzy match against its
+  own bundled catalog, which can land on a different provider, so a retired alias
+  such as `kimi` must not reach it. Once a discovered omp catalog exists, a bare
+  name that is not an alias and not exactly the model ID of a catalog entry fails
+  with `invalid_alias` and lists the configured aliases and the nearest catalog
+  selectors. With no catalog the run proceeds with a warning; run
+  `delegate capabilities refresh` so bare names can be checked.
 
 ### `reasoning`
 

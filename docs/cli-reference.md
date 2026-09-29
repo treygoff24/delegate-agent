@@ -104,9 +104,14 @@ prompts. Input JSON uses `persona` (string or null) and `allowRepoPersona`
 (boolean).
 
 `--continuity-mode pinned|fungible|panel` is a shared launch option (default
-`fungible`). A pinned run is paused with a typed terminal when the harness
+`fungible`; the exception is `omp` with an explicit `provider/model` selector,
+which is `pinned` unless you name a mode, and is launched with OMP's retry
+failover switched off; see [`omp`](configuration.md#omp)). A pinned run is
+paused with a typed terminal when the harness
 reports a served model that does not match the request or switches model
-mid-session. The check depends on the harness reporting a model at all: a
+mid-session. For OMP the served provider counts: the failure message names the
+provider and model OMP tried to serve (`requested opencode-go/glm-5.3, but omp
+tried to serve fireworks/glm-5p3`). The check depends on the harness reporting a model at all: a
 pinned run that completes with `modelProvenance.servedModelSource:
 "unavailable"` carries a `pinned_continuity_unverified` warning naming the
 harness, because nothing was observed to check; an ungrouped `call` carries
@@ -114,7 +119,16 @@ the same warning on its payload. Codex and Grok streams carry no model field
 today. Fungible (the default) and panel runs never pause on a switch; when the
 harness reports a served model that differs from the resolved one, the record
 carries a `model_substitution` warning naming requested, resolved, and served
-models, so a substituted lane is not read as the requested model's work.
+models (`provider/model` for OMP), so a substituted lane is not read as the
+requested model's work. Cursor labels are compared after the context window
+(`256K`, `1M`) is dropped, so `grok-4.7-xhigh` served as `Grok 4.7 256K Extra
+High` is the requested model, not a substitution.
+
+Run and call envelopes carry `servedModel` and, when the harness reports one,
+`servedProvider`: what the child's stream says actually answered. They sit at
+the top level beside `modelResolved` (which names the request) and repeat the
+same pair inside `modelProvenance`. They are absent when the harness reported no
+model, never a copy of the request.
 
 `delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
 containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.
@@ -738,7 +752,8 @@ persistent worktree/commit policy options. The skill-review preamble that safe
 and work runs can carry is off by default and never applies here; see
 [`tracking.skillReviewPreamble`](configuration.md#tracking) for the switch. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
-`model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`, `usage`,
+`model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`,
+`servedModel` and `servedProvider` (when the child reported them), `usage`,
 `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`, reasoning
 metadata, and `warnings`. Failed calls include a redacted `stderrTail`.
 `textTruncated` is `true` when the returned

@@ -199,7 +199,8 @@ _MODEL_OPTION = OptionSpec(
 _CONTINUITY_MODE_OPTION = OptionSpec(
     "--continuity-mode",
     "MODE",
-    "Select pinned, fungible (default), or panel model continuity for this run.",
+    "Select pinned, fungible (default), or panel model continuity for this run; omp with an "
+    "explicit provider/model ID defaults to pinned.",
 )
 _AGENT_OPTION = OptionSpec(
     "--agent",
@@ -735,6 +736,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Reasoning effort maps directly to omp --thinking: "
             f"{thinking_vocabulary_prose(OMP_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
+            "An explicit provider/model ID is pinned by default: omp's retry failover is switched off "
+            "for the run and a run served by another provider fails; --continuity-mode fungible "
+            "allows failover. A bare name that is neither an omp alias nor a catalog model ID is "
+            "refused (invalid_alias) once a catalog exists.",
         ),
         see_also=("pi", "opencode", "codex", "models", "agent-help"),
     ),

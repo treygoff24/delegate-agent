@@ -240,6 +240,9 @@ class Request:
     model_requested: str | None = None
     capability_model: str | None = None
     capability_model_source: str | None = None
+    # The catalog display name for `model` (cursor reports display names, never
+    # the selector), when a discovery snapshot carried one.
+    model_display_name: str | None = None
     output_schema: str | None = None
     output_schema_text: str | None = None
     pure: bool = False
@@ -369,6 +372,10 @@ class EngineRequestParts:
     persona_file_placeholder: str | None = None
     persona_env_overrides: dict[str, str] | None = None
     agent: str | None = None
+    # The continuity mode this engine's launch takes when the caller named none.
+    # omp pins an explicit provider/model selector by default; None means the
+    # global default.
+    default_continuity_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -398,3 +405,6 @@ class EngineBuildInput:
     persist_session: bool = False
     resumable: bool = False
     resume_session_id: str | None = None
+    # The caller's continuity mode exactly as given: None means "not named", which
+    # an engine may resolve to its own default before the global one applies.
+    continuity_mode: str | None = None
