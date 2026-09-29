@@ -11,6 +11,51 @@ if SRC not in sys.path:
 from delegate_agent import structured_output  # noqa: E402
 
 
+ADJUDICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dispositions": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["dispositions"],
+    "additionalProperties": False,
+}
+
+
+class CodexFreeFormObjectEligibilityTests(unittest.TestCase):
+    def test_bare_object_array_item_is_not_native_eligible_for_codex(self):
+        reason = structured_output.native_schema_eligible("codex", ADJUDICATION_SCHEMA)
+        self.assertIsNotNone(reason)
+        self.assertIn("schema.properties.dispositions.items", reason)
+        self.assertIn("no declared properties", reason)
+
+    def test_bare_object_root_is_not_native_eligible_for_codex(self):
+        self.assertIsNotNone(structured_output.native_schema_eligible("codex", {"type": "object"}))
+
+    def test_declared_properties_stay_eligible_for_codex(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"a": {"type": "string"}}},
+                }
+            },
+        }
+        self.assertIsNone(structured_output.native_schema_eligible("codex", schema))
+
+    def test_explicit_empty_closed_object_stays_eligible(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "n": {"type": "object", "properties": {}, "additionalProperties": False}
+            },
+        }
+        self.assertIsNone(structured_output.native_schema_eligible("codex", schema))
+
+    def test_claude_eligibility_is_unchanged_for_bare_object(self):
+        self.assertIsNone(structured_output.native_schema_eligible("claude", ADJUDICATION_SCHEMA))
+
+
 class CodexSchemaPreflightTests(unittest.TestCase):
     def test_injects_additional_properties_false_recursively(self):
         schema = {

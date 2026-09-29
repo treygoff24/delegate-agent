@@ -596,9 +596,18 @@ intentionally deferred.
   supported schema natively through `--output-schema`. Codex uses native
   `--output-schema` only when the schema is strict-compatible (every object
   node lists all properties in `required`, `additionalProperties` absent or
-  `false`); any other Codex schema — optional fields, typed maps — and every
+  `false`, and no object node is free-form, i.e. every `{"type": "object"}`
+  declares `properties`, including array `items`; strict mode would close a
+  bare object to zero keys so the model could only emit `{}`); any other Codex
+  schema — optional fields, typed maps, bare objects — and every
   other engine take the prompt-and-parse path, with validation retries. A
-  schema is never silently rewritten to satisfy strict mode. The subset
+  schema is never silently rewritten to satisfy strict mode. The journal row
+  `agent_schema_prompt_path` carries the reason (for a bare object it names the
+  schema path). When the schema root is an array and the child answers with a
+  one-key object wrapping a valid array (`{"items": [...]}`), the array is
+  unwrapped and an `agent_output_unwrapped` journal row (`wrapperKey`,
+  `warning`) records it; a two-key object or a non-validating array still
+  fails validation. The subset
   validator rejects empty or duplicate `enum` values and repeated `required`
   or `type` entries, which Claude's own schema preflight refuses at launch.
 
