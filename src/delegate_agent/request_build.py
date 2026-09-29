@@ -26,6 +26,7 @@ from typing import TextIO
 from delegate_agent import (
     account_binding,
     harness_discovery,
+    harness_enabled,
     mail,
     model_discovery,
     personas,
@@ -1797,6 +1798,11 @@ def _build_normalized_launch(
             persist_session=not call and spec.structured_session,
             preserve_safe_workspace=not call and spec.structured_retry_workspace,
             continuity_mode=launch.continuity_mode,
+            preflight_claude_model=(
+                spec.origin == "cli"
+                and launch.resume_session_id is None
+                and not launch.replayed_from_manifest
+            ),
         )
     except BaseException:
         if cleanup_workspace:
@@ -1923,6 +1929,7 @@ def request_from_parsed(
         or launch.mode is None
     ):
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
+    harness_enabled.require_enabled(config, launch.engine)
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
         if launch.persona is not None:
@@ -2126,6 +2133,7 @@ def request_from_input_json(
             "invalid_engine",
             f"engine must be {ENGINES_PROSE}.",
         )
+    harness_enabled.require_enabled(config, engine)
     if not isinstance(mode, str):
         raise DelegateError("invalid_mode", "mode must be safe, work, or call.")
     validate_mode(mode)
@@ -2598,6 +2606,7 @@ def build_request(
     persist_session: bool = False,
     preserve_safe_workspace: bool = False,
     continuity_mode: str | None = None,
+    preflight_claude_model: bool = False,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -2832,6 +2841,7 @@ def build_request(
             persist_session=persist_session,
             preserve_safe_workspace=preserve_safe_workspace,
             continuity_mode=continuity_mode,
+            preflight_claude_model=preflight_claude_model,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -3911,6 +3921,7 @@ def _build_request_for_workspace(
     persist_session: bool = False,
     preserve_safe_workspace: bool = False,
     continuity_mode: str | None = None,
+    preflight_claude_model: bool = False,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -4064,6 +4075,19 @@ def _build_request_for_workspace(
     if continuity_mode is None:
         continuity_mode = parts.default_continuity_mode or DEFAULT_CONTINUITY_MODE
     _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
+    typed_model = model_override or model_alias
+    if (
+        engine == "claude"
+        and typed_model is not None
+        and preflight_claude_model
+        and parts.model == typed_model
+    ):
+        # Only a selector the caller typed on a fresh CLI launch and no alias
+        # table rewrote: a configured alias target is the operator's own (Bedrock
+        # ARNs, gateways), and a followup/resume replays the source run's model.
+        unknown_claude_model = model_discovery.claude_unknown_model_error(parts.model, discovery)
+        if unknown_claude_model is not None:
+            raise unknown_claude_model
     catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})

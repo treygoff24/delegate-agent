@@ -20,6 +20,7 @@ from delegate_agent import (
     VERSION,
     command_help,
     harness_discovery,
+    harness_enabled,
     model_discovery,
     profiles,
     reasoning,
@@ -1622,6 +1623,7 @@ def emit_models(
     if engine is not None:
         from delegate_agent import model_discovery
 
+        harness_enabled.require_enabled(config, engine)
         payload = redaction.scrub_public_projection(
             model_discovery.engine_models_payload(
                 config,
@@ -1640,12 +1642,15 @@ def emit_models(
         return EXIT_OK
     if summary:
         payload = redaction.scrub_public_projection(
-            models_summary_payload(
-                config,
-                config_source,
-                workspace,
-                discovery=discovery,
-                profile=profile,
+            harness_enabled.strip_disabled(
+                models_summary_payload(
+                    config,
+                    config_source,
+                    workspace,
+                    discovery=discovery,
+                    profile=profile,
+                ),
+                harness_enabled.disabled_harnesses(config),
             )
         )
         if json_mode:
@@ -1664,7 +1669,10 @@ def emit_models(
                     )
         return EXIT_OK
     payload = redaction.scrub_public_projection(
-        models_payload(config, config_source, workspace, discovery=discovery)
+        harness_enabled.strip_disabled(
+            models_payload(config, config_source, workspace, discovery=discovery),
+            harness_enabled.disabled_harnesses(config),
+        )
     )
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
@@ -1689,7 +1697,9 @@ def emit_describe(
         raw_payload = describe_summary_payload(config, config_source, workspace)
     else:
         raw_payload = describe_overview_payload()
-    payload = redaction.scrub_public_projection(raw_payload)
+    payload = redaction.scrub_public_projection(
+        harness_enabled.strip_disabled(raw_payload, harness_enabled.disabled_harnesses(config))
+    )
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK

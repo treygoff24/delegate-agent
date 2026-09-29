@@ -125,6 +125,20 @@ Inspect `configResolution.layers`; `DELEGATE_CONFIG` can override the user
 config. Workspace `.delegate/config.json` is reported but remains unapplied
 unless selected explicitly through `DELEGATE_CONFIG`.
 
+`claude` raises `invalid_alias` before launch (dry runs included) for a typed
+`--model` that is not a Claude alias (`opus`, `sonnet`, `haiku`, `fable`, `best`,
+`opusplan`, `default`, optionally with a `[1m]` suffix), not a catalog id, and
+not a `claude-...` id. `Unknown Claude model 'opus-5.5'` names the closest
+choice (`opus (claude-opus-5-5)`) and the valid values. A `claude-...` id the
+catalog does not list still launches with a catalog warning, because new models
+ship before the catalog. A target of a configured `claude.models` alias is never
+refused.
+
+`harness_disabled` means `harnesses.<name>.enabled` is `false` in the active
+config: the harness is hidden from `models`, `describe`, and `capabilities`, and
+launching it (or `delegate models <name>`) fails with this error. Set the key to
+`true` or remove it to restore the harness.
+
 `omp` also raises `invalid_alias` for a bare model name that is not a key of
 `omp.models` and not exactly the model ID of an entry in the discovered omp
 catalog (`Unknown omp model alias 'kimi'`). OMP resolves a bare name by fuzzy
@@ -384,7 +398,7 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 | `forbidden` | persistent | HTTP 403: the account may not use this model or region. Check access; re-authenticate if the login changed. |
 | `auth_token_rejected` | persistent | The harness reports an expired or rejected token. Re-authenticate. |
 | `claude_login_required` | persistent | Claude is not signed in or its login expired. Sign in again with `/login`. |
-| `cursor_auth_required` | persistent | Cursor is not signed in. Run `estate-cursor login`. |
+| `cursor_auth_required` | persistent | Cursor is not signed in. The hint names the auth realm the run used (from `AI_PROFILE`) and the other one to try: if the Cursor login lives in the work realm, relaunch with `--auth-profile work` and `DELEGATE_CONFIG` unset; otherwise run `estate-cursor login`. |
 | `api_key_missing` | persistent | The provider behind an OMP, Pi, or OpenCode alias has no API key. Set it or pick another alias. |
 | `payment_required` | persistent | HTTP 402: no credit on the account. Add credit. |
 | `usage_limit` | persistent | Usage or quota limit reached (HTTP 429 with a quota message). Wait for the reset or use another account or lane. |
