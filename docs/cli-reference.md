@@ -436,6 +436,14 @@ delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-o
 - Setup, capability refresh, and `models devin --live` use the prompt-free
   `devin models list --format json` catalog. Catalog failures degrade to
   version-only metadata without prompting Devin.
+- Devin prints its answer as plain lines with no message boundaries, so
+  Delegate treats everything it prints as one running answer. That answer is
+  kept in memory as a bounded excerpt: past 30,000 characters it holds the first
+  20,000 and the last 10,000 with an `[N chars omitted]` marker between them, and
+  `assistantText`, `assistantTextChars` (the full length), the completion report
+  and a failed run's recovered partial output all read that excerpt. The full
+  stream stays in `stdout.log`, which the default (uncapped) tracked stream never
+  truncates.
 
 Examples:
 
@@ -772,7 +780,8 @@ or with ordinary Codex call mode (schema path).
 calls and tracked `safe`/`work` runs alike: on expiry Delegate terminates the
 whole child process group and returns `call_timeout` (a historical error-code
 name kept for API stability) with exit code 1. A call that timed out or
-overflowed keeps what it had already produced: the error carries `diagnostics`
+overflowed keeps what it had already produced, including a child that finished
+before Delegate noticed the overflow: the error carries `diagnostics`
 (also flattened into the JSON error) with the child's last substantive assistant
 text as `partialText` (redacted and bounded), plus `stdoutTail` and `stderrTail`;
 text mode prints the partial text to stderr. `--timeout` is not supported
@@ -1611,8 +1620,9 @@ synthesized report is.
 A failed, timed-out, or (opt-in) capped run's synthesized report quotes the
 child's last substantive assistant text, bounded and redacted, under "Partial
 output recovered before the run stopped. This is not a completion report", the
-way a cancelled run's report does. Pi and OMP keep that text across turns, so a
-long review followed by a tool turn and a provider error is still recoverable.
+way a cancelled run's report does. Pi, OMP and OpenCode keep that text across
+turns and steps, so a long review followed by a tool turn and a provider error is
+still recoverable.
 
 With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when
