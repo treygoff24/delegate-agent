@@ -26,6 +26,7 @@ from typing import BinaryIO, TextIO, cast
 from delegate_agent import (
     account_binding,
     child_failures,
+    degraded,
     failover_state,
     harness_events,
     mail,
@@ -976,9 +977,14 @@ def _persist_final_progress(
         persisted_status = current["status"]
         assert isinstance(persisted_status, str)
         persisted_extra = dict(extra)
+        if persisted_status != run_registry.STATUS_SUCCEEDED:
+            degraded.strip_degraded(persisted_extra)
         for key in (
             "completionReportWritten",
             "completionReportSource",
+            "degraded",
+            "degradedEvidence",
+            "degradedReason",
             "error",
             "failureKind",
             "failureReason",
@@ -3477,6 +3483,18 @@ def _finalize_tracked_run(
     # The child's own text is what the quality heuristic is about, so
     # classification reads it before any notice is attached.
     child_report_text = report_text
+    if status == run_registry.STATUS_SUCCEEDED:
+        # Still succeeded (its work is adoptable), but a child that ended its turn
+        # with its job unfinished is marked so no caller reads it as done.
+        degraded_verdict = degraded.assess(
+            None if ctx.structured_output else child_report_text,
+            background_tasks=final_accumulator.background_tasks_at_result or (),
+        )
+        if degraded_verdict is not None:
+            merged_extra.update(degraded_verdict.extra())
+            warnings = list(merged_extra.get("warnings") or [])
+            _append_unique(warnings, degraded_verdict.warning())
+            merged_extra["warnings"] = warnings
     failover_notice = merged_extra.get("failoverNotice")
     if isinstance(failover_notice, str) and failover_notice.strip():
         report_text = (

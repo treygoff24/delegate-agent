@@ -1315,6 +1315,10 @@ creating a Run or writing a prompt record.
 `delegate runs` defaults to recent runs. In a repository's main worktree it also lists runs registered in linked worktrees, tagged with `registryWorkspace` (see [Worktrees](worktrees.md#prune-many-worktrees)). `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
+A [degraded](#degraded-runs-the-child-ended-its-turn-mid-job) Run's `degraded` and
+`degradedReason` appear on its `runs` entry, and the text table prefixes its `current`
+column with `[degraded]`. `--structural` stays a lifecycle-only view and omits them; use
+`wait --structural` when you need the outcome fields.
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
 and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
 `showing N of M runs (raise --limit to see more)` when truncated. An empty result adds a
@@ -1424,6 +1428,46 @@ After the child exits, Delegate checks the child's process group for members
 that are still alive before it terminates them. If any survive, the run records
 `orphanedProcesses: true` and adds an `orphanedProcesses:` warning. This is only
 a warning; it does not change the outcome.
+
+#### Degraded runs: the child ended its turn mid-job
+
+A headless child ends when the model stops talking, and a background Bash task
+or Monitor dies with the session. A Run whose child started its full test gate
+in the background and then said "Waiting on the full gate" has ended, not
+paused: nothing will wake it. The Run stays `succeeded` (its work can be
+adopted), but a tracked Run that ends this way carries `degraded: true`, a
+`degradedReason`, and `degradedEvidence` (bounded, redacted lines saying what
+was seen), plus a `degraded=...` warning. `degraded` appears only when true.
+It is surfaced on the launch envelope, in the persisted record, on `wait`
+(JSON, `--structural`, and a `degraded:` line under the text table row),
+`snapshot`, `runs`/`ps`, the `run-output --completion-report` view, and a
+workflow child's journal event and `agent_meta()`. `wait` still exits 0 and reports
+`ok: true` for a degraded Run.
+Nothing fails a Run or a workflow step on its own; the caller decides.
+
+`degradedReason` is a closed enum:
+
+- `ended_waiting_on_background_work`: the child's own final message is short,
+  not shaped like a finished report, and says it is waiting on or will act after
+  unfinished work ("Waiting on the gate.", "The suite is still running; I'll
+  commit when it finishes."). Checked for every engine's tracked Run. A long or
+  report-shaped final message never matches, and neither does waiting on the
+  requester ("waiting on your answer") or a denial ("no need to wait"). Schema-bound
+  (`--output-schema`) Runs are not text-checked.
+- `background_work_unfinished_at_exit`: Claude Code's `background_tasks_changed`
+  stream event still listed a running task when the turn's `result` event arrived,
+  and the message did not read as waiting. This catches a finished-looking report
+  that abandoned a task. Only Claude emits the event; an older Claude Code that
+  does not gets the text check only.
+
+Prevention for Claude work Runs (and followups of them): Delegate sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment, which removes
+Bash `run_in_background` and the automatic backgrounding of long commands, and
+adds `--disallowedTools Monitor`. `claude.disableBackgroundTasks: false` turns
+both off. Every framed `work` and `safe` prompt also carries a two-sentence
+rule, just before the completion-report requirement, that ending the turn ends the
+Run and that long jobs must run in the foreground and finish before the final
+message. Verbatim slash pass-through prompts are not rewritten and do not get it.
 
 Call-mode JSON and tracked envelopes share `assistantText`,
 `assistantTextChars`, and `assistantTextTruncated`. Call mode's `text`,

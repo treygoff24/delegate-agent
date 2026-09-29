@@ -347,6 +347,9 @@ the child produced none — so `--completion-report` never dead-ends.
 A work run with `resultQuality=no_assistant_text` fails with `empty_result` and
 exit code `1` when persistent-worktree accounting also verifies that it made no
 file changes or commits; the child exit code remains available as `childExitCode`.
+A run whose child ended its turn mid-job ("Waiting on the full gate" while a
+background test run was still going) stays `succeeded` but carries `degraded: true`
+and a `degradedReason`; see [Troubleshooting](docs/troubleshooting.md#a-succeeded-runs-report-says-it-is-still-waiting-degraded).
 Each tracked raw stream is capped per engine by `<engine>.trackedStreamMaxBytes`
 (16 MiB by default, 64 MiB for Pi and Oh My Pi). A child that exceeds the cap is
 terminated with `output_limit_exceeded`; a child that lingers after an explicit
