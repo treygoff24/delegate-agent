@@ -406,13 +406,27 @@ def emit_run(
     script_hash: str | None = None
     repin_result: workflow_pinning.RepinResult | None = None
     runtime_pin: JsonObject | None = None
+    repin_attempted = False
+    repin_event_journaled = False
+    launched = False
 
     def rollback_repin() -> None:
         # A resume that fails after the pin moved must leave the workflow on the
         # runtime it had, the way it restores status.json and the approval file.
-        if repin_result is not None and repin_result.previous_payload is not None:
+        # The way back is the pre-repin backup on disk, so it works even when
+        # repin_to_live raised before returning a result. Once the supervisor has
+        # launched there is nothing to undo: it runs on the new pin.
+        if not repin_attempted or launched:
+            return
+        try:
+            undone = workflow_pinning.rollback_repin(wf_id)
+        except (OSError, workflow_pinning.WorkflowPinError):
+            # The backup stays where it is; the next resume puts the pin back.
+            return
+        if undone is not None and repin_event_journaled:
+            # The journal said the workflow moved; say that it did not.
             with contextlib.suppress(OSError):
-                workflow_pinning.restore_pin_payload(wf_id, repin_result.previous_payload)
+                append_run_event("runtime_repin_rolled_back", reason="launch_failed", **undone)
 
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
@@ -423,6 +437,8 @@ def emit_run(
                 f"Workflow not found: {wf_id}. {_workflow_state_hint(workspace)}",
             )
         _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
+        if not command.dry_run:
+            _recover_interrupted_repin(root, wf_id)
         try:
             if command.repin:
                 # The pin moves under the workflow lock, after the checks below,
@@ -529,6 +545,7 @@ def emit_run(
                     registry.write_status(root, status)
                     previous_status = registry.read_json(root / registry.STATUS_FILE) or {}
             if command.repin:
+                repin_attempted = True
                 try:
                     repin_result = workflow_pinning.repin_to_live(wf_id)
                     pin = repin_result.pin
@@ -733,16 +750,6 @@ def emit_run(
         wf_id,
     ]
     try:
-        if repin_result is not None and repin_result.changed:
-            previous_runtime = repin_result.previous or {}
-            append_run_event(
-                "runtime_repinned",
-                fromDigest=previous_runtime.get("digest"),
-                fromVersion=previous_runtime.get("version"),
-                fromPinnedAt=previous_runtime.get("pinnedAt"),
-                toDigest=pin.runtime_digest,
-                toVersion=(runtime_pin or {}).get("pinned", {}).get("version"),
-            )
         if attempt is not None:
             append_run_event("attempt_config", **attempt.metadata)
             current_status = registry.read_json(root / registry.STATUS_FILE) or {}
@@ -794,12 +801,29 @@ def emit_run(
         systemd_warning = _systemd_detach_warning()
         if systemd_warning is not None and systemd_warning not in warnings:
             warnings.append(systemd_warning)
+        if repin_result is not None and repin_result.changed:
+            # As late as the parent can write: once the supervisor starts it owns
+            # the journal, so this cannot follow the launch. A launch that fails
+            # after this line journals runtime_repin_rolled_back (see above).
+            previous_runtime = repin_result.previous or {}
+            append_run_event(
+                "runtime_repinned",
+                fromDigest=previous_runtime.get("digest"),
+                fromVersion=previous_runtime.get("version"),
+                fromPinnedAt=previous_runtime.get("pinnedAt"),
+                toDigest=pin.runtime_digest,
+                toVersion=(runtime_pin or {}).get("pinned", {}).get("version"),
+            )
+            repin_event_journaled = True
         previous_environment = workflow_pinning.temporarily_apply_environment(pin, attempt=attempt)
         try:
             runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+            launched = True
         finally:
             if previous_environment:
                 workflow_pinning.restore_environment(previous_environment)
+        if repin_attempted:
+            workflow_pinning.commit_repin(wf_id)
     except BaseException:
         rollback_repin()
         restore_approval()
@@ -1748,6 +1772,42 @@ def _parse_args(raw: str | None) -> JsonValue:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise DelegateError("invalid_workflow_args", "workflow --args must be valid JSON.") from exc
+
+
+def _recover_interrupted_repin(root: Path, wf_id: str) -> None:
+    """Undo a repin whose process died before its resume launched.
+
+    A repin keeps the pin it replaced in a backup until the launch succeeds, so
+    a backup found here means the workflow was left on a pin nothing ever ran
+    on. It is put back under the workflow lock, and the journal, which may
+    already say the workflow moved, gets the matching rollback record.
+    """
+    if not workflow_pinning.repin_backup_path(wf_id).exists():
+        return
+    lock_fd = _acquire_workflow_lock(root, wf_id)
+    try:
+        try:
+            undone = workflow_pinning.rollback_repin(wf_id)
+        except workflow_pinning.WorkflowPinError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+        if undone is not None and _repin_journaled_for(root, undone.get("abandonedDigest")):
+            _append_command_event(root, "runtime_repin_rolled_back", reason="interrupted", **undone)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
+
+
+def _repin_journaled_for(root: Path, digest: object) -> bool:
+    """Whether the journal's latest repin record is an unretracted move to ``digest``."""
+    latest: JsonObject | None = None
+    for event in registry.iter_journal(root / registry.JOURNAL_FILE):
+        if event.get("type") in {"runtime_repinned", "runtime_repin_rolled_back"}:
+            latest = event
+    return (
+        latest is not None
+        and latest.get("type") == "runtime_repinned"
+        and latest.get("toDigest") == digest
+    )
 
 
 def _append_command_event(root: Path, event_type: str, **payload: JsonValue) -> None:

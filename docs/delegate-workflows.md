@@ -260,7 +260,11 @@ keeps:
   exactly as it was, so personas and configuration stay frozen too.
 - The journal is untouched apart from one added `runtime_repinned` event
   (`fromDigest`, `fromVersion`, `fromPinnedAt`, `toDigest`, `toVersion`), written
-  before `attempt_config`. Step keys are not recomputed: settled steps replay
+  after `attempt_config` and as late as the resuming command can write: once the
+  supervisor starts it owns the journal. If the launch then fails, the old pin
+  is put back and a `runtime_repin_rolled_back` event (`reason`,
+  `abandonedDigest`, `restoredDigest`) follows it, so the journal never ends
+  claiming a move that did not stay. Step keys are not recomputed: settled steps replay
   as before. The existing key-version check still applies, so a workflow saved
   under a different structural key version is refused for that reason with or
   without `--repin`. A change to how keys are derived must bump
@@ -270,9 +274,17 @@ keeps:
   (`workflow_identity.validate`): a workflow whose credential namespace or
   profile no longer matches what it was launched under is refused as
   `workflow_profile_drift`, as on any resume.
-- The new pin is loaded back and validated before the resume goes on. If that
-  fails, or the resume itself fails to launch, the previous pin is put back
-  byte for byte, so a failed `--repin` leaves the workflow as it was.
+- The new pin is written beside the old one as `pin.json.staged`, loaded back
+  and validated there, and only then renamed over `pin.json`, so a replacement
+  that does not validate never becomes the pin. Before the rename the old pin is
+  copied to `pin.json.pre-repin`, which stays until the resume has launched
+  (then it is deleted) or failed (then its bytes are restored over `pin.json`).
+  If the process dies in between, the next resume (not a `--dry-run`) finds the
+  backup, puts the old pin back under the workflow lock, and, when the journal
+  still says the workflow moved, adds `runtime_repin_rolled_back` with
+  `reason: interrupted`. A failed `--repin` therefore leaves the workflow as it
+  was. Until that recovery runs, `workflow status` reads the pin on disk, which
+  is the new one.
 - If the pinned runtime already equals the live one, `--repin` changes nothing
   and says so.
 

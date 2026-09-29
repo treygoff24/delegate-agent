@@ -653,8 +653,9 @@ delegate [--json] workflow save <script.py> --name NAME
   pin cannot be read). `--repin` (on `resume`, `run --resume`, and `approve`)
   moves the workflow onto the live runtime: it keeps the journal, step keys,
   frozen script, arguments, and config, still runs the identity check, records a
-  `runtime_repinned` journal event, and restores the old pin if the resume then
-  fails. It is refused with `repin_children_running` while any child run is
+  `runtime_repinned` journal event, and restores the old pin (journaling
+  `runtime_repin_rolled_back`) if the resume then fails or the process dies before
+  it launches. It is refused with `repin_children_running` while any child run is
   still running, and with `invalid_option_combination` on a new run or with
   `--dry-run`. See
   [Pinned runtime and `--repin`](delegate-workflows.md#pinned-runtime-and---repin).

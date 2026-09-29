@@ -11,7 +11,10 @@ A pin is fixed for the life of a workflow except for its ``runtime`` section,
 which only ``repin_to_live`` (``workflow resume --repin``) may move onto the
 live runtime; the runtime directories themselves stay immutable, and the old
 runtime is kept in ``runtimeHistory``.  Everything else in a pin (script,
-config, personas, profile identity) is never rewritten.  ``runtime_drift`` and
+config, personas, profile identity) is never rewritten.  The move is staged and
+validated before it replaces ``pin.json``, and the pin it replaced is kept in
+``pin.json.pre-repin`` until the resume that repinned has launched.
+``runtime_drift`` and
 ``runtime_drift_notice`` describe how the pinned runtime differs from the live
 one for ``workflow resume`` and ``workflow status``.
 """
@@ -19,6 +22,7 @@ one for ``workflow resume`` and ``workflow status``.
 from __future__ import annotations
 
 import compileall
+import contextlib
 import errno
 import hashlib
 import json
@@ -27,8 +31,8 @@ import re
 import shutil
 import stat
 import sys
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -46,6 +50,10 @@ PIN_VERSION = 1
 PIN_ROOT_DIRNAME = ".delegate-workflow-pins"
 PIN_FILE = "pin.json"
 PIN_CONFIG_FILE = "config.json"
+# A repin stages its replacement pin here and keeps the pin it replaces here
+# until the resume that repinned has launched (see repin_to_live).
+PIN_STAGED_FILE = "pin.json.staged"
+PIN_BACKUP_FILE = "pin.json.pre-repin"
 RUNTIME_DIR = "runtimes"
 PERSONA_DIR = "personas"
 ACTIVE_INDEX_FILE = "active-supervisors.json"
@@ -652,6 +660,11 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
     path = pin_path(workflow_id, home=home)
     if not path.exists():
         return None
+    return _load_pin_file(workflow_id, path, home=home)
+
+
+def _load_pin_file(workflow_id: str, path: Path, *, home: Path | None = None) -> WorkflowPin:
+    """Validate the pin document at ``path`` (a pin.json, or a staged replacement beside it)."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -846,29 +859,37 @@ def runtime_drift_notice(drift: JsonObject, *, workflow_id: str, resume_hint: st
 
 @dataclass(frozen=True)
 class RepinResult:
-    """What ``repin_to_live`` did. ``previous`` and ``previous_payload`` are set only when it moved."""
+    """What ``repin_to_live`` did. ``previous`` is set only when it moved the pin."""
 
     pin: WorkflowPin
     changed: bool
     previous: JsonObject | None = None
-    previous_payload: str | None = None
 
 
-def _replace_pin_file(
-    path: Path, *, text: str | None = None, payload: JsonObject | None = None
-) -> None:
-    """Replace ``pin.json`` inside its sealed (0o500) directory, then seal it again."""
-    root = path.parent
+def repin_backup_path(workflow_id: str, *, home: Path | None = None) -> Path:
+    """Where ``repin_to_live`` keeps the pin it replaced until the resume has launched."""
+    return pin_directory(workflow_id, home=home) / PIN_BACKUP_FILE
+
+
+@contextlib.contextmanager
+def _pin_directory_writable(root: Path) -> Iterator[None]:
+    """Unseal the pin directory (0o500) for one edit, and seal it again."""
     root.chmod(0o700)
     try:
-        if payload is not None:
-            run_registry.write_json_atomic(path, payload)
-        else:
-            assert text is not None
-            run_registry.write_private_text_atomic(path, text)
-        path.chmod(0o400)
+        yield
     finally:
         root.chmod(0o500)
+
+
+def _publish_staged_pin(staged: Path, path: Path) -> None:
+    """Atomically make the staged file the pin. The directory must be writable."""
+    os.replace(staged, path)
+    with contextlib.suppress(OSError):
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
@@ -885,6 +906,14 @@ def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
     ``WORKFLOW_KEY_VERSION`` and resume already refuses a workflow saved under a
     different one.
 
+    The move is staged, not edited in place. The replacement is written beside
+    the pin, validated as a pin, and only then renamed over ``pin.json``, so a
+    replacement that does not validate never becomes the pin. Before the
+    rename, the pin it replaces is copied to ``pin.json.pre-repin`` and stays
+    there until ``commit_repin`` (the resume launched) or ``rollback_repin``
+    (it did not, or the process died first): the way back is on disk and does
+    not depend on this call having returned.
+
     The caller must hold the workflow lock. A pin rewritten under a live
     supervisor would make every child it launches later fail its attempt check
     ("attempt base pin digest differs").
@@ -897,6 +926,13 @@ def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
     workflow_identity.validate(pin.profile_identity, pin.config)
     if live_runtime_digest() == pin.runtime_digest:
         return RepinResult(pin=pin, changed=False)
+    backup = pin.path.with_name(PIN_BACKUP_FILE)
+    if backup.exists():
+        raise WorkflowPinError(
+            "repin_incomplete",
+            f"an earlier repin of {workflow_id} never finished ({backup}); resume it once "
+            "without --repin to put its pin back",
+        )
     previous_text = pin.path.read_text(encoding="utf-8")
     payload = json.loads(previous_text)
     old_runtime = payload["runtime"]
@@ -919,21 +955,90 @@ def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
         "attemptConfigVersion": 1,
         "pinnedAt": now,
     }
-    _replace_pin_file(pin.path, payload=payload)
+    staged = pin.path.with_name(PIN_STAGED_FILE)
+    with _pin_directory_writable(pin.path.parent):
+        try:
+            run_registry.write_private_text_atomic(backup, previous_text)
+            backup.chmod(0o400)
+            run_registry.write_json_atomic(staged, payload)
+            staged.chmod(0o400)
+            repinned = _load_pin_file(workflow_id, staged, home=home)
+            _publish_staged_pin(staged, pin.path)
+        except BaseException:
+            # Unpublished means the old pin is still in place and the backup is
+            # a redundant copy. Whether the rename happened is read from the
+            # pin itself, never assumed, so an interruption on either side of
+            # it leaves the backup exactly when it is needed.
+            with contextlib.suppress(OSError):
+                if pin.path.read_text(encoding="utf-8") == previous_text:
+                    staged.unlink(missing_ok=True)
+                    backup.unlink(missing_ok=True)
+            raise
+    return RepinResult(pin=replace(repinned, path=pin.path), changed=True, previous=previous)
+
+
+def rollback_repin(workflow_id: str, *, home: Path | None = None) -> JsonObject | None:
+    """Put back the pin a repin replaced, if it left its backup. The caller holds the lock.
+
+    Used when the resume that repinned failed, and at the start of a later
+    resume when the process died before it could. ``None`` means there was
+    nothing to undo; otherwise the digests of the runtime taken off the pin and
+    of the one put back. Restoring is a rename of the backup's bytes over
+    ``pin.json``, so it is idempotent: an interruption leaves the backup for the
+    next attempt.
+    """
+    path = pin_path(workflow_id, home=home)
+    backup = path.with_name(PIN_BACKUP_FILE)
     try:
-        repinned = load_pin(workflow_id, home=home)
-    except WorkflowPinError:
-        _replace_pin_file(pin.path, text=previous_text)
-        raise
-    assert repinned is not None
-    return RepinResult(
-        pin=repinned, changed=True, previous=previous, previous_payload=previous_text
-    )
+        text = backup.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        return None
+    restored = _document_runtime_digest(text)
+    if restored is None or _document_workflow_id(text) != workflow_id:
+        raise WorkflowPinError(
+            "invalid_pin", f"pre-repin backup is not this workflow's pin: {backup}"
+        )
+    try:
+        abandoned = _document_runtime_digest(path.read_text(encoding="utf-8"))
+    except OSError:
+        abandoned = None
+    staged = path.with_name(PIN_STAGED_FILE)
+    with _pin_directory_writable(path.parent):
+        run_registry.write_private_text_atomic(staged, text)
+        staged.chmod(0o400)
+        _publish_staged_pin(staged, path)
+        backup.unlink(missing_ok=True)
+    return {"abandonedDigest": abandoned, "restoredDigest": restored}
 
 
-def restore_pin_payload(workflow_id: str, payload_text: str, *, home: Path | None = None) -> None:
-    """Put back the exact ``pin.json`` bytes ``repin_to_live`` replaced (a failed resume)."""
-    _replace_pin_file(pin_path(workflow_id, home=home), text=payload_text)
+def commit_repin(workflow_id: str, *, home: Path | None = None) -> None:
+    """Drop the pre-repin backup once the resume that repinned has launched.
+
+    Never raises: a backup that could not be removed is picked up by the next
+    resume, which puts the old pin back instead of leaving the workflow half
+    moved, so a failure here must not fail a launch that already succeeded.
+    """
+    backup = repin_backup_path(workflow_id, home=home)
+    with contextlib.suppress(OSError), _pin_directory_writable(backup.parent):
+        backup.unlink(missing_ok=True)
+
+
+def _document_runtime_digest(text: str) -> str | None:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    runtime = payload.get("runtime") if isinstance(payload, dict) else None
+    digest = runtime.get("digest") if isinstance(runtime, dict) else None
+    return digest if isinstance(digest, str) else None
+
+
+def _document_workflow_id(text: str) -> object:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    return payload.get("workflowId") if isinstance(payload, dict) else None
 
 
 def temporarily_apply_environment(
@@ -1252,6 +1357,7 @@ __all__ = [
     "WorkflowPinError",
     "active_index_path",
     "active_supervisors_view",
+    "commit_repin",
     "create_pin",
     "describe_runtime",
     "doctor",
@@ -1267,9 +1373,10 @@ __all__ = [
     "promote",
     "reconcile_active_supervisors",
     "register_active_supervisor",
+    "repin_backup_path",
     "repin_to_live",
     "restore_environment",
-    "restore_pin_payload",
+    "rollback_repin",
     "runtime_drift",
     "runtime_drift_notice",
     "temporarily_apply_environment",
