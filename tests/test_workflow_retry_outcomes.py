@@ -160,6 +160,43 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         )
         self.assertEqual(event["scope"], "root")
 
+    def test_followup_timeout_event_names_the_step(self) -> None:
+        """A follow-up that times out is attributed to its step, like an agent timeout.
+
+        The row carried the engine and the timeout only, so a journal with
+        several follow-ups could not say which one died.
+        """
+        dsl = self._dsl()
+        with (
+            mock.patch.object(
+                runtime,
+                "_run_child_command_for_state",
+                side_effect=subprocess.TimeoutExpired(["delegate"], 1),
+            ),
+            mock.patch.object(runtime, "cancel_workflow_agent_child"),
+        ):
+            result = dsl._run_delegate_followup(
+                "del_20260920T000000Z_abc126",
+                "prompt text",
+                engine="codex",
+                timeout=1,
+                prefer_assistant=False,
+                workflow_agent_key="followup-timeout-key",
+                label="followup-timeout-label",
+            )
+        assert result.outcome is not None
+        self.assertEqual(result.outcome.failure_reason, "timeout")
+        (event,) = [
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_timeout"
+        ]
+        self.assertEqual(event["engine"], "codex")
+        self.assertEqual(event["timeout"], 1)
+        self.assertEqual(event["key"], "followup-timeout-key")
+        self.assertEqual(event["label"], "followup-timeout-label")
+        self.assertEqual(event["scope"], "root")
+
     def test_resume_retry_prompt_re_renders_the_schema(self) -> None:
         """A resume correction without the schema rebuilds the shape from memory.
 

@@ -5149,7 +5149,16 @@ class WorkflowDsl:
             completed = _run_child_command_for_state(argv, state=self.state, timeout=timeout)
         except subprocess.TimeoutExpired:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
-            self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
+            # Same identifiers as the agent_timeout row in _run_delegate: without
+            # key and label this row says which engine died and not which step.
+            self.state.append_event(
+                "agent_timeout",
+                engine=engine,
+                timeout=timeout,
+                key=workflow_agent_key,
+                label=label,
+                scope=self.state.current_scope(),
+            )
             return _failed_child_result(None, reason="timeout")
         finally:
             Path(prompt_path).unlink(missing_ok=True)
