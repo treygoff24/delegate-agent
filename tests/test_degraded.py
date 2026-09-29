@@ -439,7 +439,7 @@ class AwaitingInputTests(unittest.TestCase):
                 self.assertIsNotNone(degraded.awaiting_input(text), text)
                 result = degraded.assess(text, mode="work", files_changed=False)
                 self.assertEqual(result.reason, "ended_awaiting_input")
-                self.assertIn('delegate resume <run> "Approved', result.warning())
+                self.assertIn('delegate resume <handle> "Approved', result.warning())
 
     def test_unknown_change_state_falls_back_to_the_text_signal(self):
         result = degraded.assess(AWAITING_FINALS["atlasos"], mode="work", files_changed=None)
