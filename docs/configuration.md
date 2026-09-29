@@ -1067,7 +1067,7 @@ for the signature table.
 - `autoResume`: defaults to `true`. A Codex or Claude work run that dies on a
   transient stream drop or provider 5xx and saved its session gets exactly one
   automatic continuation. It also gates one fresh rerun of a `safe` run killed by
-  a stream drop and one retry of a broker `binding_not_active` launch refusal (see
+  a stream drop and one retry of a safe-mode broker `binding_not_active` launch refusal (see
   [troubleshooting](troubleshooting.md#automatic-resume-after-a-transient-drop)).
   `false` opts out of all three.
 - `stageStopAfter`: defaults to `3`. In a workflow, when the first this-many

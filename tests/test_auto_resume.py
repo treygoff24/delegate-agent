@@ -227,7 +227,7 @@ class AutoResumeTests(FakeCodexCase):
     def test_a_broker_binding_refusal_is_retried_once_without_marking_the_lane(self):
         self.set_plan("broker403", "ok")
 
-        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+        exit_code, payload = self.in_process_json("codex", "safe", "review the thing")
 
         self.assertEqual(exit_code, 0, payload)
         self.assertEqual(self.invocation_count(), 2)
@@ -252,10 +252,25 @@ class AutoResumeTests(FakeCodexCase):
         self.assertEqual(self.slept, [])
         self.assertEqual(len(self.marker_files()), 1)
 
+    def test_a_quiet_work_broker_refusal_is_not_rerun_and_says_how_to_relaunch(self):
+        # A work child may have edited in place or acted externally before the
+        # refusal line; a rerun could apply that twice, so work never reruns.
+        self.set_plan("broker403", "ok")
+
+        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(self.invocation_count(), 1)
+        self.assertNotIn("autoResume", payload)
+        self.assertNotIn("laneMarkerDeferred", payload)
+        self.assertEqual(self.slept, [])
+        self.assertEqual(len(self.marker_files()), 1)
+        self.assertIn("--force-launch", payload["providerError"]["hint"])
+
     def test_two_broker_refusals_fail_as_before_and_mark_the_lane(self):
         self.set_plan("broker403", "broker403", "ok")
 
-        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+        exit_code, payload = self.in_process_json("codex", "safe", "review the thing")
 
         self.assertEqual(exit_code, 1)
         self.assertEqual(self.invocation_count(), 2, "exactly one retry")
@@ -406,22 +421,39 @@ class RerunSkipReasonTests(unittest.TestCase):
         note = _note(mode="safe", provider_error={"signature": "auth_rejected"})
         self.assertEqual(self.reason(note), "not_a_transient_drop")
 
-    def test_a_broker_binding_refusal_is_eligible_in_any_mode(self):
+    def test_a_quiet_safe_broker_binding_refusal_is_rerun(self):
         record = {"signature": "broker_binding_inactive", "class": "persistent"}
-        for mode in ("work", "safe"):
-            with self.subTest(mode):
-                self.assertIsNone(
-                    self.reason(_note(mode=mode, provider_error=record, no_child_output=True))
-                )
+        self.assertIsNone(
+            self.reason(_note(mode="safe", provider_error=record, no_child_output=True))
+        )
         self.assertEqual(
-            self.reason(_note(provider_error=record)),
+            self.reason(_note(mode="safe", provider_error=record)),
             "child_produced_output",
             "no positive launch-time evidence fails closed",
         )
         self.assertGreater(auto_resume.broker_backoff_seconds(_note(provider_error=record)), 0)
+        self.assertTrue(
+            auto_resume.defers_lane_marker(
+                record, enabled=True, already_automatic=False, no_child_output=True, mode="safe"
+            )
+        )
         self.assertFalse(
             auto_resume.defers_lane_marker(
-                record, enabled=True, already_automatic=False, no_child_output=False
+                record, enabled=True, already_automatic=False, no_child_output=False, mode="safe"
+            )
+        )
+
+    def test_a_work_broker_refusal_is_never_rerun_even_with_no_output(self):
+        # Output counters are read after the child exits: a silent in-place edit or
+        # external action before the refusal line would be applied twice by a rerun.
+        record = {"signature": "broker_binding_inactive", "class": "persistent"}
+        self.assertEqual(
+            self.reason(_note(mode="work", provider_error=record, no_child_output=True)),
+            "work_side_effects",
+        )
+        self.assertFalse(
+            auto_resume.defers_lane_marker(
+                record, enabled=True, already_automatic=False, no_child_output=True, mode="work"
             )
         )
         self.assertEqual(auto_resume.broker_backoff_seconds(_note(mode="safe")), 0.0)

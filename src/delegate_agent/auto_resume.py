@@ -12,8 +12,10 @@ because building a request is the CLI's job. Session resume never applies to saf
 mode, pass-through, structured-output runs (the workflow supervisor owns that
 retry), or a run that saved no session. Two cases instead get one fresh rerun
 of the same request (``rerun_skip_reason``): a safe-mode run killed by a
-transient stream drop, and a launch the estate broker refused with
-``binding_not_active``. There is no second automatic attempt: the continuation
+transient stream drop, and a safe-mode launch the estate broker refused with
+``binding_not_active``. A work run is never rerun from scratch: nothing proves a
+refused work child did nothing to the workspace or the outside world before the
+refusal line appeared. There is no second automatic attempt: the continuation
 or rerun is launched once and its result is final.
 """
 
@@ -128,17 +130,20 @@ def defers_lane_marker(
     enabled: bool,
     already_automatic: bool,
     no_child_output: bool,
+    mode: str | None,
 ) -> bool:
     """True when a broker binding refusal will be retried once, so it earns no marker yet.
 
     A single ``binding_not_active`` at launch is slot contention, not a bad
     lane. The retry run carries ``autoResume``, so a second refusal marks the
-    lane exactly as before.
+    lane exactly as before. Work runs are never retried (see
+    ``rerun_skip_reason``), so their refusal marks the lane as before.
     """
     signature = provider_errors.signature_for_record(record)
     return (
         enabled
         and not already_automatic
+        and mode != "work"
         and no_child_output
         and signature is not None
         and signature.id == BROKER_SIGNATURE
@@ -150,9 +155,11 @@ def rerun_skip_reason(note: RunNote, *, enabled: bool, already_automatic: bool) 
 
     Two cases rerun the same request from scratch (a new run, not a session
     resume): a safe-mode run killed by a transient stream drop (no durable side
-    effects, and the rerun starts from a fresh isolated copy), and a launch the
-    broker refused with ``binding_not_active`` (no vendor process ran). Call
-    mode is never noted, so it stays out.
+    effects, and the rerun starts from a fresh isolated copy), and a safe-mode
+    launch the broker refused with ``binding_not_active``. A work run is never
+    rerun: "no output" is measured after the child exits and cannot prove a
+    silent edit or external action did not happen before the refusal line, so
+    a rerun could apply it twice. Call mode is never noted, so it stays out.
     """
     if not enabled:
         return "disabled"
@@ -164,6 +171,8 @@ def rerun_skip_reason(note: RunNote, *, enabled: bool, already_automatic: bool) 
     if signature is None:
         return "not_a_transient_drop"
     if signature.id == BROKER_SIGNATURE:
+        if note.mode == "work":
+            return "work_side_effects"
         # The error text can be read from stderr after the child already worked;
         # only a run with no output and no workspace changes is a launch refusal.
         return None if note.no_child_output else "child_produced_output"

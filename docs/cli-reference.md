@@ -1612,7 +1612,7 @@ where `class` is `persistent`, `transient`, or `unknown`; see
 for the signature table. A run that Delegate continued after a transient drop
 carries `autoResume` (`automatic`, `attempt`, `of`, `trigger`) on the
 continuation's envelope (plus `kind`: `resume`, or `rerun` with `firstError` for a fresh
-rerun of a safe stream drop or a tracked-launch broker `binding_not_active` refusal with no child output), or
+rerun of a safe stream drop or a safe-mode broker `binding_not_active` refusal with no child output), or
 `attempted: false` with a `reason` on the first run's envelope when the
 continuation could not be built. `wait` reports `runner_lost` when a running record's runner
 process is gone (`staleReason` `dead_pid` or `missing_pid`); `stalled` is kept
