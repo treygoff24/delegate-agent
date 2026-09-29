@@ -38,9 +38,13 @@ DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
 DEFAULT_DRY_RUN_TIMEOUT_SECONDS: Final = 300
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(KNOWN_ENGINES)
 
-DEFAULT_TRACKED_STREAM_MAX_BYTES: Final = 16 * 1024 * 1024
-PI_FAMILY_TRACKED_STREAM_MAX_BYTES: Final = 64 * 1024 * 1024
-PI_FAMILY_ENGINES: Final = frozenset({"pi", "omp"})
+# The tracked stdout/stderr byte cap is OFF by default (Trey, 2026-09-28: "set the
+# output cap totally off by default"). A cap killed finished lanes and blinded the
+# parser; runaway output has its own detector in the stall watchdog. `null` in
+# config means no cap; a positive integer opts an engine into one. Internally a
+# resolved cap of TRACKED_STREAM_UNCAPPED (0) means no cap.
+DEFAULT_TRACKED_STREAM_MAX_BYTES: Final = None
+TRACKED_STREAM_UNCAPPED: Final = 0
 
 SAFE_BACKEND_COPY = "copy"
 SAFE_BACKEND_BWRAP = "bwrap"
@@ -156,14 +160,14 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "binary": "pi",
         "defaultModel": None,
         "defaultReasoningEffort": None,
-        "trackedStreamMaxBytes": PI_FAMILY_TRACKED_STREAM_MAX_BYTES,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "omp": {
         "binary": "omp",
         "defaultModel": None,
         "defaultReasoningEffort": None,
-        "trackedStreamMaxBytes": PI_FAMILY_TRACKED_STREAM_MAX_BYTES,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
     "policy": {
@@ -262,12 +266,12 @@ def default_progress_interval_sec() -> float:
 
 
 def default_tracked_stream_max_bytes(engine: str) -> int:
-    if engine in PI_FAMILY_ENGINES:
-        return PI_FAMILY_TRACKED_STREAM_MAX_BYTES
-    return DEFAULT_TRACKED_STREAM_MAX_BYTES
+    """The engine's default tracked-stream cap: TRACKED_STREAM_UNCAPPED (no cap)."""
+    return TRACKED_STREAM_UNCAPPED
 
 
 def resolve_tracked_stream_max_bytes(config: JsonObject, engine: str) -> int:
+    """A configured positive byte cap, else TRACKED_STREAM_UNCAPPED (0, no cap)."""
     section = config.get(engine)
     if isinstance(section, dict):
         value = section.get("trackedStreamMaxBytes")
@@ -509,10 +513,12 @@ def _validate_engine_tracked_stream_max_bytes(config: JsonObject) -> None:
         if not isinstance(section, dict) or "trackedStreamMaxBytes" not in section:
             continue
         value = section["trackedStreamMaxBytes"]
+        if value is None:
+            continue
         if not is_non_negative_int(value) or value <= 0:
             raise ConfigError(
                 f"invalid_{engine}_config",
-                f"{engine}.trackedStreamMaxBytes must be a positive integer.",
+                f"{engine}.trackedStreamMaxBytes must be a positive integer, or null for no cap.",
             )
 
 

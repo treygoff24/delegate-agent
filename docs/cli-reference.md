@@ -771,7 +771,11 @@ or with ordinary Codex call mode (schema path).
 `--timeout SECONDS` is a positive integer accepted in every mode. It bounds
 calls and tracked `safe`/`work` runs alike: on expiry Delegate terminates the
 whole child process group and returns `call_timeout` (a historical error-code
-name kept for API stability) with exit code 1. `--timeout` is not supported
+name kept for API stability) with exit code 1. A call that timed out or
+overflowed keeps what it had already produced: the error carries `diagnostics`
+(also flattened into the JSON error) with the child's last substantive assistant
+text as `partialText` (redacted and bounded), plus `stdoutTail` and `stderrTail`;
+text mode prints the partial text to stderr. `--timeout` is not supported
 with `--pass-through`, which streams the child without a tracked deadline.
 
 `--read-only` and `--pure` apply only to `call`; passing them with
@@ -1301,7 +1305,7 @@ creating a Run or writing a prompt record.
 | Progress intent | `progressRequested` (`on`, `off`, or omitted) | `--progress` or `--no-progress` | Omitted uses target progress configuration and emits a note; only `on` and `off` are inherited. | Retained; progress intent is not engine-specific. |
 | Timeout | `timeoutSeconds` | `--timeout` | Omitted uses the target timeout default and emits a note. A present value must be a positive integer (an integral JSON float is accepted). | Retained. |
 | Stall threshold | `stallMinutes`, written only when the source launch passed `--stall-minutes` | None | Omitted means the source ran on the configured default, so the resumed Run re-resolves `stallMinutes` config, `DELEGATE_STALL_MINUTES`, and the engine default with no note. A present value must be a finite number >= 0 (0 disables); anything else refuses resume. `delegate followup` inherits it the same way and ignores an invalid value. | Retained; an inherited value is an explicit operator threshold, honored on every engine. |
-| Tracked stream limit | `trackedStreamMaxBytes` | None | Launch provenance only: the resumed Run re-resolves the limit from the target engine configuration and does not inherit the recorded value. | Not inherited. |
+| Tracked stream limit | `trackedStreamMaxBytes` (`null` when uncapped, the default) | None | Launch provenance only: the resumed Run re-resolves the limit from the target engine configuration and does not inherit the recorded value. | Not inherited. |
 | Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Codex and Claude inherit inline schema text. Other engines soft-drop it with a note before output-schema validation. |
 | OpenCode agent | `agent` | None | Omitted means no agent selection. | Inherited only for a same-engine OpenCode resume; otherwise dropped with a note. |
 | Workspace cwd / execution cwd | `cwd`; persistent records also derive `executionCwd`, branch, and source Git root | None (`--cwd` selects the registry workspace and must match recorded `cwd`) | Missing `cwd` falls back to the selected registry workspace; missing persistent-worktree metadata causes attachment validation to refuse. | Retained as workspace context; an attach uses the validated existing worktree rather than copying `executionCwd` into a new worktree. |
@@ -1481,30 +1485,43 @@ warning, in a labelled delegate-authored block above the child's text in the
 completion report; the child's own words and `completionReportSource` are
 unchanged.
 
-Tracked stdout and stderr logs are capped independently. Pi and OMP default to
-64 MiB per stream; other engines default to 16 MiB. Set
-`<engine>.trackedStreamMaxBytes` to a positive byte count to override that
-engine's tracked-run limit. Exceeding a cap terminates the child and records
+Tracked stdout and stderr logs have no byte cap by default: nothing is
+truncated, hidden from the parser, or killed for being verbose, and `stdout.log`
+is flushed on every write so its size and modification time follow the child. A
+cap is opt-in. Set `<engine>.trackedStreamMaxBytes` to a positive byte count (or
+leave it `null` for no cap) to give that engine's tracked runs a per-stream
+limit. Exceeding an opted-in cap terminates the child and records
 `output_limit_exceeded` plus an `outputLimit` object naming the stream and byte
-limit; the error message also names the engine and configured limit.
+limit; the error message also names the engine, the configured limit, and the
+key that raises or removes it. The failed Run still quotes the child's last
+substantive text in its completion report.
 
-OMP stdout has a separate, finite transport budget: 256 MiB received per attempt,
-16 MiB per JSON record, and a 64 MiB retained-output cap by default. Delegate retains
-up to 64 KiB of the known stripped `message_update` / `thinking_delta` diagnostic
-shape, then omits further records of exactly that shape. Other fields, malformed
-JSON, text, errors, models, usage, and tool records are never discounted.
-OMP call mode keeps its separate 16 MiB retained-output cap while using the same
-thinking compaction and transport safeguards. An over-limit read can observe at
-most one extra 64 KiB chunk before termination.
+OMP stdout has two more ceilings that ride with an opted-in cap: 256 MiB received
+per attempt and 16 MiB per JSON record. With no cap neither applies, and a record
+too large to classify is kept verbatim. Delegate retains up to 64 KiB of the known
+stripped `message_update` / `thinking_delta` diagnostic shape, then omits further
+records of exactly that shape. It also shrinks an oversized `args` or
+`partialResult` on a `tool_execution_update` record to a short
+`{"delegateCompacted": true, "originalBytes": N, "head": ..., "tail": ...}`
+stub: OMP re-emits a tool's whole arguments (for the sub-agent `task` tool, the
+full shared context) on every update. `tool_execution_start` and
+`tool_execution_end` carry the complete arguments and result once and are never
+touched. Other fields, malformed JSON, text, errors, models, usage, and other
+tool records are never discounted. OMP call mode keeps its separate 16 MiB
+retained-output cap while using the same compaction and transport safeguards. An
+over-limit read can observe at most one extra 64 KiB chunk before termination.
 
-OMP results disclose `stdoutCapture`: transport/captured byte counts, omitted
-thinking bytes and records, limits, `limitKind`, `truncated`, and a streaming
-`transportSha256` of observed child bytes. These counters describe the final
-attempt; existing top-level byte counts may combine retries. Compaction adds a
-warning and one `delegate.capture` marker to retained stdout. `--raw` returns
-that retained stream, not omitted thinking. Captured bytes include the marker;
-the transport digest does not. Compaction preserves the existing stall detector,
-timeouts, terminal handling, and process-group cleanup.
+OMP results disclose `stdoutCapture` (policy `omp-capture-v2`): transport/captured
+byte counts, omitted thinking bytes and records, compacted tool-update records and
+bytes (`compactedToolUpdateRecords`, `compactedToolUpdateBytes`), limits (`null`
+when no cap is set), `limitKind`, `truncated`, and a streaming `transportSha256`
+of observed child bytes. These counters describe the final attempt; existing
+top-level byte counts may combine retries. Compaction adds a warning and, for
+thinking, one `delegate.capture` marker to retained stdout. `--raw` returns that
+retained stream, not the omitted thinking or the compacted tool-update text.
+Captured bytes include the marker; the transport digest does not. Compaction
+preserves the existing stall detector, timeouts, terminal handling, and
+process-group cleanup.
 
 After an explicit
 terminal-success event, Delegate gives the harness one second to exit and then
@@ -1516,7 +1533,9 @@ Each tracked Run also keeps `events.jsonl`, an append-only diagnostic mirror
 of retained child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
 records (including a final unterminated line when the child exits mid-line).
 The mirror retains at most 500 stdout-line records, followed by one
-`stream.lines_truncated` marker when additional lines are omitted. Normalized
+`stream.lines_truncated` marker when additional lines are omitted. Only this
+mirror stops: the child keeps running and `stdout.log` keeps the full stream and
+keeps growing (the marker's `note` says so). Normalized
 progress events also appear in Snapshot `recentEvents`; it retains the first
 100 and latest 400 events while reporting the full `eventsTotal`. Both surfaces
 bound child-controlled event strings to 500 characters, including the `…`
@@ -1588,6 +1607,12 @@ terminal cancellation event), a bounded redacted stderr tail when present, and a
 next action pointing at `run-output <alias>` for partial output. It is readable
 via `run-output <handle> --completion-report` the same way a failed run's
 synthesized report is.
+
+A failed, timed-out, or (opt-in) capped run's synthesized report quotes the
+child's last substantive assistant text, bounded and redacted, under "Partial
+output recovered before the run stopped. This is not a completion report", the
+way a cancelled run's report does. Pi and OMP keep that text across turns, so a
+long review followed by a tool turn and a provider error is still recoverable.
 
 With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when

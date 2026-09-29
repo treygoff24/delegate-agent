@@ -192,6 +192,16 @@ UNHANDLED_EVENT_TYPE_CHARS = 64
 PI_PENDING_TOOL_LIMIT = 256
 
 
+def bound_assistant_text(text: str) -> str:
+    """Keep the head and tail of over-long assistant text, naming what was cut."""
+    if len(text) <= ASSISTANT_TEXT_LIMIT:
+        return text
+    omitted = len(text) - ASSISTANT_TEXT_HEAD - ASSISTANT_TEXT_TAIL
+    head = text[:ASSISTANT_TEXT_HEAD]
+    tail = text[-ASSISTANT_TEXT_TAIL:]
+    return f"{head}\n\n… [{omitted} chars omitted] …\n\n{tail}"
+
+
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
     """Bound retained event text for raw and normalized event surfaces.
 
@@ -651,6 +661,54 @@ def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
     return usage
 
 
+_USAGE_COUNTER_ORDER = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
+
+
+def _non_negative_number(value: JsonValue) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        return None
+    return float(value)
+
+
+def _pi_message_usage(value: JsonValue) -> tuple[dict[str, int], float] | None:
+    """Counters and cost from a pi/omp assistant message's ``usage`` block.
+
+    The block is `{"input", "output", "cacheRead", "cacheWrite", "totalTokens",
+    "cost": {"total", ...}}`. `reasoning` is a subset of `output`, so it is not
+    added. Returns None when the block carries no input or output counter.
+    """
+    if not isinstance(value, dict):
+        return None
+    if not (is_non_negative_int(value.get("input")) or is_non_negative_int(value.get("output"))):
+        return None
+    counters = {
+        canonical: int(value[key]) if is_non_negative_int(value.get(key)) else 0
+        for canonical, key in zip(
+            _USAGE_COUNTER_ORDER, ("input", "output", "cacheRead", "cacheWrite"), strict=True
+        )
+    }
+    cost = value.get("cost")
+    total = _non_negative_number(cost.get("total")) if isinstance(cost, dict) else None
+    return counters, total or 0.0
+
+
+def _opencode_step_usage(part: JsonObject) -> tuple[dict[str, int], float] | None:
+    tokens = part.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    if not (is_non_negative_int(tokens.get("input")) or is_non_negative_int(tokens.get("output"))):
+        return None
+    cache = tokens.get("cache")
+    cache = cache if isinstance(cache, dict) else {}
+    counters = {
+        "inputTokens": int(tokens["input"]) if is_non_negative_int(tokens.get("input")) else 0,
+        "outputTokens": int(tokens["output"]) if is_non_negative_int(tokens.get("output")) else 0,
+        "cacheReadTokens": int(cache["read"]) if is_non_negative_int(cache.get("read")) else 0,
+        "cacheWriteTokens": int(cache["write"]) if is_non_negative_int(cache.get("write")) else 0,
+    }
+    return counters, _non_negative_number(part.get("cost")) or 0.0
+
+
 @dataclass
 class StreamAccumulator:
     harness: str | None = None
@@ -676,6 +734,15 @@ class StreamAccumulator:
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     _pi_text_buffer: str = field(default="", repr=False)
     _pi_recovery_error: str | None = field(default=None, repr=False)
+    # Running token totals for harnesses that report usage per message or step
+    # (pi, omp, opencode) rather than once at the end. Summed here and published
+    # to `usage` only while some counter is nonzero: an all-zero report is not
+    # evidence of anything, and providers do send zeros.
+    _usage_totals: dict[str, int] = field(default_factory=dict, repr=False)
+    _usage_cost_usd: float = field(default=0.0, repr=False)
+    # pi and omp report a message's usage on `message_end` and again on the
+    # `turn_end` that wraps it; this key stops the second from being added.
+    _pi_counted_usage_key: str | None = field(default=None, repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     provider_terminal_state: str | None = None
@@ -739,6 +806,31 @@ class StreamAccumulator:
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
+
+    def _add_stream_usage(self, counters: dict[str, int], cost_usd: float) -> None:
+        for key in _USAGE_COUNTER_ORDER:
+            self._usage_totals[key] = self._usage_totals.get(key, 0) + counters.get(key, 0)
+        self._usage_cost_usd += cost_usd
+        if not any(self._usage_totals.values()) and self._usage_cost_usd <= 0:
+            return
+        usage: JsonObject = {"basis": "reported", **self._usage_totals}
+        if self._usage_cost_usd > 0:
+            usage["costUsd"] = self._usage_cost_usd
+        self.usage = usage
+
+    def _record_pi_message_usage(self, message: JsonObject, *, closing_turn: bool) -> None:
+        parsed = _pi_message_usage(message.get("usage"))
+        if parsed is None:
+            return
+        counters, cost = parsed
+        key = repr((message.get("timestamp"), sorted(counters.items()), cost))
+        if closing_turn:
+            counted, self._pi_counted_usage_key = self._pi_counted_usage_key, None
+            if counted == key:
+                return
+        else:
+            self._pi_counted_usage_key = key
+        self._add_stream_usage(counters, cost)
 
     def ingest_line(self, line: str) -> None:
         stripped = line.strip()
@@ -1581,6 +1673,10 @@ class StreamAccumulator:
         self.current = _tool_current(tool, target)
 
     def _ingest_opencode_step_finish(self, part: JsonObject) -> None:
+        # Every step spends tokens, not only the closing `stop` step.
+        step_usage = _opencode_step_usage(part)
+        if step_usage is not None:
+            self._add_stream_usage(*step_usage)
         reason = _string_field(part, "reason")
         if reason != "stop":
             return
@@ -1613,11 +1709,14 @@ class StreamAccumulator:
             self.current = _bounded_current_line(reason)
 
     def _reset_pi_turn_text(self) -> None:
+        # A new turn starts its own published text and completion candidate. The
+        # recoverable text is kept: a long review in one turn followed by a tool
+        # turn, an empty turn, or a failure is still the last thing the child
+        # said, and clearing it left nothing for a failed report or `run-output`
+        # to recover.
         self._pi_text_buffer = ""
         self.assistant_chunks = []
         self.completion_text = None
-        self._last_recoverable_assistant_text = None
-        self._last_substantive_assistant_text = None
         self._invalidate_assistant_text_cache()
 
     def _publish_pi_text(self, text: str, *, completion: bool = False) -> None:
@@ -1686,6 +1785,7 @@ class StreamAccumulator:
             message = payload.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
                 self._publish_pi_text(_extract_text(message.get("content")))
+                self._record_pi_message_usage(message, closing_turn=False)
             return
         if event_type == "tool_execution_start":
             self._ingest_pi_tool(payload, completed=False)
@@ -1703,6 +1803,7 @@ class StreamAccumulator:
             )
             if role != "assistant":
                 return
+            self._record_pi_message_usage(message, closing_turn=True)
             error_status = message.get("errorStatus")
             http_error = (
                 isinstance(error_status, int)
@@ -1920,10 +2021,8 @@ class StreamAccumulator:
                 "assistantTextOmittedMiddleChars": 0,
             }
             return text, meta
-        head = text[:ASSISTANT_TEXT_HEAD]
-        tail = text[-ASSISTANT_TEXT_TAIL:]
         omitted = len(text) - ASSISTANT_TEXT_HEAD - ASSISTANT_TEXT_TAIL
-        bounded = f"{head}\n\n… [{omitted} chars omitted] …\n\n{tail}"
+        bounded = bound_assistant_text(text)
         meta = {
             "assistantText": bounded,
             "assistantTextChars": len(text),
