@@ -20,7 +20,7 @@ live under `src/delegate_agent/`:
 | Registry mutations versus read-only status | `run_registry.py` versus `run_status.py`, `snapshot_view.py` |
 | Shared metadata fields | `run_metadata.py`; manifest, state, and snapshot remain separate records |
 | Persistent-worktree identity and retirement | `worktree_records.py`, `worktree_mgmt.py` |
-| Workflow replay, lifecycle commands, immutable runtime pins | `workflows/runtime.py`, `workflows/commands.py`, `workflow_pinning.py` |
+| Workflow replay, lifecycle commands, content-addressed runtime pins (`--repin`) | `workflows/runtime.py`, `workflows/commands.py`, `workflow_pinning.py` |
 
 Unit tests should call the module that owns the behavior. Keep CLI tests for
 parsing/dispatch/output contracts and subprocess fixtures for launch boundaries.

@@ -597,14 +597,14 @@ Usage:
 ```bash
 delegate [--json] workflow check <script.py>
 delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]
-delegate [--json] workflow run --resume <wfId> [--budget N]
-delegate [--json] workflow resume <wfId> [--budget N] [--dry-run]
+delegate [--json] workflow run --resume <wfId> [--budget N] [--repin]
+delegate [--json] workflow resume <wfId> [--budget N] [--dry-run] [--repin]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
 delegate [--json] workflow watch <wfId> [--since SEQ] [--jsonl]
 delegate [--json] workflow wait [<wfId>] [--timeout SEC]
 delegate [--json] workflow result [<wfId>] [--field KEY]
-delegate [--json] workflow approve <wfId> [--gate KEY] [--action NAME] [--note TEXT] [--data JSON]
+delegate [--json] workflow approve <wfId> [--gate KEY] [--action NAME] [--note TEXT] [--data JSON] [--repin]
 delegate [--json] workflow reject <wfId> <key-or-label> --reason TEXT
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
@@ -612,7 +612,11 @@ delegate [--json] workflow save <script.py> --name NAME
 ```
 
 - `check` validates the workflow script, including literal preflight checks for
-  unsupported `agent()` combinations.
+  unsupported `agent()` combinations. It also warns (`keying warning`, with the
+  source lines) about `agent()`, `parallel()`, `pipeline()`, or `workflow()` calls
+  left without `key=` in a script that keys others, since those calls replay by
+  position and prompt and lose their settled results when a resumed script
+  shifts.
 - `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
   status record. It overrides `--json` buffering; ordinary `--json` still returns
   the existing single envelope. A successful watch observes the workflow; inspect
@@ -633,12 +637,27 @@ delegate [--json] workflow save <script.py> --name NAME
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
   and UTF-8 `promptBytes`; Kimi prompts over 102400 bytes add a warning before its
   argv transport limit can fail a real run. Kimi is the only engine still on argv.
-- `--resume` replays the journal, adopts matching child runs by workflow agent
-  key, and continues from missing work. Resuming a completed `--dry-run` starts
+- `--resume` replays the journal, adopts child runs that already finished by
+  workflow agent key, and continues from missing work. It cancels every child the
+  previous attempt still had running and relaunches that work; it does not adopt
+  live children. Resuming a completed `--dry-run` starts
   its planned agents live under the same workflow ID; simulated journal events
   remain visible for audit but are excluded from replay and live budget.
   `workflow resume <wfId>` is an alias for `workflow run --resume <wfId>`;
   it uses the same pinned arguments and validation.
+- A workflow keeps running on the delegate runtime it was pinned to at launch, so
+  a fix shipped afterwards does not reach it on a plain resume. `resume` and
+  `status` print a notice whenever the pinned runtime differs from the live one
+  (digest, delegate version, and pin or promotion date for each) and carry the
+  same facts as `runtimePin` in JSON (`status` adds `checked: false` when the
+  pin cannot be read). `--repin` (on `resume`, `run --resume`, and `approve`)
+  moves the workflow onto the live runtime: it keeps the journal, step keys,
+  frozen script, arguments, and config, still runs the identity check, records a
+  `runtime_repinned` journal event, and restores the old pin if the resume then
+  fails. It is refused with `repin_children_running` while any child run is
+  still running, and with `invalid_option_combination` on a new run or with
+  `--dry-run`. See
+  [Pinned runtime and `--repin`](delegate-workflows.md#pinned-runtime-and---repin).
 - `events` returns the public workflow journal. For each tracked child launch,
   an `agent_child` event binds `runId` to the structural `key` (also emitted as
   `workflowAgentKey`) and includes `label` when the `agent()` call supplied one;
@@ -703,6 +722,8 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
 | `workflow_execution_failed` | Dry-run (or in-process) execution raised before detach. |
 | `workflow_locked` | Another supervisor already holds the workflow flock. |
+| `repin_children_running` | `--repin` was refused because a child run of the workflow is still running; the message names them. |
+| `invalid_option_combination` | `--repin` on a new run (it applies only to a resume) or together with `--dry-run`. |
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_gate_not_found` | `approve --gate KEY` names no unapproved gate; the message lists pending gates. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
