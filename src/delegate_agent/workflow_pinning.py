@@ -13,7 +13,7 @@ live runtime; the runtime directories themselves stay immutable, and the old
 runtime is kept in ``runtimeHistory``.  Everything else in a pin (script,
 config, personas, profile identity) is never rewritten.  The move is staged and
 validated before it replaces ``pin.json``, and the pin it replaced is kept in
-``pin.json.pre-repin`` until the resume that repinned has launched.
+``pin.json.pre-repin`` until a supervisor runs on the new pin.
 ``runtime_drift`` and
 ``runtime_drift_notice`` describe how the pinned runtime differs from the live
 one for ``workflow resume`` and ``workflow status``.
@@ -51,7 +51,7 @@ PIN_ROOT_DIRNAME = ".delegate-workflow-pins"
 PIN_FILE = "pin.json"
 PIN_CONFIG_FILE = "config.json"
 # A repin stages its replacement pin here and keeps the pin it replaces here
-# until the resume that repinned has launched (see repin_to_live).
+# until a supervisor runs on the new pin (see repin_to_live, commit_repin).
 PIN_STAGED_FILE = "pin.json.staged"
 PIN_BACKUP_FILE = "pin.json.pre-repin"
 RUNTIME_DIR = "runtimes"
@@ -867,7 +867,7 @@ class RepinResult:
 
 
 def repin_backup_path(workflow_id: str, *, home: Path | None = None) -> Path:
-    """Where ``repin_to_live`` keeps the pin it replaced until the resume has launched."""
+    """Where ``repin_to_live`` keeps the pin it replaced until a supervisor runs on the new one."""
     return pin_directory(workflow_id, home=home) / PIN_BACKUP_FILE
 
 
@@ -881,15 +881,28 @@ def _pin_directory_writable(root: Path) -> Iterator[None]:
         root.chmod(0o500)
 
 
+def _sync_directory(directory: Path) -> None:
+    """Make a rename or unlink in ``directory`` durable.
+
+    A filesystem that cannot sync a directory at all (EINVAL, ENOTSUP) is
+    tolerated, since it offers no stronger ordering to wait for; any other
+    failure raises, because the repin's way back depends on the order in which
+    the pin and its backup reach the disk.
+    """
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", -1)}:
+            raise
+    finally:
+        os.close(fd)
+
+
 def _publish_staged_pin(staged: Path, path: Path) -> None:
-    """Atomically make the staged file the pin. The directory must be writable."""
+    """Atomically and durably make the staged file the pin. The directory must be writable."""
     os.replace(staged, path)
-    with contextlib.suppress(OSError):
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    _sync_directory(path.parent)
 
 
 def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
@@ -910,7 +923,7 @@ def repin_to_live(workflow_id: str, *, home: Path | None = None) -> RepinResult:
     the pin, validated as a pin, and only then renamed over ``pin.json``, so a
     replacement that does not validate never becomes the pin. Before the
     rename, the pin it replaces is copied to ``pin.json.pre-repin`` and stays
-    there until ``commit_repin`` (the resume launched) or ``rollback_repin``
+    there until ``commit_repin`` (a supervisor runs on the new pin) or ``rollback_repin``
     (it did not, or the process died first): the way back is on disk and does
     not depend on this call having returned.
 
@@ -1008,19 +1021,26 @@ def rollback_repin(workflow_id: str, *, home: Path | None = None) -> JsonObject 
         staged.chmod(0o400)
         _publish_staged_pin(staged, path)
         backup.unlink(missing_ok=True)
+        _sync_directory(path.parent)
     return {"abandonedDigest": abandoned, "restoredDigest": restored}
 
 
 def commit_repin(workflow_id: str, *, home: Path | None = None) -> None:
-    """Drop the pre-repin backup once the resume that repinned has launched.
+    """Drop the pre-repin backup: a supervisor is running on the new pin.
 
-    Never raises: a backup that could not be removed is picked up by the next
-    resume, which puts the old pin back instead of leaving the workflow half
-    moved, so a failure here must not fail a launch that already succeeded.
+    The supervisor calls this before it runs any step, so a backup that is
+    still on disk always means nothing ran on the repinned runtime and the next
+    resume may put the old pin back. The removal is synced before this returns,
+    and any failure raises: a supervisor that cannot retire the backup must stop
+    before doing work, or a later resume would roll the pin back under work that
+    already ran on the new one. No backup is a no-op.
     """
     backup = repin_backup_path(workflow_id, home=home)
-    with contextlib.suppress(OSError), _pin_directory_writable(backup.parent):
+    if not os.path.lexists(backup):
+        return
+    with _pin_directory_writable(backup.parent):
         backup.unlink(missing_ok=True)
+        _sync_directory(backup.parent)
 
 
 def _document_runtime_digest(text: str) -> str | None:

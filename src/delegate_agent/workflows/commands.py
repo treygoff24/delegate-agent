@@ -485,7 +485,9 @@ def emit_run(
                 # Checked before anything is touched. A resume cancels the prior
                 # attempt's live children; a repin would add a runtime move on
                 # top of losing that work, and the operator should choose both.
-                live_children = runtime.live_workflow_children(workspace, wf_id)
+                live_children = runtime.live_workflow_children(
+                    workspace, wf_id, include_starting=True
+                )
                 if live_children:
                     named = ", ".join(
                         str(child.get("alias") or child["runId"]) for child in live_children[:5]
@@ -822,8 +824,9 @@ def emit_run(
         finally:
             if previous_environment:
                 workflow_pinning.restore_environment(previous_environment)
-        if repin_attempted:
-            workflow_pinning.commit_repin(wf_id)
+        # The pre-repin backup is retired by the supervisor itself, before its
+        # first step (runtime.run_supervisor): only a supervisor that actually
+        # runs on the new pin may make the move permanent.
     except BaseException:
         rollback_repin()
         restore_approval()
@@ -1775,12 +1778,14 @@ def _parse_args(raw: str | None) -> JsonValue:
 
 
 def _recover_interrupted_repin(root: Path, wf_id: str) -> None:
-    """Undo a repin whose process died before its resume launched.
+    """Undo a repin that no supervisor ever ran on.
 
-    A repin keeps the pin it replaced in a backup until the launch succeeds, so
-    a backup found here means the workflow was left on a pin nothing ever ran
-    on. It is put back under the workflow lock, and the journal, which may
-    already say the workflow moved, gets the matching rollback record.
+    A repin keeps the pin it replaced in a backup, and only a supervisor
+    running on the new pin removes it (durably, before its first step), so a
+    backup found here means nothing ran on the repinned runtime: the resume
+    failed, or its process or supervisor died first. It is put back under the
+    workflow lock, and the journal, which may already say the workflow moved,
+    gets the matching rollback record.
     """
     if not workflow_pinning.repin_backup_path(wf_id).exists():
         return
