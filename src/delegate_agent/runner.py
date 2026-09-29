@@ -32,6 +32,7 @@ from delegate_agent import (
     git_utils,
     harness_events,
     lane_health,
+    lane_slice,
     mail,
     mail_push,
     notify,
@@ -2773,6 +2774,7 @@ def _launch_tracked_process(
     guard_registry_root: Path | None = None,
     guard_run_roots: Sequence[write_guard.Reopen] = (),
     forbid_commit: bool = False,
+    lane_scope: lane_slice.LaneScope | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_temp_dir(env_overrides, temp_dir)
@@ -2849,6 +2851,11 @@ def _launch_tracked_process(
             guard_record.update(guarded.record)
             if guarded.warning is not None:
                 guard_record["warning"] = guarded.warning
+    if lane_scope is not None:
+        # Outermost wrapper: systemd-run registers the scope in the capped test
+        # slice, then execs everything above in place (same pid and group).
+        lane_slice.ensure_bus_env(env)
+        argv = lane_slice.wrap_argv(argv, lane_scope)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -4562,6 +4569,8 @@ def _run_single_tracked_attempt(
     grace_seconds = _process_group_grace_seconds(ctx)
     launch_exc: OSError | None = None
     boundary_exc: DelegateError | None = None
+    # Probed outside the registry lock: one short systemctl call on Linux.
+    lane_scope = lane_slice.plan(ctx.run_id, ctx.source_git_root or ctx.source_cwd)
     # Admission, launch, and pid/pgid publication are one locked generation
     # transition for both the primary attempt and retries. Cancel therefore
     # observes either its marker blocking a retry or a complete live generation;
@@ -4588,6 +4597,8 @@ def _run_single_tracked_attempt(
             )
         if ctx.forbid_commit:
             policy_launch["forbid_commit"] = True
+        if lane_scope is not None:
+            policy_launch["lane_scope"] = lane_scope
         try:
             process = _launch_tracked_process(
                 argv,
@@ -4705,6 +4716,10 @@ def _run_single_tracked_attempt(
             grace_seconds=grace_seconds,
             identity_ctx=ctx,
         )
+        # The scope holds anything that left the process group (a setsid
+        # daemon, a detached test runner); stopping it ends them too.
+        if process is not None:
+            lane_slice.stop(lane_scope)
     if capture is None:  # pragma: no cover - the try block either returns or raises
         raise AssertionError("tracked capture did not produce a result")
     if not group_exited:

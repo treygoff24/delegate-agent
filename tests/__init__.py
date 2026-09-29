@@ -52,6 +52,9 @@ os.environ.pop("DELEGATE_CONFIG", None)
 # note. Most tests assert exact argv and prompts and run fake engines, so the
 # suite defaults it off; the guard's own tests enable it explicitly per test.
 os.environ["DELEGATE_WRITE_GUARD"] = "off"
+# On a host with the capped test slice installed, real launches would each get a
+# systemd scope. The suite defaults that off; tests/test_lane_slice.py enables it.
+os.environ["DELEGATE_LANE_SLICE"] = "off"
 # A workflow-pinned parent leaks PYTHONPATH=<pin src> plus DELEGATE_WORKFLOW_PIN
 # into every child. The pin src ships a sitecustomize.py that, seeing the pin
 # var, imports delegate_agent at interpreter startup -- BEFORE this package can
