@@ -26,6 +26,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent import (  # noqa: E402
+    argv_builders,
     cli,
     prompt_instructions,
     request_build,
@@ -41,6 +42,8 @@ stdin_text = sys.stdin.read()
 record = {
     "argv": sys.argv[1:],
     "disableBackgroundTasks": os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
+    "bashDefaultTimeoutMs": os.environ.get("BASH_DEFAULT_TIMEOUT_MS"),
+    "bashMaxTimeoutMs": os.environ.get("BASH_MAX_TIMEOUT_MS"),
     "stdin": stdin_text,
 }
 with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as handle:
@@ -142,6 +145,7 @@ class DegradedRunsBase(unittest.TestCase):
             "workPermissionMode": "auto",
             "noSessionPersistence": True,
         }
+        self.extra_config: dict = {}
         self.config_path = self.home / "delegate_config.json"
         self.stream_path = self.home / "stream.jsonl"
         self.log_path = self.home / "claude_log.jsonl"
@@ -149,7 +153,8 @@ class DegradedRunsBase(unittest.TestCase):
 
     def write_config(self) -> None:
         self.config_path.write_text(
-            json.dumps({"version": 1, "claude": self.claude_config}), encoding="utf-8"
+            json.dumps({"version": 1, "claude": self.claude_config, **self.extra_config}),
+            encoding="utf-8",
         )
 
     def script(self, events: list[dict]) -> None:
@@ -400,6 +405,8 @@ class DegradedPreventionTests(DegradedRunsBase):
         _initial, followup = self.child_launches()
         self.assertIn("--resume", followup["argv"])
         self.assertEqual(followup["disableBackgroundTasks"], "1")
+        self.assertEqual(followup["bashDefaultTimeoutMs"], "7200000")
+        self.assertEqual(followup["bashMaxTimeoutMs"], "7200000")
         self.assertIn("--disallowedTools", followup["argv"])
 
     def test_config_key_turns_the_prevention_off(self):
@@ -409,6 +416,8 @@ class DegradedPreventionTests(DegradedRunsBase):
         self.launch("work", "run the gate")
         (launch,) = self.child_launches()
         self.assertIsNone(launch["disableBackgroundTasks"])
+        self.assertIsNone(launch["bashDefaultTimeoutMs"])
+        self.assertIsNone(launch["bashMaxTimeoutMs"])
         self.assertNotIn("--disallowedTools", launch["argv"])
 
     def test_safe_run_argv_and_env_are_unchanged(self):
@@ -416,7 +425,100 @@ class DegradedPreventionTests(DegradedRunsBase):
         self.launch("safe", "review the diff")
         (launch,) = self.child_launches()
         self.assertIsNone(launch["disableBackgroundTasks"])
+        self.assertIsNone(launch["bashDefaultTimeoutMs"])
+        self.assertIsNone(launch["bashMaxTimeoutMs"])
         self.assertNotIn("--disallowedTools", launch["argv"])
+
+    def test_work_run_lifts_the_bash_timeouts_so_a_long_gate_fits_in_the_foreground(self):
+        # Claude Code cuts a foreground command off at 2 minutes (default) and 10
+        # minutes (maximum); with background tasks off a 15-minute gate needs more.
+        self.script(finished_stream(FINISHED_REPORT))
+        self.launch("work", "run the gate")
+        (launch,) = self.child_launches()
+        self.assertEqual(launch["bashDefaultTimeoutMs"], "7200000")
+        self.assertEqual(launch["bashMaxTimeoutMs"], "7200000")
+
+    def test_bash_timeouts_follow_a_run_timeout_longer_than_the_floor(self):
+        self.script(finished_stream(FINISHED_REPORT))
+        self.launch("work", "--timeout", "10800", "run the gate")
+        (launch,) = self.child_launches()
+        self.assertEqual(launch["bashDefaultTimeoutMs"], "10800000")
+        self.assertEqual(launch["bashMaxTimeoutMs"], "10800000")
+
+    def test_a_short_run_timeout_does_not_shrink_the_bash_timeouts_below_the_floor(self):
+        self.script(finished_stream(FINISHED_REPORT))
+        self.launch("work", "--timeout", "60", "run the gate")
+        (launch,) = self.child_launches()
+        self.assertEqual(launch["bashDefaultTimeoutMs"], "7200000")
+        self.assertEqual(launch["bashMaxTimeoutMs"], "7200000")
+
+    def test_a_profile_cannot_undo_the_prevention_environment(self):
+        # The auth profile's env is applied after Delegate builds the child env.
+        self.extra_config["profiles"] = {
+            "detectFrom": [],
+            "default": None,
+            "definitions": {
+                "loose": {
+                    "env": {
+                        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+                        "BASH_DEFAULT_TIMEOUT_MS": "1000",
+                        "BASH_MAX_TIMEOUT_MS": "2000",
+                    }
+                }
+            },
+        }
+        self.write_config()
+        self.script(finished_stream(FINISHED_REPORT))
+        exit_code, stdout, stderr = self.run_delegate(
+            ["--json", "--auth-profile", "loose", "claude", "work", "run the gate"]
+        )
+        self.assertEqual(exit_code, 0, msg=f"stdout={stdout!r} stderr={stderr!r}")
+        (launch,) = self.child_launches()
+        self.assertEqual(launch["disableBackgroundTasks"], "1")
+        self.assertEqual(launch["bashDefaultTimeoutMs"], "7200000")
+        self.assertEqual(launch["bashMaxTimeoutMs"], "7200000")
+        warnings = json.loads(stdout)["warnings"]
+        for name in (
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            "BASH_DEFAULT_TIMEOUT_MS",
+            "BASH_MAX_TIMEOUT_MS",
+        ):
+            self.assertTrue(
+                any(f"profile env {name} ignored" in warning for warning in warnings), warnings
+            )
+
+    def test_a_profile_that_agrees_with_the_prevention_environment_draws_no_warning(self):
+        self.extra_config["profiles"] = {
+            "detectFrom": [],
+            "default": None,
+            "definitions": {"same": {"env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}}},
+        }
+        self.write_config()
+        self.script(finished_stream(FINISHED_REPORT))
+        exit_code, stdout, stderr = self.run_delegate(
+            ["--json", "--auth-profile", "same", "claude", "work", "run the gate"]
+        )
+        self.assertEqual(exit_code, 0, msg=f"stdout={stdout!r} stderr={stderr!r}")
+        self.assertFalse(
+            any("profile env" in warning for warning in json.loads(stdout).get("warnings", []))
+        )
+
+    def test_with_the_prevention_off_the_profile_decides(self):
+        self.claude_config["disableBackgroundTasks"] = False
+        self.extra_config["profiles"] = {
+            "detectFrom": [],
+            "default": None,
+            "definitions": {"loose": {"env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}}},
+        }
+        self.write_config()
+        self.script(finished_stream(FINISHED_REPORT))
+        exit_code, stdout, stderr = self.run_delegate(
+            ["--json", "--auth-profile", "loose", "claude", "work", "run the gate"]
+        )
+        self.assertEqual(exit_code, 0, msg=f"stdout={stdout!r} stderr={stderr!r}")
+        (launch,) = self.child_launches()
+        self.assertEqual(launch["disableBackgroundTasks"], "0")
+        self.assertIsNone(launch["bashMaxTimeoutMs"])
 
     def test_every_tracked_run_prompt_says_ending_the_turn_ends_the_run(self):
         self.script(finished_stream(FINISHED_REPORT))
@@ -463,6 +565,37 @@ class TurnEndClauseTests(unittest.TestCase):
         self.assertNotIn(prompt_instructions.TURN_END_INSTRUCTION, self.frame(mode=""))
         slash = self.frame(prompt="/goal fix it", instruction_mode=PROMPT_INSTRUCTION_MODE_SLASH)
         self.assertEqual(slash, "/goal fix it")
+
+
+class ClaudeWorkEnvOverridesTests(unittest.TestCase):
+    def env(self, timeout_seconds, **claude):
+        return argv_builders.claude_work_env_overrides(
+            {"binary": "claude", **claude}, timeout_seconds=timeout_seconds
+        )
+
+    def test_default_run_gets_the_floor_and_a_longer_run_timeout_wins(self):
+        for timeout, expected in (
+            (None, "7200000"),
+            (60, "7200000"),
+            (7200, "7200000"),
+            (14400, "14400000"),
+        ):
+            with self.subTest(timeout=timeout):
+                env = self.env(timeout)
+                self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], expected)
+                self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], expected)
+                self.assertEqual(env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
+
+    def test_a_huge_run_timeout_is_capped_below_the_javascript_timer_limit(self):
+        env = self.env(10**9)
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], str(2**31 - 1))
+        self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(2**31 - 1))
+
+    def test_the_config_key_turns_all_of_it_off(self):
+        self.assertIsNone(self.env(3600, disableBackgroundTasks=False))
+
+    def test_every_variable_delegate_sets_is_in_the_owned_set(self):
+        self.assertEqual(set(self.env(None)), set(argv_builders.CLAUDE_WORK_OWNED_ENV))
 
 
 class DisableBackgroundTasksConfigTests(unittest.TestCase):

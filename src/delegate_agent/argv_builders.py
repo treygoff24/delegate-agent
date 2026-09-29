@@ -72,6 +72,23 @@ CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
 # Safe runs are unchanged: CLAUDE_SAFE_TOOLS already excludes Monitor.
 CLAUDE_DISABLE_BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
 CLAUDE_DISALLOWED_BACKGROUND_TOOLS = "Monitor"
+# With background tasks off, a long gate must run in the foreground, and Claude
+# Code's Bash tool times a foreground command out at 2 minutes (default) and 10
+# minutes (maximum). BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS lift both
+# (names and the 120000 / 600000 defaults read from the 2.1.284 binary). The
+# run's own --timeout is the real bound, so both take that value, floored so a
+# Run with no deadline (or a short one) still fits a long gate.
+CLAUDE_BASH_DEFAULT_TIMEOUT_ENV = "BASH_DEFAULT_TIMEOUT_MS"
+CLAUDE_BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
+CLAUDE_BASH_TIMEOUT_FLOOR_SECONDS = 2 * 60 * 60
+# Larger values overflow a JavaScript timer (2**31 - 1 ms) and fire at once.
+CLAUDE_BASH_TIMEOUT_CEILING_MS = 2_147_483_647
+# The variables Delegate owns for a Claude work Run; a profile must not undo them.
+CLAUDE_WORK_OWNED_ENV = (
+    CLAUDE_DISABLE_BACKGROUND_TASKS_ENV,
+    CLAUDE_BASH_DEFAULT_TIMEOUT_ENV,
+    CLAUDE_BASH_MAX_TIMEOUT_ENV,
+)
 
 # Claude Code 2.1.259 added --permission-prompts; 2.1.263 documents "none" as
 # "nobody: anything that would prompt is denied automatically; the permission
@@ -335,6 +352,27 @@ def build_kimi_argv(
 def claude_disables_background_tasks(claude: JsonObject) -> bool:
     """Whether a Claude work child is launched without background tasks (default on)."""
     return claude.get("disableBackgroundTasks", True) is True
+
+
+def claude_work_env_overrides(
+    claude: JsonObject, *, timeout_seconds: int | None
+) -> dict[str, str] | None:
+    """The child env that keeps a Claude work Run from backgrounding its long jobs.
+
+    None when ``claude.disableBackgroundTasks`` is off. Otherwise background tasks
+    are disabled and the Bash tool's default and maximum command timeouts are both
+    raised to the run's own ``--timeout`` (at least two hours), so a long test gate
+    that must now run in the foreground is not cut off at Claude Code's 2/10 minutes.
+    """
+    if not claude_disables_background_tasks(claude):
+        return None
+    seconds = max(timeout_seconds or 0, CLAUDE_BASH_TIMEOUT_FLOOR_SECONDS)
+    bash_timeout_ms = str(min(seconds * 1000, CLAUDE_BASH_TIMEOUT_CEILING_MS))
+    return {
+        CLAUDE_DISABLE_BACKGROUND_TASKS_ENV: "1",
+        CLAUDE_BASH_DEFAULT_TIMEOUT_ENV: bash_timeout_ms,
+        CLAUDE_BASH_MAX_TIMEOUT_ENV: bash_timeout_ms,
+    }
 
 
 def build_claude_argv(

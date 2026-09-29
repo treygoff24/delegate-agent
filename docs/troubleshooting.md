@@ -329,8 +329,10 @@ Do not read `succeeded` as "the gate passed".
 
 Claude work Runs are launched with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and
 `--disallowedTools Monitor` so the child cannot background a job in the first
-place, and every tracked work or safe prompt tells the child that ending its turn
-ends the Run. If you set `claude.disableBackgroundTasks` to `false`, or the child
+place (plus `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` at the run's
+`--timeout`, at least two hours, so a long foreground gate is not cut off at Claude
+Code's 2 and 10 minutes), and every tracked work or safe prompt tells the child that
+ending its turn ends the Run. If you set `claude.disableBackgroundTasks` to `false`, or the child
 found another way (a shell `&` or `nohup` inside a foreground command), only the
 after-the-fact detection remains. A false flag on a finished Run means its final
 message was short, not shaped like a report, and matched a waiting phrase; the

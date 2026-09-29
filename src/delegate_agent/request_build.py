@@ -42,7 +42,7 @@ from delegate_agent import (
 from delegate_agent import config as delegate_config
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
-    CLAUDE_DISABLE_BACKGROUND_TASKS_ENV,
+    CLAUDE_WORK_OWNED_ENV,
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
     _grok_harness_bypass_enabled,
@@ -56,7 +56,7 @@ from delegate_agent.argv_builders import (
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
-    claude_disables_background_tasks,
+    claude_work_env_overrides,
     omp_image_path_warnings,
     redacted_prompt_argv,
 )
@@ -3218,8 +3218,8 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     # Tracked work children (followups included) cannot background a job: it
     # would die with the session while the child reports "waiting on the gate".
     env_overrides = (
-        {CLAUDE_DISABLE_BACKGROUND_TASKS_ENV: "1"}
-        if build.mode == MODE_WORK and claude_disables_background_tasks(claude)
+        claude_work_env_overrides(claude, timeout_seconds=build.timeout_seconds)
+        if build.mode == MODE_WORK
         else None
     )
     return EngineRequestParts(
@@ -3918,6 +3918,7 @@ def _build_request_for_workspace(
             resumable=resumable,
             persist_session=persist_session,
             resume_session_id=resume_session_id,
+            timeout_seconds=timeout,
         ),
     )
     _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
@@ -4052,6 +4053,21 @@ def _apply_profile_resolution(
         # preserves the profile's effective config while preventing a later
         # ambient/profile value from clobbering the persona agent entry.
         env_overrides.update(request.persona_env_overrides)
+    owned_env_warnings: list[str] = []
+    if request.engine == "claude":
+        # A profile's env must not undo the variables Delegate owns for a Claude
+        # work Run (no background tasks, long foreground Bash timeouts): reassert
+        # them, and say so when the profile tried to set a different value.
+        request_env = request.env_overrides or {}
+        for key in CLAUDE_WORK_OWNED_ENV:
+            if key not in request_env:
+                continue
+            if resolution.env.get(key, request_env[key]) != request_env[key]:
+                owned_env_warnings.append(
+                    f"profile env {key} ignored: Delegate sets it for Claude work runs "
+                    "(set claude.disableBackgroundTasks to false to let the profile decide)"
+                )
+            env_overrides[key] = request_env[key]
     if request.engine == "opencode":
         # Profiles and ambient environment must not relax a read-only request.
         request_env = request.env_overrides or {}
@@ -4085,7 +4101,9 @@ def _apply_profile_resolution(
             fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
-        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings, *launch_warnings)),
+        warnings=_dedupe_warnings(
+            (*request.warnings, *resolution.warnings, *launch_warnings, *owned_env_warnings)
+        ),
         env_overrides=env_overrides or None,
         auth_profile=auth_profile,
         fallback_auth_profile=fallback_profile,
