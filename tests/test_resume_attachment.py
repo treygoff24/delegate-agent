@@ -450,11 +450,14 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                     resume_command,
                     "_validate_attach_target",
                     return_value={"path": expected_path},
-                ),
+                ) as validate,
             ):
                 target = resume_command._attachment_owner_target(root, attachment)
 
             self.assertEqual(target["path"], expected_path)
+            # The recorded owner (a) is absent from the index; the legacy fallback
+            # must validate the indexed run whose path matches (b), and only it.
+            self.assertEqual([call.args[1] for call in validate.call_args_list], [owner_b])
 
     def test_forbid_commit_is_inherited_and_enforced_on_attached_run(self):
         _repo, repo_path = self._make_repo()
@@ -625,18 +628,23 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 outside.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
                 os.link(outside, bad_path / "manifest.json")
 
-                code, _payload, stderr = self._resume(
+                code, payload, stderr = self._resume(
                     repo_path, fake_home, first_manifest["alias"], "second"
                 )
             self.assertEqual(code, 0, stderr)
             self.assertEqual(first_manifest["worktreeAttachment"]["sourceRunId"], owner_id)
             self.assertEqual(first_manifest["worktreeAttachment"]["path"], worktree_path)
             self.assertNotEqual(first_id, owner_id)
+            second = registry_api.load_run_manifest(root, payload["runId"])
+            self.assertNotIn(second["runId"], (owner_id, first_id, bad_id))
+            self.assertEqual(second["worktreeAttachment"]["sourceRunId"], owner_id)
+            self.assertEqual(second["worktreeAttachment"]["sourceAlias"], owner_alias)
+            self.assertEqual(second["worktreeAttachment"]["path"], worktree_path)
 
     def test_chain_owner_falls_back_when_recorded_owner_is_stale(self):
         _repo, repo_path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
-            owner_id, owner_alias, _worktree_path, _branch = self._owner(repo_path, fake_home)
+            owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
             with mock.patch.dict(
                 os.environ, {"PATH": fake_agent + os.pathsep + os.environ.get("PATH", "")}
             ):
@@ -648,10 +656,16 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 first_manifest["worktreeAttachment"]["sourceRunId"] = "del_20200101T000000Z_deadbe"
                 registry_api.write_json_atomic(first_path / "manifest.json", first_manifest)
 
-                code, _payload, stderr = self._resume(
+                code, payload, stderr = self._resume(
                     repo_path, fake_home, first_manifest["alias"], "second"
                 )
             self.assertEqual(code, 0, stderr)
+            second = registry_api.load_run_manifest(root, payload["runId"])
+            self.assertNotIn(second["runId"], (owner_id, first_id))
+            self.assertEqual(second["worktreeAttachment"]["sourceRunId"], owner_id)
+            self.assertEqual(second["worktreeAttachment"]["sourceAlias"], owner_alias)
+            self.assertEqual(second["worktreeAttachment"]["path"], worktree_path)
+            self.assertEqual(second["executionCwd"], worktree_path)
 
 
 if __name__ == "__main__":
