@@ -1244,23 +1244,54 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": True, "note": "real"})
 
-    def test_structured_negative_retries_returns_none(self) -> None:
-        dsl = self._dsl()
-        result = dsl._run_structured_or_text(
-            "claude",
-            "no-attempts",
-            mode="safe",
-            model=None,
-            effort=None,
-            fast=None,
-            schema={"type": "object"},
-            isolation=None,
-            passthrough=False,
-            timeout=None,
-            retries=-1,
-            key="negative-retries-key",
+    def test_negative_retries_still_launch_one_structured_attempt(self) -> None:
+        child = runtime._DelegateChildResult(
+            text=json.dumps({"ok": True}),
+            run_id="del_20260827T040000Z_negret1",
+            execution_cwd="/tmp/negative-retries",
+            session_id=None,
         )
-        self.assertIsNone(result)
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child) as launch,
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "one-attempt",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object"},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=-1,
+                key="negative-retries-key",
+            )
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(result, {"ok": True})
+
+    def test_negative_retries_still_launch_one_followup_attempt(self) -> None:
+        child = runtime._DelegateChildResult(
+            text="followup done",
+            run_id="del_20260827T040000Z_negret2",
+            execution_cwd=None,
+            session_id=None,
+        )
+        dsl = self._dsl()
+        with mock.patch.object(dsl, "_run_delegate_followup", return_value=child) as launch:
+            result = dsl._run_followup_structured_or_text(
+                runtime.CompletedChild("prior", "claude", True),
+                "follow up",
+                schema=None,
+                timeout=None,
+                retries=-1,
+                key="negative-followup-key",
+            )
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(result, "followup done")
 
     def test_structured_agent_accepts_json_string_payload_for_object_schema(self) -> None:
         dsl = self._dsl()

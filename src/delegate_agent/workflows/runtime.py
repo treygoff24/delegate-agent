@@ -4506,7 +4506,9 @@ class WorkflowDsl:
                 self._release_structured_retry_worktree(first_child_run_id)
             return None
         workflow_schema.validate_schema_subset(schema)
-        attempts = retries if retries is not None else _structured_retries(self.state.config)
+        attempts = (
+            max(0, retries) if retries is not None else _structured_retries(self.state.config)
+        )
         native_schema_reason = structured_output.native_schema_eligible(engine, schema)
         native_schema = _native_schema(engine, schema)
         if native_schema is None and engine in structured_output.NATIVE_SCHEMA_ENGINES:
@@ -5398,7 +5400,7 @@ class WorkflowDsl:
         if schema is not None:
             workflow_schema.validate_schema_subset(schema)
         attempts = (
-            retries
+            max(0, retries)
             if retries is not None
             else (_structured_retries(self.state.config) if schema is not None else 0)
         )
