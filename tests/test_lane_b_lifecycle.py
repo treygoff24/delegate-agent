@@ -18,6 +18,8 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
         timeout: int | None,
         stall_minutes: float | None = None,
         flag_minutes: str | None = None,
+        effort: str | None = None,
+        dry_run_payload: bool = False,
     ):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
@@ -30,6 +32,8 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
             args.extend(("--timeout", str(timeout)))
         if flag_minutes is not None:
             args.extend(("--stall-minutes", flag_minutes))
+        if effort is not None:
+            args.extend(("--reasoning-effort", effort))
         args.append("check the workspace")
 
         with tempfile.TemporaryDirectory() as home_tmp:
@@ -94,6 +98,81 @@ class SilentHarnessStallPolicyTests(unittest.TestCase):
     def test_without_the_flag_the_threshold_is_not_pinned(self):
         request = self._captured_request("claude", timeout=None)
         self.assertFalse(request.stall_seconds_pinned)
+
+
+class EffortAwareStallWindowTests(unittest.TestCase):
+    _captured_request = SilentHarnessStallPolicyTests._captured_request
+
+    LONG = stall_watchdog.stall_seconds_from_minutes(
+        stall_watchdog.STALL_MINUTES_LONG_THINKING_DEFAULT
+    )
+    FLAT = stall_watchdog.stall_seconds_from_minutes(stall_watchdog.STALL_MINUTES_DEFAULT)
+
+    def test_xhigh_and_max_get_the_longer_default_window(self):
+        for engine, effort in (("codex", "xhigh"), ("claude", "max"), ("claude", "xhigh")):
+            with self.subTest(engine=engine, effort=effort):
+                request = self._captured_request(engine, timeout=None, effort=effort)
+                self.assertEqual(request.stall_seconds, self.LONG)
+                self.assertEqual(request.stall_source, "effort_default")
+                self.assertFalse(request.stall_seconds_pinned)
+
+    def test_lower_efforts_keep_the_flat_default(self):
+        request = self._captured_request("codex", timeout=None, effort="high")
+        self.assertEqual(request.stall_seconds, self.FLAT)
+        self.assertEqual(request.stall_source, "default")
+
+    def test_flag_and_config_beat_the_effort_default(self):
+        flagged = self._captured_request("codex", timeout=None, effort="xhigh", flag_minutes="3")
+        self.assertEqual((flagged.stall_seconds, flagged.stall_source), (180.0, "flag"))
+        configured = self._captured_request("codex", timeout=None, effort="xhigh", stall_minutes=4)
+        self.assertEqual((configured.stall_seconds, configured.stall_source), (240.0, "config"))
+
+    def test_an_effort_suffixed_model_id_counts(self):
+        self.assertTrue(stall_watchdog.is_long_thinking_effort(None, "grok-4.7-xhigh-fast"))
+        self.assertFalse(stall_watchdog.is_long_thinking_effort(None, "grok-4.7-high"))
+        self.assertFalse(stall_watchdog.is_long_thinking_effort("high", "grok-4.7-xhigh"))
+
+    def test_env_override_is_reported_as_the_source(self):
+        seconds, source = stall_watchdog.apply_env_override(
+            self.LONG, "effort_default", pinned=False, raw_env="2"
+        )
+        self.assertEqual((seconds, source), (120.0, "env"))
+        self.assertEqual(
+            stall_watchdog.apply_env_override(self.LONG, "flag", pinned=True, raw_env="2"),
+            (self.LONG, "flag"),
+        )
+        self.assertEqual(
+            stall_watchdog.apply_env_override(self.LONG, "default", pinned=False, raw_env="junk"),
+            (self.LONG, "default"),
+        )
+
+    def test_dry_run_and_manifest_show_the_window_and_its_source(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        out = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            mock.patch.dict(os.environ, {"HOME": home_tmp, "AI_PROFILE": ""}),
+        ):
+            cli.main(
+                [
+                    "--json",
+                    "--cwd",
+                    repo.name,
+                    "dry-run",
+                    "codex",
+                    "work",
+                    "--reasoning-effort",
+                    "xhigh",
+                    "hi",
+                ],
+                stdout=out,
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(
+            json.loads(out.getvalue())["stallWindow"],
+            {"minutes": 20.0, "source": "effort_default"},
+        )
 
 
 class StallMinutesParserTests(unittest.TestCase):

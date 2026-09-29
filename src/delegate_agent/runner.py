@@ -203,6 +203,7 @@ class RunContext:
     # --stall-minutes pinned this run's threshold; DELEGATE_STALL_MINUTES does
     # not override a per-run choice.
     stall_seconds_pinned: bool = False
+    stall_source: str = "default"
     process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
     tracked_stream_max_bytes: int | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
@@ -850,6 +851,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         # Only an explicit --stall-minutes is recorded, so resume and followup
         # inherit operator intent; a config or env default is re-resolved.
         payload["stallMinutes"] = ctx.stall_seconds / stall_watchdog.SECONDS_PER_MINUTE
+    window_seconds, window_source = _effective_stall_window(ctx)
+    payload["stallWindow"] = stall_watchdog.stall_window_record(window_seconds, window_source)
     if ctx.tracked_stream_max_bytes is not None:
         # null records "no cap" (the default) without a misleading 0.
         payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes or None
@@ -2403,6 +2406,16 @@ def _stall_message(detail: JsonObject) -> str:
     )
 
 
+def _effective_stall_window(ctx: RunContext) -> tuple[float, str]:
+    """The silent window this run's watchdog uses, and its source (env applied)."""
+    return stall_watchdog.apply_env_override(
+        ctx.stall_seconds,
+        ctx.stall_source,
+        pinned=ctx.stall_seconds_pinned,
+        raw_env=os.environ.get(STALL_MINUTES_ENV),
+    )
+
+
 def _stall_seconds_from_env(default: float) -> float:
     """Operator override for the configured stall threshold, in minutes.
 
@@ -2945,11 +2958,7 @@ def _capture_tracked_process(
         continuity_mode=ctx.continuity_mode,
     )
     watchdog = stall_watchdog.StallWatchdog(
-        stall_seconds=(
-            ctx.stall_seconds
-            if ctx.stall_seconds_pinned
-            else _stall_seconds_from_env(ctx.stall_seconds)
-        ),
+        stall_seconds=_effective_stall_window(ctx)[0],
         harness=ctx.harness,
         progress_probe=_worktree_head_probe(ctx.execution_cwd),
     )
@@ -3673,6 +3682,15 @@ def _observe_lane_health(
         and provider_error is not None
         and provider_errors.reason_for_record(provider_error) == "usage_limit"
     ):
+        return
+    if not succeeded and auto_resume.defers_lane_marker(
+        provider_error,
+        enabled=ctx.provider_policy.auto_resume,
+        already_automatic=ctx.auto_resume is not None,
+    ):
+        # One broker binding refusal is launch-slot contention; the automatic
+        # retry decides whether the lane is really bad.
+        merged_extra["laneMarkerDeferred"] = "broker_binding_retry"
         return
     marker_result = lane_health.observe(
         ctx.lane,

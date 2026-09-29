@@ -486,6 +486,18 @@ class ResumeInheritanceTests(ResumeFixture):
         self.assertEqual(runner_api.build_manifest(pinned, ["codex"])["stallMinutes"], 7.5)
         default = runner_api.RunContext(**base, stall_seconds=450.0)
         self.assertNotIn("stallMinutes", runner_api.build_manifest(default, ["codex"]))
+        # The effective window and its source are always recorded (an addition).
+        self.assertEqual(
+            runner_api.build_manifest(default, ["codex"])["stallWindow"],
+            {"minutes": 7.5, "source": "default"},
+        )
+        long_run = runner_api.RunContext(
+            **base, stall_seconds=1200.0, stall_source="effort_default"
+        )
+        self.assertEqual(
+            runner_api.build_manifest(long_run, ["codex"])["stallWindow"],
+            {"minutes": 20.0, "source": "effort_default"},
+        )
 
     def test_runs_prune_removes_only_old_dead_legacy_resume_schema(self):
         self.write_config({})

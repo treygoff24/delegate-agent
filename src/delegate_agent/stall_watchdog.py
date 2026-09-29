@@ -67,6 +67,21 @@ from delegate_agent.json_types import JsonObject, JsonValue
 # Minutes of no progress before a tracked run is cancelled. 0 disables.
 STALL_MINUTES_DEFAULT = 8
 SECONDS_PER_MINUTE = 60
+# Runs at these reasoning efforts can think silently for many minutes (a Grok
+# xhigh review was killed at 8), so their default silent window is longer. An
+# explicit --stall-minutes, config stallMinutes, or DELEGATE_STALL_MINUTES wins.
+LONG_THINKING_EFFORTS = frozenset({"xhigh", "max", "ultra"})
+STALL_MINUTES_LONG_THINKING_DEFAULT = 20
+
+STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
+STALL_SOURCE_DEFAULT = "default"
+STALL_SOURCE_EFFORT_DEFAULT = "effort_default"
+STALL_SOURCE_FLAG = "flag"
+STALL_SOURCE_CONFIG = "config"
+STALL_SOURCE_ENV = "env"
+STALL_SOURCE_HARNESS_DEFAULT = "harness_default"
+
+_MODEL_EFFORT_SUFFIX = re.compile(r"-(?P<effort>xhigh|max|ultra)(?:-fast)?$")
 
 # How many recent DISTINCT delta contents are remembered. A short repeating
 # cycle -- the observed failure alternated an opening and a closing fence -- is
@@ -146,6 +161,15 @@ def stall_seconds_from_minutes(minutes: float) -> float:
     return float(minutes) * SECONDS_PER_MINUTE
 
 
+def is_long_thinking_effort(effort: str | None, model: str | None = None) -> bool:
+    """True when the run's reasoning effort (or an effort-suffixed model id) is xhigh or above."""
+    if effort:
+        return effort.strip().lower() in LONG_THINKING_EFFORTS
+    if model:
+        return _MODEL_EFFORT_SUFFIX.search(model.strip().lower()) is not None
+    return False
+
+
 def effective_stall_seconds(
     configured_seconds: float,
     *,
@@ -161,6 +185,63 @@ def effective_stall_seconds(
     ):
         return 0.0
     return configured_seconds
+
+
+def resolve_stall_window(
+    configured_seconds: float,
+    *,
+    harness: str,
+    timeout_seconds: int | None,
+    pinned: bool,
+    config_explicit: bool,
+    effort: str | None,
+    model: str | None = None,
+) -> tuple[float, str]:
+    """The launch's silent-window seconds and where they came from.
+
+    Sources: ``flag`` (--stall-minutes), ``config`` (stallMinutes),
+    ``harness_default`` (silent harness with a deadline: watchdog off),
+    ``effort_default`` (xhigh/max/ultra get a longer default), ``default``.
+    DELEGATE_STALL_MINUTES is applied later, at spawn, and reports ``env``.
+    """
+    if pinned:
+        return configured_seconds, STALL_SOURCE_FLAG
+    if config_explicit:
+        return configured_seconds, STALL_SOURCE_CONFIG
+    disabled = effective_stall_seconds(
+        configured_seconds,
+        harness=harness,
+        timeout_seconds=timeout_seconds,
+        explicitly_configured=False,
+    )
+    if disabled != configured_seconds:
+        return disabled, STALL_SOURCE_HARNESS_DEFAULT
+    if is_long_thinking_effort(effort, model):
+        return (
+            stall_seconds_from_minutes(STALL_MINUTES_LONG_THINKING_DEFAULT),
+            STALL_SOURCE_EFFORT_DEFAULT,
+        )
+    return configured_seconds, STALL_SOURCE_DEFAULT
+
+
+def apply_env_override(
+    seconds: float, source: str, *, pinned: bool, raw_env: str | None
+) -> tuple[float, str]:
+    """Apply DELEGATE_STALL_MINUTES (an unpinned run only); junk values are ignored."""
+    if pinned or raw_env is None:
+        return seconds, source
+    try:
+        minutes = float(raw_env)
+    except ValueError:
+        return seconds, source
+    if not math.isfinite(minutes) or minutes < 0:
+        return seconds, source
+    return stall_seconds_from_minutes(minutes), STALL_SOURCE_ENV
+
+
+def stall_window_record(seconds: float, source: str) -> JsonObject:
+    """The manifest/dry-run record of the effective silent window."""
+    return {"minutes": seconds / SECONDS_PER_MINUTE, "source": source}
 
 
 def normalize_delta(text: str) -> str:
