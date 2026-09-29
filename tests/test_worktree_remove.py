@@ -78,10 +78,16 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
                 "process_group_alive",
             ),
             (
-                "forced-live-owner",
+                "kill-live-owner",
+                {"status": "running", "pid": os.getpid()},
+                "--kill-live",
+                None,
+            ),
+            (
+                "force-live-owner",
                 {"status": "running", "pid": os.getpid()},
                 "--force",
-                None,
+                "run_active",
             ),
         )
         for label, state_fields, option, expected_error in cases:
@@ -113,6 +119,8 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
                         self.assertEqual(code, errors_api.EXIT_USAGE, out)
                         self.assertEqual(json.loads(out)["code"], expected_error)
                         self.assertTrue(Path(wt_path).exists())
+                        if option == "--force":
+                            self.assertIn("--kill-live", json.loads(out)["message"])
 
     def test_worktree_remove_refuses_source_root_target(self):
         _repo, path = self._make_repo()
@@ -150,7 +158,7 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(code, errors_api.EXIT_USAGE)
             payload = json.loads(out)
             self.assertEqual(payload["code"], "dirty_worktree")
-            self.assertIn("?? scratch.txt", payload["dirtyPaths"])
+            self.assertIn("scratch.txt", payload["dirtyPaths"])
             self.assertEqual(
                 payload["nextActions"],
                 [

@@ -2052,7 +2052,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Remove one persistent worktree and, by default, its branch.",
         usage=(
             "delegate [--cwd PATH] [--json] worktree remove <handle|--group NAME> "
-            "[--discard-uncommitted] [--force-branch] [--force] [--keep-branch]",
+            "[--discard-uncommitted] [--force-branch] [--force] [--kill-live] [--keep-branch]",
         ),
         arguments=(
             ArgSpec(
@@ -2075,7 +2075,17 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Remove the branch even if it is not fully merged.",
             ),
-            OptionSpec("--force", None, "Force removal of the worktree and its branch."),
+            OptionSpec(
+                "--force",
+                None,
+                "Shorthand for --discard-uncommitted and --force-branch. Never overrides a live run.",
+            ),
+            OptionSpec(
+                "--kill-live",
+                None,
+                "Also remove a worktree a live run still holds; that run loses its workspace. "
+                "The only way past the live-owner guard.",
+            ),
             OptionSpec("--keep-branch", None, "Remove the worktree but keep its branch."),
         ),
         examples=(
@@ -2085,6 +2095,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "--keep-branch is mutually exclusive with --force-branch and --force.",
+            "Uncommitted changes means what a lane changed: launch-seeded files that still "
+            "match the launch digest and the configured ledger globs "
+            "(worktrees.retirementIgnoreGlobs) do not count, the same as at completion "
+            "and in prune.",
+            "A worktree whose owning Run is still live is refused with run_active, "
+            "run_not_terminal, process_group_alive, or worktree_leased. --force does not "
+            "override that; --kill-live does.",
+            "A worktree with no run record is removed with worktree reap --path, not here.",
             "A --help token anywhere in the args prints help and removes nothing.",
         ),
         see_also=("worktree list", "worktree prune", "worktree gc"),
@@ -2096,7 +2114,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--cwd PATH] [--json] worktree prune "
             "[--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] "
-            "[--dry-run] [--discard-uncommitted] [--force-branch] [--force]",
+            "[--dry-run] [--discard-uncommitted] [--force-branch] [--force] [--kill-live]",
         ),
         options=(
             OptionSpec("--merged", None, "Prune only worktrees whose branch is merged."),
@@ -2127,7 +2145,17 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Remove branches even if not fully merged.",
             ),
-            OptionSpec("--force", None, "Force removal of matched worktrees and their branches."),
+            OptionSpec(
+                "--force",
+                None,
+                "Shorthand for --discard-uncommitted and --force-branch. Never overrides a live run.",
+            ),
+            OptionSpec(
+                "--kill-live",
+                None,
+                "Also prune worktrees a live run still holds; those runs lose their workspace. "
+                "The only way past the live-owner guard.",
+            ),
         ),
         examples=(
             "delegate worktree prune --merged",
@@ -2138,7 +2166,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Prune never selects a worktree whose owning Run has not reached a "
             "terminal status, or whose recorded process group is still alive; "
             "those are reported as run_active, run_not_terminal, and "
-            "process_group_alive. --force overrides the guard.",
+            "process_group_alive (and worktree_leased while the launcher holds the "
+            "run). --force does not override that guard; only --kill-live does.",
+            "Uncommitted changes means what a lane changed: launch-seeded files that still "
+            "match the launch digest and the configured ledger globs "
+            "(worktrees.retirementIgnoreGlobs) do not count, the same as at completion "
+            "and in remove.",
         ),
         see_also=("worktree list", "worktree remove", "worktree gc"),
         unsupported_global_options=("--isolation", "--auth-profile"),
@@ -2185,7 +2218,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--cwd PATH] [--json] worktree reap "
             "(--handle HANDLE | --path PATH | --group NAME) --older-than DAYS "
-            "[--dry-run] [--yes] [--force] [--discard-uncommitted]",
+            "[--dry-run] [--yes] [--force] [--kill-live] [--discard-uncommitted]",
         ),
         options=(
             OptionSpec("--handle", "HANDLE", "Select one persistent worktree by run ID or alias."),
@@ -2203,7 +2236,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--force",
                 None,
-                "Allow removal when source-gone cleanliness is unknown; branches are preserved.",
+                "Allow removal when source-gone cleanliness is unknown, and remove a path Git "
+                "still links but no run record owns. Branches are preserved. Never overrides a live run.",
+            ),
+            OptionSpec(
+                "--kill-live",
+                None,
+                "Also remove a worktree a live run holds, or one with a process working "
+                "inside it. The only way past those guards.",
             ),
             OptionSpec(
                 "--discard-uncommitted",
@@ -2219,6 +2259,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Exactly one selector is required; --older-than is always required.",
             "Without --yes the command reports a confirmation requirement and leaves paths unchanged.",
             "Source-gone paths have unknown dirt; removal requires --yes plus either --force or --discard-uncommitted. Branches are never touched.",
+            "A --path with no run record that Git still links is skipped as live_backlink; "
+            "--force --yes removes it after checking for uncommitted work, a record in the "
+            "source repository's own Registry, and processes whose cwd is inside it.",
+            "--force never overrides a live run; --kill-live does (worktree_leased, run_active, "
+            "or a process_cwd_inside).",
             "A --help token anywhere in the args prints help and reaps nothing.",
         ),
         see_also=(

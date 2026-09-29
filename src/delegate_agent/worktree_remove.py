@@ -36,7 +36,7 @@ class RemoveWorktreeOptions:
     discard_uncommitted: bool
     force_branch: bool
     keep_branch: bool
-    force: bool = False
+    kill_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -274,7 +274,7 @@ def _build_remove_worktree_plan(
         discard_uncommitted=options.discard_uncommitted,
         force_branch=options.force_branch,
         keep_branch=options.keep_branch,
-        force=options.force,
+        kill_live=options.kill_live,
         require_merged=True,
     )
     if decision.reason is not None:
@@ -418,10 +418,16 @@ def remove_worktree(
     force_branch: bool = False,
     keep_branch: bool = False,
     force: bool = False,
+    kill_live: bool = False,
     include_detached: bool = False,
     retirement_ignore_globs: tuple[str, ...] | None = None,
     workspace: Path | None = None,
 ) -> JsonObject:
+    """Remove one persistent worktree after the shared safety checks.
+
+    ``force`` is the shorthand for ``discard_uncommitted`` plus ``force_branch``.
+    It never overrides a live owner run; ``kill_live`` does, on its own.
+    """
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
         force_branch=force_branch,
@@ -433,7 +439,7 @@ def remove_worktree(
         discard_uncommitted=discard_uncommitted,
         force_branch=force_branch,
         keep_branch=keep_branch,
-        force=force,
+        kill_live=kill_live,
     )
     with run_registry.registry_lock(registry_root):
         record = wm.resolve_record(registry_root, handle=handle, workspace=workspace)
@@ -442,7 +448,7 @@ def remove_worktree(
             registry_root,
             record,
             include_detached=include_detached,
-            force=force,
+            kill_live=kill_live,
             check_merge=not keep_branch and not force_branch,
             retirement_ignore_globs=retirement_ignore_globs,
         )
@@ -457,10 +463,9 @@ def remove_worktree(
         if plan.status == STATUS_MISSING:
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
-        # Ignored/seeded dirt needs Git force only after locked policy validation.
-        physical_options = (
-            replace(options, discard_uncommitted=True)
-            if retirement_ignore_globs is not None
-            else options
+        # The policy above judged effective dirt, so what remains is dirt the
+        # policy discounts (seeded or ledger files). Git only removes a path
+        # holding any of it with its own force, which is now authorized.
+        return _remove_present_worktree_path(
+            registry_root, plan, options=replace(options, discard_uncommitted=True)
         )
-        return _remove_present_worktree_path(registry_root, plan, options=physical_options)

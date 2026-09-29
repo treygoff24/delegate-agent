@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import isolation, run_registry, worktree_gc, worktree_mgmt, worktree_remove
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
@@ -24,6 +25,7 @@ class WorktreeCommand:
     discard_uncommitted: bool = False
     force_branch: bool = False
     force: bool = False
+    kill_live: bool = False
     keep_branch: bool = False
     merged: bool = False
     older_than_days: int | None = None
@@ -84,8 +86,9 @@ def _show_payload(
 
 
 def _remove_payload(
-    command: WorktreeCommand, registry_root: Path, _config: JsonObject, workspace: Path | None
+    command: WorktreeCommand, registry_root: Path, config: JsonObject, workspace: Path | None
 ) -> JsonObject:
+    ignore_globs = delegate_config.retirement_ignore_globs(config)
     if command.group is not None:
         removed: list[JsonObject] = []
         errors: list[JsonObject] = []
@@ -116,6 +119,8 @@ def _remove_payload(
                         force_branch=command.force_branch,
                         keep_branch=command.keep_branch,
                         force=command.force,
+                        kill_live=command.kill_live,
+                        retirement_ignore_globs=ignore_globs,
                     )
                 )
                 if removed[-1].get("ok") is False:
@@ -147,12 +152,14 @@ def _remove_payload(
         force_branch=command.force_branch,
         keep_branch=command.keep_branch,
         force=command.force,
+        kill_live=command.kill_live,
+        retirement_ignore_globs=ignore_globs,
         workspace=workspace,
     )
 
 
 def _prune_payload(
-    command: WorktreeCommand, registry_root: Path, _config: JsonObject, _workspace: Path | None
+    command: WorktreeCommand, registry_root: Path, config: JsonObject, _workspace: Path | None
 ) -> JsonObject:
     return worktree_gc.prune_worktrees(
         registry_root,
@@ -165,6 +172,8 @@ def _prune_payload(
         discard_uncommitted=command.discard_uncommitted,
         force_branch=command.force_branch,
         force=command.force,
+        kill_live=command.kill_live,
+        retirement_ignore_globs=delegate_config.retirement_ignore_globs(config),
     )
 
 
@@ -207,6 +216,8 @@ def _reap_payload(
         yes=command.yes,
         force=command.force,
         discard_uncommitted=command.discard_uncommitted,
+        kill_live=command.kill_live,
+        retirement_ignore_globs=delegate_config.retirement_ignore_globs(config),
     )
 
 
