@@ -914,6 +914,14 @@ class SetupProcessUnitTests(unittest.TestCase):
         result = self._run_setup(f"printf '%s' {text}", mask_values=env)
         self.assertEqual(result.output_tail, "***")
 
+    def test_record_level_masking_does_not_join_halves_of_a_secret(self):
+        # Masking the short value turns the text into an 11-character piece of
+        # SECRET; whole-value masking alone would leave it in the record.
+        env = {"SHORT": "QQQQ", "SECRET": "ABCDEFGH***IJKLMN"}
+        text = "EFGHQQQQIJKL"
+        self.assertEqual(workspace_spec.mask_recorded_env_values(text, env), "EFGH***IJKL")
+        self.assertEqual(workspace_spec.mask_recorded_env(text, env), "***")
+
     def test_a_sigterm_during_the_setup_pgid_clear_is_not_swallowed(self):
         """The clear waits on the registry lock, the launcher's longest window.
 

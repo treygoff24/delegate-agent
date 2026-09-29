@@ -848,7 +848,7 @@ def _run_workspace_setup_or_record_failure(
     # cuts the tail to its recorded length (masking a cut tail would miss a
     # value that straddled the cut), so this pass is the record-level guarantee:
     # whatever tail reaches this message is masked here as well.
-    tail = workspace_spec.mask_recorded_env_values(result.output_tail, recorded_env)
+    tail = workspace_spec.mask_recorded_env(result.output_tail, recorded_env)
     if tail.strip():
         message = f"{message}\n--- setup output (tail) ---\n{tail}"
     _record_persistent_worktree_failure(

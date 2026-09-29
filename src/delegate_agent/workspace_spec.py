@@ -212,6 +212,16 @@ def mask_recorded_env_values(text: str, env: Mapping[str, str] | None) -> str:
     return text
 
 
+def mask_recorded_env(text: str, env: Mapping[str, str] | None) -> str:
+    """Whole-value masking, then fragment masking to a fixpoint.
+
+    Whole-value masking can join the halves of a mask-containing value (a
+    four-character value between them becomes ``***``), so any pass that
+    re-masks already-cut text runs both, in this order.
+    """
+    return mask_recorded_env_fragments(mask_recorded_env_values(text, env), env)
+
+
 def mask_recorded_env_fragments(text: str, env: Mapping[str, str] | None) -> str:
     """Mask merged spans covered by recorded values' 8-character substrings.
 
