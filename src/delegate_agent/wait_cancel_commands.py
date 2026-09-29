@@ -17,6 +17,7 @@ from delegate_agent import (
     degraded,
     outcome,
     profiles,
+    record_io,
     redaction,
     run_registry,
     snapshot_view,
@@ -264,7 +265,7 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         failure = str(run.get("failureReason") or run.get("staleReason") or "")[:40]
         print(f"{alias:<12} {status:<10} {quality:<16} {failure}", file=stdout)
         unread = run.get("unreadMail")
-        if isinstance(unread, dict) and unread.get("count"):
+        if isinstance(unread, dict) and (unread.get("count") or unread.get("unreadable")):
             print(
                 f"  unread mail: {unread.get('count')} delivered message(s) never read by this "
                 "run; see warnings in `delegate snapshot` and send the correction with "
@@ -746,6 +747,34 @@ STALE_SEAL_WARNING = (
 )
 
 
+def _record_unread_mail_on_cancel(
+    registry_root: Path, target: run_registry.RunTarget, updated: JsonObject
+) -> None:
+    """Stamp ``unreadMail`` on a cancelled record, as the runner does at finalization.
+
+    Every cancel path (locked, urgent, unlaunched seal, stale seal) ends here, so
+    mail delivered to a lane that is then cancelled is still reported. A record
+    the runner already finalized keeps the ``unreadMail`` it wrote.
+    """
+    if "unreadMail" in updated:
+        return
+    from delegate_agent import mail
+
+    manifest = record_io.load_run_manifest_or_none(registry_root, target.run_id)
+    push = isinstance(manifest, dict) and manifest.get("mailPush") is True
+    unread = mail.unread_mail_extra(
+        registry_root, target.run_id, target.alias or target.run_id, mail_push=push
+    )
+    if not unread:
+        return
+    updated["unreadMail"] = unread["unreadMail"]
+    warnings = list(updated.get("warnings") or [])
+    for warning in unread["warnings"]:
+        if warning not in warnings:
+            warnings.append(warning)
+    updated["warnings"] = warnings
+
+
 def _persist_cancelled_terminal_locked(
     registry_root: Path,
     target: run_registry.RunTarget,
@@ -793,6 +822,7 @@ def _persist_cancelled_terminal_locked(
             *existing,
             *(warning for warning in warnings if warning not in existing),
         ]
+    _record_unread_mail_on_cancel(registry_root, target, updated)
     updated.update(
         {
             "schema": run_registry.STATE_SCHEMA,
