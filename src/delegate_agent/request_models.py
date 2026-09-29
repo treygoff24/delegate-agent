@@ -16,6 +16,7 @@ from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
+from delegate_agent.write_guard import WriteGuardSettings
 
 CONTINUITY_MODES = frozenset({"pinned", "fungible", "panel"})
 DEFAULT_CONTINUITY_MODE = "fungible"
@@ -54,6 +55,8 @@ class LaunchOptions:
     forbid_commit: bool = False
     forbid_commit_implied_isolation: bool = False
     expect_files: tuple[str, ...] = ()
+    # Extra paths the work write guard leaves writable for this run (--writable).
+    writable: tuple[str, ...] = ()
     include_dirty: bool = False
     read_only: bool = False
     pure: bool = False
@@ -226,6 +229,7 @@ class PromptTail(NamedTuple):
     workspace_env_files: tuple[str, ...] = ()
     workspace_setup: str | None = None
     stall_minutes: float | None = None
+    writable: tuple[str, ...] = ()
 
 
 @dataclass
@@ -274,6 +278,9 @@ class Request:
     tracked_stream_max_bytes: int | None = None
     forbid_commit: bool = False
     expect_files: tuple[str, ...] = ()
+    # Work write guard settings for this run; None outside work mode and under
+    # --pass-through (which runs the child unguarded).
+    write_guard: WriteGuardSettings | None = None
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None

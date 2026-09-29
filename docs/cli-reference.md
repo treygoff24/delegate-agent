@@ -263,15 +263,28 @@ default-threshold stall on those two is normally a false positive, and a run wit
 no deadline keeps the detector, because nothing else would stop it. An explicit
 operator `stallMinutes` is always honored, on every engine, deadline or not.
 
-`--forbid-commit` is an opt-in launch flag for `work` mode with persistent
-worktree isolation; when isolation is omitted, it implies `--isolation worktree`
-and launch output prints `note: --forbid-commit implies --isolation worktree`.
-It injects a no-commit prompt note and fails the run if
-commits remain ahead of the creation base when the child exits. Without it,
-Delegate still reports remaining child commits in the work summary, emits a
-warning plus suggested review commands, but does not fail solely because commits
-exist. Validation rejects `--forbid-commit` outside `work` mode, and explicit
-`--isolation none --forbid-commit` remains invalid.
+`--forbid-commit` is an opt-in launch flag for `work` mode; when isolation is
+omitted, it implies `--isolation worktree` and launch output prints
+`note: --forbid-commit implies --isolation worktree`. An explicit
+`--isolation none --forbid-commit` is accepted and enforced on the real
+workspace. It injects a no-commit prompt note, makes commits fail inside the
+child through run-owned git hooks (`core.hooksPath` set through
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`), and fails the run
+if commits remain ahead of the creation base when the child exits (for
+`--isolation none`, the HEAD recorded at launch). The hooks can be bypassed with
+`git -c core.hooksPath=/dev/null commit` or `git commit-tree`; the post-exit
+check is the backstop. Without the flag, Delegate still reports remaining child
+commits in the work summary, emits a warning plus suggested review commands,
+but does not fail solely because commits exist. Validation rejects
+`--forbid-commit` outside `work` mode.
+
+`--writable PATH` (repeatable, `work` mode only, CLI-only) leaves an existing
+PATH writable under the [work write guard](security-model.md#work-write-guard)
+even though it sits inside a protected path such as a sibling checkout under the
+code root. Relative paths resolve against the caller's directory. The re-open is
+recorded in the run manifest and in `--dry-run` under `writeGuard`. The guard's
+protected list and backend choice are configured under
+[`isolation.writeGuard`](configuration.md#isolationwriteguard).
 
 Work-mode persistent worktrees automatically copy uncommitted tracked changes
 and untracked non-ignored files from a dirty source checkout before the child
@@ -859,6 +872,8 @@ is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
 
+Work-mode dry-runs also include `writeGuard`: the planned backend (`bwrap`, `seatbelt`, or `codex-native-sandbox`), the protected paths, and each writable re-open with its reason. On a host with no backend it carries a status (`off` or `unavailable`) and the reason instead. A dry-run lists only what is known before launch; the run scratch, temp and engine-home re-opens are added to the manifest record when the child starts.
+
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
 
 ### Profiles
@@ -1034,7 +1049,7 @@ Supported input keys:
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
-- `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
+- `forbidCommit`: optional boolean. `true` requires `mode: "work"`, makes commits fail inside the child through run-owned git hooks, and fails the run if the child creates commits (any isolation, including `none`; with isolation omitted it implies `worktree`). `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
 - `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.

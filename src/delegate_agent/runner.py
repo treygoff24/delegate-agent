@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +27,7 @@ from delegate_agent import (
     account_binding,
     child_failures,
     failover_state,
+    git_utils,
     harness_events,
     mail,
     mail_push,
@@ -48,11 +49,14 @@ from delegate_agent import (
     terminal_states,
     workspace_spec,
     worktree_summary,
+    write_guard,
+    write_guard_launch,
 )
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, is_non_negative_int
+from delegate_agent.write_guard import WriteGuardSettings
 
 STDOUT_LOG = run_registry.STDOUT_LOG
 STDERR_LOG = run_registry.STDERR_LOG
@@ -231,6 +235,10 @@ class RunContext:
     account_binding_command: tuple[str, ...] | None = None
     sandbox: sandbox_bwrap.SandboxPlan | None = None
     scratch_permissions: JsonObject | None = None
+    # Work write guard settings (None outside work mode) and, once known, the
+    # record of what was enforced; the record lands in the manifest.
+    write_guard: WriteGuardSettings | None = None
+    write_guard_record: JsonObject | None = None
     # Bounded wait for registry mutations. Finalization writes a WAL when this
     # budget expires; launch admission fails before spawning a child.
     registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
@@ -739,6 +747,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["worktreeAttachment"] = ctx.worktree_attachment
     if ctx.workspace_spec is not None:
         payload["workspaceSpec"] = ctx.workspace_spec
+    if ctx.write_guard_record is not None:
+        payload["writeGuard"] = ctx.write_guard_record
     return payload
 
 
@@ -1906,6 +1916,41 @@ def _source_commits_missed(summary: JsonObject | None) -> int | None:
     return commits if isinstance(commits, int) and commits > 0 else None
 
 
+def _in_place_commits_created(ctx: RunContext) -> int | None:
+    """Commits a ``--forbid-commit`` child added to the caller's own checkout.
+
+    An in-place run has no worktree summary, so the count is taken from the HEAD
+    recorded at launch. ``None`` means it could not be verified.
+    """
+    if ctx.workspace_kind != "git":
+        return None
+    creation = ctx.creation_context if isinstance(ctx.creation_context, dict) else {}
+    base = creation.get("sourceHeadOid")
+    if isinstance(base, str) and base:
+        spec = f"{base}..HEAD"
+    else:
+        # The checkout had no commits at launch: any commit now is a violation.
+        head = git_utils.run_git(
+            ctx.execution_cwd,
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+            timeout_seconds=git_utils.GIT_QUICK_TIMEOUT_SECONDS,
+        )
+        if head.returncode != 0:
+            return 0 if head.returncode == 1 and not head.stderr.strip() else None
+        spec = "HEAD"
+    counted = git_utils.run_git(
+        ctx.execution_cwd,
+        ["rev-list", "--count", spec],
+        timeout_seconds=git_utils.GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if counted.returncode != 0:
+        return None
+    try:
+        return int(counted.stdout.strip())
+    except ValueError:
+        return None
+
+
 def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObject]:
     extra: JsonObject = {}
     summary = _persistent_work_summary(ctx)
@@ -1956,6 +2001,8 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         extra["warnings"] = warnings
 
     commits_created = worktree_summary.commits_created_count(summary)
+    if summary is None and ctx.forbid_commit:
+        commits_created = _in_place_commits_created(ctx)
     if (
         summary is not None
         and commits_created is not None
@@ -2402,6 +2449,18 @@ def _install_no_page_ask(env: dict[str, str], root: Path | None) -> None:
     env["PATH"] = f"{stub_dir}{os.pathsep}{path}" if path else str(stub_dir)
 
 
+def _guard_run_roots(ctx: RunContext, files: TrackedRunFiles) -> tuple[write_guard.Reopen, ...]:
+    """Run-owned directories the work write guard must leave writable."""
+    roots: list[write_guard.Reopen] = []
+    if files.scratch_dir is not None:
+        roots.append(write_guard.Reopen(str(files.scratch_dir), "run scratch"))
+    if files.temp_dir is not None:
+        roots.append(write_guard.Reopen(str(files.temp_dir), "run temp"))
+    for path in _bwrap_mail_push_rw_roots(ctx):
+        roots.append(write_guard.Reopen(path, "mail-push home"))
+    return tuple(roots)
+
+
 def _launch_tracked_process(
     argv: list[str],
     cwd: str,
@@ -2415,6 +2474,11 @@ def _launch_tracked_process(
     engine: str = "",
     extra_rw_roots: list[str] | None = None,
     run_path: Path | None = None,
+    guard_settings: WriteGuardSettings | None = None,
+    guard_record: JsonObject | None = None,
+    guard_registry_root: Path | None = None,
+    guard_run_roots: Sequence[write_guard.Reopen] = (),
+    forbid_commit: bool = False,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_temp_dir(env_overrides, temp_dir)
@@ -2422,6 +2486,14 @@ def _launch_tracked_process(
     for key in drop_env:
         env.pop(key, None)
     _install_no_page_ask(env, temp_dir or scratch_dir or run_path)
+    hooks_root = run_path or temp_dir or scratch_dir
+    if forbid_commit and hooks_root is not None:
+        # Independent of any sandbox and of the isolation mode: the version control
+        # tool itself runs the refusing hooks, wherever the child commits from.
+        hooks_dir = write_guard.install_forbid_commit_hooks(
+            hooks_root / write_guard.FORBID_COMMIT_HOOKS_DIRNAME
+        )
+        env.update(write_guard.forbid_commit_env(str(hooks_dir), env))
     if sandbox is not None:
         if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
             raise DelegateError(
@@ -2457,6 +2529,32 @@ def _launch_tracked_process(
             bwrap_path=sandbox.bwrap_path,
         )
         sandbox_bwrap.preflight_plan(argv)
+    elif (
+        guard_settings is not None
+        and guard_settings.enabled
+        and not (engine == "codex" and write_guard.codex_native_sandbox_on(argv))
+    ):
+        # Work mode: protect irreplaceable paths. Codex with its own sandbox on is
+        # bounded by that sandbox (roots were added to its argv), never wrapped.
+        # Env is final here, so the engine home and TMPDIR are known. An unusable
+        # backend follows isolation.writeGuard.onUnavailable: a refusal raises
+        # DelegateError (recorded as a launch failure), otherwise the run goes
+        # unguarded and the record carries the warning.
+        guarded = write_guard_launch.apply_write_guard(
+            guard_settings,
+            argv=argv,
+            cwd=cwd,
+            env=env,
+            engine=engine,
+            registry_root=str(guard_registry_root) if guard_registry_root is not None else None,
+            run_roots=guard_run_roots,
+        )
+        argv = guarded.argv
+        if guard_record is not None:
+            guard_record.clear()
+            guard_record.update(guarded.record)
+            if guarded.warning is not None:
+                guard_record["warning"] = guarded.warning
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -3913,6 +4011,9 @@ def _run_single_tracked_attempt(
     progress_interval_sec: float,
     attempt_label: str | None = None,
     prior_capture: TrackedCaptureResult | None = None,
+    guard_record: JsonObject | None = None,
+    guard_run_roots: Sequence[write_guard.Reopen] = (),
+    on_guard_warning: Callable[[str], None] | None = None,
 ) -> TrackedCaptureResult:
     process: subprocess.Popen[bytes] | None = None
     process_pgid: int | None = None
@@ -3933,6 +4034,18 @@ def _run_single_tracked_attempt(
             raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
         if attempt_label is not None:
             _append_attempt_delimiter(files.stderr_log, label=attempt_label)
+        # Work-mode policy kwargs ride only when the run has them, so a launch seam
+        # that predates them keeps its signature.
+        policy_launch: dict[str, object] = {}
+        if ctx.write_guard is not None:
+            policy_launch.update(
+                guard_settings=ctx.write_guard,
+                guard_record=guard_record,
+                guard_registry_root=ctx.registry_root,
+                guard_run_roots=guard_run_roots,
+            )
+        if ctx.forbid_commit:
+            policy_launch["forbid_commit"] = True
         try:
             process = _launch_tracked_process(
                 argv,
@@ -3948,6 +4061,7 @@ def _run_single_tracked_attempt(
                 engine=ctx.engine,
                 extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
                 run_path=files.run_path,
+                **policy_launch,
             )
         except OSError as exc:
             launch_exc = exc
@@ -3989,6 +4103,8 @@ def _run_single_tracked_attempt(
                     manifest["pid"] = process.pid
                     manifest["pgid"] = process_pgid
                     manifest["processGroupTerminationGraceSec"] = grace_seconds
+                    if guard_record:
+                        manifest["writeGuard"] = dict(guard_record)
                     write_manifest(files.run_path, manifest)
                 index = run_registry.load_index(ctx.registry_root)
                 runs = index.get("runs")
@@ -4014,6 +4130,9 @@ def _run_single_tracked_attempt(
         error = _runner_launch_error(argv, cwd, exc)
         _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise error from exc
+    guard_warning = guard_record.get("warning") if guard_record else None
+    if isinstance(guard_warning, str) and on_guard_warning is not None:
+        on_guard_warning(guard_warning)
     assert process is not None
     capture: TrackedCaptureResult | None = None
     try:
@@ -4386,9 +4505,33 @@ def _execute_tracked(
         if ctx.engine == "codex" and manifest_argv is not None
         else manifest_argv
     )
-    if ctx.engine == "codex" and files.scratch_dir is not None:
+    guard_run_roots = _guard_run_roots(ctx, files)
+    native_guard = (
+        write_guard_launch.codex_native_launch(
+            ctx.write_guard,
+            argv=run_argv,
+            cwd=cwd,
+            registry_root=str(ctx.registry_root),
+            run_roots=guard_run_roots,
+            home=(ctx.env_overrides or {}).get("HOME"),
+        )
+        if ctx.write_guard is not None and ctx.write_guard.enabled and ctx.engine == "codex"
+        else None
+    )
+    if native_guard is not None and native_guard.roots:
+        # Codex's own workspace-write sandbox is the boundary: give it the paths the
+        # run legitimately writes (git common dir, scratch, temp, registry).
+        run_argv = write_guard_launch.codex_argv_with_work_roots(run_argv, native_guard.roots)
+        if run_manifest_argv is not None:
+            run_manifest_argv = write_guard_launch.codex_argv_with_work_roots(
+                run_manifest_argv, native_guard.roots
+            )
+    if native_guard is not None:
+        ctx = replace(ctx, write_guard_record=native_guard.record)
+    if ctx.engine == "codex" and (files.scratch_dir is not None or native_guard is not None):
         manifest = build_manifest(ctx, run_manifest_argv or run_argv)
-        manifest["scratchPath"] = str(files.scratch_dir)
+        if files.scratch_dir is not None:
+            manifest["scratchPath"] = str(files.scratch_dir)
         if files.temp_dir is not None:
             manifest["tempPath"] = str(files.temp_dir)
         write_manifest(files.run_path, manifest)
@@ -4417,6 +4560,18 @@ def _execute_tracked(
         ),
         temp_base=sandbox_temp_base,
     )
+    guard_state: JsonObject = {}
+    guard_warnings: list[str] = []
+
+    def note_guard_warning(message: str) -> None:
+        # Said once, at launch, where a caller can still stop the run.
+        if message in guard_warnings:
+            return
+        guard_warnings.append(message)
+        _append_runtime_event(files, "write_guard_unavailable", message)
+        with contextlib.suppress(OSError, ValueError):
+            print(f"delegate: warning: {message}", file=stderr)
+
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (
         profiles.capture_workspace_baseline(
@@ -4491,6 +4646,9 @@ def _execute_tracked(
             progress_interval_sec=progress_interval_sec,
             attempt_label=attempt_label,
             prior_capture=prior_capture,
+            guard_record=guard_state,
+            guard_run_roots=guard_run_roots,
+            on_guard_warning=note_guard_warning,
         )
 
     try:
@@ -4796,6 +4954,8 @@ def _execute_tracked(
         for warning in attempt_extra.get("warnings") or []:
             if isinstance(warning, str):
                 _append_unique(final_warnings, warning)
+    for warning in guard_warnings:
+        _append_unique(final_warnings, warning)
     if capture.zero_commit_health is not None:
         final_extra["zeroCommitHealth"] = capture.zero_commit_health
         _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))

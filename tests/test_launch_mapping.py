@@ -275,10 +275,8 @@ class LaunchMappingTests(ExecutionTestBase):
         repo, _ = self._make_git_repo_with_commit()
         cases = (
             (["codex", "call", "--include-dirty", "task"], "invalid_option_combination"),
-            (
-                ["--isolation", "none", "codex", "work", "--forbid-commit", "task"],
-                "invalid_option_combination",
-            ),
+            (["codex", "call", "--writable", "/tmp", "task"], "invalid_option_combination"),
+            (["codex", "safe", "--writable", "/tmp", "task"], "invalid_option_combination"),
         )
         for args, expected in cases:
             with (

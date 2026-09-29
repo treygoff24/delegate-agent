@@ -205,7 +205,8 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 
 - Cursor work runs with edit-enabling Cursor flags.
 - Droid work adds Droid's unsafe skip flag for non-interactive edits.
-- Codex work uses the configured Codex policy and sandbox settings.
+- Codex work uses the configured Codex policy and sandbox settings. When the policy keeps Codex's own `workspace-write` sandbox on, Delegate adds the writable roots the run needs (see [Work write guard](#work-write-guard)).
+- Every work lane also runs under the [work write guard](#work-write-guard), which makes a named list of irreplaceable paths read-only where the platform offers a backend.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Grok work uses `grok.workPermissionMode` and `grok.workSandbox`; Delegate policy can explicitly map `policy.harness.grok.work.bypassApprovalsAndSandbox` to Grok `--permission-mode bypassPermissions`.
 - Devin work uses `--permission-mode dangerous` because non-interactive edit and exec tools otherwise require approval.
@@ -385,7 +386,9 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 ### Non-isolated work mode (`--isolation none`)
 
 Work mode defaults to `--isolation none` (`isolation.work` in config): the child
-runs directly in the resolved workspace with **no write boundary**. Delegate
+runs directly in the resolved workspace with **no workspace write boundary**
+(the [work write guard](#work-write-guard) still protects a named list of
+irreplaceable paths, but everything else stays writable). Delegate
 records no launch-versus-exit drift for these runs — `worktreeStatus`, the dirty
 work summary, and the worktree cleanup commands exist only for
 persistent-worktree runs — and it neither refuses nor reports a write the child
@@ -408,6 +411,109 @@ different provider. A persistent-worktree resume attaches to the existing path
 by deriving and validating its Registry record; it does not weaken
 safe/worktree path checks or create a replacement worktree when the original
 has moved.
+
+### Work write guard
+
+Work mode runs the child with the caller's own filesystem rights, and the
+`external-sandbox` policy profile turns the engines' own sandboxes off. One
+confused lane (`rm -rf ~`, a stray redirect into a sibling checkout) can then
+destroy things nobody can recreate. The write guard is a **protect-list**, not
+"HOME read-only plus an allowlist": everything a lane legitimately touches
+(caches, toolchains, dotfiles it edits) stays writable, and a named list of
+irreplaceable paths becomes read-only. Reads are never restricted. It is on by
+default for work lanes wherever a backend exists, and it never applies to safe
+mode (safe has its own boundaries above).
+
+**Default protected paths** (each only when it exists on the host):
+
+- Credential stores: `~/.ssh`, `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`,
+  `~/.aws`, `~/.azure`, `~/.kube`, `~/.netrc`, `~/.git-credentials`,
+  `~/.password-store`.
+- Estate state: `~/.ai-profiles` and the installed Delegate runtime
+  (`~/.local/bin/delegate` plus `~/.delegate/src`, `releases`, `bin` and
+  `config*.json`). Run scratch, worktrees and caches under `~/.delegate` stay
+  writable.
+- The code root (default `~/Code`, configurable), so a lane in one checkout
+  cannot write into a sibling checkout.
+
+**Writable re-opens** inside those paths, so a protected parent never breaks the
+run itself: the execution root, the git common directory (so `git commit` works
+in a linked worktree), the run registry, the run's scratch and compact temp
+directories, mail-push homes, the selected engine's home (`CODEX_HOME`,
+`CLAUDE_CONFIG_DIR`, and any environment variable that points into
+`~/.ai-profiles`, so an engine's profile directory stays writable while sibling
+profiles stay protected), and anything named by `--writable PATH` or
+`isolation.writeGuard.writable`. An environment variable that names a
+credential store (for example `GNUPGHOME`) does not lift that store's
+protection. `TMPDIR`, `/tmp` and home caches such as `~/.cache` are not in the
+protected list and stay writable.
+
+The list is configurable: `isolation.writeGuard.add` protects more paths,
+`remove` drops a default, and `writable` re-opens paths for every run (see
+[configuration](configuration.md#isolationwriteguard)). `--writable PATH` re-opens
+an existing path for one run only.
+
+**Backends.**
+
+- **Linux, bubblewrap.** The child runs under `bwrap --dev-bind / /` with each
+  protected path bound read-only over itself and each re-open bound read-write,
+  parents before children. The final argv is preflighted with `/bin/true`
+  before launch. The kernel also refuses to move or remove a mount point, so a
+  lane cannot rename `~/.ssh` out of the way. bwrap is a filesystem boundary
+  here, not a process sandbox: the pid namespace, network and `/proc` are the
+  host's.
+- **macOS, Seatbelt (opt-in).** `isolation.writeGuard.macosSeatbelt: true` wraps
+  non-Codex engines in `sandbox-exec` with `(allow default)` followed by ordered
+  `deny file-write*` and re-open rules (last match wins). The execution root
+  additionally refuses unlink and rename of itself so a lane cannot move its own
+  checkout out from under the rule. It ships off by default until the
+  maintainer has live-tested it; with it off the guard status is `off` and
+  nothing is wrapped. Seatbelt cannot nest: a launch already inside another
+  sandbox fails the preflight probe and is reported as unavailable.
+- **Codex native sandbox (any platform).** Codex is never wrapped by Delegate
+  when its own sandbox is on. With `policy.harness.codex.work.bypassApprovalsAndSandbox`
+  set to `false`, `build_codex_argv` emits `--sandbox workspace-write`
+  (network per `policy`), and Delegate adds `--add-dir` roots for the git common
+  directory (Codex keeps `.git` read-only even under a writable root, so it is
+  always its own root), the registry, scratch, temp, `--writable` paths and the
+  existing home caches. The `external-sandbox` profile and this override
+  compose: keep `policy.profile: "external-sandbox"` and set the one
+  harness-scoped field to `false`; the profile's hook-trust bypass stays on.
+
+**When no backend is available** (Linux without a usable bwrap, or bwrap failing
+its preflight): `isolation.writeGuard.onUnavailable` decides. `warn` (default)
+launches unguarded and records a warning; `refuse` fails the launch with
+`write_guard_unavailable`. `isolation.writeGuard.enabled: false` or
+`DELEGATE_WRITE_GUARD=off` means Delegate adds nothing: no wrap, no `--add-dir`
+roots and no prompt note.
+
+**What the operator can see.** The plan (backend, protected paths, writable
+re-opens with reasons) is in the run manifest under `writeGuard` and in
+`--dry-run` output. Work-mode prompts gain a two-sentence note naming the
+protected paths, so a lane reports a blocked write instead of working around
+it.
+
+**Limits.** The guard does not stop reads, network use, or use of credentials
+already in the environment. `--pass-through` runs execute outside the tracked
+launcher and are not guarded. A protect-list cannot cover a path nobody named:
+add such paths to `isolation.writeGuard.add`. On the Mac, with the native Codex
+sandbox on and the guard `enabled: false`, git commits in a linked worktree stay
+blocked, because Delegate adds no `--add-dir` root.
+
+#### `--forbid-commit` in every isolation mode
+
+`--forbid-commit` is enforced twice, in every isolation mode including
+`--isolation none`. First, Delegate creates a run-owned hooks directory
+(`forbid-commit-hooks` under the run directory) whose `pre-commit`,
+`prepare-commit-msg`, `commit-msg` and `pre-merge-commit` hooks refuse, and
+injects `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (plus
+`GIT_CONFIG_PARAMETERS`, for engines that scrub variables named like secrets)
+so `core.hooksPath` points at it. `git commit --no-verify` does not skip
+`prepare-commit-msg`. Second, when the child exits Delegate checks for commits
+ahead of the creation base (`sourceHeadOid` for in-place runs) and fails the run
+if there are any. The hooks are a tripwire, not a wall: a child can bypass them
+with `git -c core.hooksPath=/dev/null commit` or `git commit-tree`, so the
+post-exit check is the backstop.
 
 ### Bounded private reader retry contract
 

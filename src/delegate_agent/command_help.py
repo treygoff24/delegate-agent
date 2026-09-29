@@ -235,8 +235,11 @@ _NO_PROGRESS_OPTION = OptionSpec(
 _FORBID_COMMIT_OPTION = OptionSpec(
     "--forbid-commit",
     None,
-    "Only valid for persistent worktree work runs (--isolation worktree); "
-    "fail if commits remain ahead of the creation base when the child exits.",
+    "Work mode only: refuse commits during the run and fail it if commits remain ahead of "
+    "the starting HEAD when the child exits. Git hooks that refuse commit, merge-commit and "
+    "commit-message steps are injected for the child in every isolation mode "
+    "(--isolation none included); the exit check is the backstop. Without an explicit "
+    "--isolation this implies --isolation worktree.",
 )
 _INCLUDE_DIRTY_OPTION = OptionSpec(
     "--include-dirty",
@@ -287,6 +290,14 @@ _EXPECT_FILE_OPTION = OptionSpec(
     "Repeatable deliverable check for tracked safe/work runs: when the child exits, "
     "the run fails with failureKind=deliverable_missing unless PATH exists (relative "
     "paths resolve against the run's execution directory).",
+)
+_WRITABLE_OPTION = OptionSpec(
+    "--writable",
+    "PATH",
+    "Repeatable, work mode only: leave PATH writable under the work write guard even "
+    "though it sits inside a protected path (a sibling checkout, a credential directory). "
+    "PATH must exist; relative paths resolve against the caller's directory. The re-open "
+    "is recorded in the manifest and dry-run writeGuard.",
 )
 _MAIL_PUSH_OPTION = OptionSpec(
     "--mail-push",
@@ -2397,6 +2408,7 @@ for _engine in (*KNOWN_ENGINES, "dry-run"):
             *_spec.options,
             _MAIL_PUSH_OPTION,
             _EXPECT_FILE_OPTION,
+            _WRITABLE_OPTION,
             _CONTINUITY_MODE_OPTION,
             *_WORKSPACE_SPEC_OPTIONS,
             *PERSONA_OPTIONS,
@@ -2411,6 +2423,7 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--forbid-commit",
         "--include-dirty",
         "--expect-file",
+        "--writable",
         "--mail-push",
         "--resumable",
         *WORKSPACE_SPEC_FLAGS,

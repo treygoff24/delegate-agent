@@ -18,8 +18,12 @@ from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 class ResumeAttachmentTests(WorktreeMgmtTestBase):
     def _fake_agent(
-        self, *, commit: bool = False, binary: str = "agent"
+        self, *, commit: bool = False, bypass_commit_hooks: bool = False, binary: str = "agent"
     ) -> tempfile.TemporaryDirectory:
+        # bypass_commit_hooks: under --forbid-commit git itself refuses a plain commit
+        # (run-owned hooks), so a test of the post-exit commit check needs a child that
+        # sidesteps them.
+        hooks = "-c core.hooksPath=/dev/null " if bypass_commit_hooks else ""
         temp = tempfile.TemporaryDirectory(prefix="delegate-resume-agent-")
         agent = Path(temp.name) / binary
         body = ["#!/bin/sh", "set -eu"]
@@ -34,7 +38,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 [
                     "printf '%s\\n' child > resumed-child.txt",
                     "git add resumed-child.txt",
-                    "git -c user.name='Delegate Test' -c user.email=delegate-test@example.com commit -m resumed-child >/dev/null",
+                    f"git {hooks}-c user.name='Delegate Test' -c user.email=delegate-test@example.com commit -m resumed-child >/dev/null",
                 ]
             )
         # Outcome contract (src/delegate_agent/outcome.py): an exit-0 child with
@@ -456,7 +460,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
         _repo, repo_path = self._make_repo()
         with (
             tempfile.TemporaryDirectory() as fake_home,
-            self._fake_agent(commit=True) as fake_agent,
+            self._fake_agent(commit=True, bypass_commit_hooks=True) as fake_agent,
         ):
             owner_id, owner_alias, worktree_path, _branch = self._owner(
                 repo_path, fake_home, forbid_commit=True

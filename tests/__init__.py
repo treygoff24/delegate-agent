@@ -48,6 +48,10 @@ if _SRC not in sys.path:
 
 os.environ.pop("AI_PROFILE", None)
 os.environ.pop("DELEGATE_CONFIG", None)
+# The work write guard wraps real launches in bwrap or Seatbelt and adds a prompt
+# note. Most tests assert exact argv and prompts and run fake engines, so the
+# suite defaults it off; the guard's own tests enable it explicitly per test.
+os.environ["DELEGATE_WRITE_GUARD"] = "off"
 # A workflow-pinned parent leaks PYTHONPATH=<pin src> plus DELEGATE_WORKFLOW_PIN
 # into every child. The pin src ships a sitecustomize.py that, seeing the pin
 # var, imports delegate_agent at interpreter startup -- BEFORE this package can
