@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Early-stop detection.** A succeeded Run whose last sentence announces a
+  next step ("Now let me write my report.") carries `degraded:
+  ended_announcing_next_step`, and a work Run that parks on an approval
+  question with no changed files carries `degraded: ended_awaiting_input`.
+  Status stays `succeeded`; the warning names `delegate resume <handle>`. A
+  finished deliverable that ends with "Should I proceed?" is not flagged.
+- **Unread coordinator mail is surfaced at run end.** A terminal work Run
+  records `unreadMail` (count, up to three id/sender/subject rows, and an
+  `unreadable` count for damaged or non-regular inbox entries) plus a warning
+  on the state, envelope, completion report, snapshot, `wait`, and `cancel`
+  reply. Messages a push hook already injected count as read. The mail prompt
+  suffix now asks lanes to read their inbox before final verification or
+  commit. Launch, dry-run, and manifest carry `mailInbox` (host and mail
+  root).
+- `followup` and `resume` inherit `--mail-push` from the source Run and accept
+  `--no-mail-push`; `followup` also accepts `--mail-push`.
+- **One automatic fresh rerun for transient safe-mode failures.** A `safe`
+  Run that fails with `stream_disconnected` or `provider_unavailable`, or a
+  `safe` launch the broker refuses (`broker_binding_inactive`) with no child
+  output, is rerun once as a new Run recorded under `autoResume` with `kind:
+  "rerun"` and the first attempt's error. The first broker refusal defers the
+  known-bad lane marker (`laneMarkerDeferred: "broker_binding_retry"`). Work
+  Runs are never rerun this way. `providerErrors.autoResume: false` turns it
+  off.
+- **`<engine>.enabled: false`** hides a harness from `models`, `describe`,
+  `capabilities`, and `capabilities refresh`, and any launch of it fails with
+  `harness_disabled` naming the key.
+- **Claude model typos are refused before launch.** A typed `--model` that is
+  a family word plus a version (`opus-5.5`, `Sonnet 5`) or names no model
+  (`claude-`, an empty `[]`) fails with `invalid_alias` and the closest valid
+  values, on the CLI, dry runs, and `run --input-json`. Provider names
+  (Bedrock ARNs, Foundry deployments, gateway strings) still launch, and the
+  version-typo refusal is skipped when a Bedrock, Vertex, Foundry, or
+  `ANTHROPIC_BASE_URL` gateway variable is set.
+- Workflow status says why and what next: a paused workflow carries a `pause`
+  object (gate, actions, last failure, rejection text) or a `softPark` reason
+  naming `delegate workflow resume <wfId>`; agent journal rows always carry
+  label and item, `agent_started` records `timeout` and `deadlineAt`,
+  `agent_timeout` names `nextEngine`, and status lists recent timeouts.
+- Codex structured output: a root-array answer wrapped in a one-key object is
+  unwrapped on the prompt path and journaled as `agent_output_unwrapped`.
+- Worktree warnings name the files: `dirty_source_auto_included_paths`,
+  `dirty_source_included`/`dirty_source_included_paths` for explicit
+  `--include-dirty`, `dirty_source_mirrored` for safe worktree launches, and
+  `dirtySourcePreview` in dry runs (up to five paths each).
 - `workflow resume` and `workflow status` say when a workflow's pinned runtime
   differs from the live one. The notice names both runtimes (digest, delegate
   version, and the pin or promotion date), and JSON carries the same facts as
@@ -348,6 +393,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- `worktree remove` of a parent no longer orphans worktrees of Runs launched
+  inside it: clean, merged nested worktrees are removed first, and dirty or
+  unmerged ones refuse with `nested_worktrees_block_remove` and a per-nested
+  command (`--force` does not reach them). Reap refuses a pool path holding
+  nested worktrees (`nested_worktrees_present`), a nested Registry that
+  appears mid-removal refuses with `nested_registry_appeared`, and an
+  unreadable nested Registry refuses even with `--kill-live`.
+- A Codex workflow stage whose schema has an object with no declared
+  properties (including through a local `$ref`) no longer fails every
+  attempt: it uses the prompt path instead of strict mode, which closed the
+  object to zero keys. A direct `codex --output-schema` with such a schema is
+  refused at preflight with `invalid_output_schema` naming the path.
+- A dry-run `workflow resume` no longer cancels or reaps a stale scope child,
+  changes status, persists a budget, or records an approval; it only
+  journals. `workflow approve` on a failed workflow points at `workflow
+  resume`, and on a running one says the gate is not open yet.
+- A relative `--prompt-file` falls back to `--cwd`, and the not-found error
+  names both paths tried.
+- The unread-mail scan cannot block on a FIFO named like mail; the shared
+  bounded record reader opens non-blocking.
+- Small surface fixes: the Registry writes `.delegate/.gitignore`;
+  `--include-dirty` is a warned no-op in safe mode and reports `includeDirty:
+  false`; `runs show` names the real readers; a timed-out `wait --json` warns
+  and names `--structural`; `no_matching_worktrees` names the Registry it
+  searched.
 - A `--mail-push` Codex run no longer dies before the model starts. Delegate
   injected `-c hooks=true`, which Codex 0.157 rejects at config load because
   `hooks` is a table; it now passes `--enable hooks` (the same as `-c
@@ -647,6 +717,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendUnavailable`. The isolated build path is unchanged.
 
 ### Changed
+- Work-mode prompts gain two sentences saying nobody can approve during a Run
+  and the task is the approval unless the prompt asks only for a plan,
+  review, or read-only answer. Safe and call prompts are unchanged.
+- Runs at `xhigh`, `max`, or `ultra` effort default to a 20-minute stall
+  window instead of 8, unless `--stall-minutes`, config, or
+  `DELEGATE_STALL_MINUTES` sets one; dry run, manifest, and snapshot report
+  `stallWindow` with its source.
+- The `broker_binding_inactive` hint says one refusal while siblings launch is
+  usually launch-slot contention (relaunch once, with `--force-launch` if the
+  lane is marked) and a repeat means the binding is inactive.
+- OMP alias objects with unknown keys name the allowed keys and point effort
+  synonyms at `thinking`; `help omp` carries a valid example. The
+  `cursor_auth_required` hint names the auth realm the Run used and the
+  `--auth-profile` alternative.
 - **The tracked output cap is now off by default.**
   `<engine>.trackedStreamMaxBytes` used to default to 16 MiB (64 MiB for Pi
   and OMP) and stopped a run as `output_limit_exceeded` when a stream passed

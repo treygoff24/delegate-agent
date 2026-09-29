@@ -1,6 +1,6 @@
 # STATE — delegate-agent
 
-Updated: 2026-09-28 (papercuts fixes shipped to `main`; see CHANGELOG [Unreleased])
+Updated: 2026-09-29 (overnight friction work merged to `main`; see CHANGELOG [Unreleased])
 
 ## Where things stand
 
@@ -8,6 +8,9 @@ Updated: 2026-09-28 (papercuts fixes shipped to `main`; see CHANGELOG [Unrelease
 - Each area was built on its own branch, reviewed by an outside model (at most two rounds, then the coordinator reviewed and fixed), full-gated at its branch head, and merged into `papercuts/integration`, which was full-gated again before the fast-forward.
 - Moving `main` makes estate-sync install it on the Mac.
 - Report and diagnoses: `docs/audits/2026-09-28-papercuts/REPORT.md` and `appendix/`.
+- 2026-09-28 ledger sweep (`docs/audits/2026-09-28-papercuts/ledger-sweep.json`): 305 open delegate cuts classified as 136 fixed (131 resolved in their ledgers with the fixing commit named; 5 in an archived ledger left alone), 54 not fixed, 92 not delegate, 23 unsure. The sweep commit's body said 106 not delegate and 30 unsure; the file is right.
+- Overnight 2026-09-28/29 (epic `dlg-erz`): the 54 not-fixed cuts became eight clusters, each built by a Sonnet lane, reviewed by Sol high (at most two rounds, then the coordinator reviewed and fixed), and merged through `overnight/integration`: early-stop detection (`ended_announcing_next_step`, `ended_awaiting_input`), Codex free-form objects and wrapped arrays, unread coordinator mail at run end, one fresh rerun for transient safe-mode failures plus the effort-aware stall window, Claude model-typo preflight and `<engine>.enabled`, six CLI surface traps, workflow status why/next (pause, soft park, timeouts), and nested-worktree removal safety.
+- Coordinator calls in the third rounds, easy to revisit: a work-mode broker refusal is never auto-rerun (post-exit "no output" cannot prove no side effects); an unreadable nested Registry refuses even with `--kill-live`; the Claude typo refusal is limited to family-plus-version shapes and skipped under Bedrock/Vertex/Foundry/gateway env; the work-mode prompt carries a "nobody can approve during a Run" clause.
 
 ## Open loops
 
@@ -16,6 +19,7 @@ Updated: 2026-09-28 (papercuts fixes shipped to `main`; see CHANGELOG [Unrelease
 - Known write-guard limits (documented in `docs/security-model.md`): a protected path that is itself a symlink is protected at its target while the link stays replaceable; an existing hard link to a protected file is the same inode; a second profile nested deeper than three levels is not found.
 - The blocked-dependency model rotation Trey asked about lives in the `writing-plans` skill, not this repo.
 - `dlg-ptm` (Claude preflight on non-object workflow schema roots) is another session's work.
+- Overnight deferrals, as beads: a running agent's deadline in `delegate runs`; the Cursor auth hint's `execute_call` profile pass-through is untested; the Claude typo check does not see `--env` provider variables (they resolve after it).
 - Deferred items stay as beads (`bd ready`): workflow resume adopting live children, one lane-environment record, strict option grammar, registry option applicability, near-duplicate cut warning, watchdog loop detection, bounded assistant text.
 - The estate launcher and `bin/delegate-profile-shim` still disagree on `DELEGATE_CONFIG` versus `--auth-profile`; aligning them is a linux-devbox change.
 
