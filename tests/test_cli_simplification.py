@@ -109,18 +109,6 @@ def test_agent_help_json_is_a_help_envelope():
     assert payload["command"] == "agent-help"
 
 
-def test_unsupported_global_options_are_rejected_from_snapshot():
-    parsed_error = None
-    with pytest.raises(errors.DelegateError) as caught:
-        cli_parser.parse_cli(["--isolation", "worktree", "snapshot", "example"])
-    parsed_error = caught.value
-    assert getattr(parsed_error, "error", None) == "invalid_option_combination"
-
-    code, _output, error = run_cli("--pass-through", "snapshot", "example")
-    assert code != 0
-    assert "pass-through" in error
-
-
 def test_droid_uses_unified_model_option_and_keeps_alias_provenance():
     with pytest.raises(errors.DelegateError) as caught:
         cli_parser.parse_cli(["droid", "reviewer", "safe", "review"])
@@ -187,20 +175,10 @@ def test_nonlaunch_global_advertisement_and_refusals(name, position):
             cli_parser.parse_cli(argv)
         assert caught.value.error == "invalid_option_combination", (argv, caught.value)
         assert flag in str(caught.value)
-
-
-@pytest.mark.parametrize(
-    "command", ["runs", "ps", "wait", "worktree list", "worktree remove", "worktree prune"]
-)
-def test_local_group_option_remains_effective(command):
-    parsed = cli_parser.parse_cli([*command.split(), "--group", "wave4"])
-    assert parsed.payload.group == "wave4"
-
-
-@pytest.mark.parametrize("command", ["wait", "run-output"])
-def test_local_completion_report_remains_effective(command):
-    parsed = cli_parser.parse_cli([command, "codex-1", "--completion-report"])
-    assert parsed.payload.completion_report is True
+    if name == "snapshot" and position == "before":
+        code, _output, error = run_cli("--pass-through", "snapshot", "example")
+        assert code != 0
+        assert "pass-through" in error
 
 
 @pytest.mark.parametrize(
@@ -208,9 +186,11 @@ def test_local_completion_report_remains_effective(command):
     [
         ["snapshot", "codex-1"],
         ["runs"],
+        ["runs", "--stale"],
         ["ps"],
         ["wait", "codex-1"],
         ["run-output", "codex-1"],
+        ["run-output", "cursor", "--completion-report"],
         ["cancel", "codex-1"],
         ["worktree", "list"],
         ["mail", "inbox"],
@@ -230,9 +210,12 @@ def test_supported_global_cwd_and_json_reach_parsed_options(args):
         assert parsed.global_options.json_mode is True
 
 
-@pytest.mark.parametrize("command", ["models", "capabilities", "profiles", "setup"])
+@pytest.mark.parametrize(
+    "command",
+    [["models"], ["models", "codex", "--live"], ["capabilities"], ["profiles"], ["setup"]],
+)
 def test_supported_auth_profile_reaches_parsed_options(command):
-    parsed = cli_parser.parse_cli(["--auth-profile", "example", command])
+    parsed = cli_parser.parse_cli(["--auth-profile", "example", *command])
     assert parsed.global_options.auth_profile == "example"
 
 

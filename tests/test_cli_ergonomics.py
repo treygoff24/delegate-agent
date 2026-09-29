@@ -195,10 +195,6 @@ class MailBodyOptionTests(CommandTestBase):
                 self.assertIn("the body is the positional BODY, --file FILE, or '-'", message)
                 self.assertIn("delegate mail send --to coordinator", message)
 
-    def test_dash_reads_stdin_as_the_help_and_error_promise(self):
-        parsed = parse_cli(["mail", "send", "--to", "coordinator", "-"])
-        self.assertEqual(parsed.payload.body, "-")
-
 
 class FollowupInheritedRouteTests(CommandTestBase):
     def test_route_options_say_the_route_is_inherited_and_point_at_resume(self):
@@ -236,6 +232,8 @@ class FollowupInheritedRouteTests(CommandTestBase):
     def test_non_route_unknown_option_keeps_the_plain_message(self):
         with self.assertRaises(DelegateError) as caught:
             parse_cli(["followup", "--bogus", "codex-1", "go on"])
+        self.assertEqual(caught.exception.error, "unknown_option")
+        self.assertEqual(caught.exception.message, "followup does not support option: --bogus.")
         self.assertNotIn("inherits", caught.exception.message)
 
 

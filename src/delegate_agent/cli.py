@@ -715,7 +715,7 @@ def _binary_config_key(engine: str | None) -> str | None:
 
 
 def _binary_config_path(config_source: str | None) -> str:
-    if config_source and config_source not in {"embedded-default", "cli-overrides"}:
+    if config_source and config_source != "embedded-default":
         return config_source
     return str(delegate_config.config_path())
 

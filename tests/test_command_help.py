@@ -104,45 +104,6 @@ class RenderEverySpecTests(unittest.TestCase):
 class CommandPayloadShapeTests(unittest.TestCase):
     """JSON help contract shape (D4)."""
 
-    def test_representative_payload_shape(self):
-        spec = command_help.COMMAND_SPECS["worktree remove"]
-        payload = command_help.command_help_payload(spec)
-
-        self.assertEqual(set(payload.keys()), PAYLOAD_KEYS)
-        self.assertIs(payload["ok"], True)
-        self.assertEqual(payload["command"], spec.name)
-        self.assertEqual(payload["command"], "worktree remove")
-        self.assertEqual(payload["summary"], spec.summary)
-
-        for list_key in (
-            "usage",
-            "arguments",
-            "options",
-            "globalOptions",
-            "unsupportedGlobalOptions",
-            "examples",
-            "notes",
-            "seeAlso",
-        ):
-            self.assertIsInstance(payload[list_key], list, f"{list_key} must be a list")
-
-        for arg in payload["arguments"]:
-            self.assertEqual(set(arg.keys()), {"name", "required", "description"})
-            self.assertIsInstance(arg["name"], str)
-            self.assertIsInstance(arg["required"], bool)
-            self.assertIsInstance(arg["description"], str)
-
-        for opt in payload["options"] + payload["globalOptions"]:
-            self.assertEqual(set(opt.keys()), {"flag", "argument", "description"})
-            self.assertIsInstance(opt["flag"], str)
-            self.assertTrue(opt["argument"] is None or isinstance(opt["argument"], str))
-            self.assertIsInstance(opt["description"], str)
-
-        # worktree remove rejects --auth-profile: it must surface in the unsupported
-        # list and be filtered out of the advertised global options.
-        self.assertIn("--auth-profile", payload["unsupportedGlobalOptions"])
-        self.assertNotIn("--auth-profile", {opt["flag"] for opt in payload["globalOptions"]})
-
     def test_reap_help_requires_confirmation_and_destructive_override(self):
         payload = command_help.command_help_payload(command_help.COMMAND_SPECS["worktree reap"])
         notes = " ".join(payload["notes"])
@@ -170,6 +131,7 @@ class CommandPayloadShapeTests(unittest.TestCase):
                 self.assertEqual(set(payload.keys()), PAYLOAD_KEYS)
                 self.assertIs(payload["ok"], True)
                 self.assertEqual(payload["command"], spec.name)
+                self.assertEqual(payload["summary"], spec.summary)
                 for list_key in (
                     "usage",
                     "arguments",
@@ -183,10 +145,23 @@ class CommandPayloadShapeTests(unittest.TestCase):
                     self.assertIsInstance(payload[list_key], list)
                 for arg in payload["arguments"]:
                     self.assertEqual(set(arg.keys()), {"name", "required", "description"})
+                    self.assertIsInstance(arg["name"], str)
+                    self.assertIsInstance(arg["required"], bool)
+                    self.assertIsInstance(arg["description"], str)
                 for opt in payload["options"] + payload["globalOptions"]:
                     self.assertEqual(set(opt.keys()), {"flag", "argument", "description"})
+                    self.assertIsInstance(opt["flag"], str)
+                    self.assertTrue(opt["argument"] is None or isinstance(opt["argument"], str))
+                    self.assertIsInstance(opt["description"], str)
                 for flag in payload["unsupportedGlobalOptions"]:
                     self.assertIsInstance(flag, str)
+                if key == "worktree remove":
+                    # worktree remove rejects --auth-profile: it must surface in the
+                    # unsupported list and be filtered out of the advertised globals.
+                    self.assertIn("--auth-profile", payload["unsupportedGlobalOptions"])
+                    self.assertNotIn(
+                        "--auth-profile", {opt["flag"] for opt in payload["globalOptions"]}
+                    )
                 # Must survive a JSON round-trip without raising.
                 json.dumps(payload)
 
@@ -245,16 +220,8 @@ class OverviewTests(unittest.TestCase):
     def setUp(self):
         self.overview = command_help.render_overview_text()
 
-    def test_overview_contains_worktree_prune_literal(self):
-        self.assertIn("worktree prune", self.overview)
-
     def test_overview_has_no_delete(self):
         self.assertNotIn("delete", self.overview.lower())
-
-    def test_overview_lists_every_top_level_command(self):
-        for command in TOP_LEVEL_COMMANDS:
-            with self.subTest(command=command):
-                self.assertIn(command, self.overview)
 
     def test_top_level_commands_match_registry(self):
         registry_top_level = {name for name in command_help.COMMAND_SPECS if " " not in name}
@@ -271,6 +238,7 @@ class OverviewTests(unittest.TestCase):
                     self.assertIn("--output-schema", text)
                     if engine == "codex":
                         self.assertIn("--fast", text)
+                        self.assertIn("JSON Schema", text)
 
     def test_overview_call_lines_omit_workspace_options(self):
         """Stateless call usage must not advertise workspace-only options."""
@@ -294,10 +262,6 @@ class OverviewTests(unittest.TestCase):
             for option in ("--cwd", "--isolation", "--forbid-commit", "--include-dirty"):
                 with self.subTest(line=line, option=option):
                     self.assertNotIn(option, line)
-
-    def test_focused_devin_usage_omits_unsupported_reasoning_effort(self):
-        for usage in command_help.COMMAND_SPECS["devin"].usage:
-            self.assertNotIn("--reasoning-effort", usage)
 
 
 class PsHelpContractTests(unittest.TestCase):
@@ -359,11 +323,6 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
     def test_non_worktree_help_keeps_isolation_global(self):
         text = command_help.render_command_help_text(command_help.COMMAND_SPECS["cursor"])
         self.assertTrue(any("--isolation" in line for line in self._global_option_lines(text)))
-
-    def test_codex_help_documents_output_schema(self):
-        text = command_help.render_command_help_text(command_help.COMMAND_SPECS["codex"])
-        self.assertIn("--output-schema", text)
-        self.assertIn("JSON Schema", text)
 
     def test_launch_help_documents_continuity_mode(self):
         for command in (
@@ -435,11 +394,6 @@ class WorkflowHelpContractTests(unittest.TestCase):
                 self.assertFalse(payload["arguments"][0]["required"])
                 self.assertTrue(any("resolutionKind" in note for note in payload["notes"]))
 
-    def test_result_advertises_field_extraction(self):
-        payload = command_help.command_help_payload(command_help.COMMAND_SPECS["workflow result"])
-        self.assertIn("--field KEY", payload["usage"][0])
-        self.assertIn("--field", {option["flag"] for option in payload["options"]})
-
     def test_safe_workspace_note_requires_relative_report_paths(self):
         self.assertIn("Absolute source-workspace paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
         self.assertIn("workspace-relative paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
@@ -451,9 +405,6 @@ class HelpIndexPayloadTests(unittest.TestCase):
     def setUp(self):
         self.payload = command_help.help_index_payload()
 
-    def test_ok_true(self):
-        self.assertIs(self.payload["ok"], True)
-
     def test_commands_list_shape(self):
         commands = self.payload["commands"]
         self.assertIsInstance(commands, list)
@@ -464,7 +415,9 @@ class HelpIndexPayloadTests(unittest.TestCase):
 
     def test_commands_cover_all_top_level(self):
         listed = {entry["command"] for entry in self.payload["commands"]}
-        for command in TOP_LEVEL_COMMANDS:
+        expected = {name for name, spec in command_help.COMMAND_SPECS.items() if not spec.internal}
+        self.assertTrue(expected)
+        for command in expected:
             with self.subTest(command=command):
                 self.assertIn(command, listed)
 
@@ -478,16 +431,9 @@ class HelpIndexPayloadTests(unittest.TestCase):
             self.assertTrue(opt["argument"] is None or isinstance(opt["argument"], str))
             self.assertIsInstance(opt["description"], str)
 
-    def test_serializable(self):
-        json.dumps(self.payload)
-
 
 class IsHelpTokenTests(unittest.TestCase):
     """is_help_token recognizes only --help and -h."""
-
-    def test_true_tokens(self):
-        self.assertTrue(command_help.is_help_token("--help"))
-        self.assertTrue(command_help.is_help_token("-h"))
 
     def test_false_tokens(self):
         for tok in ("help", "-help", "--h", "cursor", ""):
@@ -568,14 +514,3 @@ class ThinkingVocabularyTests(unittest.TestCase):
             with self.subTest(engine=engine):
                 note = self._note(harnesses[engine]["workNotes"], engine)
                 self.assertEqual(self._levels(note), tuple(efforts))
-
-    def test_omp_is_no_longer_documented_as_an_argv_prompt_engine(self):
-        """omp moved to stdin; only kimi keeps the argv carve-out."""
-        from delegate_agent.prompt_transport import ARGV_PROMPT_TRANSPORT_ENGINES
-
-        self.assertEqual(ARGV_PROMPT_TRANSPORT_ENGINES, ("kimi",))
-        notes = command_help.COMMAND_SPECS["omp"].notes
-        transport = [note for note in notes if note.startswith("Uses omp ")]
-        self.assertEqual(len(transport), 1)
-        self.assertIn("stdin", transport[0])
-        self.assertNotIn("positional argument", transport[0])

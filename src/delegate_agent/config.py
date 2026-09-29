@@ -1629,9 +1629,8 @@ def load_config(
     path: Path | None = None,
     *,
     workspace: Path | None = None,
-    cli_overrides: JsonObject | None = None,
 ) -> tuple[JsonObject, str]:
-    """Load config with precedence: cli > DELEGATE_CONFIG > local > global > embedded.
+    """Load config with precedence: DELEGATE_CONFIG > local > global > embedded.
 
     When DELEGATE_CONFIG is set, the path must exist; a missing file raises ConfigError
     instead of discarding lower-precedence layers. Workspace config is never merged
@@ -1646,11 +1645,6 @@ def load_config(
             raise ConfigError(exc.error, exc.message) from exc
         if attempt is None:
             raise ConfigError("invalid_workflow_attempt", "workflow attempt is missing")
-        if cli_overrides:
-            raise ConfigError(
-                "invalid_workflow_attempt",
-                "config overrides cannot replace an immutable workflow attempt",
-            )
         return copy.deepcopy(attempt.config), str(attempt.config_path)
     merged = embedded_default_config()
     primary_source = "embedded-default"
@@ -1675,10 +1669,6 @@ def load_config(
         )
     elif path is not None and path != global_path and path.exists():
         merged, primary_source = _merge_with_local_overlay(merged, path, str(path))
-
-    if cli_overrides:
-        merged = merge_config_layer(merged, cli_overrides)
-        primary_source = "cli-overrides"
 
     return merged, primary_source
 

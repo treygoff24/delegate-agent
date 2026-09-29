@@ -762,8 +762,14 @@ class ProfileGuardCliTests(unittest.TestCase):
                 "AI_PROFILE": "work",
                 "DELEGATE_CONFIG": str(config_path),
             }
-            _code, stdout, stderr = self.run_main(["dry-run", "codex", "safe", "hello"], env=env)
+            code, stdout, stderr = self.run_main(
+                ["--json", "dry-run", "codex", "safe", "hello"], env=env
+            )
 
+        self.assertEqual(code, errors_api.EXIT_OK, stderr)
+        payload = json.loads(stdout)
+        self.assertIs(payload["ok"], True)
+        self.assertIs(payload["dryRun"], True)
         self.assertNotIn("profile_config_missing", stdout)
         self.assertNotIn("AI_PROFILE", stderr)
         self.assertNotIn("is not a recognized profile", stderr)

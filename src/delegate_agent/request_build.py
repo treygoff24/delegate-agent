@@ -350,10 +350,9 @@ def load_config(
     path: Path | None = None,
     *,
     workspace: Path | None = None,
-    cli_overrides: JsonObject | None = None,
 ) -> tuple[JsonObject, str]:
     try:
-        return delegate_config.load_config(path, workspace=workspace, cli_overrides=cli_overrides)
+        return delegate_config.load_config(path, workspace=workspace)
     except delegate_config.ConfigError as exc:
         raise DelegateError(exc.error, exc.message) from exc
 

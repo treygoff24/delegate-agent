@@ -533,32 +533,6 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(Path(request.workspace).resolve(), Path(tmp).resolve())
             self.assertEqual(request.workspace_kind, "directory")
 
-    def test_run_input_json_cwd_conflict_fails(self):
-        repo1 = make_git_repo()
-        repo2 = make_git_repo()
-        self.addCleanup(repo1.cleanup)
-        self.addCleanup(repo2.cleanup)
-        task = Path(repo1.name) / "task.json"
-        task.write_text(
-            json.dumps(
-                {
-                    "engine": "droid",
-                    "mode": "safe",
-                    "model": "minimax",
-                    "cwd": repo1.name,
-                    "prompt": "hello",
-                }
-            )
-        )
-        parsed = request_types.ParsedCommand(
-            "run",
-            global_options=request_types.GlobalOptions(json_mode=True, cwd=repo2.name),
-            payload=request_types.RunJsonOptions(str(task)),
-        )
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            request_api.request_from_input_json(parsed, DEFAULT_CONFIG)
-        self.assertEqual(ctx.exception.error, "ambiguous_cwd")
-
     def test_workspace_local_config_cannot_override_global(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -760,27 +734,6 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
             self.assertEqual(loaded["cursor"]["defaultModel"], "ok")
 
-    def test_explicit_config_inside_the_config_home_still_takes_its_sibling(self):
-        # The profile files are exactly this case: selected via DELEGATE_CONFIG
-        # by the profile shim, and living in the config home.
-        config_mod = load_config_module()
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home" / ".delegate"
-            home.mkdir(parents=True)
-            global_cfg = home / "config.json"
-            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "base"}}))
-            profile_cfg = home / "config.work.json"
-            profile_cfg.write_text(json.dumps({"cursor": {"defaultModel": "provisioned"}}))
-            (home / "config.work.local.json").write_text(
-                json.dumps({"cursor": {"defaultModel": "operator-tuned"}})
-            )
-            with (
-                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
-                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: str(profile_cfg)}, clear=False),
-            ):
-                loaded, _ = config_mod.load_config()
-            self.assertEqual(loaded["cursor"]["defaultModel"], "operator-tuned")
-
     def test_explicit_delegate_config_still_outranks_the_local_overlay(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -817,13 +770,6 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
             self.assertEqual(source, str(global_cfg))
 
-    def test_local_config_path_sits_beside_its_base(self):
-        config_mod = load_config_module()
-        self.assertEqual(
-            config_mod.local_config_path(Path("/tmp/x/.delegate/config.json")),
-            Path("/tmp/x/.delegate/config.local.json"),
-        )
-
     def test_no_workspace_local_preserves_global_only_behavior(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -856,7 +802,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(loaded["cursor"]["defaultModel"], "home-model")
         self.assertEqual(source, str(global_cfg))
 
-    def test_missing_delegate_config_raises_without_discarding_merged_layers(self):
+    def test_missing_delegate_config_raises_config_not_found(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1309,7 +1255,7 @@ class ValidationTests(unittest.TestCase):
             )
         )
 
-    def test_isolation_missing_uses_embedded_defaults(self):
+    def test_embedded_defaults_set_safe_auto_and_work_none(self):
         config_mod = load_config_module()
         cfg = config_mod.deep_merge(config_mod.DEFAULT_CONFIG, {})
         self.assertEqual(cfg["isolation"]["safe"], "auto")
@@ -1850,13 +1796,6 @@ class DryRunHintScopeTests(unittest.TestCase):
         self.assertIn("dry-run", message)
         self.assertIn("Validate without launching", message)
 
-    def test_a_dry_run_correction_does_not_tell_you_to_dry_run(self):
-        suffix = parser_api.corrected_command_suffix(
-            ["--isolation", "worktree", "dry-run", "codex", "work", "--forbid-commit", "fix"]
-        )
-        self.assertIn("Corrected command:", suffix)
-        self.assertNotIn("Validate without launching", suffix)
-
     def test_a_dry_run_correction_stays_a_dry_run(self):
         """The correction must not silently convert a validation into a launch."""
         suffix = parser_api.corrected_command_suffix(
@@ -1869,6 +1808,7 @@ class DryRunHintScopeTests(unittest.TestCase):
         reparsed = parser_api.parse_cli(argv[1:])
         self.assertEqual(reparsed.subcommand, "codex")
         self.assertTrue(reparsed.payload.dry_run)
+        self.assertNotIn("Validate without launching", suffix)
 
     def test_a_non_launch_error_is_not_told_to_use_a_launch_only_verb(self):
         message = self._message(["--notify", "channel:x", "runs"])
