@@ -409,6 +409,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- A stale Run's `nextActions` (in `runs` and `snapshot`) now offers `delegate
+  resume <handle>` (not for `call` Runs, which cannot resume). The CLI
+  reference and troubleshooting guide say what killing a launch command does:
+  the launch is the Run's supervisor, the child keeps running on its own until
+  it next writes output and then exits, the Run reads `stale`, and `cancel`,
+  `resume`, or `followup` recover it. Launch each lane from its own background
+  task.
+- The `runs` and `worktree list` text tables head their time-since-activity
+  column `idle`; it was labelled `age`, which agents read as run age. JSON is
+  unchanged.
 - Parallel Runs launched at the same moment (workflow `parallel()` children,
   a fan-out) no longer fail at random with `unsafe_scratch_directory` ("File
   exists: 'run-scratch'"). Two launches racing to create the shared scratch
