@@ -1953,7 +1953,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "with signature, hint, and expiry. Launches on those lanes refuse until the marker "
             "expires or --force-launch overrides it.",
             "JSON (delegate.doctor.v1) reports runtimeDigest, entrypoint, entrypointDigest, "
-            "promotion, promotionMatchesRuntime, activeSupervisors, knownBadLanes, and warnings.",
+            "promotion, promotionMatchesRuntime, activeSupervisors, knownBadLanes, authHealth "
+            "(the last reading `capabilities refresh` recorded per engine), and warnings.",
         ),
         see_also=("promote", "workflow list", "describe"),
         unsupported_global_options=(
@@ -2340,6 +2341,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Cached reporting reads the selected profile's private user cache and invokes no child binaries.",
             "refresh runs metadata-only probes for every supported harness and updates that profile's user cache.",
             "refresh <engine> probes only the named harnesses; other harnesses keep their last-known-good records.",
+            "refresh also records per-engine auth health from the read-only probes named in "
+            "providerErrors.authProbes (default: `estate-cursor status` for cursor, "
+            "`estate-omp usage` for omp) as authHealth: ok, logged_out, limit_reached, or "
+            "unknown. A missing, slow, or unrecognised probe records unknown, never a failure; "
+            "`delegate doctor` shows the last reading.",
             "The legacy workspace reasoning cache remains a lower-precedence read-only compatibility source.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),

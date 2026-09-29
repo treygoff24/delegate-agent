@@ -19,12 +19,13 @@ import re
 import shutil
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
+from delegate_agent import auth_health as auth_health_module
 from delegate_agent import lane_health, personas, redaction, run_registry
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -863,6 +864,7 @@ def doctor(
     home: Path | None = None,
     extra_warnings: Sequence[str] = (),
     known_bad_lanes: Sequence[JsonObject] = (),
+    auth_health: Mapping[str, JsonObject] | None = None,
 ) -> JsonObject:
     """Read executing/installed artifact identities, stamp, and pinned supervisors.
 
@@ -871,7 +873,8 @@ def doctor(
     as a missing Codex profile overlay are resolved by the caller and appended
     here rather than pulling config knowledge into the runtime-identity seam.
     ``known_bad_lanes`` is the caller's snapshot of live lane markers
-    (``lane_health``), reported alongside the runtime identity.
+    (``lane_health``), reported alongside the runtime identity; ``auth_health`` is
+    the last recorded per-engine reading from `capabilities refresh`.
     """
     index = active_supervisors_view(home=home)
     entries = index.get("supervisors")
@@ -903,6 +906,7 @@ def doctor(
         "promotionMatchesRuntime": matches,
         "activeSupervisors": entries if isinstance(entries, dict) else {},
         "knownBadLanes": list(known_bad_lanes),
+        "authHealth": dict(auth_health or {}),
     }
     warnings: list[str] = []
     if promotion is None:
@@ -1011,8 +1015,14 @@ def emit_doctor(
     json_mode: bool = False,
     extra_warnings: Sequence[str] = (),
     known_bad_lanes: Sequence[JsonObject] = (),
+    auth_health: Mapping[str, JsonObject] | None = None,
 ) -> int:
-    payload = doctor(home=home, extra_warnings=extra_warnings, known_bad_lanes=known_bad_lanes)
+    payload = doctor(
+        home=home,
+        extra_warnings=extra_warnings,
+        known_bad_lanes=known_bad_lanes,
+        auth_health=auth_health,
+    )
     if json_mode:
         print(json.dumps(payload, sort_keys=True), file=stdout)
     else:
@@ -1040,6 +1050,10 @@ def emit_doctor(
         for lane in lanes if isinstance(lanes, list) else ():
             if isinstance(lane, dict):
                 print(lane_health.describe_public(lane), file=stdout)
+        health = payload.get("authHealth")
+        for record in health.values() if isinstance(health, dict) else ():
+            if isinstance(record, dict):
+                print(f"auth health - {auth_health_module.describe(record)}", file=stdout)
         for warning in payload.get("warnings", []):
             if isinstance(warning, str):
                 print(f"warning: {warning}", file=stdout)

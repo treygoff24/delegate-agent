@@ -907,7 +907,11 @@ Timing resolves as environment override, then config, then embedded default. Non
   "providerErrors": {
     "knownBadLaneMinutes": 15,
     "autoResume": true,
-    "stageStopAfter": 3
+    "stageStopAfter": 3,
+    "authProbes": {
+      "cursor": ["estate-cursor", "status"],
+      "omp": ["estate-omp", "usage"]
+    }
   }
 }
 ```
@@ -928,6 +932,14 @@ for the signature table.
   results of one `phase()` stage on one lane all failed with the same persistent
   lane-scoped signature, the stage stops launching further calls on that lane and
   they return `provider_exhausted`. `0` turns the stop off.
+- `authProbes`: the read-only health commands `delegate capabilities refresh`
+  runs to record per-engine auth health (`authHealth`, shown by `delegate
+  doctor`). Only `cursor` and `omp` are understood; each value is a command and
+  its arguments, or `null` to turn that probe off. A missing or unrecognised
+  probe records `unknown`, never a failure. An empty `authProbes: {}` in your
+  config leaves the defaults in place, so use `null` per engine to disable.
+  Set the environment variable `DELEGATE_AUTH_PROBES=off` (or `0`, `false`,
+  `no`) to skip every probe, for CI or a sandbox.
 
 Unknown keys under `providerErrors` are rejected with
 `invalid_provider_errors_config`.

@@ -6,6 +6,7 @@ import re
 import unittest
 from pathlib import Path
 
+from delegate_agent import config as delegate_config
 from delegate_agent import lane_health, outcome, provider_errors
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
@@ -45,14 +46,17 @@ class ProviderErrorDocsTests(unittest.TestCase):
 
     def test_configuration_documents_every_provider_errors_key(self):
         text = _doc("configuration.md")
-        for key in ("knownBadLaneMinutes", "autoResume", "stageStopAfter"):
+        section = delegate_config.embedded_default_config()["providerErrors"]
+        self.assertGreaterEqual(len(section), 4)
+        for key in section:
             with self.subTest(key):
-                self.assertIn(f"`{key}`", text)
+                self.assertIn(f"- `{key}`:", text)
 
     def test_cli_reference_documents_the_flag_the_exit_code_and_the_new_failure_kinds(self):
         text = _doc("cli-reference.md")
         self.assertIn(lane_health.FORCE_LAUNCH_FLAG, text)
         self.assertIn("| 4 |", text)
+        self.assertIn("authHealth", text)
         for kind in (outcome.FAILURE_LANE_KNOWN_BAD, outcome.FAILURE_PROVIDER_EXHAUSTED):
             with self.subTest(kind):
                 self.assertIn(f"`{kind}`", text)

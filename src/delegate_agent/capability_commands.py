@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import harness_discovery, profiles, reasoning, redaction
+from delegate_agent import auth_health, harness_discovery, profiles, reasoning, redaction
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.errors import EXIT_MISSING_BINARY, DelegateError
@@ -281,6 +281,10 @@ def _refresh_payload(
     }
     if drifted_harnesses:
         payload["driftedHarnesses"] = drifted_harnesses
+    # Best effort and never a failure: a missing or unreadable probe records unknown.
+    auth = auth_health.refresh(config, engines)
+    if auth:
+        payload["authHealth"] = auth
     if result.get("futureSchemaCache") is True:
         payload["cacheWriteSkipped"] = harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
@@ -339,6 +343,10 @@ def emit(
                 f"{', '.join(str(harness) for harness in drifted)}",
                 file=stdout,
             )
+        health = payload.get("authHealth")
+        for record in health.values() if isinstance(health, dict) else ():
+            if isinstance(record, dict):
+                print(f"auth health - {auth_health.describe(record)}", file=stdout)
         harnesses = payload["reasoning"]["harnesses"]
         if not isinstance(harnesses, dict):
             return 0

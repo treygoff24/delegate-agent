@@ -144,6 +144,10 @@
   "providerErrors": {
     "knownBadLaneMinutes": 15,
     "autoResume": true,
-    "stageStopAfter": 3
+    "stageStopAfter": 3,
+    "authProbes": {
+      "cursor": ["estate-cursor", "status"],
+      "omp": ["estate-omp", "usage"]
+    }
   }
 }
