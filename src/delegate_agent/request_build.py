@@ -3168,10 +3168,16 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     model, effective_family_warning = _resolve_cursor_family_name(model, build.discovery)
     if effective_family_warning is not None:
         warnings.append(effective_family_warning)
-    elif family_warning is not None and (
-        model == base_model or capability_model_source == "discovery"
-    ):
+    elif family_warning is not None and model == base_model:
         warnings.append(family_warning)
+    elif family_warning is not None and capability_model_source == "discovery":
+        # Effort routing moved off the family's newest selector; name the final one.
+        warnings.append(
+            f"cursor model {pinned or cursor['defaultModel']!r} is a family name cursor-agent "
+            f"rejects; resolved it to {base_model!r}, then reasoning-effort routing selected "
+            f"{model!r} from the same discovered model family. Pin a concrete id to choose "
+            "another version, effort, or speed."
+        )
 
     argv = build_cursor_argv(
         cursor["argvPrefix"],

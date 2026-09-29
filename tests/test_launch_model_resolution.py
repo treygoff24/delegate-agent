@@ -126,7 +126,12 @@ class CursorFamilyNameTests(CommandTestBase):
         self.assertEqual(request.model, "cursor-grok-4.6-low")
         self.assertEqual(request.argv[request.argv.index("--model") + 1], "cursor-grok-4.6-low")
         self.assertEqual(request.reasoning_effort, "low")
-        self.assertEqual(sum("family name" in warning for warning in request.warnings), 1)
+        family = [warning for warning in request.warnings if "family name" in warning]
+        self.assertEqual(len(family), 1, request.warnings)
+        # The warning must name the final routed selector, not claim the family
+        # resolved to the pre-route (newest) selector.
+        self.assertIn("'cursor-grok-4.6-low'", family[0])
+        self.assertNotIn("the newest", family[0])
 
     def test_configured_reasoning_route_family_resolves_before_argv(self):
         config = delegate_config.embedded_default_config()
