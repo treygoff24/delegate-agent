@@ -14,6 +14,7 @@ from typing import TextIO
 
 from delegate_agent import (
     command_errors,
+    degraded,
     outcome,
     profiles,
     redaction,
@@ -72,6 +73,8 @@ WAIT_STRUCTURAL_KEYS = (
     "status",
     "terminalState",
     "resultQuality",
+    "degraded",
+    "degradedReason",
     "failureKind",
     "failureReason",
     "staleReason",
@@ -259,6 +262,13 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         quality = str(run.get("resultQuality") or "")[:16]
         failure = str(run.get("failureReason") or run.get("staleReason") or "")[:40]
         print(f"{alias:<12} {status:<10} {quality:<16} {failure}", file=stdout)
+        flags = degraded.degraded_fields(run)
+        if flags:
+            print(
+                f"  degraded: {flags.get('degradedReason', 'unknown')} "
+                "(succeeded, but the child ended its turn with work unfinished)",
+                file=stdout,
+            )
 
 
 def _group_workspace_warnings(command: WaitCommand, runs: list[JsonObject]) -> list[str]:

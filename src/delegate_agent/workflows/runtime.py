@@ -403,10 +403,14 @@ def _child_outcome_fields(result: JsonObject) -> JsonObject:
     ok = result.get("ok")
     if isinstance(ok, bool):
         fields["ok"] = ok
-    for key in ("status", "failureKind", "failureReason", "modelResolved"):
+    for key in ("status", "failureKind", "failureReason", "modelResolved", "degradedReason"):
         value = result.get(key)
         if isinstance(value, str):
             fields[key] = value
+    # A succeeded child that ended its turn with work unfinished. Journaled, never
+    # failed: the workflow script decides what to do with it.
+    if result.get("degraded") is True:
+        fields["degraded"] = True
     provenance = result.get("modelProvenance")
     if isinstance(provenance, dict):
         for key in ("servedModel", "servedProvider"):
@@ -2608,6 +2612,8 @@ class WorkflowDsl:
                 "status",
                 "failureKind",
                 "failureReason",
+                "degraded",
+                "degradedReason",
                 "servedModel",
                 "servedProvider",
                 "modelResolved",

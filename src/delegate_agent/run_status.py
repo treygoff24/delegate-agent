@@ -296,6 +296,8 @@ def build_run_summary(
             "failureKind",
             "outcomeEvidence",
             "orphanedProcesses",
+            "degraded",
+            "degradedReason",
             "expectedFiles",
             "error",
             "message",

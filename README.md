@@ -348,6 +348,9 @@ the child produced none — so `--completion-report` never dead-ends.
 A work run with `resultQuality=no_assistant_text` fails with `empty_result` and
 exit code `1` when persistent-worktree accounting also verifies that it made no
 file changes or commits; the child exit code remains available as `childExitCode`.
+A run whose child ended its turn mid-job ("Waiting on the full gate" while a
+background test run was still going) stays `succeeded` but carries `degraded: true`
+and a `degradedReason`; see [Troubleshooting](docs/troubleshooting.md#a-succeeded-runs-report-says-it-is-still-waiting-degraded).
 Tracked raw streams have no byte cap by default, so a verbose run is never
 killed or truncated for its size and `stdout.log` keeps the whole stream. Set
 `<engine>.trackedStreamMaxBytes` to a positive integer to opt an engine into a

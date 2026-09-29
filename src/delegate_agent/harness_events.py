@@ -190,6 +190,10 @@ UNHANDLED_EVENT_TYPE_CHARS = 64
 # pi/omp remember each tool start's target until its end arrives; a run whose
 # ends never arrive must not grow that memory without bound.
 PI_PENDING_TOOL_LIMIT = 256
+# Bounds for the Claude background-task snapshot: a task description can be a
+# whole shell script, and only enough of it to recognize the job is kept.
+BACKGROUND_TASKS_KEPT = 20
+BACKGROUND_TASK_LABEL_CHARS = 300
 
 
 def _omitted_marker(omitted: int) -> str:
@@ -794,6 +798,13 @@ class StreamAccumulator:
     _devin_block: _RollingText | None = field(default=None, repr=False)
     _devin_block_chunk: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
+    # Claude Code reports its running background tasks (background Bash, Monitor)
+    # in `system/background_tasks_changed` snapshots. `_background_tasks_live` is
+    # the latest one; `background_tasks_at_result` is the snapshot taken when the
+    # turn's `result` event arrived, because the harness kills the leftovers just
+    # after `result` and then reports an empty list. None means no `result` yet.
+    _background_tasks_live: tuple[str, ...] = field(default=(), repr=False)
+    background_tasks_at_result: tuple[str, ...] | None = None
     _grok_text_buffer: str = field(default="", repr=False)
     _grok_sealed_response: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
@@ -1275,7 +1286,25 @@ class StreamAccumulator:
                 return message.strip()
         return self._last_error_message
 
+    def _ingest_background_tasks(self, payload: JsonObject) -> None:
+        tasks = payload.get("tasks")
+        labels: list[str] = []
+        if isinstance(tasks, list):
+            for task in tasks:
+                if not isinstance(task, dict) or len(labels) >= BACKGROUND_TASKS_KEPT:
+                    continue
+                description = task.get("description")
+                label = (
+                    description.strip()
+                    if isinstance(description, str) and description.strip()
+                    else _string_field(task, "task_type") or "background task"
+                )
+                labels.append(label[:BACKGROUND_TASK_LABEL_CHARS])
+        self._background_tasks_live = tuple(labels)
+
     def _ingest_system(self, payload: JsonObject) -> None:
+        if self.harness == "claude" and payload.get("subtype") == "background_tasks_changed":
+            self._ingest_background_tasks(payload)
         cwd = payload.get("cwd")
         if isinstance(cwd, str) and cwd:
             self.current = f"session cwd {cwd}"
@@ -1528,6 +1557,8 @@ class StreamAccumulator:
             self._record_successful_completion_text(final_text)
 
     def _ingest_result_event(self, payload: JsonObject, *, terminal_recorded: bool = False) -> None:
+        if self.harness == "claude":
+            self.background_tasks_at_result = self._background_tasks_live
         if self.harness == "cursor":
             usage = _normalize_reported_usage(payload.get("usage"))
             if usage is not None:

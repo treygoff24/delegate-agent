@@ -128,6 +128,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         # Work Runs save their native session by default so `delegate followup`
         # works without --resumable at launch. Wins over noSessionPersistence.
         "resumable": True,
+        "disableBackgroundTasks": True,
         "bare": False,
         "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
@@ -898,6 +899,11 @@ def _validate_claude_section(claude: JsonValue) -> None:
     )
     require_bool(
         claude.get("resumable", True), path="claude.resumable", error="invalid_claude_config"
+    )
+    require_bool(
+        claude.get("disableBackgroundTasks", True),
+        path="claude.disableBackgroundTasks",
+        error="invalid_claude_config",
     )
     require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")
     _validate_engine_models(claude.get("models"), engine="claude", error="invalid_claude_config")

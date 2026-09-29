@@ -8,6 +8,7 @@ from typing import BinaryIO, TextIO
 
 from delegate_agent import (
     command_errors,
+    degraded,
     harness_events,
     log_output,
     redaction,
@@ -359,6 +360,18 @@ def _append_warning(warnings: list[str], warning: str | None) -> None:
         warnings.append(warning)
 
 
+def _mark_degraded(
+    meta: JsonObject, warnings: list[str], *, registry_root: Path, run_id: str
+) -> None:
+    """Carry a degraded Run's flag, reason, and warning onto its completion-report view."""
+    state = run_registry.load_run_state(registry_root, run_id)
+    flags = degraded.degraded_fields(state)
+    if not flags:
+        return
+    meta.update(flags)
+    _append_warning(warnings, degraded.degraded_warning(str(flags.get("degradedReason") or "")))
+
+
 def _log_section_info(registry_root: Path, run_id: str, log_name: str) -> JsonObject:
     """Probe a stream's presence and byte size once (live file first, then archive)."""
     live_path = run_registry.run_directory(registry_root, run_id) / log_name
@@ -515,6 +528,7 @@ def _add_completion_report_section(
         }
         if source is not None:
             meta["completionReportSource"] = source
+        _mark_degraded(meta, warnings, registry_root=registry_root, run_id=run_id)
         sections["completionReport"] = meta
         text_sections["completionReport"] = text
         return
@@ -564,6 +578,7 @@ def _add_completion_report_section(
             warnings,
             _quality_warning(result_quality, harness=harness if isinstance(harness, str) else None),
         )
+        _mark_degraded(report_meta, warnings, registry_root=registry_root, run_id=run_id)
         sections["completionReport"] = report_meta
         text_sections["completionReport"] = text
         return

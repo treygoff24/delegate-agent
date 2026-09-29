@@ -77,6 +77,22 @@ def _render_snapshot_status_detail(view: SnapshotView, stdout: TextIO) -> None:
     render_resolution_text(view, stdout)
 
 
+def _render_snapshot_degraded(view: SnapshotView, stdout: TextIO) -> None:
+    if view.get("degraded") is not True:
+        return
+    reason = view.get("degradedReason")
+    print(
+        f"degraded: {reason if isinstance(reason, str) and reason else 'unknown'} "
+        "(succeeded, but the child ended its turn with work unfinished)",
+        file=stdout,
+    )
+    evidence = view.get("degradedEvidence")
+    if isinstance(evidence, list):
+        for line in evidence:
+            if isinstance(line, str):
+                print(f"  - {line}", file=stdout)
+
+
 def render_resolution_text(view: JsonObject, stdout: TextIO) -> None:
     requested = view.get("requestedHandle")
     resolved = view.get("resolvedHandle")
@@ -200,6 +216,7 @@ def render_snapshot_text(view: SnapshotView, stdout: TextIO) -> None:
     _render_snapshot_header(view, stdout)
     _render_snapshot_status_detail(view, stdout)
     _render_snapshot_scratch(view, stdout)
+    _render_snapshot_degraded(view, stdout)
     _render_snapshot_string_fields(view, SNAPSHOT_CONTEXT_FIELDS, stdout)
     _render_snapshot_isolation(view, stdout)
     _render_snapshot_reasoning(view, stdout)
@@ -264,6 +281,8 @@ def render_runs_text(
         else:
             iso_label = ""
         current = summary.get("current", "")
+        if summary.get("degraded") is True:
+            current = f"[degraded] {current}" if isinstance(current, str) else "[degraded]"
         if isinstance(current, str) and len(current) > 40:
             current = current[:37] + "..."
         if show_group:

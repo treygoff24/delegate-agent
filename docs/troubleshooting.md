@@ -366,6 +366,35 @@ and the retest ran against a standalone Bun rather than the shipped binary, so
 treat the cause as unsettled and check `--print-logs` stderr before concluding
 the child is stuck.
 
+## A succeeded Run's report says it is still waiting (`degraded`)
+
+A Run reads `succeeded` but its completion report ends with "Waiting on the full
+gate", "Monitor armed; waiting for both suites to finish", or "I'll commit when it
+finishes". The child ended its turn with its job unfinished. A headless child
+(`claude -p` and the other tracked engines) ends when the model stops talking, and
+background Bash tasks and Monitors die with the session, so nothing was left to
+wake it. Delegate records such a Run as `succeeded` (its edits are real and
+adoptable) but marks it `degraded: true` with a `degradedReason`, a `degraded=...`
+warning, and `degradedEvidence` saying what it saw. `wait`, `snapshot`, `runs`, the
+launch envelope, `run-output --completion-report`, and a workflow's `agent_meta()`
+all carry the flag; see [Degraded runs](cli-reference.md#degraded-runs-the-child-ended-its-turn-mid-job)
+for the two reasons.
+
+What to do: treat the unfinished job as not done. Run it yourself (or `followup` a
+resumable Run and tell it to run the job in the foreground), then accept the work.
+Do not read `succeeded` as "the gate passed".
+
+Claude work Runs are launched with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and
+`--disallowedTools Monitor` so the child cannot background a job in the first
+place (plus `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` at the run's
+`--timeout`, at least two hours, so a long foreground gate is not cut off at Claude
+Code's 2 and 10 minutes), and every tracked work or safe prompt tells the child that
+ending its turn ends the Run. If you set `claude.disableBackgroundTasks` to `false`, or the child
+found another way (a shell `&` or `nohup` inside a foreground command), only the
+after-the-fact detection remains. A false flag on a finished Run means its final
+message was short, not shaped like a report, and matched a waiting phrase; the
+`degradedEvidence` line quotes the phrase. Report the wording as a papercut.
+
 ## Need one-hop output instead of a tracked run
 
 Use `call` mode when you just need a prompt answered and do not want Delegate to

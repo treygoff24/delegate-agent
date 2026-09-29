@@ -1442,6 +1442,10 @@ engines.)
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 `--summary` prints counts by status, harness, and group for every matching run and no rows,
 so it is refused together with `--limit` or `--structural`.
+A [degraded](#degraded-runs-the-child-ended-its-turn-mid-job) Run's `degraded` and
+`degradedReason` appear on its `runs` entry, and the text table prefixes its `current`
+column with `[degraded]`. `--structural` stays a lifecycle-only view and omits them; use
+`wait --structural` when you need the outcome fields.
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
 and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
 `showing N of M runs (raise --limit to see more)` when truncated. An empty result adds a
@@ -1569,6 +1573,60 @@ After the child exits, Delegate checks the child's process group for members
 that are still alive before it terminates them. If any survive, the run records
 `orphanedProcesses: true` and adds an `orphanedProcesses:` warning. This is only
 a warning; it does not change the outcome.
+
+#### Degraded runs: the child ended its turn mid-job
+
+A headless child ends when the model stops talking, and a background Bash task
+or Monitor dies with the session. A Run whose child started its full test gate
+in the background and then said "Waiting on the full gate" has ended, not
+paused: nothing will wake it. The Run stays `succeeded` (its work can be
+adopted), but a tracked Run that ends this way carries `degraded: true`, a
+`degradedReason`, and `degradedEvidence` (bounded, redacted lines saying what
+was seen), plus a `degraded=...` warning. `degraded` appears only when true.
+It is surfaced on the launch envelope, in the persisted record, on `wait`
+(JSON, `--structural`, and a `degraded:` line under the text table row),
+`snapshot`, `runs`/`ps`, the `run-output --completion-report` view, and a
+workflow child's journal event and `agent_meta()`. `wait` still exits 0 and reports
+`ok: true` for a degraded Run.
+Nothing fails a Run or a workflow step on its own; the caller decides.
+
+`degradedReason` is a closed enum:
+
+- `ended_waiting_on_background_work`: the child's own final message is short,
+  not shaped like a finished report, and says it is waiting on or will act after
+  unfinished work ("Waiting on the gate.", "The suite is still running; I'll
+  commit when it finishes."). Checked for every engine's tracked Run. A long
+  final message never matches. A short one shaped like a finished report matches
+  only an explicit present-tense statement that the child's own job is still
+  running ("Status: completed implementation; the full gate is still running").
+  Nothing matches waiting on, or acting after, the requester ("waiting on your
+  answer", "I'll commit when you approve"), a denial ("no need to wait"), text the
+  child quotes (a tool's output in quotation marks, backticks, or a code fence),
+  or a third party's independent result ("Done. Waiting for CI to post its
+  result", "I'll report after CI posts it"): the wait has to be on a job the child
+  ran. Schema-bound
+  (`--output-schema`) Runs are not text-checked.
+- `background_work_unfinished_at_exit`: Claude Code's `background_tasks_changed`
+  stream event still listed a running task when the turn's `result` event arrived,
+  and the message did not read as waiting. This catches a finished-looking report
+  that abandoned a task. Only Claude emits the event; an older Claude Code that
+  does not gets the text check only.
+
+Prevention for Claude work Runs (and followups of them): Delegate sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment, which removes
+Bash `run_in_background` and the automatic backgrounding of long commands, and
+adds `--disallowedTools Monitor`. Because a long gate must then run in the
+foreground, and Claude Code cuts a foreground command off at 2 minutes by default
+and 10 minutes at most, Delegate also sets `BASH_DEFAULT_TIMEOUT_MS` and
+`BASH_MAX_TIMEOUT_MS` to the run's own `--timeout`, never less than two hours (a
+Run with no `--timeout` gets two hours). `claude.disableBackgroundTasks: false`
+turns all of it off. An auth profile's `env` cannot undo these variables: Delegate
+keeps its own values and adds a `profile env NAME ignored` warning when the
+profile set a different one; a workspace `--env` for one of these names is
+overridden the same way, with a `workspace env NAME ignored` warning. Every framed `work` and `safe` prompt also carries a two-sentence
+rule, just before the completion-report requirement, that ending the turn ends the
+Run and that long jobs must run in the foreground and finish before the final
+message. Verbatim slash pass-through prompts are not rewritten and do not get it.
 
 Call-mode JSON and tracked envelopes share `assistantText`,
 `assistantTextChars`, and `assistantTextTruncated`. Call mode's `text`,

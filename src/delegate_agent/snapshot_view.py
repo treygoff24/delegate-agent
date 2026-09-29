@@ -73,6 +73,9 @@ class SnapshotView(TypedDict, total=False):
     completionReportWritten: bool
     completionReportSource: str
     resultQuality: str
+    degraded: bool
+    degradedReason: str
+    degradedEvidence: list[str]
     terminalState: str
     terminalRecord: JsonObject
     continuityMode: str

@@ -78,6 +78,7 @@
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
     "resumable": true,
+    "disableBackgroundTasks": true,
     "bare": false
   },
   "grok": {

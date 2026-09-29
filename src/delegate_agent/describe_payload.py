@@ -311,6 +311,7 @@ def models_payload(
         "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
         "workPermissionMode": config["claude"]["workPermissionMode"],
         "noSessionPersistence": config["claude"]["noSessionPersistence"],
+        "disableBackgroundTasks": config["claude"].get("disableBackgroundTasks", True),
         "bare": config["claude"]["bare"],
     }
     kimi: JsonObject = {
@@ -1162,7 +1163,7 @@ def describe_payload(
                 "followup": "followup(prior_label, prompt, *, label=None, phase=None, schema=None, timeout=None, retries=None) continues a resumable child run by label.",
                 "args": "args is the JSON value from workflow run --args (None when absent); a nested workflow() sees its own args=.",
                 "budget": "run-count budget: total, spent(), remaining().",
-                "agent_meta": "agent_meta(key_or_label=None) returns the latest agent attempt's child outcome: key, label, runId, engine, ok, status, failureKind, failureReason, servedModel, servedProvider, modelResolved. With no argument it reads the calling thread's most recent agent() call; None when no child run was recorded.",
+                "agent_meta": "agent_meta(key_or_label=None) returns the latest agent attempt's child outcome: key, label, runId, engine, ok, status, failureKind, failureReason, degraded, degradedReason, servedModel, servedProvider, modelResolved. degraded is True when a succeeded child ended its turn with work unfinished (the step is not failed); None otherwise. With no argument it reads the calling thread's most recent agent() call; None when no child run was recorded.",
                 "AgentFailure": "AgentFailure(key, label, failure_kind, failure_reason, attempts, last_parsed_candidate, candidate_present, validation_error, run_id, engine, served_model, served_provider) is falsy; failure_kind is the closed run failureKind enum.",
                 "capabilities": f"capabilities maps feature names to versions ({workflow_capabilities!r}); test membership before using a newer feature.",
                 "capabilityVersions": workflow_capabilities,
