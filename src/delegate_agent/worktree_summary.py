@@ -133,31 +133,49 @@ def effective_changed_files(
 
     effective: list[JsonObject] = []
     for entry in raw_entries:
-        # ``oldPath`` is considered below as well; a rename/deletion of a
-        # seeded path is real dirt because its content no longer exists there.
-        candidate_paths = [entry.get("path")]
-        old_path = entry.get("oldPath")
-        if isinstance(old_path, str):
-            candidate_paths.append(old_path)
-        if ignore_globs and all(
-            isinstance(path, str)
-            and any(fnmatch.fnmatch(path, pattern) for pattern in ignore_globs)
-            for path in candidate_paths
-        ):
+        # ``oldPath`` is considered as well; a rename/deletion of a seeded path
+        # is real dirt because its content no longer exists there.
+        candidate_paths = _entry_paths(entry)
+        if matches_ignore_globs(candidate_paths, ignore_globs):
             continue
-        seeded_only = True
-        for candidate in candidate_paths:
-            if not isinstance(candidate, str) or candidate not in seeded:
-                seeded_only = False
-                break
-            baseline = seeded.get(candidate)
-            current = file_content_digest(Path(execution_cwd), candidate)
-            if not isinstance(baseline, str) or current != baseline:
-                seeded_only = False
-                break
-        if not seeded_only:
+        if not is_seeded_unchanged(candidate_paths, execution_cwd=execution_cwd, seeded=seeded):
             effective.append(entry)
     return effective[:MAX_CHANGED_FILES_REPORTED], len(effective), raw_total
+
+
+def _entry_paths(entry: JsonObject) -> list[object]:
+    paths: list[object] = [entry.get("path")]
+    old_path = entry.get("oldPath")
+    if isinstance(old_path, str):
+        paths.append(old_path)
+    return paths
+
+
+def matches_ignore_globs(paths: Sequence[object], ignore_globs: Sequence[str]) -> bool:
+    """True when every path is covered by an ignore glob (the discounted ledgers)."""
+
+    return bool(ignore_globs) and all(
+        isinstance(path, str) and any(fnmatch.fnmatch(path, pattern) for pattern in ignore_globs)
+        for path in paths
+    )
+
+
+def is_seeded_unchanged(
+    paths: Sequence[object],
+    *,
+    execution_cwd: str,
+    seeded: JsonObject,
+) -> bool:
+    """True when every path is a launch-seeded file still holding its launch content."""
+
+    for candidate in paths:
+        if not isinstance(candidate, str) or candidate not in seeded:
+            return False
+        baseline = seeded.get(candidate)
+        current = file_content_digest(Path(execution_cwd), candidate)
+        if not isinstance(baseline, str) or current != baseline:
+            return False
+    return True
 
 
 _SHORTSTAT_FILES_RE = re.compile(r"(\d+)\s+files?\s+changed")

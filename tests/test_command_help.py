@@ -152,6 +152,17 @@ class CommandPayloadShapeTests(unittest.TestCase):
             notes,
         )
 
+    def test_kill_live_help_is_the_only_documented_way_past_a_live_run(self):
+        for key in ("worktree remove", "worktree prune", "worktree reap"):
+            with self.subTest(command=key):
+                payload = command_help.command_help_payload(command_help.COMMAND_SPECS[key])
+                options = {opt["flag"]: opt["description"] for opt in payload["options"]}
+                self.assertIn("--kill-live", options)
+                self.assertIn("live", options["--kill-live"])
+                self.assertIn("Never overrides a live run", options["--force"])
+                usage = " ".join(payload["usage"])
+                self.assertIn("--kill-live", usage)
+
     def test_all_payloads_shape_and_serializable(self):
         for key, spec in command_help.COMMAND_SPECS.items():
             with self.subTest(command=key):

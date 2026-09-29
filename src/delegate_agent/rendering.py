@@ -572,18 +572,37 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
             print(f"  - {warning}", file=stdout)
 
 
+def _print_salvage(item: object, stdout: TextIO, *, indent: str = "") -> None:
+    """Say where changed ledger files were saved before their worktree was removed."""
+
+    if not isinstance(item, dict):
+        return
+    path = item.get("salvagePath")
+    if not isinstance(path, str):
+        return
+    files = item.get("salvagedPaths")
+    count = len(files) if isinstance(files, list) else 0
+    removed = item.get("salvageRemovedPaths")
+    gone = len(removed) if isinstance(removed, list) else 0
+    also = f"; {gone} deleted or renamed one(s) listed in its MANIFEST.tsv" if gone else ""
+    print(f"{indent}saved {count} changed ledger file(s) to {path}{also}", file=stdout)
+
+
 def render_worktree_remove_text(payload: JsonObject, stdout: TextIO) -> None:
     if isinstance(payload.get("removed"), list):
         print(
             f"group: {payload.get('group')} matched={payload.get('matched')} removed={len(payload.get('removed') or [])} errors={len(payload.get('errors') or [])}",
             file=stdout,
         )
+        for item in payload.get("removed") or []:
+            _print_salvage(item, stdout, indent="  ")
         return
     alias = payload.get("alias") or payload.get("runId") or "?"
     print(
         f"{alias}: removed={payload.get('removed')} pathRemoved={payload.get('pathRemoved')} branchRemoved={payload.get('branchRemoved')}",
         file=stdout,
     )
+    _print_salvage(payload, stdout)
     if payload.get("ok") is False or payload.get("branchRemovalError"):
         error = payload.get("branchRemovalError") or payload.get("message") or payload.get("code")
         if error:
@@ -612,6 +631,7 @@ def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
                         item.get("reason") or item.get("code") or item.get("worktreeStatus") or ""
                     )
                     print(f"  - {label} {detail}", file=stdout)
+                    _print_salvage(item, stdout, indent="    ")
 
 
 def render_worktree_reap_text(payload: JsonObject, stdout: TextIO) -> None:
@@ -633,6 +653,7 @@ def render_worktree_reap_text(payload: JsonObject, stdout: TextIO) -> None:
                 label = item.get("alias") or item.get("runId") or item.get("worktreePath") or "?"
                 detail = item.get("reason") or item.get("code") or ""
                 print(f"  - {label} {detail}", file=stdout)
+                _print_salvage(item, stdout, indent="    ")
 
 
 def render_runs_prune_text(payload: JsonObject, stdout: TextIO) -> None:

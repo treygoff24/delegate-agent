@@ -783,7 +783,19 @@ def sync_git_dirty_snapshot(
     worktree_path: str,
     *,
     snapshot: DirtySyncSnapshot | None = None,
+    persistent_worktree: bool = False,
 ) -> tuple[int, int, int, tuple[str, ...]]:
+    """Copy the source's uncommitted state into a fresh worktree.
+
+    Safe copies (the default) end with a sweep of the whole tree that replaces
+    every symlink pointing outside the source with a placeholder file: nothing in
+    a throwaway copy may reach outside it. A persistent worktree is a real
+    checkout that gets committed from, so with ``persistent_worktree`` there is
+    no sweep. Only the untracked paths this sync mirrored in are placeholdered
+    (``mirror_path_preserving_symlinks`` does it as it copies them); tracked
+    symlinks stay exactly as Git checked them out, because a placeholder there is
+    a typechange that the next ``git add -A`` commits.
+    """
     snapshot = snapshot or dirty_sync_snapshot(git_root)
     apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
     untracked = snapshot.untracked_names
@@ -808,14 +820,28 @@ def sync_git_dirty_snapshot(
             leak_blocked=leak_blocked,
         )
     tracked_count = len(snapshot.diff_names)
+    if persistent_worktree:
+        # The source-wide scan names every external link, tracked ones included,
+        # and says placeholders were used. Here only the mirrored untracked
+        # paths were, so those are the ones reported.
+        mirrored_external = {
+            relative
+            for relative in untracked
+            if relative and symlink_target_resolves_outside(root / relative, root)
+        }
+        symlink_warnings = _leak_blocked_symlink_warning(leak_blocked | mirrored_external)
+    else:
+        symlink_warnings = merge_warnings(
+            external_symlink_warnings(git_root),
+            block_external_symlinks(worktree_path, git_root),
+            _leak_blocked_symlink_warning(leak_blocked),
+        )
     return (
         len(snapshot.example_paths),
         tracked_count,
         len(untracked),
         merge_warnings(
-            external_symlink_warnings(git_root),
-            block_external_symlinks(worktree_path, git_root),
-            _leak_blocked_symlink_warning(leak_blocked),
+            symlink_warnings,
             check_ignore_warnings,
             local_exclude_omission_warnings(git_root),
         ),

@@ -483,20 +483,38 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
             self.assertEqual(reasons["cursor-live-pgid"], "process_group_alive")
 
-    def test_prune_force_overrides_live_owner_guard(self):
+    def test_prune_kill_live_overrides_live_owner_guard(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
             run_id = self._seed_prunable_tree(path, fake_home, "cursor-forced")
             self._set_run_state(path, run_id, status="running", pid=os.getpid())
 
             result = worktree_gc_api.prune_worktrees(
-                self._registry_root(path), merged=True, dry_run=True, force=True
+                self._registry_root(path), merged=True, dry_run=True, kill_live=True
             )
 
             planned = {entry["alias"] for entry in result["planned"]}
             self.assertIn("cursor-forced", planned)
 
-    def test_prune_force_reaches_mutating_remove_owner_recheck(self):
+    def test_prune_force_never_overrides_live_owner_guard(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-forced-refused")
+            worktree = Path(fake_home) / "wt" / "cursor-forced-refused"
+            self._set_run_state(path, run_id, status="running", pid=os.getpid())
+
+            result = worktree_gc_api.prune_worktrees(
+                self._registry_root(path), merged=True, force=True
+            )
+
+            self.assertEqual(result["planned"], [])
+            self.assertEqual(result["removed"], [])
+            (skipped,) = result["skipped"]
+            self.assertEqual(skipped["reason"], "run_active")
+            self.assertIn("--kill-live", skipped["hint"])
+            self.assertTrue(worktree.exists())
+
+    def test_prune_kill_live_reaches_mutating_remove_owner_recheck(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
             alias = "cursor-forced-live-pgid"
@@ -505,7 +523,7 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self._set_run_state(path, run_id, status="succeeded", pgid=os.getpgid(0))
 
             result = worktree_gc_api.prune_worktrees(
-                self._registry_root(path), merged=True, force=True
+                self._registry_root(path), merged=True, kill_live=True
             )
 
             self.assertTrue(result["ok"], result)

@@ -1225,7 +1225,7 @@ The JSON spec uses these keys:
   "ok": true,
   "command": "worktree remove",
   "summary": "Remove one persistent worktree and, by default, its branch.",
-  "usage": ["delegate [--cwd PATH] [--json] worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]"],
+  "usage": ["delegate [--cwd PATH] [--json] worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--kill-live] [--keep-branch]"],
   "arguments": [{"name": "<handle>", "required": true, "description": "Worktree handle to remove."}],
   "options": [{"flag": "--keep-branch", "argument": null, "description": "Remove the worktree but keep its branch."}],
   "examples": ["delegate worktree remove cursor-1"],
@@ -1699,12 +1699,12 @@ commands before you read raw `.delegate/` files directly.
 delegate worktree list [--harness HARNESS] [--group NAME] [--status STATUS] [--limit N] [--no-auto-prune]
 delegate worktree show <handle>
 delegate worktree show --latest HARNESS
-delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
-delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
+delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-branch] [--force] [--kill-live] [--keep-branch]
+delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force] [--kill-live]
 delegate worktree gc [--dry-run] [--all] [--pool PATH]
 ```
 
-Work runs in a persistent worktree accept `--base REF`, `--env NAME=VALUE`, `--env-file PATH`, and `--setup CMD` (see [Workspace spec](worktrees.md#workspace-spec-base-env-setup)). Prune paths skip a worktree whose run is not terminal while its launcher is alive (`worktree_leased`).
+Work runs in a persistent worktree accept `--base REF`, `--env NAME=VALUE`, `--env-file PATH`, and `--setup CMD` (see [Workspace spec](worktrees.md#workspace-spec-base-env-setup)). Prune paths skip a worktree whose run is not terminal while its launcher is alive (`worktree_leased`). `--force` never overrides a live run; `--kill-live` does (see [Worktrees](worktrees.md#prune-many-worktrees)). Changed ledger files (`worktrees.retirementIgnoreGlobs`) are copied to `<Registry>/salvage/<worktree>-<timestamp>/` before `remove`, `prune`, `reap`, or completion retirement deletes their worktree; the result carries `salvagePath` and a failed copy refuses the removal (see [Worktrees](worktrees.md#ledger-edits-are-saved-before-removal)).
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` / `--group` filters (pre-status-filter) and `statusCounts` to the visible entries. `worktree remove --group NAME` removes all matching persistent worktrees with the same safety checks as single-handle removal. `worktree prune --group NAME` limits prune candidates to the group. `worktree gc --dry-run` reports `wouldPruneSourceRoots` and structured orphan reasons; `worktree gc` JSON also includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields. `gc` never deletes worktree directories.
 

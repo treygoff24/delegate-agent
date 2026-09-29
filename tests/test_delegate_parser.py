@@ -1462,6 +1462,26 @@ class ParserTests(unittest.TestCase):
             parser_api.parse_cli(["worktree", "remove", "cursor-1", "--keep-branch", "--force"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
+    def test_worktree_kill_live_is_its_own_flag_on_remove_prune_and_reap(self):
+        cases = (
+            ["worktree", "remove", "cursor-1"],
+            ["worktree", "prune", "--merged"],
+            ["worktree", "reap", "--path", "/p", "--older-than", "0"],
+        )
+        for base in cases:
+            with self.subTest(action=base[1]):
+                plain = parser_api.parse_cli([*base, "--force"]).payload
+                self.assertTrue(plain.force)
+                self.assertFalse(plain.kill_live)
+                killed = parser_api.parse_cli([*base, "--kill-live"]).payload
+                self.assertTrue(killed.kill_live)
+                self.assertFalse(killed.force)
+
+    def test_worktree_kill_live_is_rejected_where_it_means_nothing(self):
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            parser_api.parse_cli(["worktree", "list", "--kill-live"])
+        self.assertEqual(ctx.exception.error, "unknown_option")
+
     def test_worktree_prune_requires_filter_at_execution_time(self):
         parsed = parser_api.parse_cli(["worktree", "prune"])
         self.assertEqual(parsed.payload.action, "prune")

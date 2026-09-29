@@ -617,6 +617,18 @@ delegate worktree remove <alias-or-runId> --force
 flags can discard edits or delete unmerged branches. Use them only after
 reviewing the worktree.
 
+Files the launch seeded from a dirty source and the ledger paths in
+`worktrees.retirementIgnoreGlobs` (`.beads/**`, `.papercuts.jsonl`) do not count
+as uncommitted edits, so they never cause this refusal. If the refusal names a
+live run (`run_active`, `run_not_terminal`, `process_group_alive`,
+`worktree_leased`, `nested_run_active`, or `nested_registry_unreadable`),
+`--force` will not override it; wait for the run, or pass `--kill-live` to remove
+the worktree out from under it. Edits to those ledger paths are not lost on
+removal: they are copied to `<Registry>/salvage/<worktree>-<timestamp>/` first,
+and the result names that path.
+A pooled path with no run record is removed with `worktree reap --path <path>
+--older-than 0 --yes --force`.
+
 ## CI does not have child runtimes
 
 That is expected. Required tests do not need real Cursor, Droid, Codex, Claude,
