@@ -14,7 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from delegate_agent import VERSION, reasoning
-from delegate_agent.constants import DEFAULT_RUN_PRUNE_DAYS, ENGINES_PROSE, KNOWN_ENGINES
+from delegate_agent.constants import (
+    DEFAULT_RUN_PRUNE_DAYS,
+    DEFAULT_SCRATCH_RECLAIM_DAYS,
+    ENGINES_PROSE,
+    KNOWN_ENGINES,
+)
 from delegate_agent.json_types import JsonObject
 from delegate_agent.reasoning import (
     OMP_NATIVE_EFFORTS,
@@ -1037,6 +1042,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Provide either a handle or --latest HARNESS, not both.",
             "Bare harness handles report the resolved run, workspace, and age; resolutions older "
             "than 24h warn to use --cwd or an explicit handle.",
+            "A run ID missing from this workspace's Registry but recorded in exactly one other "
+            "known workspace is read from there (resolutionKind cross_registry, resolvedWorkspace "
+            "set). An alias is never resolved across workspaces; the error lists them.",
         ),
         see_also=("runs", "run-output"),
         unsupported_global_options=(
@@ -1107,7 +1115,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--stale then excludes, the warning instead suggests dropping the "
             "status flag.",
         ),
-        see_also=("ps", "runs prune", "snapshot", "run-output"),
+        see_also=("ps", "runs prune", "runs reclaim", "snapshot", "run-output"),
         unsupported_global_options=(
             "--isolation",
             "--pass-through",
@@ -1142,6 +1150,51 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Runs with a registered present persistent worktree are skipped, so their worktree remains manageable. Pruning removes the per-Run directory, including its Snapshot, Manifest, logs, events, and Completion Report, plus the retained raw-log archive.",
         ),
         see_also=("runs", "snapshot", "run-output"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+            "--auth-profile",
+            "--group",
+            "--notify",
+        ),
+    ),
+    "runs reclaim": CommandSpec(
+        name="runs reclaim",
+        summary="Reclaim the scratch of finished Runs now, keeping their Run records.",
+        usage=("delegate [--cwd PATH] [--json] runs reclaim [--older-than DAYS] [--dry-run]",),
+        options=(
+            OptionSpec(
+                "--older-than",
+                "DAYS",
+                "Reclaim scratch of Runs older than DAYS by Registry activity time "
+                f"(defaults to tracking.retention.scratchDays, {DEFAULT_SCRATCH_RECLAIM_DAYS} "
+                "unless configured; non-negative integer).",
+            ),
+            OptionSpec(
+                "--dry-run",
+                None,
+                "List each Run's scratch and its size without removing anything.",
+            ),
+        ),
+        examples=(
+            "delegate runs reclaim --dry-run",
+            "delegate runs reclaim --older-than 1",
+        ),
+        notes=(
+            "Scratch is the private per-Run directory under ~/.delegate/run-scratch, its "
+            "sidecars, and the short child temp directory. Only terminal effective statuses "
+            "are eligible; running, stale, and unknown Runs are never touched.",
+            "The Run record (Snapshot, logs, events, Completion Report) stays. The Run state "
+            "gains scratchReclaimedAt and scratchReclaimedBytes so later readers know the "
+            "scratch is gone.",
+            "The same reclamation runs on its own during the implicit retention pass, "
+            "bounded by a time budget; this command has none. Sizes are apparent bytes of "
+            "regular files. JSON output uses schema delegate.runs-reclaim.v1 with planned, "
+            "reclaimed, skipped (each with a reason), errors, totalBytes, and budgetExhausted.",
+        ),
+        see_also=("runs", "runs prune", "snapshot"),
         unsupported_global_options=(
             "--isolation",
             "--pass-through",
@@ -1416,6 +1469,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "With no selector, prints the best available parent-facing output.",
             "Bare harness handles report the resolved run, workspace, and age; resolutions older "
             "than 24h warn to use --cwd or an explicit handle.",
+            "A run ID missing from this workspace's Registry but recorded in exactly one other "
+            "known workspace is read from there (resolutionKind cross_registry, resolvedWorkspace "
+            "set). An alias is never resolved across workspaces; the error lists them.",
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
@@ -1475,6 +1531,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Dead recorded child pids are treated as terminal failures, not as hangs.",
             "Bare harness handles report the resolved run, workspace, and age; resolutions older "
             "than 24h warn to use --cwd or an explicit handle.",
+            "A handle missing from this workspace's Registry but recorded in another known "
+            "workspace fails with that workspace and the exact --cwd command to run.",
         ),
         see_also=("runs", "snapshot", "run-output", "cancel"),
         unsupported_global_options=(
@@ -1632,6 +1690,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="workflow status",
         summary="Read a workflow status snapshot (reports stalled if the supervisor died).",
         usage=("delegate [--json] workflow status <wfId>",),
+        notes=(
+            "Workflow state is workspace-scoped. A wfId missing here but stored in exactly one "
+            "other known workspace is read from there and reported as resolvedWorkspace; "
+            "mutating workflow commands (approve, reject, kill, run --resume) instead fail "
+            "with that workspace and the exact --cwd command.",
+        ),
         see_also=("workflow events", "workflow result"),
     ),
     "workflow events": CommandSpec(
@@ -1672,6 +1736,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
             "Text --field output prints strings directly and JSON-encodes other values.",
+            "A wfId stored in exactly one other known workspace is read from there "
+            "(JSON reports resolvedWorkspace).",
         ),
         see_also=("workflow wait",),
     ),
@@ -1691,6 +1757,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
             "Returns at completion, paused, or stalled; a pause is not proof of completed work.",
             "An explicit wfId may return a completed dry-run. Implicit latest selection excludes dry-runs.",
+            "A wfId stored in exactly one other known workspace is read from there "
+            "(JSON reports resolvedWorkspace).",
         ),
         see_also=("workflow status", "workflow result"),
     ),

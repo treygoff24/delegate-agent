@@ -613,6 +613,17 @@ delegate [--json] workflow save <script.py> --name NAME
 
 - `check` validates the workflow script, including literal preflight checks for
   unsupported `agent()` combinations.
+- Workflows are stored per workspace like runs. A `<wfId>` that is not in the
+  current workspace is looked up on the roster of other known workspaces
+  (`~/.delegate/registries.json`). `status`, `events`, `watch`, `wait`, and
+  `result` read a workflow found in exactly one other workspace directly;
+  `status`, `wait`, and `result` add `resolvedWorkspace` to their output (a
+  `resolvedWorkspace:` line in text).
+  `approve`, `reject`, `kill`, and `run --resume` never act across workspaces:
+  they fail with `workflow_not_found`, name the workspace, and give the exact
+  command, for example `delegate --cwd /path/to/workspace workflow kill wf_...`.
+  A workflow id found in several workspaces is listed, never guessed, and an id
+  found nowhere keeps the plain `workflow_not_found` error.
 - `watch --jsonl` flushes one JSON event wrapper per line, followed by a final
   status record. It overrides `--json` buffering; ordinary `--json` still returns
   the existing single envelope. A successful watch observes the workflow; inspect
@@ -1250,6 +1261,13 @@ path; moving the registry or changing `HOME` causes a refusal rather than deleti
 through an untrusted pointer. Legacy run-local scratch remains part of its run
 record, and a legacy run that recorded no `tempPath` prunes as before.
 
+Scratch does not wait for the record to be pruned. Once a Run is terminal and
+older than `tracking.retention.scratchDays` (default 3), the ambient retention
+pass and `delegate runs reclaim` remove its scratch, its sidecars, and its
+compact temp directory, keep the Run record, and stamp `scratchReclaimedAt` and
+`scratchReclaimedBytes` into the Run state. Reclaiming applies the same
+recorded-path and ownership checks as pruning.
+
 For Codex read-only runs, Delegate selects a high-entropy named permissions
 profile extending `:read-only` with exactly the neutral scratch path and the
 child's temp root writable. Isolated work-mode Codex keeps its configured
@@ -1264,6 +1282,7 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]
 delegate runs prune [--older-than DAYS] [--dry-run]
+delegate runs reclaim [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
@@ -1330,6 +1349,8 @@ accepts the same harness, group, limit, and structural selectors (including `tot
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
 
+`delegate runs reclaim` gives back the disk a finished Run no longer needs while leaving its record readable. Only runs whose effective status is terminal and whose last activity is older than the threshold (default `tracking.retention.scratchDays`, 3 days; override with `--older-than DAYS`) are touched. It removes the run's neutral scratch directory, its scratch sidecars (for example the mail-push engine homes), and its compact child temp directory, and never touches a running or stale run. The Run record, logs, Snapshot, and Completion Report stay, and the Run state gains `scratchReclaimedAt` and `scratchReclaimedBytes`, which `snapshot` shows. A Run whose manifest recorded no scratch is skipped, and a Run already reclaimed is not walked again. Removal reuses the ownership and recorded-path checks of `runs prune`: a recorded path that no longer equals the deterministic owned path, a foreign-owned entry, or a scratch inside a Git worktree is refused and reported under `errors` (exit code 1), and the other runs still proceed. `--dry-run` lists each run's `scratchBytes`, its `paths`, and a `totalBytes` without removing anything or writing the marker. JSON output uses schema `delegate.runs-reclaim.v1` with `planned`, `reclaimed`, `skipped` (each entry carries a `reason`: `running`, `non_terminal`, `not_yet_old_enough`, `no_scratch`, `already_reclaimed`, `nothing_to_reclaim`, or `invalid_activity`), `errors`, `totalBytes`, and `budgetExhausted`. The ambient retention pass (see `tracking.retention`) runs the same reclamation for every workspace command that triggers retention, within a 20-second budget; `budgetExhausted: true` means a later pass finishes the rest.
+
 Command-local options belong after the command path: use `runs --group NAME`
 or `wait HANDLE --completion-report`. Their global launch spellings are not
 substitutes; for example, `--completion-report markdown wait HANDLE` is refused.
@@ -1345,6 +1366,22 @@ the selected run and start time, counts the newer runs, and includes the run's
 group when recorded. Review grouped runs with `delegate runs --group NAME`.
 Explicit `--latest` selectors expose the same resolution details and warn when
 the selected run's last activity is more than 24 hours old.
+
+Runs are recorded per workspace, so a handle that is not in the current
+workspace's Registry is looked up in a small roster of the other workspaces
+Delegate has launched in (`~/.delegate/registries.json`, at most 256 entries,
+most recently used first; workspaces whose `.delegate` is gone are skipped and
+dropped). A run ID is unique everywhere. `snapshot` and `run-output` read a run
+ID found in exactly one other workspace directly and report
+`resolutionKind: "cross_registry"`, `resolvedWorkspace`, and a `cross_registry:`
+warning. `wait`, `cancel`, `resume`, `followup`, and `worktree show` never act
+across workspaces: they fail with `unknown_handle`, name the workspace, and put
+the exact command (for example `delegate --cwd /path/to/workspace wait
+del_...`) first in `nextActions`. A run ID recorded in several workspaces is
+listed, never guessed. A numbered alias is only unique per workspace, so it is
+never resolved for you: the error lists each workspace that has it. The roster
+only knows workspaces used for a launch after it was introduced; a run from an
+older, never-relaunched workspace still needs `--cwd`.
 
 v0.10.0 migration note: pre-v0.10 runs that were literally aliased with a bare
 harness name (for example `codex`) are shadowed by the new latest-selector

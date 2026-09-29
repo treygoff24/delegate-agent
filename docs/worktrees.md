@@ -245,6 +245,16 @@ Unknown handle suggestions for `worktree show/remove` are scoped to persistent
 worktrees and include `delegate worktree list` guidance. Run handles from
 non-worktree launches are not suggested for worktree management commands.
 
+A followup, resume, or attached run does not own the worktree it used. Asking
+`worktree show` about one names the run that does, following the lineage
+upward through followups and resumes (up to 16 hops, with a cycle guard):
+"It followed up codex-5, which followed up codex-2, which owns the
+worktree", with `delegate worktree show codex-2` as the first next action. A
+handle that is not in this workspace's Registry but is recorded in another
+known workspace names that workspace and the exact
+`delegate --cwd <workspace> worktree show <handle>` to run; it is never
+followed automatically.
+
 Common statuses:
 
 - `present`: worktree path exists and is registered.

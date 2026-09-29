@@ -173,6 +173,8 @@ WORKFLOW_DRY_RUN_HINT = (
 
 # Shared execution/help defaults; keep discovery imports free of registry I/O.
 DEFAULT_RUN_PRUNE_DAYS = 30
+# Terminal runs' scratch is reclaimed after this many days (tracking.retention.scratchDays).
+DEFAULT_SCRATCH_RECLAIM_DAYS = 3
 RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
 
 

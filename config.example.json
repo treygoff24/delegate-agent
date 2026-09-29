@@ -5,7 +5,8 @@
     },
     "retention": {
       "enabled": true,
-      "rawLogDays": 7
+      "rawLogDays": 7,
+      "scratchDays": 3
     },
     "processGroupTerminationGraceSec": 3,
     "skillReviewPreamble": {

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import tarfile
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 
-from delegate_agent import archived_logs, log_output, run_registry
+from delegate_agent import archived_logs, log_output, run_registry, run_scratch
+from delegate_agent.constants import DEFAULT_SCRATCH_RECLAIM_DAYS
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.log_output import LogOutput
 
@@ -17,7 +19,16 @@ ARCHIVE_MEMBER_NAMES = (
     run_registry.EVENTS_JSONL,
 )
 DEFAULT_RAW_LOG_RETENTION_DAYS = 7
+DEFAULT_SCRATCH_RETENTION_DAYS = DEFAULT_SCRATCH_RECLAIM_DAYS
 RETENTION_CADENCE_SECONDS = 60
+SCRATCH_RECLAIMED_AT_KEY = "scratchReclaimedAt"
+SCRATCH_RECLAIMED_BYTES_KEY = "scratchReclaimedBytes"
+RUNS_RECLAIM_SCHEMA = "delegate.runs-reclaim.v1"
+# The implicit pass runs inside launches and read commands. Deleting a run's
+# scratch can take minutes when a test filled it, so the implicit pass stops
+# starting new reclaims once it has spent this long and the next pass carries on.
+# `delegate runs reclaim` has no such budget.
+SCRATCH_RECLAIM_BUDGET_SECONDS = 20.0
 
 
 def _retention_completed_at(index: JsonObject) -> datetime | None:
@@ -68,6 +79,14 @@ def raw_log_retention_days(config: JsonObject) -> int:
     days = settings.get("rawLogDays", DEFAULT_RAW_LOG_RETENTION_DAYS)
     if not is_non_negative_int(days):
         return DEFAULT_RAW_LOG_RETENTION_DAYS
+    return days
+
+
+def scratch_retention_days(config: JsonObject) -> int:
+    settings = retention_settings(config)
+    days = settings.get("scratchDays", DEFAULT_SCRATCH_RETENTION_DAYS)
+    if not is_non_negative_int(days):
+        return DEFAULT_SCRATCH_RETENTION_DAYS
     return days
 
 
@@ -277,14 +296,155 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
             temp_destination.unlink()
 
 
+def empty_reclaim_payload(*, older_than_days: int, dry_run: bool) -> JsonObject:
+    return {
+        "schema": RUNS_RECLAIM_SCHEMA,
+        "ok": True,
+        "olderThanDays": older_than_days,
+        "dryRun": dry_run,
+        "planned": [],
+        "reclaimed": [],
+        "skipped": [],
+        "errors": [],
+        "totalBytes": 0,
+        "budgetExhausted": False,
+    }
+
+
+def _mark_scratch_reclaimed(
+    registry_root: Path, run_id: str, *, reclaimed_bytes: int, moment: datetime
+) -> None:
+    """Record in the run state that the scratch is gone, so readers are not confused."""
+    run_path = run_registry.run_directory(registry_root, run_id)
+    with run_registry.registry_lock(registry_root):
+        run_registry.reconcile_finalize_wal_locked(registry_root, run_id)
+        state = run_registry.read_json_object_or_none(run_path / run_registry.STATE_FILE)
+        if state is None:
+            return
+        state[SCRATCH_RECLAIMED_AT_KEY] = moment.strftime(run_registry.UTC_TIMESTAMP_FORMAT)
+        state[SCRATCH_RECLAIMED_BYTES_KEY] = reclaimed_bytes
+        run_registry.write_run_state(run_path, state)
+
+
+def _reclaim_scratch_locked(
+    registry_root: Path,
+    *,
+    older_than_days: int,
+    dry_run: bool,
+    now: datetime | None = None,
+    budget_seconds: float | None = None,
+) -> JsonObject:
+    """Remove the scratch of terminal runs older than ``older_than_days``.
+
+    The caller holds the retention lock. Only runs whose effective status is
+    terminal qualify: a running or stale run is never touched, whatever its
+    age. Removal reuses ``run_scratch``'s owned-path and ownership checks, and
+    the run record itself stays; only the neutral scratch, its sidecars, and the
+    compact child temp go. Records are never rewritten in a dry run.
+    """
+    moment = now or datetime.now(UTC)
+    cutoff = moment - timedelta(days=older_than_days)
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
+    payload = empty_reclaim_payload(older_than_days=older_than_days, dry_run=dry_run)
+    planned: list[JsonObject] = payload["planned"]  # type: ignore[assignment]
+    reclaimed: list[JsonObject] = payload["reclaimed"]  # type: ignore[assignment]
+    skipped: list[JsonObject] = payload["skipped"]  # type: ignore[assignment]
+    errors: list[JsonObject] = payload["errors"]  # type: ignore[assignment]
+    index = run_registry.load_index(registry_root)
+    total_bytes = 0
+    for run_id in list(index.get("runs", {}).keys()):
+        if not isinstance(run_id, str) or not run_registry.RUN_ID_RE.fullmatch(run_id):
+            continue
+        try:
+            state = run_registry.load_run_state_or_none(registry_root, run_id)
+            status = run_registry.effective_status(state)
+            ref: JsonObject = {
+                "alias": run_registry.alias_for_run(index, run_id),
+                "runId": run_id,
+                "effectiveStatus": status,
+            }
+            if status == run_registry.STATUS_RUNNING:
+                skipped.append({**ref, "reason": "running"})
+                continue
+            if status not in run_registry.TERMINAL_STATUSES:
+                skipped.append({**ref, "reason": "non_terminal"})
+                continue
+            if isinstance(state, dict) and SCRATCH_RECLAIMED_AT_KEY in state:
+                skipped.append({**ref, "reason": "already_reclaimed"})
+                continue
+            manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+            if manifest is None or not ("scratchPath" in manifest or "tempPath" in manifest):
+                skipped.append({**ref, "reason": "no_scratch"})
+                continue
+            activity = run_registry.activity_datetime(state, manifest, run_id)
+            if activity is None:
+                skipped.append({**ref, "reason": "invalid_activity"})
+                continue
+            if activity >= cutoff:
+                skipped.append({**ref, "reason": "not_yet_old_enough"})
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                payload["budgetExhausted"] = True
+                break
+            ref["activityAt"] = run_registry.activity_timestamp(state, manifest, run_id)
+            run_scratch.verify_recorded_paths(registry_root, run_id, manifest, action="reclaim")
+            targets = run_scratch.owned_targets(registry_root, run_id)
+            size = sum(run_scratch.tree_bytes(target) for target in targets)
+            ref["scratchBytes"] = size
+            ref["paths"] = [str(target) for target in targets]
+            if not targets:
+                if not dry_run:
+                    _mark_scratch_reclaimed(registry_root, run_id, reclaimed_bytes=0, moment=moment)
+                skipped.append({**ref, "reason": "nothing_to_reclaim"})
+                continue
+            planned.append(ref)
+            if dry_run:
+                total_bytes += size
+                continue
+            run_scratch.remove_targets(targets)
+            _mark_scratch_reclaimed(registry_root, run_id, reclaimed_bytes=size, moment=moment)
+            reclaimed.append(ref)
+            total_bytes += size
+        except (OSError, ValueError) as exc:
+            errors.append(
+                {
+                    "code": "scratch_reclaim_failed",
+                    "runId": run_id,
+                    "message": str(exc),
+                }
+            )
+    payload["totalBytes"] = total_bytes
+    if errors:
+        payload["ok"] = False
+        payload["exitCode"] = run_registry.RUN_PRUNE_ERROR_EXIT_CODE
+    return payload
+
+
+def reclaim_scratch(
+    registry_root: Path,
+    *,
+    older_than_days: int = DEFAULT_SCRATCH_RETENTION_DAYS,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> JsonObject:
+    """Reclaim scratch of finished runs now (``delegate runs reclaim``)."""
+    if not is_non_negative_int(older_than_days):
+        raise ValueError("older_than_days must be a non-negative integer")
+    with run_registry.file_lock(run_registry.retention_lock_path(registry_root)):
+        return _reclaim_scratch_locked(
+            registry_root, older_than_days=older_than_days, dry_run=dry_run, now=now
+        )
+
+
 def run_retention_pass(
     registry_root: Path,
     config: JsonObject,
     *,
     now: datetime | None = None,
 ) -> dict[str, int]:
+    empty = {"scanned": 0, "archived": 0, "skipped": 0, "scratchReclaimed": 0}
     if not retention_enabled(config):
-        return {"scanned": 0, "archived": 0, "skipped": 0}
+        return dict(empty)
     try:
         with run_registry.file_lock(
             run_registry.retention_lock_path(registry_root),
@@ -304,7 +464,7 @@ def run_retention_pass(
                 and completed_run_count == run_count
                 and moment - completed_at < timedelta(seconds=RETENTION_CADENCE_SECONDS)
             ):
-                return {"scanned": 0, "archived": 0, "skipped": 0}
+                return dict(empty)
             scanned = 0
             archived = 0
             skipped = 0
@@ -327,10 +487,35 @@ def run_retention_pass(
                         skipped += 1
                 except OSError:
                     skipped += 1
-            _mark_retention_completed(registry_root, moment, run_count)
-            return {"scanned": scanned, "archived": archived, "skipped": skipped}
+            # Scratch is reclaimed on its own age, independent of record
+            # pruning and of raw-log archival. A failure here never fails the
+            # command that happened to trigger the pass.
+            scratch_reclaimed = 0
+            budget_exhausted = False
+            try:
+                reclaim = _reclaim_scratch_locked(
+                    registry_root,
+                    older_than_days=scratch_retention_days(config),
+                    dry_run=False,
+                    now=now,
+                    budget_seconds=SCRATCH_RECLAIM_BUDGET_SECONDS,
+                )
+                scratch_reclaimed = len(reclaim["reclaimed"])
+                budget_exhausted = reclaim["budgetExhausted"] is True
+            except (OSError, ValueError):
+                pass
+            # A pass cut short by the budget must not start the cadence window,
+            # or the remaining scratch would wait for the next new run.
+            if not budget_exhausted:
+                _mark_retention_completed(registry_root, moment, run_count)
+            return {
+                "scanned": scanned,
+                "archived": archived,
+                "skipped": skipped,
+                "scratchReclaimed": scratch_reclaimed,
+            }
     except TimeoutError:
-        return {"scanned": 0, "archived": 0, "skipped": 0}
+        return dict(empty)
 
 
 def read_archived_member(archive_file: Path, member_name: str) -> str:

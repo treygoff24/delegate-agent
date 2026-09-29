@@ -681,9 +681,15 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         registry_root,
         handle=command.handle,
         latest_harness=command.latest_harness,
+        command="run-output",
+        read_across_registries=True,
     )
     if isinstance(target, run_registry.RunTargetLookupError):
-        raise RunOutputError(target.error, target.message)
+        error = RunOutputError(target.error, target.message)
+        error.next_actions = list(target.next_actions) or None
+        raise error
+    if target.registry_root is not None:
+        registry_root = target.registry_root
     run_id, alias = target.run_id, target.alias
     resolution: JsonObject = {}
     run_registry.add_run_target_resolution(resolution, target)
