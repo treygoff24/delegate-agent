@@ -56,32 +56,49 @@ def native_schema_eligible(
     return None
 
 
-def free_form_object_path(node: object, path: str, seen: set[int] | None = None) -> str | None:
-    """Path of the first object node with no declared `properties`, or None."""
+def free_form_object_path(node: object, path: str) -> str | None:
+    """Path of the first object node with no declared `properties`, or None.
+
+    Local `$ref` targets are followed the way normalize_codex_schema follows
+    them, and the referenced node's own path is reported.
+    """
+    return _walk_free_form(node, path, set(), node)
+
+
+def _walk_free_form(node: object, path: str, seen: set[int], root: object) -> str | None:
     if not isinstance(node, dict):
         return None
-    seen = set() if seen is None else seen
     if id(node) in seen:
         return None
     seen.add(id(node))
     if _is_object_node(node) and "properties" not in node:
         return path
+    if "$ref" in node and isinstance(root, dict):
+        try:
+            target, target_path = _resolve_local_ref(root, node["$ref"], path)
+        except SchemaPreflightError:
+            # Normalization reports unresolvable refs with its own message.
+            pass
+        else:
+            found = _walk_free_form(target, target_path, seen, root)
+            if found is not None:
+                return found
     for keyword in ("properties", "$defs", "definitions", "dependentSchemas"):
         children = node.get(keyword)
         if isinstance(children, dict):
             for name, child in children.items():
-                found = free_form_object_path(child, f"{path}.{keyword}.{name}", seen)
+                found = _walk_free_form(child, f"{path}.{keyword}.{name}", seen, root)
                 if found is not None:
                     return found
     for keyword in ("anyOf", "oneOf", "allOf", "prefixItems"):
         children = node.get(keyword)
         if isinstance(children, list):
             for index, child in enumerate(children):
-                found = free_form_object_path(child, f"{path}.{keyword}[{index}]", seen)
+                found = _walk_free_form(child, f"{path}.{keyword}[{index}]", seen, root)
                 if found is not None:
                     return found
     for keyword in ("items", "not", "if", "then", "else", "contains", "propertyNames"):
-        found = free_form_object_path(node.get(keyword), f"{path}.{keyword}", seen)
+        found = _walk_free_form(node.get(keyword), f"{path}.{keyword}", seen, root)
         if found is not None:
             return found
     return None
