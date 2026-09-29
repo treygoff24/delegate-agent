@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 import tempfile
+import threading
 import time
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from delegate_agent import config as delegate_config
@@ -127,6 +130,113 @@ class LaneIdentityTests(unittest.TestCase):
         self.assertNotIn("/secret/path", json.dumps(lane.public()))
 
 
+SECRET_A = "sk-live-AAAA1111secretvalue"
+SECRET_B = "sk-live-BBBB2222secretvalue"
+
+
+class LaneCredentialTests(HomeCase):
+    """Two launches on one model with different credentials are different lanes."""
+
+    def derive(self, *, env=None, process=None, **launch):
+        launch = {"engine": "omp", "model": "openai/gpt-5", **launch}
+        # A clean process environment: what the launch inherits is part of the answer.
+        with mock.patch.dict(
+            os.environ, {"HOME": os.environ["HOME"], **(process or {})}, clear=True
+        ):
+            return lane_health.derive_lane(env=env, **launch)
+
+    def test_a_different_api_key_override_is_a_different_lane(self):
+        a = self.derive(env={"OPENAI_API_KEY": SECRET_A})
+        b = self.derive(env={"OPENAI_API_KEY": SECRET_B})
+        again = self.derive(env={"OPENAI_API_KEY": SECRET_A})
+
+        self.assertNotEqual(a.key, b.key)
+        self.assertEqual(a.key, again.key)
+
+    def test_a_different_inherited_api_key_is_a_different_lane(self):
+        a = self.derive(process={"OPENAI_API_KEY": SECRET_A})
+        b = self.derive(process={"OPENAI_API_KEY": SECRET_B})
+
+        self.assertNotEqual(a.key, b.key)
+        self.assertEqual(a.key, self.derive(process={"OPENAI_API_KEY": SECRET_A}).key)
+        self.assertNotEqual(a.key, self.derive().key, "no key at all is not the same lane")
+
+    def test_the_broker_realm_or_socket_is_part_of_the_lane(self):
+        base = self.derive(env={"OPENAI_API_KEY": SECRET_A})
+        for extra in (
+            {"ESTATE_BROKER_REALM": "team-a"},
+            {"BROKER_SOCKET": "/run/broker-a.sock"},
+            {"OPENAI_BASE_URL": "https://broker-a.example/v1"},
+        ):
+            with self.subTest(extra):
+                other = self.derive(env={"OPENAI_API_KEY": SECRET_A, **extra})
+                self.assertNotEqual(base.key, other.key)
+
+    def test_a_model_with_no_provider_prefix_counts_every_inherited_secret(self):
+        a = self.derive(model="glm-5", process={"ZAI_API_KEY": SECRET_A})
+        b = self.derive(model="glm-5", process={"ZAI_API_KEY": SECRET_B})
+
+        self.assertNotEqual(a.key, b.key)
+
+    def test_other_engines_read_their_own_credentials(self):
+        for engine, name in (("claude", "ANTHROPIC_API_KEY"), ("grok", "XAI_API_KEY")):
+            with self.subTest(engine):
+                a = self.derive(engine=engine, model=None, env={name: SECRET_A})
+                b = self.derive(engine=engine, model=None, env={name: SECRET_B})
+                self.assertNotEqual(a.key, b.key)
+
+    def test_environment_that_is_not_a_credential_does_not_split_a_lane(self):
+        base = self.derive(env={"OPENAI_API_KEY": SECRET_A})
+        for noise in (
+            {
+                "DELEGATE_RUN_ID": "del_1",
+                "DELEGATE_MAIL_TOKEN": "per-run-1",
+                "WORKSPACE_ROOT": "/w/1",
+            },
+            # Delegate's own per-mode permission JSON is not an account.
+            {"OPENCODE_CONFIG_CONTENT": '{"permission":{"edit":"deny"}}', "TERM": "xterm"},
+        ):
+            with self.subTest(noise):
+                other = self.derive(env={"OPENAI_API_KEY": SECRET_A, **noise})
+                self.assertEqual(base.key, other.key)
+
+    def test_no_secret_material_reaches_the_key_the_label_or_the_disk(self):
+        lane = self.derive(
+            env={"OPENAI_API_KEY": SECRET_A, "BROKER_SOCKET": "/run/broker-secret-path.sock"}
+        )
+        lane_health.write(lane, PERSISTENT, seconds=900)
+
+        blobs = [lane.key, lane.label, json.dumps(lane.public())]
+        home = Path(os.environ["HOME"])
+        blobs += [path.read_text(errors="replace") for path in home.rglob("*") if path.is_file()]
+        for secret in (SECRET_A, "broker-secret-path", "AAAA1111"):
+            for blob in blobs:
+                self.assertNotIn(secret, blob)
+
+    def test_launches_that_race_to_create_the_salt_agree_on_the_winners(self):
+        env = {"OPENAI_API_KEY": SECRET_A}
+        real_link = os.link
+
+        def another_launch_publishes_first(src, dst, *args, **kwargs):
+            Path(dst).write_bytes(b"the-other-launchs-salt")
+            return real_link(src, dst, *args, **kwargs)  # now raises FileExistsError
+
+        with mock.patch.object(os, "link", another_launch_publishes_first):
+            first = self.derive(env=env)
+
+        self.assertEqual(first.key, self.derive(env=env).key)
+
+    def test_the_credential_digest_is_salted_per_machine(self):
+        env = {"OPENAI_API_KEY": SECRET_A}
+        before = self.derive(env=env).key
+        self.assertEqual(before, self.derive(env=env).key)
+
+        for salt in Path(os.environ["HOME"]).rglob("*.salt"):
+            salt.unlink()
+
+        self.assertNotEqual(before, self.derive(env=env).key)
+
+
 class StoreTests(HomeCase):
     def test_a_written_marker_is_read_back_until_it_expires(self):
         lane_health.write(self.lane, PERSISTENT, seconds=900, run_id="del_1", alias="codex-1")
@@ -203,6 +313,196 @@ class StoreTests(HomeCase):
 
         self.assertEqual(warnings, [])
         self.assertEqual([marker.lane["model"] for marker in markers], ["soon", "late"])
+
+    def test_a_marker_never_stores_an_email_address(self):
+        rec = dict(PERSISTENT, message="the token for alice@example.com was rejected")
+
+        marker = lane_health.write(self.lane, rec, seconds=900)
+
+        assert marker is not None
+        (path,) = lane_health.store_dir().iterdir()
+        for blob in (marker.message, path.read_text(encoding="utf-8")):
+            self.assertNotIn("alice@example.com", blob)
+        self.assertIn("was rejected", marker.message)
+
+
+class StoreConcurrencyTests(HomeCase):
+    """One machine-wide store, many launches: writes and clears on a lane must not tear."""
+
+    def slow_replace(self, delay=0.15):
+        """Patch os.replace to widen the write window and count writes in flight."""
+        real = os.replace
+        counter = threading.Lock()
+        seen = {"inflight": 0, "peak": 0, "sources": []}
+
+        def replace(src, dst, *args, **kwargs):
+            with counter:
+                seen["inflight"] += 1
+                seen["peak"] = max(seen["peak"], seen["inflight"])
+                seen["sources"].append(str(src))
+            time.sleep(delay)
+            try:
+                return real(src, dst, *args, **kwargs)
+            finally:
+                with counter:
+                    seen["inflight"] -= 1
+
+        patcher = mock.patch.object(os, "replace", replace)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return seen
+
+    def run_together(self, *callables):
+        results = [None] * len(callables)
+        errors = []
+        start = threading.Barrier(len(callables))
+
+        def runner(index, call):
+            try:
+                start.wait(5)
+                results[index] = call()
+            except BaseException as exc:  # the test reports whatever a worker raised
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=runner, args=(index, call))
+            for index, call in enumerate(callables)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(errors, [])
+        self.assertFalse([thread for thread in threads if thread.is_alive()])
+        return results
+
+    def test_overlapping_atomic_writes_never_share_a_temp_file(self):
+        path = lane_health.store_dir() / "one-lane.json"
+        arrived = threading.Barrier(2)
+        real = os.replace
+
+        def rendezvous(src, dst, *args, **kwargs):
+            # Both writers finish writing their temp file before either publishes.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                arrived.wait(2)
+            return real(src, dst, *args, **kwargs)
+
+        with mock.patch.object(os, "replace", rendezvous):
+            self.run_together(
+                lambda: lane_health._write_atomic(path, {"writer": 1}),
+                lambda: lane_health._write_atomic(path, {"writer": 2}),
+            )
+
+        self.assertIn(json.loads(path.read_text(encoding="utf-8"))["writer"], (1, 2))
+        self.assertEqual(sorted(path.parent.glob("*.tmp.*")), [])
+
+    def test_each_write_uses_a_temp_file_of_its_own(self):
+        seen = self.slow_replace(delay=0)
+
+        lane_health.write(self.lane, PERSISTENT, seconds=900)
+        lane_health.write(self.lane, PERSISTENT, seconds=900)
+
+        self.assertEqual(len(seen["sources"]), 2)
+        self.assertEqual(len(set(seen["sources"])), 2, "a reused temp name is what tore writes")
+
+    def test_writes_to_one_lane_take_turns(self):
+        seen = self.slow_replace()
+
+        first, second = self.run_together(
+            lambda: lane_health.write(self.lane, PERSISTENT, seconds=900, run_id="a"),
+            lambda: lane_health.write(self.lane, TRANSIENT, seconds=900, run_id="b"),
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(seen["peak"], 1, "two writers were inside the store at once")
+        marker, warnings = lane_health.check(self.lane)
+        self.assertEqual(warnings, [])
+        assert marker is not None
+        self.assertIn(marker.run_id, ("a", "b"))
+
+    def test_a_clear_waits_for_a_write_in_flight_instead_of_being_undone_by_it(self):
+        entered, release = threading.Event(), threading.Event()
+        real = os.replace
+
+        def held(src, dst, *args, **kwargs):
+            entered.set()
+            release.wait(10)
+            return real(src, dst, *args, **kwargs)
+
+        outcome: dict[str, object] = {}
+        with mock.patch.object(os, "replace", held):
+            writer = threading.Thread(
+                target=lambda: outcome.setdefault(
+                    "write", lane_health.write(self.lane, PERSISTENT, seconds=900)
+                )
+            )
+            writer.start()
+            self.assertTrue(entered.wait(5), "the write never reached the publish step")
+            clearer = threading.Thread(
+                target=lambda: outcome.setdefault("clear", lane_health.clear(self.lane))
+            )
+            clearer.start()
+            clearer.join(0.4)
+            still_waiting = clearer.is_alive()
+            release.set()
+            writer.join(10)
+            clearer.join(10)
+
+        self.assertTrue(still_waiting, "the clear ran while a write was half-published")
+        self.assertTrue(outcome["clear"], "the clear should have removed the finished write")
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_a_reader_never_removes_a_marker_written_after_it_read_a_stale_one(self):
+        now = time.time() + 901
+        lane_health.write(self.lane, PERSISTENT, seconds=900)  # stale by `now`
+        real_parse = lane_health._parse_marker
+        calls = []
+
+        def parse_then_get_replaced(raw):
+            marker = real_parse(raw)
+            if not calls:
+                calls.append(1)
+                # A writer publishes a fresh marker between the reader's read and its unlink.
+                lane_health.write(self.lane, TRANSIENT, seconds=900, run_id="fresh", now=now)
+            return marker
+
+        with mock.patch.object(lane_health, "_parse_marker", parse_then_get_replaced):
+            lane_health.check(self.lane, now=now)
+
+        marker, _ = lane_health.check(self.lane, now=now)
+        assert marker is not None, "the reader deleted a fresh marker"
+        self.assertEqual(marker.run_id, "fresh")
+
+    def test_a_storm_of_writes_clears_and_reads_never_tears_the_marker(self):
+        self.slow_replace(delay=0.002)  # widen the publish window so an overlap shows up
+        failures: list[str] = []
+        writes = []
+
+        def worker(seed):
+            for step in range(25):
+                turn = (seed + step) % 3
+                if turn == 0:
+                    writes.append(
+                        lane_health.write(
+                            self.lane, PERSISTENT, seconds=900, run_id=f"{seed}-{step}"
+                        )
+                    )
+                elif turn == 1:
+                    lane_health.clear(self.lane)
+                else:
+                    failures.extend(lane_health.check(self.lane)[1])
+
+        self.run_together(*[lambda seed=seed: worker(seed) for seed in range(6)])
+
+        self.assertEqual(failures, [], "a reader saw a partial or unreadable marker")
+        self.assertTrue(writes)
+        self.assertNotIn(None, writes, "a write gave up under contention")
+        marker, warnings = lane_health.check(self.lane)
+        self.assertEqual(warnings, [])
+        if marker is not None:
+            self.assertEqual(marker.signature, "auth_rejected")
+        self.assertEqual(sorted(lane_health.store_dir().glob("*.tmp.*")), [])
 
 
 class ObserveTests(HomeCase):

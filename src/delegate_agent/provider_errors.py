@@ -48,6 +48,19 @@ UNCLASSIFIED = "unclassified"
 MESSAGE_LIMIT = 400
 CODE_LIMIT = 96
 
+# `redaction.redact_string` masks credentials, not addresses, and a provider's own
+# words often name the account ("the token for alice@example.com was rejected").
+# Every field is length-capped so a hostile run of address characters cannot make
+# the scan quadratic.
+_EMAIL_ADDRESS = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+")
+EMAIL_MASK = "[email]"
+
+
+def scrub(text: str) -> str:
+    """Provider text made safe to store and show: credentials redacted, addresses masked."""
+    return _EMAIL_ADDRESS.sub(EMAIL_MASK, redaction.redact_string(text))
+
+
 THREAD_LOSS_PATTERNS = (
     re.compile(r"\bno thread with id\b", re.IGNORECASE),
     re.compile(r"\bno thread (?:found )?with id\b", re.IGNORECASE),
@@ -620,12 +633,8 @@ def raw_error(
     source: str | None = None,
 ) -> JsonObject | None:
     """The provider's own error as captured from one event: redacted and bounded."""
-    text = _bound(redaction.redact_string(message), MESSAGE_LIMIT) if message else ""
-    clean_code = (
-        _bound(redaction.redact_string(code), CODE_LIMIT)
-        if isinstance(code, str) and code.strip()
-        else None
-    )
+    text = _bound(scrub(message), MESSAGE_LIMIT) if message else ""
+    clean_code = _bound(scrub(code), CODE_LIMIT) if isinstance(code, str) and code.strip() else None
     if not text and status is None and clean_code is None:
         return None
     record: JsonObject = {
@@ -714,7 +723,7 @@ def provider_error_record(
     if hit is None and raw is None:
         return None
     if not text and hit is not None and hit.line:
-        text = _bound(redaction.redact_string(hit.line), MESSAGE_LIMIT)
+        text = _bound(scrub(hit.line), MESSAGE_LIMIT)
     record: JsonObject = {
         "status": status,
         "providerCode": code,

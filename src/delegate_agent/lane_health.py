@@ -14,24 +14,38 @@ fallback profile to fail over to (the runner skips those writes).
 
 State lives under the Delegate home (``~/.delegate/state/lane-health/``), not a
 workspace registry, because an account or a model is machine-wide: a bad key in
-one repository is a bad key in every repository. Writes are atomic and a corrupt
-marker is ignored with a warning, never a crash.
+one repository is a bad key in every repository. Writes are atomic (a unique
+temp file per write, published by rename); writes, clears, and removals of stale
+markers take one store lock; a corrupt marker is ignored with a warning, never a
+crash.
+
+Which account a launch uses is part of the lane. Codex and Claude carry their own
+account identity; for every engine the credential-bearing environment the child
+will see (API keys and tokens, and broker, realm, account, endpoint selectors) is
+folded into the key as a salted HMAC. The salt lives beside the store, so neither
+the key nor the marker can be used to recover or test a secret. Over-splitting
+(a rotated key reads as a new lane) only costs one failed launch to re-learn; the
+opposite mistake would refuse a healthy account for a bad one's failure.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
+import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from delegate_agent import provider_errors
+from delegate_agent import provider_errors, redaction
 from delegate_agent.errors import EXIT_LANE_KNOWN_BAD, DelegateError
 from delegate_agent.json_types import JsonObject
 
@@ -44,6 +58,18 @@ FORCE_LAUNCH_FLAG = "--force-launch"
 # Engines whose model ids are "<provider>/<model>".
 _PROVIDER_PREFIXED_ENGINES = frozenset({"omp", "pi", "opencode"})
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Environment names that say which account or gateway a child talks to, beyond the
+# secret-looking names redaction already knows (API keys, tokens, credentials).
+_ACCOUNT_SELECTOR = re.compile(
+    r"BROKER|REALM|ACCOUNT|TENANT|ENDPOINT|BASE[_-]?URL|API[_-]?URL|ORG(?:ANI[SZ]ATION)?[_-]?ID",
+    re.IGNORECASE,
+)
+# Delegate's own per-run variables (mail tokens, run ids) are not an account.
+_OWN_ENV_PREFIX = "DELEGATE_"
+_CREDENTIAL_TAG_LENGTH = 8
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
@@ -91,6 +117,9 @@ class Lane:
     ``identity`` is the strongest account discriminator known (a Codex auth file
     plus profile overlay, a Claude config dir). It enters the key only as a hash
     and is never stored; ``account`` is the plain label shown to people.
+    ``credentials`` is the salted digest of the credential-bearing environment
+    (``credential_fingerprint``); it enters the key, and only its first few
+    characters are shown so two lanes on one model can be told apart.
     """
 
     engine: str
@@ -98,19 +127,24 @@ class Lane:
     model: str | None = None
     account: str | None = None
     identity: str | None = None
+    credentials: str | None = None
 
     @property
     def key(self) -> str:
-        material = "\0".join(
-            (
-                self.engine,
-                self.provider or "",
-                self.model or "",
-                self.account or "",
-                self.identity or "",
-            )
-        )
-        return hashlib.sha256(material.encode()).hexdigest()[:24]
+        parts = [
+            self.engine,
+            self.provider or "",
+            self.model or "",
+            self.account or "",
+            self.identity or "",
+        ]
+        if self.credentials:
+            parts.append(self.credentials)
+        return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:24]
+
+    @property
+    def credential_tag(self) -> str | None:
+        return self.credentials[:_CREDENTIAL_TAG_LENGTH] if self.credentials else None
 
     @property
     def label(self) -> str:
@@ -118,6 +152,8 @@ class Lane:
         text = f"{self.engine} {target}"
         if self.account:
             text += f" (account {self.account})"
+        if self.credential_tag:
+            text += f" [credential {self.credential_tag}]"
         return text
 
     def public(self) -> JsonObject:
@@ -127,7 +163,71 @@ class Lane:
             "provider": self.provider,
             "model": self.model,
             "account": self.account,
+            "credential": self.credential_tag,
         }
+
+
+def _account_variable(name: str) -> bool:
+    """True for an environment name that identifies an account or a gateway."""
+    if name.startswith(_OWN_ENV_PREFIX) or name in redaction.SENSITIVE_ENV_KEYS:
+        return False
+    return redaction.key_looks_secret(name) or _ACCOUNT_SELECTOR.search(name) is not None
+
+
+def _salt_path() -> Path:
+    return store_dir().parent / "lane-health.salt"
+
+
+def _machine_salt() -> bytes:
+    """A random per-machine secret that keeps credential digests untestable offline.
+
+    Created once (published by hard link so concurrent launches agree) beside the
+    store, mode 0600. When the home cannot hold one the salt is per-process: keys
+    stay stable within a run and nothing durable can be written anyway.
+    """
+    path = _salt_path()
+    with contextlib.suppress(OSError):
+        existing = path.read_bytes().strip()
+        if existing:
+            return existing
+    fresh = secrets.token_hex(32).encode()
+    temp: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.tmp.")
+        temp = Path(name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(fresh)
+        with contextlib.suppress(FileExistsError):
+            os.link(temp, path)
+        return path.read_bytes().strip() or fresh
+    except OSError:
+        return fresh
+    finally:
+        if temp is not None:
+            with contextlib.suppress(OSError):
+                temp.unlink()
+
+
+def credential_fingerprint(env: Mapping[str, str] | None = None) -> str | None:
+    """A short, secret-free digest of the account the child will authenticate as.
+
+    Reads the child's effective environment (this process's, then ``env`` on top,
+    as the launch composes it) and digests every credential-bearing variable's
+    name and value under the machine salt. None when the environment carries none.
+    """
+    effective = {**os.environ, **(env or {})}
+    pairs = sorted(
+        (name, value)
+        for name, value in effective.items()
+        if isinstance(value, str) and value and _account_variable(name)
+    )
+    if not pairs:
+        return None
+    digest = hmac.new(_machine_salt(), digestmod=hashlib.sha256)
+    for name, value in pairs:
+        digest.update(f"{name}\0{value}\0".encode())
+    return digest.hexdigest()[:24]
 
 
 def derive_lane(
@@ -151,7 +251,7 @@ def derive_lane(
         identity = env.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR") or None
         if account is None and identity:
             account = os.path.basename(identity.rstrip("/")) or None
-    return Lane(engine, provider, model, account, identity)
+    return Lane(engine, provider, model, account, identity, credential_fingerprint(env))
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +365,55 @@ def _parse_marker(raw: object) -> Marker | None:
     )
 
 
+@contextlib.contextmanager
+def _store_lock() -> Iterator[None]:
+    """Serialize every mutation of the marker store (write, clear, stale removal).
+
+    One advisory ``flock`` on a file beside the store directory (not inside it, so
+    the directory holds only markers). ``flock`` excludes separate open file
+    descriptions, so it orders threads in one process as well as separate launches.
+    Holders keep it for a single small file operation; waiting longer than
+    ``_LOCK_TIMEOUT_SECONDS`` raises ``TimeoutError`` (an ``OSError``), which every
+    caller already treats as "the store is unavailable".
+    """
+    lock_path = store_dir().parent / "lane-health.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for {lock_path}") from None
+                time.sleep(_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        os.close(fd)  # closing the descriptor releases the lock
+
+
+def _load(path: Path) -> Marker | None:
+    """The marker file at ``path`` parsed, or None when it is absent or malformed."""
+    try:
+        return _parse_marker(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+
+
+def _discard(path: Path, now: float) -> None:
+    """Remove a corrupt or expired marker, unless a writer replaced it since it was read.
+
+    The caller read the file without the lock, so a fresh marker may have been
+    published in between; re-read under the lock and only remove what is still bad.
+    """
+    with contextlib.suppress(OSError), _store_lock():
+        marker = _load(path)
+        if marker is None or marker.expires_at <= now:
+            path.unlink()
+
+
 def _read_path(path: Path, now: float, warnings: list[str]) -> Marker | None:
     """A live marker at ``path``; expired markers are removed, corrupt ones warned about."""
     try:
@@ -282,12 +431,10 @@ def _read_path(path: Path, now: float, warnings: list[str]) -> Marker | None:
         warnings.append(
             f"lane-health: ignoring corrupt marker {path.name} (removed; the lane is treated as healthy)"
         )
-        with contextlib.suppress(OSError):
-            path.unlink()
+        _discard(path, now)
         return None
     if marker.expires_at <= now:
-        with contextlib.suppress(OSError):
-            path.unlink()
+        _discard(path, now)
         return None
     return marker
 
@@ -331,6 +478,8 @@ def describe_public(marker: Mapping[str, object]) -> str:
     where = f"{lane.get('engine')} {lane.get('model') or 'default model'}"
     if lane.get("account"):
         where += f" (account {lane['account']})"
+    if lane.get("credential"):
+        where += f" [credential {lane['credential']}]"
     status = f" HTTP {marker['status']}" if marker.get("status") is not None else ""
     line = (
         f"{where}: {marker.get('signature')}{status} until {marker.get('expiresAt')} "
@@ -343,9 +492,11 @@ def describe_public(marker: Mapping[str, object]) -> str:
 def _write_atomic(path: Path, payload: JsonObject) -> None:
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    # A unique name per write (mkstemp opens it 0600 and exclusively): two writers
+    # that shared one temp file would truncate each other's bytes and race to rename it.
+    fd, name = tempfile.mkstemp(dir=directory, prefix=f"{path.name}.tmp.")
+    temp = Path(name)
     try:
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, sort_keys=True)
             handle.write("\n")
@@ -373,7 +524,8 @@ def write(
         klass=str(record.get("class") or provider_errors.CLASS_PERSISTENT),
         status=status if isinstance(status, int) and not isinstance(status, bool) else None,
         provider_code=_optional_str(record.get("providerCode")),
-        message=_optional_str(record.get("message")) or "",
+        # Records arrive scrubbed; the store re-scrubs so no caller can persist an address.
+        message=provider_errors.scrub(_optional_str(record.get("message")) or ""),
         hint=_optional_str(record.get("hint")) or "",
         written_at=moment,
         expires_at=moment + seconds,
@@ -381,21 +533,25 @@ def write(
         alias=alias,
     )
     try:
-        _write_atomic(_marker_path(lane), marker.to_json())
+        with _store_lock():
+            _write_atomic(_marker_path(lane), marker.to_json())
     except OSError:
         return None
     return marker
 
 
 def clear(lane: Lane | None) -> bool:
-    """Drop the marker for ``lane``; True when one existed."""
-    if lane is None:
+    """Drop the marker for ``lane``; True when one existed.
+
+    Takes the store lock so a clear waits for a write in flight instead of
+    running before it and being undone by it.
+    """
+    if lane is None or not store_dir().is_dir():
         return False
     try:
-        _marker_path(lane).unlink()
-    except FileNotFoundError:
-        return False
-    except OSError:
+        with _store_lock():
+            _marker_path(lane).unlink()
+    except OSError:  # no marker (FileNotFoundError) or an unavailable store
         return False
     return True
 

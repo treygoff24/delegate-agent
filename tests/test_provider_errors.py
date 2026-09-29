@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -165,6 +166,43 @@ class RecordShapeTests(unittest.TestCase):
         self.assertLessEqual(len(raw["message"]), provider_errors.MESSAGE_LIMIT)
         self.assertLessEqual(len(raw["providerCode"]), provider_errors.CODE_LIMIT)
         self.assertNotIn(secret, raw["message"])
+
+    def test_email_addresses_are_masked_in_the_message_and_the_code(self):
+        raw = provider_errors.raw_error(
+            message="401 Unauthorized: the token for alice@example.com was rejected",
+            code="account_alice.b+tag@mail.example.co.uk_suspended",
+            status=401,
+        )
+        blob = json.dumps(raw)
+        self.assertNotIn("alice", blob)
+        self.assertNotIn("example.com", blob)
+        self.assertNotIn("example.co.uk", blob)
+        self.assertIn(
+            "was rejected", raw["message"], "only the address is masked, not the sentence"
+        )
+
+    def test_masking_an_address_never_changes_the_classification(self):
+        text = "unexpected status 401 Unauthorized: the token for alice@example.com was rejected"
+        masked = record("codex", text)
+        plain = record("codex", "unexpected status 401 Unauthorized: the token was rejected")
+        self.assertEqual(masked["signature"], plain["signature"])
+        self.assertEqual(masked["status"], 401)
+        self.assertNotIn("alice@example.com", masked["message"])
+
+    def test_a_signature_line_lifted_from_trusted_text_is_masked_too(self):
+        # No terminal error message: the record's message falls back to the matched line.
+        fallback = (
+            "stream disconnected before completion: websocket closed by server for bob@corp.example"
+        )
+        result = record("codex", None, fallback=fallback)
+        self.assertEqual(result["signature"], "stream_disconnected")
+        self.assertNotIn("bob@corp.example", json.dumps(result))
+        self.assertIn("websocket closed by server", result["message"], "the line is still surfaced")
+
+    def test_text_that_only_looks_like_an_address_survives(self):
+        for text in ("model@latest is retired", "rate limit @ 100 rpm", "see user@ host"):
+            with self.subTest(text):
+                self.assertEqual(provider_errors.raw_error(message=text)["message"], text)
 
     def test_payload_extraction_reads_the_shapes_engines_emit(self):
         self.assertEqual(

@@ -88,6 +88,54 @@ class KnownBadLaneTests(FakeCodexCase):
         self.assertEqual(payload["error"], "lane_known_bad")
         self.assertEqual(self.invocation_count(), 2)
 
+    def test_an_email_in_the_provider_message_is_masked_everywhere_it_is_kept(self):
+        address = "alice@example.com"
+        self.set_plan("email401", "ok")
+
+        completed, payload = self.json_cli("codex", "work", "first")
+
+        self.assertEqual(completed.returncode, 1)
+        provider_error = payload["providerError"]
+        self.assertEqual(provider_error["signature"], "auth_rejected")
+        self.assertNotIn(address, provider_error["message"])
+        self.assertIn("was rejected", provider_error["message"])
+        (marker_path,) = self.marker_files()
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertNotIn(address, marker["message"])
+        self.assertNotIn(address, marker_path.read_text(encoding="utf-8"))
+        # The places the marker is echoed back: the refusal and doctor.
+        _refused, refusal = self.json_cli("codex", "work", "second")
+        self.assertEqual(refusal["error"], "lane_known_bad")
+        self.assertNotIn(address, json.dumps(refusal))
+        doctor = self.bare_cli("--json", "doctor")
+        self.assertNotIn(address, doctor.stdout)
+        self.assertNotIn(address, self.bare_cli("doctor").stdout)
+
+    def test_a_different_credential_on_the_same_model_is_not_refused(self):
+        self.set_claude_plan("auth401", "ok")
+        self.extra_env = {"ANTHROPIC_API_KEY": "sk-ant-test-key-AAAA1111"}
+        first, first_payload = self.json_cli("claude", "work", "first")
+        self.assertEqual(first.returncode, 1)
+        self.assertEqual(first_payload["providerError"]["class"], "persistent")
+        self.assertEqual(len(self.marker_files()), 1)
+
+        # A healthy account: same engine, same model, another key.
+        self.extra_env = {"ANTHROPIC_API_KEY": "sk-ant-test-key-BBBB2222"}
+        second, second_payload = self.json_cli("claude", "work", "second")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertTrue(second_payload["ok"])
+        self.assertEqual(len(self.claude_invocations()), 2)
+
+        # The failing account stays refused, without spawning anything.
+        self.extra_env = {"ANTHROPIC_API_KEY": "sk-ant-test-key-AAAA1111"}
+        third, third_payload = self.json_cli("claude", "work", "third")
+        self.assertEqual(third.returncode, 4)
+        self.assertEqual(third_payload["error"], "lane_known_bad")
+        self.assertEqual(len(self.claude_invocations()), 2)
+        for path in self.marker_files():
+            self.assertNotIn("AAAA1111", path.read_text(encoding="utf-8"))
+        self.assertNotIn("AAAA1111", json.dumps(third_payload))
+
     def test_a_transient_failure_never_marks_the_lane(self):
         self.config["providerErrors"] = {"autoResume": False}
         self.set_plan("ws_drop", "ok")
