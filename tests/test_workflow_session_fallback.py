@@ -26,6 +26,31 @@ SCHEMA = {
 }
 TASK = "review the entire repository"
 CHANGED = {"changedFilesCount": 2, "commitsCreatedCount": 1, "noChanges": False}
+VERIFIED_CLEAN = {
+    "changedFilesCount": 0,
+    "commitsCreatedCount": 0,
+    "noChanges": True,
+    "fileInspectionStatus": "verified",
+    "commitInspectionStatus": "verified",
+}
+# What a failed `git status` looks like to a reader of the counts alone: zero files
+# and zero commits, exactly as for a clean tree. Only the status fields tell them apart.
+FILES_UNVERIFIED = {
+    **VERIFIED_CLEAN,
+    "noChanges": False,
+    "fileInspectionStatus": "unverified",
+    "warnings": ["git status --porcelain=v1 failed: fatal: index file corrupt"],
+}
+COMMITS_UNVERIFIED = {
+    **VERIFIED_CLEAN,
+    "commitsCreatedCount": None,
+    "noChanges": False,
+    "commitInspectionStatus": "unverified",
+}
+# A summary from a delegate that predates fileInspectionStatus.
+NO_FILE_STATUS_FIELD = {
+    key: value for key, value in VERIFIED_CLEAN.items() if key != "fileInspectionStatus"
+}
 
 
 @pytest.fixture
@@ -52,11 +77,11 @@ def child(text, run_id, *, session="thread-1", reason=None, work_summary=None):
     )
 
 
-def invoke(dsl, engine, *, retries):
+def invoke(dsl, engine, *, retries, mode="safe"):
     return dsl._run_structured_or_text(
         engine,
         TASK,
-        mode="safe",
+        mode=mode,
         model=None,
         effort=None,
         fast=None,
@@ -69,7 +94,7 @@ def invoke(dsl, engine, *, retries):
     )
 
 
-def run_with(dsl, engine, results, *, retries):
+def run_with(dsl, engine, results, *, retries, mode="safe"):
     """Drive one structured call through canned children; return (value, calls)."""
     queue = list(results)
     calls = []
@@ -84,7 +109,7 @@ def run_with(dsl, engine, results, *, retries):
         mock.patch.object(dsl.state.cancel_event, "wait", return_value=False),
         mock.patch.object(runtime.random, "uniform", return_value=0.5),
     ):
-        value = invoke(dsl, engine, retries=retries)
+        value = invoke(dsl, engine, retries=retries, mode=mode)
     return value, calls
 
 
@@ -159,6 +184,131 @@ def test_missing_session_after_landed_work_refuses_instead_of_relaunching(dsl):
     assert [e["reason"] for e in refused] == ["work_changed_session_missing"]
     assert refused[0]["workSummary"] == CHANGED
     assert not [e for e in journal(dsl, "agent_structured_retry") if e.get("fellBackFrom")]
+
+
+def test_work_mode_relaunches_when_every_inspection_verified_a_clean_tree(dsl):
+    # The positive case the refusals below are measured against.
+    value, calls = run_with(
+        dsl,
+        "codex",
+        [
+            child('{"ok": "wrong"}', "child-1", work_summary=VERIFIED_CLEAN),
+            child(
+                None,
+                "child-2",
+                session=None,
+                reason="session_expired",
+                work_summary=VERIFIED_CLEAN,
+            ),
+            child('{"ok": true}', "child-3", session=None, work_summary=VERIFIED_CLEAN),
+        ],
+        retries=1,
+        mode="work",
+    )
+
+    assert value == {"ok": True}
+    assert [c.kwargs["resume_session_id"] for c in calls] == [None, "thread-1", None]
+    assert not journal(dsl, "agent_structured_retry_refused")
+
+
+@pytest.mark.parametrize(
+    "first,resumed",
+    [
+        # Uncommitted work landed but `git status` failed: zero files, zero commits.
+        pytest.param(FILES_UNVERIFIED, VERIFIED_CLEAN, id="prior-attempt-status-failed"),
+        pytest.param(VERIFIED_CLEAN, FILES_UNVERIFIED, id="resumed-attempt-status-failed"),
+        pytest.param(COMMITS_UNVERIFIED, VERIFIED_CLEAN, id="prior-attempt-commit-count-failed"),
+        pytest.param(VERIFIED_CLEAN, COMMITS_UNVERIFIED, id="resumed-attempt-commit-count-failed"),
+        # Only one of the two inspections is on record.
+        pytest.param(NO_FILE_STATUS_FIELD, VERIFIED_CLEAN, id="prior-summary-predates-status"),
+        pytest.param(VERIFIED_CLEAN, NO_FILE_STATUS_FIELD, id="resumed-summary-predates-status"),
+        # No summary at all for a work-mode child that owns a tree.
+        pytest.param(None, VERIFIED_CLEAN, id="prior-attempt-has-no-summary"),
+        pytest.param(None, None, id="neither-attempt-has-a-summary"),
+    ],
+)
+def test_work_mode_refuses_to_relaunch_over_a_tree_it_could_not_verify(dsl, first, resumed):
+    # A failed inspection reads as a clean tree, so a relaunch would silently redo
+    # the task on top of whatever landed. Refuse, and say the state was unverified.
+    value, calls = run_with(
+        dsl,
+        "codex",
+        [
+            child('{"ok": "wrong"}', "child-1", work_summary=first),
+            child(None, "child-2", session=None, reason="session_expired", work_summary=resumed),
+            child('{"ok": true}', "child-3", session=None, work_summary=VERIFIED_CLEAN),
+        ],
+        retries=2,
+        mode="work",
+    )
+
+    assert value is None
+    assert len(calls) == 2
+    refused = journal(dsl, "agent_structured_retry_refused")
+    assert [e["reason"] for e in refused] == ["work_state_unverified"]
+    assert not [e for e in journal(dsl, "agent_structured_retry") if e.get("fellBackFrom")]
+
+
+def test_landed_work_is_named_as_changed_even_when_another_inspection_failed(dsl):
+    # Positive evidence of changes outranks the unverified label.
+    value, _calls = run_with(
+        dsl,
+        "codex",
+        [
+            child('{"ok": "wrong"}', "child-1", work_summary=CHANGED),
+            child(
+                None,
+                "child-2",
+                session=None,
+                reason="session_expired",
+                work_summary=FILES_UNVERIFIED,
+            ),
+        ],
+        retries=2,
+        mode="work",
+    )
+
+    assert value is None
+    refused = journal(dsl, "agent_structured_retry_refused")
+    assert [e["reason"] for e in refused] == ["work_changed_session_missing"]
+
+
+def test_safe_mode_relaunches_without_any_summary(dsl):
+    # Safe children run in temporary workspaces: no summary exists and no tree needs
+    # protecting, so the fallback keeps working for read-only structured calls.
+    value, calls = run_with(
+        dsl,
+        "codex",
+        [
+            child('{"ok": "wrong"}', "child-1"),
+            child(None, "child-2", session=None, reason="session_expired"),
+            child('{"ok": true}', "child-3", session=None),
+        ],
+        retries=1,
+        mode="safe",
+    )
+
+    assert value == {"ok": True}
+    assert [c.kwargs["resume_session_id"] for c in calls] == [None, "thread-1", None]
+
+
+def test_safe_mode_still_refuses_a_summary_whose_inspection_failed(dsl):
+    value, calls = run_with(
+        dsl,
+        "codex",
+        [
+            child('{"ok": "wrong"}', "child-1", work_summary=FILES_UNVERIFIED),
+            child(None, "child-2", session=None, reason="session_expired"),
+            child('{"ok": true}', "child-3", session=None),
+        ],
+        retries=2,
+        mode="safe",
+    )
+
+    assert value is None
+    assert len(calls) == 2
+    refused = journal(dsl, "agent_structured_retry_refused")
+    assert [e["reason"] for e in refused] == ["work_state_unverified"]
 
 
 def test_a_resume_that_fails_for_another_reason_does_not_relaunch(dsl):

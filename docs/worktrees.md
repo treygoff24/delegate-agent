@@ -234,6 +234,12 @@ entries for responsiveness. Completion summaries also expose
 `rawChangedFilesCount` and `seededOnlyChanges` so an orchestrator can tell when
 the raw Git status consisted only of unchanged source dirt copied at launch.
 
+`fileInspectionStatus` and `commitInspectionStatus` are each `verified` or
+`unverified`, saying whether `git status` and the commit count actually ran. A
+failed inspection reports zero files or no commit count rather than an error, so
+read the status before treating zeros as a clean tree; `noChanges` is true only
+when both inspections are `verified` and show nothing.
+
 ### Integration state semantics
 
 Worktree list/show JSON distinguishes branch merge from full integration:

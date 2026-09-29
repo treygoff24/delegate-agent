@@ -48,7 +48,12 @@ def _parse_porcelain_line(line: str) -> JsonObject:
     return entry
 
 
-def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonObject], int]:
+def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonObject], int] | None:
+    """Every porcelain entry, or None when ``git status`` itself could not run.
+
+    None is not "no changes": a failed status reads the same as a clean tree
+    unless the caller keeps the two apart.
+    """
     # ``--untracked-files=all``: the launch-seeded digests are per file (the
     # sync lists untracked files with ``git ls-files --others``), so a collapsed
     # ``?? seeded-dir/`` entry could never match the seeded filter and counted as
@@ -61,7 +66,7 @@ def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonOb
         warnings,
     )
     if stdout is None:
-        return [], 0
+        return None
     lines = stdout.splitlines()
     return all_changed_files_from_porcelain_lines(lines)
 
@@ -263,8 +268,13 @@ def build_work_summary(
     creation = creation_context if isinstance(creation_context, dict) else {}
     base = _str(creation.get("sourceHeadOid"))
 
+    # A caller-supplied prefetch is porcelain output that already ran; only this
+    # function's own ``git status`` can fail here.
+    file_inspection_verified = True
     if prefetched_changed_files is None:
-        changed_files, changed_total = _changed_files(execution_cwd, warnings)
+        inspected = _changed_files(execution_cwd, warnings)
+        file_inspection_verified = inspected is not None
+        changed_files, changed_total = inspected if inspected is not None else ([], 0)
     else:
         changed_files, changed_total = prefetched_changed_files
     effective_files, effective_total, raw_total = effective_changed_files(
@@ -344,12 +354,19 @@ def build_work_summary(
             else False
         ),
         "commitInspectionStatus": "verified" if commit_inspection_verified else "unverified",
+        "fileInspectionStatus": "verified" if file_inspection_verified else "unverified",
         "baseCommit": base,
         "headCommit": head_commit,
         "sourceHead": source_head,
         "branch": branch,
         "diffStat": _diff_shortstat(execution_cwd, "HEAD", warnings),
-        "noChanges": (not dirty and commits_count == 0 if commit_inspection_verified else False),
+        # "No changes" needs both inspections to have run: an empty file list from
+        # a failed ``git status`` is missing evidence, not a clean tree.
+        "noChanges": (
+            not dirty and commits_count == 0
+            if commit_inspection_verified and file_inspection_verified
+            else False
+        ),
     }
     if branch_ahead_of_base is not None:
         summary["branchAheadOfBase"] = branch_ahead_of_base
