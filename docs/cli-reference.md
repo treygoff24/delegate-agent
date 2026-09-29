@@ -1536,6 +1536,11 @@ engines.)
   saved, so the usual cause is that the launch ran under a different account
   than the one holding it (for example a launcher that picks an account by
   usage). The message says so and offers `delegate resume <handle>`.
+- **Instant silent failure.** A followup whose child exits non-zero within 15
+  seconds with zero stdout and stderr bytes stays `child_failed`, but the message
+  says the saved native session probably could not be loaded (account switch,
+  expired or corrupt session) and `nextActions` offers `delegate resume <handle>`.
+  A failure that printed anything, or a fresh launch, keeps the generic message.
 - **Options and prompt text.** Options may sit on either side of the handle, but
   only before the prompt text. A known followup option inside the prompt text
   (`--dry-run`, `--timeout`, `--prompt-file`, `--mail-push`, `--no-mail-push`) is refused before anything

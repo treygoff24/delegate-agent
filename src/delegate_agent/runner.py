@@ -3961,6 +3961,18 @@ def _finalize_tracked_run(
         failure = _unclassified_provider_failure(final_accumulator, provider_error) or failure
     if session_failure is not None:
         failure = session_failure
+    empty_fast_followup = (
+        failure is not None
+        and failure.code == "child_failed"
+        and status == run_registry.STATUS_FAILED
+        and (ctx.followup_of is not None or ctx.resume_session_id is not None)
+        and capture.exit_code != 0
+        and capture.stdout_bytes == 0
+        and capture.stderr_bytes == 0
+        and capture.duration_ms < child_failures.EMPTY_FAST_FOLLOWUP_MAX_MS
+    )
+    if empty_fast_followup:
+        failure = child_failures.empty_fast_followup_failure(followup_source)
     failure_reason = failure.code if failure is not None else None
     failure_message = failure.message if failure is not None else None
     if status == run_registry.STATUS_FAILED and provider_error is not None:
@@ -4012,7 +4024,9 @@ def _finalize_tracked_run(
                 *([provider_hint] if isinstance(provider_hint, str) and provider_hint else []),
                 *_auth_remediation_actions(ctx),
             ]
-        elif failure_reason == "session_expired" and followup_source is not None:
+        elif (
+            failure_reason == "session_expired" or empty_fast_followup
+        ) and followup_source is not None:
             merged_extra["nextActions"] = [f'delegate resume {followup_source} "<instructions>"']
         elif (
             status == run_registry.STATUS_FAILED

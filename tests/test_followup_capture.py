@@ -260,6 +260,44 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         self.assertIn("different CODEX_HOME or account", payload["message"])
         self.assertNotIn("no thread with id", payload["message"])
 
+    def _followup_with_child(self, body: str):
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "codex", "work", "--resumable", "initial task"]
+        )
+        self.assertEqual(exit_code, 0, stdout)
+        alias = json.loads(stdout)["alias"]
+        (self.bin_dir / "codex").write_text(
+            "#!/usr/bin/env python3\n" + body + "raise SystemExit(1)\n", encoding="utf-8"
+        )
+        (self.bin_dir / "codex").chmod(0o755)
+        exit_code, stdout, _stderr = self.run_delegate(["--json", "followup", alias, "continue"])
+        self.assertEqual(exit_code, 1)
+        return alias, json.loads(stdout)
+
+    def test_instant_silent_followup_failure_names_the_resume_next_step(self):
+        alias, payload = self._followup_with_child("")
+        self.assertEqual(payload["error"], "child_failed")
+        self.assertIn("no stdout or stderr", payload["message"])
+        self.assertIn("native session", payload["message"])
+        self.assertIn(f"delegate resume {alias}", payload["message"])
+
+    def test_followup_failure_with_output_keeps_the_generic_message(self):
+        _alias, payload = self._followup_with_child(
+            "import sys\nsys.stderr.write('unrecognised flag\\n')\n"
+        )
+        self.assertEqual(payload["error"], "child_failed")
+        self.assertNotIn("no stdout or stderr", payload["message"])
+
+    def test_silent_fresh_launch_failure_keeps_the_generic_message(self):
+        (self.bin_dir / "codex").write_text(
+            "#!/usr/bin/env python3\nraise SystemExit(1)\n", encoding="utf-8"
+        )
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "codex", "work", "--resumable", "initial task"]
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertNotIn("no stdout or stderr", json.loads(stdout)["message"])
+
     def test_claude_expired_session_has_stable_followup_error(self):
         exit_code, stdout, _stderr = self.run_delegate(
             ["--json", "claude", "work", "--resumable", "initial task"]
