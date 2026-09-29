@@ -143,7 +143,11 @@ class FollowupRefusalsTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["code"], "session-missing")
-        self.assertIn("relaunch with --resumable", payload["message"])
+        # New codex/claude work Runs save their session by default, so the message
+        # no longer sends the caller back to a launch flag; it offers `delegate resume`.
+        self.assertNotIn("--resumable", payload["message"])
+        self.assertIn(f"delegate resume {alias}", payload["message"])
+        self.assertIn("--no-resumable", payload["message"])
 
     def test_refusal_session_invalid_injection_flag(self):
         _run_id, alias = self.write_test_run(harness_session_id="--dangerously-bypass-approvals")

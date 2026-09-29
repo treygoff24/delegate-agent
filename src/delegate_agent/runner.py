@@ -1233,6 +1233,17 @@ def _auth_remediation_actions(ctx: RunContext) -> list[str]:
     return [f"re-authenticate the {ctx.harness} CLI"]
 
 
+def _followup_source_handle(ctx: RunContext) -> str | None:
+    """The handle a followup's source Run answers to, for `delegate resume` advice."""
+    if ctx.followup_of is None:
+        return None
+    try:
+        index = run_registry.load_index(ctx.registry_root)
+    except (OSError, ValueError, run_registry.RegistryJsonError):
+        return ctx.followup_of
+    return run_registry.alias_for_run(index, ctx.followup_of) or ctx.followup_of
+
+
 def _auth_remediation_line(ctx: RunContext) -> str:
     """Harness-specific auth-remediation prose for a synthesized report."""
     if ctx.harness == "codex" or ctx.engine == "codex":
@@ -3372,9 +3383,12 @@ def _finalize_tracked_run(
         )
         if part
     )
+    followup_source = _followup_source_handle(ctx)
     session_failure = (
-        child_failures.classify_followup_session_failure(signal_text, ctx.engine)
-        if ctx.followup_of is not None
+        child_failures.classify_followup_session_failure(
+            signal_text, ctx.engine, source=followup_source
+        )
+        if ctx.followup_of is not None or ctx.resume_session_id is not None
         else None
     )
     # Failures Delegate established on its own, independent of the child's exit
@@ -3484,6 +3498,8 @@ def _finalize_tracked_run(
             merged_extra["message"] = failure_message
         if failure_reason == "auth_failed":
             merged_extra["nextActions"] = _auth_remediation_actions(ctx)
+        elif failure_reason == "session_expired" and followup_source is not None:
+            merged_extra["nextActions"] = [f'delegate resume {followup_source} "<instructions>"']
         # An unclassified child failure carries a generic message, so without
         # this the child's own words reach only the completion report and the
         # caller is told "Child harness failed" and nothing else. Call mode

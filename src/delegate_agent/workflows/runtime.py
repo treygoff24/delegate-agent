@@ -340,6 +340,54 @@ def _changed_tree_needs_resume(child: _DelegateChildResult, outcome: ChildAttemp
     return child.outcome is None or outcome.failure_reason == "empty_result"
 
 
+def _session_missing(outcome: ChildAttemptOutcome) -> bool:
+    """Did a resumed attempt fail because its native session could not be found?"""
+    kind = outcome.failure_kind or run_outcome.failure_kind_for_reason(
+        outcome.failure_reason, exit_code=outcome.exit_code
+    )
+    return kind == run_outcome.FAILURE_SESSION_LOST
+
+
+def _work_inspection_verified(summary: JsonObject) -> bool:
+    """Did both the file-status and the commit inspection behind a summary run?"""
+    return (
+        summary.get("fileInspectionStatus") == "verified"
+        and summary.get("commitInspectionStatus") == "verified"
+    )
+
+
+def _session_missing_relaunch_refusal(
+    child: _DelegateChildResult,
+    prior_child: _DelegateChildResult | None,
+    *,
+    mode: str,
+) -> str | None:
+    """Why a fresh child must not launch over this tree, or None when it may.
+
+    A fresh child after a missing session redoes the whole task, so it is safe
+    only when the tree is positively known to be untouched: every inspection
+    behind the attempts' work summaries ran and shows no changes. A summary whose
+    inspection failed reads as a clean tree (an empty file list and a zero commit
+    count), so absence of changes alone is not evidence. A work-mode call always
+    has a tree to account for; the other modes run in temporary workspaces that
+    have no summary and nothing to protect.
+    """
+    attempts = [child] if prior_child is None else [child, prior_child]
+    if any(attempt.work_changed for attempt in attempts):
+        return "work_changed_session_missing"
+    summaries = [attempt.work_summary for attempt in attempts if attempt.work_summary is not None]
+    if mode == MODE_WORK:
+        # Both attempts ran in the tree the fresh child would inherit, so each
+        # must account for it; a missing summary on either is not evidence.
+        if prior_child is None or len(summaries) != len(attempts):
+            return "work_state_unverified"
+        if not all(summary.get("noChanges") is True for summary in summaries):
+            return "work_state_unverified"
+    if not all(_work_inspection_verified(summary) for summary in summaries):
+        return "work_state_unverified"
+    return None
+
+
 def _exhaustion_failure_kind(child_outcome: ChildAttemptOutcome | None) -> str:
     """A structured call's failure kind: the last child's, else invalid output."""
     if child_outcome is None:
@@ -4227,12 +4275,20 @@ class WorkflowDsl:
         child: _DelegateChildResult | None = None
         demoted_schema_prompt_pending = False
         changed_tree_refused = False
-        for attempt in range(attempts + 1):
+        # Set when a resumed attempt found its session missing: the same attempt
+        # index runs again as a fresh launch rather than as another resume.
+        resume_session_missing = False
+        attempt = -1
+        while attempt < attempts:
+            attempt += 1
             resume_session_id = (
                 prior_child.session_id
-                if prior_child is not None and engine in STRUCTURED_RESUME_ENGINES
+                if prior_child is not None
+                and engine in STRUCTURED_RESUME_ENGINES
+                and not resume_session_missing
                 else None
             )
+            resume_session_missing = False
             attempt_prompt_has_schema = False
             if demoted_schema_prompt_pending:
                 if resume_session_id is not None:
@@ -4377,6 +4433,54 @@ class WorkflowDsl:
                 raise
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
+                if (
+                    resume_session_id is not None
+                    and child.outcome is not None
+                    and _session_missing(child.outcome)
+                ):
+                    # The resumed session no longer exists where this launch ran
+                    # (typically the launcher landed on another account). No
+                    # correction was attempted, so redo this attempt as a fresh
+                    # launch from the last real failure instead of ending the call.
+                    relaunch_refusal = _session_missing_relaunch_refusal(
+                        child, prior_child, mode=mode
+                    )
+                    if relaunch_refusal is not None:
+                        # Only the missing session could have asked for the
+                        # structured result alone; a fresh child would redo the
+                        # task on top of landed work, or on a tree nobody could
+                        # confirm was untouched.
+                        prior_output = text or ""
+                        prior_error = f"child attempt {child.outcome.failure_reason}: {exc}"
+                        changed_tree_refused = True
+                        self.state.append_event(
+                            "agent_structured_retry_refused",
+                            key=key,
+                            label=label,
+                            engine=engine,
+                            attempt=attempt,
+                            reason=relaunch_refusal,
+                            runId=child.run_id,
+                            workSummary=child.work_summary,
+                            childAttemptOutcome=child.outcome.as_json(),
+                        )
+                        break
+                    self.state.append_event(
+                        "agent_structured_retry",
+                        engine=engine,
+                        attempt=attempt,
+                        error=f"child attempt {child.outcome.failure_reason}: {exc}",
+                        key=key,
+                        label=label,
+                        strategy="relaunch",
+                        fellBackFrom="resume",
+                        sessionId=resume_session_id,
+                        retryAttempt=attempt,
+                        childAttemptOutcome=child.outcome.as_json(),
+                    )
+                    resume_session_missing = True
+                    attempt -= 1
+                    continue
                 prior_output = text or ""
                 outcome = child.outcome or ChildAttemptOutcome(
                     run_id=child.run_id,
@@ -4617,6 +4721,13 @@ class WorkflowDsl:
             payload["readOnly"] = True
         if resumable:
             payload["resumable"] = True
+        elif mode == MODE_WORK and engine in ("codex", "claude"):
+            # Standalone codex/claude work Runs save their native session by
+            # default; a workflow child keeps that opt-in per agent() call
+            # (`resumable=True`), because a fan-out that retains every session
+            # and worktree would grow without bound and `followup()` is only
+            # defined for children the script marked resumable.
+            payload["resumable"] = False
         if workspace:
             # base/setup are creation-only; a structured retry re-enters the
             # first attempt's worktree, so only env is carried onto it.

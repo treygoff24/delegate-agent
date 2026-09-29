@@ -254,7 +254,10 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "session_expired")
-        self.assertIn("relaunch with --resumable", payload["message"])
+        # The session was saved, so the error must not blame a missing --resumable.
+        self.assertNotIn("--resumable", payload["message"])
+        self.assertIn(f"delegate resume {alias}", payload["message"])
+        self.assertIn("different CODEX_HOME or account", payload["message"])
         self.assertNotIn("no thread with id", payload["message"])
 
     def test_claude_expired_session_has_stable_followup_error(self):
@@ -277,7 +280,11 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "session_expired")
-        self.assertIn("relaunch with --resumable", payload["message"])
+        # The session was saved, so the error must not blame a missing --resumable.
+        self.assertNotIn("--resumable", payload["message"])
+        self.assertIn(f"delegate resume {alias}", payload["message"])
+        self.assertIn("different account", payload["message"])
+        self.assertIn("launcher", payload["message"])
         self.assertNotIn("unknown session", payload["message"].lower())
 
 

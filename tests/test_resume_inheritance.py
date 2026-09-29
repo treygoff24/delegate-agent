@@ -547,12 +547,41 @@ class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
         self.assertTrue(payload.get("resumable"), payload)
         self.assertNotIn("--ephemeral", payload["argv"])
 
-    def test_resume_of_a_plain_run_stays_plain(self):
+    def test_resume_of_a_plain_run_takes_the_launch_default(self):
+        # A source that saved no session still resumes into a codex work Run, and
+        # that Run saves its own: codex and claude work Runs are resumable by default.
         _run_id, alias, _run_path = self.seed_run()
 
         payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
 
-        self.assertFalse(payload.get("resumable", False))
+        self.assertTrue(payload.get("resumable"), payload)
+        self.assertNotIn("--ephemeral", payload["argv"])
+
+    def test_resume_no_resumable_opts_out_even_from_a_resumable_source(self):
+        _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
+
+        payload, stderr = self.run_resume(["--dry-run", "--no-resumable", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False), payload)
+        self.assertIn("--ephemeral", payload["argv"])
+        self.assertNotIn("resumable dropped", stderr)
+
+    def test_resume_default_follows_the_engine_config_key(self):
+        self.write_config({"codex": {"resumable": False}})
+        _run_id, alias, _run_path = self.seed_run()
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False), payload)
+        self.assertIn("--ephemeral", payload["argv"])
+
+    def test_resume_into_an_engine_without_native_sessions_stays_plain(self):
+        _run_id, alias, _run_path = self.seed_run(engine="cursor")
+
+        payload, stderr = self.run_resume(["--dry-run", alias, "next step"])
+
+        self.assertFalse(payload.get("resumable", False), payload)
+        self.assertNotIn("resumable dropped", stderr)
 
     def test_cross_engine_resume_drops_the_opt_in_and_says_so(self):
         _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})

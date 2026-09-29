@@ -74,7 +74,7 @@ drift from that tuple.
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None, base=None, env=None, setup=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)). `base=`, `env=` (a dict of names to strings), and `setup=` pass a [workspace spec](worktrees.md#workspace-spec-base-env-setup) to a `mode="work"`, `isolation="worktree"` child; other lanes raise `ValueError`. They join the call's replay identity with env values reduced to a digest. A structured retry that re-enters the first attempt's worktree carries `env` only.
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None, base=None, env=None, setup=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. Workflow children stay non-resumable unless the call passes `resumable=True`, even though standalone Codex and Claude work Runs are resumable by default: a fan-out would otherwise retain every child's native session file and worktree. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)). `base=`, `env=` (a dict of names to strings), and `setup=` pass a [workspace spec](worktrees.md#workspace-spec-base-env-setup) to a `mode="work"`, `isolation="worktree"` child; other lanes raise `ValueError`. They join the call's replay identity with env values reduced to a digest. A structured retry that re-enters the first attempt's worktree carries `env` only.
 - `agent_meta(key_or_label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no argument, that of the most recent `agent()` call on the calling thread.
 - `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to, and that pin cannot change across a resume (a runtime that no longer matches the pin is refused as `pin_collision` rather than re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
@@ -413,6 +413,23 @@ retries, and so does a child that exited 0 without assistant text
 by a fresh uniform factor in `[0.75, 1]`, with the first index zero; workflow
 cancellation interrupts the wait. `retries=N` is an upper bound of `N+1` child
 attempts, not a promise to repeat terminal failures.
+
+A structured retry on Codex or Claude resumes the failed child's native session
+to ask for the structured result alone. When that resumed launch cannot find the
+session (failure kind `session_lost`, reason `session_expired`; typically the
+launcher landed on a different account than the one holding it), the call falls
+back to a fresh relaunch in the same worktree instead of ending. The fallback is
+journaled as `agent_structured_retry` with `strategy: "relaunch"` and
+`fellBackFrom: "resume"`, and it does not spend a retry. A fresh child would redo
+the task, so the fallback relaunches only over a worktree known to be untouched;
+otherwise the call is refused (`agent_structured_retry_refused`). The reason is
+`work_changed_session_missing` when an earlier attempt already changed the
+worktree, and `work_state_unverified` when that could not be checked: the work
+summary's `fileInspectionStatus` or `commitInspectionStatus` is not `verified`
+(for example `git status` failed, which otherwise reads as zero changed files),
+its summary is missing or predates `fileInspectionStatus`, or a work-mode child
+has no summary at all. Safe and call children run in temporary workspaces with
+no summary and are not held to this.
 
 The supported schema subset includes `minLength` for strings and `minItems` for
 arrays. Both take non-negative integers and are enforced recursively. `required`

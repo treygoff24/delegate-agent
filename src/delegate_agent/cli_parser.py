@@ -1625,6 +1625,55 @@ def _absorbed_option_warnings(prompt_parts: list[str]) -> tuple[str, ...]:
     return tuple(_absorbed_option_warning(option) for option in dict.fromkeys(absorbed))
 
 
+def _refuse_known_options_in_tail(command: str, tail: list[str]) -> None:
+    """Refuse a resume/followup prompt tail that swallows a real option.
+
+    Everything after the handle is free-form prompt text, so a real option of
+    this command typed there never applies: it is sent to the child as prompt
+    text and the run launches with the defaults. For `--dry-run` that means the
+    run is real. The warning for that used to print only after the child ended,
+    so a known option in the tail is refused here, before anything launches.
+    Only whole tokens that exactly name an option of this command trip it
+    (`--flag=value` counts as the flag); prose that merely mentions one does
+    not, and an unrecognized option-shaped token keeps the late warning.
+    `tail` excludes anything after a literal `--`, the caller's explicit
+    "this is prompt text".
+    """
+    spec = command_help.COMMAND_SPECS[command]
+    known = {option.flag for option in spec.options} | {"--help", "-h"}
+    swallowed = list(
+        dict.fromkeys(
+            token
+            for token in tail
+            if (token.split("=", 1)[0] if token.startswith("--") else token) in known
+        )
+    )
+    if not swallowed:
+        return
+    names = ", ".join(swallowed)
+    if command == "resume":
+        fix = "Resume options must come before the handle: delegate resume [options] HANDLE [text]."
+    else:
+        fix = (
+            "Followup options must come before the prompt text, on either side of the "
+            "handle: delegate followup [options] HANDLE [text]."
+        )
+    real_run = " A stray --dry-run therefore starts a real run." if "--dry-run" in swallowed else ""
+    literal = (
+        f"If {'it is' if len(swallowed) == 1 else 'they are'} literal prompt text, put `--` "
+        f"before the prompt: delegate {command} HANDLE -- <prompt text>."
+    )
+    raise DelegateError(
+        "option_after_handle",
+        f"{command}: {names} {'appears' if len(swallowed) == 1 else 'appear'} after the prompt text, "
+        "where it is sent to the child as "
+        f"prompt text instead of applying.{real_run} {fix} {literal}",
+        command=command,
+        help_topic=command,
+        next_actions=[f"delegate help {command}"],
+    )
+
+
 def parse_resume(
     rest: list[str],
     json_mode: bool,
@@ -1654,6 +1703,7 @@ def parse_resume(
     drop_output_schema = False
     include_dirty = False
     mail_push = False
+    no_resumable = False
     dry_run = False
     persona: str | None = None
     no_persona = False
@@ -1762,6 +1812,14 @@ def parse_resume(
                 mail_push = True
                 i += 1
                 continue
+            if token == "--no-resumable":
+                if no_resumable:
+                    raise DelegateError(
+                        "invalid_option_combination", "Only one --no-resumable flag is allowed."
+                    )
+                no_resumable = True
+                i += 1
+                continue
             if token == "--persona":
                 if i + 1 >= len(rest):
                     raise DelegateError("missing_persona", "--persona requires a non-empty name.")
@@ -1806,9 +1864,11 @@ def parse_resume(
         extra_parts = rest[i:]
         if "--" in extra_parts:
             terminator = extra_parts.index("--")
+            _refuse_known_options_in_tail("resume", extra_parts[:terminator])
             tail_warnings = _absorbed_option_warnings(extra_parts[:terminator])
             extra_parts = [*extra_parts[:terminator], *extra_parts[terminator + 1 :]]
         else:
+            _refuse_known_options_in_tail("resume", extra_parts)
             tail_warnings = _absorbed_option_warnings(extra_parts)
         break
     if handle is None:
@@ -1847,6 +1907,7 @@ def parse_resume(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            no_resumable=no_resumable,
             continuity_mode=continuity_mode,
             warnings=tail_warnings,
         ),
@@ -1926,9 +1987,11 @@ def parse_followup(
         prompt_parts = rest[i:]
         if "--" in prompt_parts:
             terminator = prompt_parts.index("--")
+            _refuse_known_options_in_tail("followup", prompt_parts[:terminator])
             tail_warnings = _absorbed_option_warnings(prompt_parts[:terminator])
             prompt_parts = [*prompt_parts[:terminator], *prompt_parts[terminator + 1 :]]
         else:
+            _refuse_known_options_in_tail("followup", prompt_parts)
             tail_warnings = _absorbed_option_warnings(prompt_parts)
         break
     if handle is None:
@@ -1973,7 +2036,7 @@ def parse_prompt_tail(
     include_dirty = False
     mail_push = False
     read_only = False
-    resumable = False
+    resumable: bool | None = None
     pure = False
     timeout: int | None = None
     stall_minutes: float | None = None
@@ -2269,11 +2332,29 @@ def parse_prompt_tail(
             i += 1
             continue
         if token == "--resumable":
-            if resumable:
+            if resumable is True:
                 raise DelegateError(
                     "invalid_option_combination", "Only one --resumable flag is allowed."
                 )
+            if resumable is False:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--resumable and --no-resumable cannot be combined.",
+                )
             resumable = True
+            i += 1
+            continue
+        if token == "--no-resumable":
+            if resumable is False:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --no-resumable flag is allowed."
+                )
+            if resumable is True:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--resumable and --no-resumable cannot be combined.",
+                )
+            resumable = False
             i += 1
             continue
         if token == "--read-only":

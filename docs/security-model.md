@@ -295,6 +295,39 @@ Fail-closed eligibility is intentional: an engine without a verified boundary
 rejects `--pure` rather than presenting a weaker one under the same name. The
 supported pure matrix may contain only Claude for some time.
 
+## Native session files
+
+Codex and Claude **work** Runs are resumable by default, so `delegate followup`
+works without a launch flag. A resumable Run does not pass `--ephemeral` (Codex)
+or `--no-session-persistence` (Claude), which means the harness keeps its own
+session record: Codex's rollout under `CODEX_HOME/sessions`, Claude Code's
+transcript under its `projects` directory. Delegate stores only the session id
+in the Run manifest.
+
+The consequence for what stays on disk:
+
+- These session files now exist for **every** Codex and Claude work Run, where
+  before they existed only for Runs launched with `--resumable`.
+- They contain the prompt as sent, the child's replies, and tool call inputs and
+  results (file contents the child read, command output). Delegate's redaction
+  applies to its own Run records and output, not to the harness's session store.
+- They live in the harness's state directory, outside `.delegate/`. `delegate
+  runs prune` and the worktree cleanup commands do not remove them, and Delegate
+  does not prune them. A profile that sets a separate `CODEX_HOME` or Claude
+  config directory keeps them in that account's store, and a session is only
+  found by the account that holds it.
+- The launch default beats `codex.ephemeral: true` and
+  `claude.noSessionPersistence: true`; those keys apply only to Runs that are
+  not resumable.
+
+Reduce the footprint with `--no-resumable` on a launch, or `codex.resumable:
+false` / `claude.resumable: false` in config (see
+[configuration](configuration.md#native-session-files-and-the-resumable-default)).
+Safe and call Runs, `--pass-through` Runs, other engines, and workflow `agent()`
+children without `resumable=True` never save a session, so the untrusted-input
+boundaries in the mode sections above are unchanged (Claude `call --pure` still
+passes `--no-session-persistence`).
+
 ## Reasoning-effort boundary
 
 `--reasoning-effort LEVEL` and JSON `reasoningEffort` request model thinking depth only. They do not change:

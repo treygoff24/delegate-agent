@@ -209,6 +209,7 @@ is absent.
     "defaultReasoningEffort": null,
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
+    "resumable": true,
     "bare": false
   },
   "grok": {
@@ -404,6 +405,7 @@ ambient pass returns immediately.
     "fallbackProfile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,
+    "resumable": true,
     "ignoreUserConfig": false
   }
 }
@@ -421,7 +423,8 @@ ambient pass returns immediately.
   missing. It is config-only; JSON run input cannot set it.
 - `fallbackProfile`: optional top-level `profiles.definitions` name for Codex-only quota fallback. The profile must define `env.CODEX_HOME`; a known-blocked credential namespace is not launched.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
-- `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
+- `resumable`: defaults to `true`. A Codex **work** Run saves its native session, so `delegate followup <handle>` works without remembering `--resumable` at launch. `false` restores the old opt-in default: a work Run then saves its session only when launched with `--resumable` (or JSON `resumable: true`). A launch can always decide for itself: `--resumable` or `--no-resumable` (JSON `resumable: true` or `false`) beats this key. Safe and call Runs, `--pass-through` Runs, and other engines never default to resumable. See [Native session files](#native-session-files-and-the-resumable-default) for the storage consequence.
+- `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs that are **not** resumable, so it now applies to safe and call Runs, `--no-resumable` Runs, and every Run while `resumable` is `false`. It does not switch resumability off: a work Run stays resumable under `ephemeral: true` unless it opts out with `--no-resumable` or `resumable: false`.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 
 Temporary usage-limit blocks live in per-user runtime state and key on a hash
@@ -517,6 +520,7 @@ different. Delegate warns when:
     "models": {},
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
+    "resumable": true,
     "bare": false
   }
 }
@@ -529,9 +533,37 @@ different. Delegate warns when:
 - `trackedStreamMaxBytes`: retained-stream byte cap for tracked runs. Off by default (`null`): nothing is truncated, hidden from the parser, or killed for being verbose, and `stdout.log` keeps the whole stream. Set a positive integer to opt in; a Run that then exceeds it is stopped as `output_limit_exceeded` with its partial output kept in the completion report. Only an opted-in cap applies the OMP 256 MiB transport and 16 MiB per-record ceilings, which are not configurable.
 - `workPermissionMode`: Claude Code permission mode for work runs. Allowed values are `acceptEdits`, `auto`, `default`, `dontAsk`, and `plan`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
-- `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to headless calls.
+- `resumable`: defaults to `true`. A Claude **work** Run saves its native session, so `delegate followup <handle>` works without remembering `--resumable` at launch. `false` restores the old opt-in default. `--resumable` or `--no-resumable` (JSON `resumable`) on a launch beats this key. Safe and call Runs and `--pass-through` Runs never default to resumable. See [Native session files](#native-session-files-and-the-resumable-default).
+- `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to runs that are **not** resumable: safe and call Runs, `--no-resumable` Runs, and every Run while `resumable` is `false`. It does not switch resumability off; a work Run stays resumable under `noSessionPersistence: true` unless it opts out.
 - `bare`: opt-in `--bare` mode for runs that should skip Claude Code customizations and auto-discovery. Defaults to `false`, which is consistent with how the other harnesses use their own installed configuration. Be aware of the footprint: with `bare: false`, a delegated run loads the operator's full Claude Code environment — hooks, skills, plugins, output styles, and auto-memory. `--strict-mcp-config` suppresses MCP servers, but nothing else, so each run carries that ambient system-prompt context (extra latency and token cost) and is not hermetic. Set `bare: true` for cost-sensitive or reproducible runs that should ignore local customizations.
 - Claude safe mode uses `claude -p`, stdin prompt delivery, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
+
+#### Native session files and the resumable default
+
+Codex and Claude **work** Runs are resumable by default. A resumable Run leaves
+the harness's own session on disk (Codex's rollout under `CODEX_HOME/sessions`,
+Claude Code's transcript under its `projects` directory) and records the session
+id in the Run's manifest, which is what `delegate followup` resumes. What that
+means in practice:
+
+- **Storage.** Native session files now persist for every Codex and Claude work
+  Run, not only Runs launched with `--resumable`. They hold the prompt, the
+  child's output, and its tool results in the harness's own store, outside
+  `.delegate/` and outside Delegate's redaction and `runs prune`. Delegate does
+  not prune them. See [the security model](security-model.md#native-session-files).
+- **Worktrees.** A succeeded persistent-worktree Run that is resumable keeps its
+  worktree (`worktreeRetained: "resumable_session"`) instead of retiring it when
+  clean, so `followup` and `resume` can re-enter it. See
+  [worktrees](worktrees.md#resumable-runs-keep-their-worktree).
+- **Precedence.** The default beats `codex.ephemeral: true` and
+  `claude.noSessionPersistence: true`. Those keys only apply to Runs that are not
+  resumable. Opt out per launch with `--no-resumable` (JSON `resumable: false`),
+  or per engine with `codex.resumable: false` / `claude.resumable: false`. A launch
+  that says `--resumable` beats the engine key.
+- **Unchanged.** Safe and call Runs, `--pass-through` Runs, and every other
+  engine stay ephemeral, and `--no-resumable` is a quiet no-op there.
+  Workflow `agent()` children stay non-resumable unless the call passes
+  `resumable=True`.
 
 ### `grok`
 
