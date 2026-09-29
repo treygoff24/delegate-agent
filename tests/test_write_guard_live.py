@@ -331,7 +331,7 @@ class LiveWriteGuardTests(unittest.TestCase):
         self.assertNotEqual(results["rm_sibling_profile_canary"], 0)
         self.assertTrue((parent / "personal/canary").exists())
         refused = {entry["path"]: entry["reason"] for entry in self.record["refused"]}
-        self.assertIn("another profile home", refused[os.path.realpath(parent)])
+        self.assertIn("not itself a profile home", refused[os.path.realpath(parent)])
         self.assertIn(os.path.realpath(parent), self.record["warning"])
 
     def test_a_protected_path_inside_the_engine_home_stays_protected(self):
