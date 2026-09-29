@@ -223,15 +223,26 @@ class NativeSchemaEligibility(unittest.TestCase):
                 with self.subTest(engine=engine, schema=schema):
                     self.assertIsNotNone(structured_output.native_schema_eligible(engine, schema))
             with self.subTest(engine=engine, schema="object"):
+                # A bare object has no declared properties: Claude enforces it as
+                # is, but Codex strict mode would close it to `{}`.
+                bare = structured_output.native_schema_eligible(engine, {"type": "object"})
+                if engine == "codex":
+                    self.assertIn("no declared properties", bare)
+                else:
+                    self.assertIsNone(bare)
+            with self.subTest(engine=engine, schema="object with properties"):
                 self.assertIsNone(
-                    structured_output.native_schema_eligible(engine, {"type": "object"})
+                    structured_output.native_schema_eligible(
+                        engine, {"type": "object", "properties": {}}
+                    )
                 )
 
     def test_only_claude_rejects_an_oversize_serialized_schema(self) -> None:
-        empty = {"type": "object", "description": ""}
+        empty = {"type": "object", "properties": {}, "description": ""}
         overhead = len(json.dumps(empty).encode("utf-8"))
         at_limit = {
             "type": "object",
+            "properties": {},
             "description": "x" * (structured_output.CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES - overhead),
         }
         under_limit = {**at_limit, "description": at_limit["description"][:-1]}

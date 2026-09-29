@@ -70,6 +70,63 @@ class StructuredSchemaFallbackTests(unittest.TestCase):
         self.assertEqual(event["key"], "array-root")
         self.assertIn("object", str(event["reason"]))
 
+    def _run_structured(self, engine: str, text: str, schema: dict[str, object], key: str):
+        child = runtime._DelegateChildResult(
+            text=text, run_id="child-1", execution_cwd=None, session_id=None
+        )
+        with mock.patch.object(self.dsl, "_run_delegate", return_value=child) as run:
+            result = self.dsl._run_structured_or_text(
+                engine,
+                "return a list",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="none",
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key=key,
+            )
+        return result, run
+
+    def test_codex_bare_object_item_schema_uses_prompt_path_with_reason(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"dispositions": {"type": "array", "items": {"type": "object"}}},
+            "required": ["dispositions"],
+            "additionalProperties": False,
+        }
+        result, run = self._run_structured(
+            "codex", '{"dispositions": [{"why": "x", "n": 1}]}', schema, "adjudicate"
+        )
+        self.assertEqual(result, {"dispositions": [{"why": "x", "n": 1}]})
+        self.assertIsNone(run.call_args.kwargs["output_schema"])
+        event = next(row for row in self._journal() if row["type"] == "agent_schema_prompt_path")
+        self.assertIn("schema.properties.dispositions.items", str(event["reason"]))
+
+    def test_root_array_single_key_wrapper_is_unwrapped_with_warning(self) -> None:
+        schema = {"type": "array", "items": {"type": "string"}}
+        result, _ = self._run_structured("omp", '{"findings": ["a", "b"]}', schema, "wrapped")
+        self.assertEqual(result, ["a", "b"])
+        event = next(row for row in self._journal() if row["type"] == "agent_output_unwrapped")
+        self.assertEqual(event["wrapperKey"], "findings")
+        self.assertEqual(event["key"], "wrapped")
+        self.assertIn("unwrapped", str(event["warning"]))
+
+    def test_root_array_two_key_wrapper_still_fails(self) -> None:
+        schema = {"type": "array", "items": {"type": "string"}}
+        result, _ = self._run_structured("omp", '{"items": ["a"], "n": 1}', schema, "two")
+        self.assertIsNone(result)
+        self.assertFalse(any(r["type"] == "agent_output_unwrapped" for r in self._journal()))
+
+    def test_root_array_wrapper_with_non_validating_array_still_fails(self) -> None:
+        schema = {"type": "array", "items": {"type": "string"}}
+        result, _ = self._run_structured("omp", '{"items": [1, 2]}', schema, "bad")
+        self.assertIsNone(result)
+        self.assertFalse(any(r["type"] == "agent_output_unwrapped" for r in self._journal()))
+
     def test_timed_out_native_attempt_demotes_and_embeds_schema_on_resume(self) -> None:
         schema = {
             "type": "object",

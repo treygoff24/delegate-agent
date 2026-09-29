@@ -44,6 +44,46 @@ def native_schema_eligible(
                 f"{serialized_bytes} bytes; the argv limit is under "
                 f"{CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES} bytes."
             )
+    if engine == "codex":
+        free_form = _free_form_object_path(schema, "schema")
+        if free_form is not None:
+            return (
+                f"codex strict mode cannot express the free-form object at {free_form} "
+                "(type object with no declared properties): strict mode would close it to "
+                "zero keys, so the model could only emit {}. Declare its properties to get "
+                "native enforcement; until then it uses prompt-and-validate."
+            )
+    return None
+
+
+def _free_form_object_path(node: object, path: str, seen: set[int] | None = None) -> str | None:
+    """Path of the first object node with no declared `properties`, or None."""
+    if not isinstance(node, dict):
+        return None
+    seen = set() if seen is None else seen
+    if id(node) in seen:
+        return None
+    seen.add(id(node))
+    if _is_object_node(node) and "properties" not in node:
+        return path
+    for keyword in ("properties", "$defs", "definitions", "dependentSchemas"):
+        children = node.get(keyword)
+        if isinstance(children, dict):
+            for name, child in children.items():
+                found = _free_form_object_path(child, f"{path}.{keyword}.{name}", seen)
+                if found is not None:
+                    return found
+    for keyword in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        children = node.get(keyword)
+        if isinstance(children, list):
+            for index, child in enumerate(children):
+                found = _free_form_object_path(child, f"{path}.{keyword}[{index}]", seen)
+                if found is not None:
+                    return found
+    for keyword in ("items", "not", "if", "then", "else", "contains", "propertyNames"):
+        found = _free_form_object_path(node.get(keyword), f"{path}.{keyword}", seen)
+        if found is not None:
+            return found
     return None
 
 
