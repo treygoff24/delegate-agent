@@ -1240,6 +1240,7 @@ class ParserTests(unittest.TestCase):
             self.assertIn("Delegate completion report requirement", effective)
             self.assertEqual(prompt, "original prompt\n")
             self.assertIn(prompt, effective)
+            self.assertEqual(prompt_path.read_text(), "original prompt\n")
 
     def test_nonblocking_stdin_select_failure_does_not_read(self):
         class BadSelectableStdin:
