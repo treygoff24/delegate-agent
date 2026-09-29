@@ -11,6 +11,7 @@ import sys
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import TextIO
 
@@ -202,6 +203,10 @@ def cleanup_mail_push_private_homes(registry_root: Path, run_id: str) -> None:
     _remove_directory(mail_push_scratch_root(registry_root, run_id))
 
 
+def _codex_hooks_feature_enabled(argv: list[str]) -> bool:
+    return any(flag == "--enable" and value == "hooks" for flag, value in pairwise(argv))
+
+
 def _set_claude_settings(argv: list[str], settings_path: str) -> None:
     try:
         index = argv.index("--settings")
@@ -282,8 +287,12 @@ def provision_mail_push(
                     continue
                 insert_at = max(len(target) - 1, 0)
                 flags: list[str] = []
-                if "hooks=true" not in target:
-                    flags.extend(["-c", "hooks=true"])
+                if not _codex_hooks_feature_enabled(target):
+                    # `--enable hooks` is `-c features.hooks=true`. Never spell it
+                    # `-c hooks=true`: `hooks` is a table in Codex's config schema
+                    # (HooksToml), so a bare boolean fails config load and the run
+                    # dies before the model starts.
+                    flags.extend(["--enable", "hooks"])
                 if "--dangerously-bypass-hook-trust" not in target:
                     flags.append("--dangerously-bypass-hook-trust")
                 target[insert_at:insert_at] = flags

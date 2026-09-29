@@ -265,8 +265,9 @@ class MailPushSeamTests(CommandTestBase):
             self.assertEqual(child["codexHome"], str(private_home))
             self.assertTrue(child["codexHomeHooksPresent"])
             self.assertFalse(private_home.exists())
-            self.assertIn("-c", child["argv"])
-            self.assertIn("hooks=true", child["argv"])
+            self.assertIn("--enable", child["argv"])
+            self.assertEqual(child["argv"][child["argv"].index("--enable") + 1], "hooks")
+            self.assertNotIn("hooks=true", child["argv"])
             self.assertIn("--dangerously-bypass-hook-trust", child["argv"])
         return run_path, manifest, child
 

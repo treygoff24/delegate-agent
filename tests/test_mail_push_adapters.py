@@ -137,7 +137,9 @@ class MailPushAdapterTests(CommandTestBase):
                     ).resolve()
                     self.assertEqual(settings_arg, settings_path.resolve())
                 elif engine == "codex":
-                    self.assertIn("hooks=true", provision.argv)
+                    self.assertIn("--enable", provision.argv)
+                    self.assertEqual(provision.argv[provision.argv.index("--enable") + 1], "hooks")
+                    self.assertNotIn("hooks=true", provision.argv)
                     self.assertIn("--dangerously-bypass-hook-trust", provision.argv)
                     self.assertTrue(
                         Path(env["CODEX_HOME"])
