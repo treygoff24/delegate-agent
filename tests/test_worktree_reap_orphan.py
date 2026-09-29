@@ -8,6 +8,7 @@ of them. `--force --yes` now removes it after the checks below.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import subprocess
@@ -34,11 +35,11 @@ class ReapLinkedOrphanTests(WorktreeMgmtTestBase):
         git("worktree", "add", "-B", f"delegate/{name}", str(worktree), "HEAD", cwd=repo_path)
         return worktree
 
-    def _reap(self, pool: Path, worktree: Path, **kwargs):
+    def _reap(self, pool: Path, worktree: Path, *, registry_root: Path | None = None, **kwargs):
         kwargs.setdefault("older_than_days", 0)
         kwargs.setdefault("yes", True)
         return worktree_gc_api.reap_worktrees(
-            None, pool_data_home=pool, path=str(worktree), **kwargs
+            registry_root, pool_data_home=pool, path=str(worktree), **kwargs
         )
 
     def _listed(self, repo_path: str) -> str:
@@ -132,6 +133,33 @@ class ReapLinkedOrphanTests(WorktreeMgmtTestBase):
 
             self.assertTrue(result["ok"], result)
             self.assertFalse(worktree.exists())
+            # The ledger edits were saved first, under the source repository's
+            # Registry (the caller here has none).
+            (reaped,) = result["reaped"]
+            saved = Path(reaped["salvagePath"])
+            self.assertEqual(
+                saved.parent.resolve(), (Path(path) / ".delegate" / "salvage").resolve()
+            )
+            self.assertEqual((saved / ".beads" / "issues.jsonl").read_text(), "{}\n")
+            self.assertEqual((saved / ".papercuts.jsonl").read_text(), "{}\n")
+
+    def test_ledger_files_that_cannot_be_saved_refuse_the_removal(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-nocopy")
+            (worktree / ".papercuts.jsonl").write_text("{}\n", encoding="utf-8")
+            (Path(path) / ".delegate").mkdir()
+            (Path(path) / ".delegate" / "salvage").write_text("in the way", encoding="utf-8")
+
+            result = self._reap(pool, worktree, force=True)
+
+            self.assertEqual(result["reaped"], [])
+            self.assertEqual(
+                [error["code"] for error in result["errors"]], ["ledger_salvage_failed"]
+            )
+            self.assertTrue(worktree.exists())
+            self.assertIn(worktree.name, self._listed(path))
 
     def test_a_process_working_inside_blocks_removal(self):
         _repo, path = self._make_repo()
@@ -195,6 +223,102 @@ class ReapLinkedOrphanTests(WorktreeMgmtTestBase):
             (skipped,) = result["skipped"]
             self.assertEqual(skipped["reason"], "record_in_other_registry")
             self.assertEqual(skipped["registryWorkspace"], path)
+            self.assertTrue(worktree.exists())
+
+    def test_a_run_record_that_appears_after_planning_stops_the_removal(self):
+        _repo, path = self._make_repo()
+        registry = self._registry_root(path)
+        # The caller's Registry exists but holds no record for the pool entry.
+        self._seed_persistent_run(path, alias="cursor-other", branch="delegate/other")
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-race")
+            real_lock = worktree_gc_api._reap_pool_lock
+
+            @contextlib.contextmanager
+            def lock_then_register_a_run(lock_path):
+                # Planning is done and the pool lock is held; a launch now
+                # registers a run whose worktree is this path.
+                with real_lock(lock_path):
+                    self._seed_persistent_run(
+                        path,
+                        alias="cursor-late",
+                        branch="delegate/orphan-race",
+                        execution_cwd=str(worktree),
+                    )
+                    yield
+
+            with mock.patch.object(worktree_gc_api, "_reap_pool_lock", lock_then_register_a_run):
+                result = self._reap(pool, worktree, force=True, registry_root=registry)
+
+            self.assertEqual(result["reaped"], [])
+            (error,) = result["errors"]
+            self.assertEqual(error["code"], "record_owns_path")
+            self.assertIn("liveness", error["hint"])
+            self.assertTrue(worktree.exists())
+            self.assertIn(worktree.name, self._listed(path))
+
+    def test_the_same_reap_without_a_racing_record_still_removes_the_path(self):
+        _repo, path = self._make_repo()
+        registry = self._registry_root(path)
+        self._seed_persistent_run(path, alias="cursor-other", branch="delegate/other")
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-calm")
+
+            result = self._reap(pool, worktree, force=True, registry_root=registry)
+
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(worktree.exists())
+
+    def test_a_scan_that_cannot_run_refuses_the_removal_until_kill_live(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-blind")
+            real_run = subprocess.run
+
+            def no_lsof(argv, *args, **kwargs):
+                if argv and argv[0] == "lsof":
+                    raise FileNotFoundError("lsof")
+                return real_run(argv, *args, **kwargs)
+
+            # Neither /proc nor lsof: the machine cannot say who works in the path.
+            with (
+                mock.patch.object(worktree_procs, "_scan_proc", return_value=None),
+                mock.patch.object(subprocess, "run", side_effect=no_lsof),
+            ):
+                refused = self._reap(pool, worktree, force=True)
+                (skipped,) = refused["skipped"]
+                self.assertEqual(skipped["reason"], "process_scan_unavailable")
+                self.assertIn("lsof is not installed", skipped["processScan"])
+                self.assertIn("--kill-live", skipped["hint"])
+                self.assertEqual(refused["reaped"], [])
+                self.assertTrue(worktree.exists())
+                self.assertIn(worktree.name, self._listed(path))
+
+                allowed = self._reap(pool, worktree, force=True, kill_live=True)
+
+            self.assertTrue(allowed["ok"], allowed)
+            self.assertFalse(worktree.exists())
+
+    def test_a_scan_that_becomes_unavailable_after_planning_stops_the_removal(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-blind-late")
+            scans = [
+                worktree_procs.ProcessCwdScan(),
+                worktree_procs.ProcessCwdScan(checked=False, note="lsof failed: boom"),
+            ]
+
+            with mock.patch.object(worktree_procs, "processes_with_cwd_inside", side_effect=scans):
+                result = self._reap(pool, worktree, force=True)
+
+            self.assertEqual(result["reaped"], [])
+            self.assertEqual(
+                [error["code"] for error in result["errors"]], ["process_scan_unavailable"]
+            )
             self.assertTrue(worktree.exists())
 
     def test_a_path_git_does_not_list_is_not_removed_as_linked(self):
@@ -330,6 +454,97 @@ class ProcessCwdScanTests(unittest.TestCase):
         self.assertFalse(scan.checked)
         self.assertEqual(scan.holders, ())
         self.assertIn("lsof", scan.note)
+
+    def _fake_proc(self, tmp: str, processes: dict[str, str | None]) -> Path:
+        """A procfs-shaped tree: pid -> the directory its cwd link points at (None: no link)."""
+        root = Path(tmp) / "proc"
+        (root / "self").mkdir(parents=True)
+        (root / "self" / "cwd").symlink_to(tmp)
+        for pid, cwd in processes.items():
+            (root / pid).mkdir()
+            (root / pid / "comm").write_text("shell\n", encoding="utf-8")
+            if cwd is not None:
+                (root / pid / "cwd").symlink_to(cwd)
+        return root
+
+    def _proc_scan(self, root: Path, target: Path, *, unreadable: tuple[str, ...] = ()):
+        real_readlink = os.readlink
+
+        def readlink(path, *args, **kwargs):
+            if Path(path).parent.name in unreadable:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_readlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(worktree_procs, "PROC_ROOT", root),
+            mock.patch.object(worktree_procs.os, "readlink", side_effect=readlink),
+        ):
+            return worktree_procs.processes_with_cwd_inside(target)
+
+    def test_proc_scan_finds_the_holder_and_ignores_the_bystander(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wt"
+            (target / "deep").mkdir(parents=True)
+            elsewhere = Path(tmp) / "elsewhere"
+            elsewhere.mkdir()
+            root = self._fake_proc(
+                tmp, {"101": str(target / "deep"), "102": str(elsewhere), "103": None}
+            )
+
+            scan = self._proc_scan(root, target)
+
+            self.assertTrue(scan.checked, scan)
+            self.assertEqual([(h.pid, h.command) for h in scan.holders], [(101, "shell")])
+
+    def test_proc_scan_that_cannot_read_a_process_of_this_user_is_not_a_clean_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wt"
+            target.mkdir()
+            root = self._fake_proc(tmp, {"201": str(Path(tmp)), "202": str(Path(tmp))})
+
+            scan = self._proc_scan(root, target, unreadable=("202",))
+
+            self.assertEqual(scan.holders, ())
+            self.assertFalse(scan.checked, scan)
+            self.assertIn("1 process(es) of this user could not be inspected", scan.note)
+
+    def test_proc_scan_notes_but_does_not_block_on_other_users_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wt"
+            target.mkdir()
+            root = self._fake_proc(tmp, {"301": str(Path(tmp)), "302": str(Path(tmp))})
+
+            with mock.patch.object(worktree_procs, "_owned_by_another_user", return_value=True):
+                scan = self._proc_scan(root, target, unreadable=("302",))
+
+            self.assertTrue(scan.checked, scan)
+            self.assertIn("belong to other users", scan.note)
+
+    def _lsof(self, returncode: int, stdout: str, stderr: str = ""):
+        completed = subprocess.CompletedProcess(["lsof"], returncode, stdout, stderr)
+        with (
+            mock.patch.object(worktree_procs, "_scan_proc", return_value=None),
+            mock.patch.object(worktree_procs.subprocess, "run", return_value=completed),
+        ):
+            return worktree_procs.processes_with_cwd_inside(Path("/nonexistent/wt"))
+
+    def test_lsof_that_prints_nothing_is_not_a_clean_answer(self):
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode):
+                scan = self._lsof(returncode, "")
+                self.assertFalse(scan.checked, scan)
+                self.assertIn("no output", scan.note)
+
+    def test_lsof_failing_outright_is_not_a_clean_answer_even_with_stray_output(self):
+        scan = self._lsof(2, "p10\ncbash\nfcwd\nn/elsewhere\n", "lsof: WARNING: boom")
+        self.assertFalse(scan.checked, scan)
+        self.assertIn("boom", scan.note)
+
+    def test_lsof_partial_answer_with_exit_one_still_counts_and_finds_holders(self):
+        # Exit 1 is lsof's "some processes were unreadable"; the rest is printed.
+        scan = self._lsof(1, "p10\ncbash\nfcwd\nn/nonexistent/wt/deep\np11\ncsh\nfcwd\nn/other\n")
+        self.assertTrue(scan.checked, scan)
+        self.assertEqual([(h.pid, h.command) for h in scan.holders], [(10, "bash")])
 
 
 if __name__ == "__main__":

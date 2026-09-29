@@ -2100,8 +2100,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "(worktrees.retirementIgnoreGlobs) do not count, the same as at completion "
             "and in prune.",
             "A worktree whose owning Run is still live is refused with run_active, "
-            "run_not_terminal, process_group_alive, or worktree_leased. --force does not "
+            "run_not_terminal, process_group_alive, or worktree_leased. A nested Registry "
+            "inside the worktree with a running Run is refused as nested_run_active, and one "
+            "that cannot be read as nested_registry_unreadable. --force does not "
             "override that; --kill-live does.",
+            "Changed ledger files are not counted as uncommitted work, but removal never "
+            "loses them: they are copied to <Registry>/salvage/<worktree>-<timestamp>/ "
+            "first, the copy is verified, and the salvagePath is in the result. A copy "
+            "that fails refuses the removal (ledger_salvage_failed). Nothing removes that "
+            "directory for you.",
             "A worktree with no run record is removed with worktree reap --path, not here.",
             "A --help token anywhere in the args prints help and removes nothing.",
         ),
@@ -2167,11 +2174,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "terminal status, or whose recorded process group is still alive; "
             "those are reported as run_active, run_not_terminal, and "
             "process_group_alive (and worktree_leased while the launcher holds the "
-            "run). --force does not override that guard; only --kill-live does.",
+            "run), and nested_run_active or nested_registry_unreadable when a Registry "
+            "inside the worktree has a running Run or cannot be read. --force does not "
+            "override that guard; only --kill-live does.",
             "Uncommitted changes means what a lane changed: launch-seeded files that still "
             "match the launch digest and the configured ledger globs "
             "(worktrees.retirementIgnoreGlobs) do not count, the same as at completion "
             "and in remove.",
+            "Changed ledger files are copied to <Registry>/salvage/<worktree>-<timestamp>/ "
+            "before a worktree is removed, and each removed entry reports its salvagePath. "
+            "Prune never removes that directory.",
         ),
         see_also=("worktree list", "worktree remove", "worktree gc"),
         unsupported_global_options=("--isolation", "--auth-profile"),
@@ -2263,7 +2275,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--force --yes removes it after checking for uncommitted work, a record in the "
             "source repository's own Registry, and processes whose cwd is inside it.",
             "--force never overrides a live run; --kill-live does (worktree_leased, run_active, "
-            "or a process_cwd_inside).",
+            "nested_run_active, nested_registry_unreadable, process_cwd_inside, or "
+            "process_scan_unavailable).",
+            "A --path removal that cannot look at running processes (no /proc and no lsof, or "
+            "an unreadable process of yours) is refused as process_scan_unavailable: finding "
+            "nothing is not the same as checking. A run record that appeared for the path "
+            "after planning is refused as record_owns_path; re-run the reap.",
+            "Changed ledger files are copied to <Registry>/salvage/<worktree>-<timestamp>/ "
+            "before a removal, and the reaped entry reports its salvagePath. A copy that "
+            "fails refuses that removal (ledger_salvage_failed). Source-gone paths are "
+            "removed without a copy.",
             "A --help token anywhere in the args prints help and reaps nothing.",
         ),
         see_also=(

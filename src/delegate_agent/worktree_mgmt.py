@@ -244,15 +244,9 @@ def safety_error_payload(
             next_actions=[f"delegate wait {first}", f"delegate cancel {first}"],
         )
     if reason in LIVE_OWNER_REASONS:
-        subject = (
-            "A run launched from inside this worktree (registered in its own .delegate, "
-            "which removal would delete) is still running"
-            if reason == "nested_run_active"
-            else "Worktree owner is still active"
-        )
         return _error_payload(
             reason,
-            f"{subject}; wait for the run to finish before removing. "
+            f"{live_owner_subject(reason)}; wait for the run to finish before removing. "
             "--force does not override a live run; only --kill-live does, and the run "
             "loses its workspace.",
             record=record,
@@ -286,6 +280,22 @@ def safety_error_payload(
     )
 
 
+def live_owner_subject(reason: str) -> str:
+    """One clause saying why ``reason`` blocks, shared by the error and the skip hint."""
+
+    if reason == "nested_run_active":
+        return (
+            "A run launched from inside this worktree (registered in its own .delegate, "
+            "which removal would delete) is still running"
+        )
+    if reason == "nested_registry_unreadable":
+        return (
+            "This worktree's own .delegate Registry could not be read, so a run still "
+            "working inside it cannot be ruled out"
+        )
+    return "Worktree owner is still active"
+
+
 LIVE_OWNER_REASONS = frozenset(
     {
         "run_active",
@@ -293,6 +303,7 @@ LIVE_OWNER_REASONS = frozenset(
         "process_group_alive",
         "worktree_leased",
         "nested_run_active",
+        "nested_registry_unreadable",
     }
 )
 
@@ -363,34 +374,44 @@ def _nested_run_block_reason(
     registry_root: Path,
     record: PersistentWorktreeRecord,
 ) -> str | None:
-    """Block removal while a run launched from inside the worktree is running.
+    """Block removal while a run launched from inside the worktree may be running.
 
     A run started with ``--cwd`` inside a delegate worktree registers in that
     worktree's own ``.delegate``, so the owning Registry never sees it, and
-    removing the worktree deletes the Registry with the live run in it. The
-    check is additive and best effort: an unreadable nested Registry does not
-    block cleanup.
+    removing the worktree deletes the Registry with the live run in it. A nested
+    Registry that exists but cannot be read (or holds a run whose state cannot
+    be read) leaves that question unanswered, and an unanswered question blocks
+    like a live run: ``nested_registry_unreadable``. Only ``--kill-live`` goes
+    past either.
     """
 
     execution = record.get("executionCwd")
     if not isinstance(execution, str) or not execution:
         return None
-    nested = run_registry.registry_root_if_exists(Path(execution))
-    if nested is None:
+    nested = run_registry.registry_root(Path(execution))
+    try:
+        os.stat(run_registry.index_path(nested))
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError:
+        return "nested_registry_unreadable"
     try:
         if nested.resolve() == registry_root.resolve():
             return None
         index = run_registry.load_index(nested)
-        _rows, running, _scope, _ids = run_registry.list_run_summaries(
+        rows, _total, _scoped, _ids = run_registry.list_run_summaries(
             nested,
             index,
-            status_filter=run_registry.STATUS_FILTER_RUNNING,
-            limit=1,
+            limit=max(1, len(index["runs"])),
         )
     except (OSError, RuntimeError, ValueError, DelegateError):
-        return None
-    return "nested_run_active" if running else None
+        return "nested_registry_unreadable"
+    statuses = {row.get("status") for row in rows}
+    if run_status.STATUS_RUNNING in statuses:
+        return "nested_run_active"
+    if run_status.STATUS_UNKNOWN in statuses:
+        return "nested_registry_unreadable"
+    return None
 
 
 def _retirement_ignore_globs(ctx: object) -> tuple[str, ...]:
@@ -653,14 +674,17 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
     completion_extra["worktreeRetired"] = True
     completion_extra["worktreeStatus"] = STATUS_REMOVED
     completion_extra["worktreeBranchPreserved"] = True
-    _persist_completion_worktree_fields(
-        ctx,
-        {
-            "worktreeStatus": STATUS_REMOVED,
-            "worktreeRetired": True,
-            "worktreeBranchPreserved": True,
-        },
-    )
+    persisted: JsonObject = {
+        "worktreeStatus": STATUS_REMOVED,
+        "worktreeRetired": True,
+        "worktreeBranchPreserved": True,
+    }
+    salvage_path = result.get("salvagePath")
+    if isinstance(salvage_path, str):
+        # Changed ledger files were copied here before the worktree went away.
+        completion_extra["worktreeSalvagePath"] = salvage_path
+        persisted["worktreeSalvagePath"] = salvage_path
+    _persist_completion_worktree_fields(ctx, persisted)
     run_auto_prune()
 
 

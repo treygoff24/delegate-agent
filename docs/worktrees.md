@@ -43,9 +43,12 @@ source, or at gitignored content, is replaced by a placeholder file as it is
 mirrored in, with the same protections as Delegate's safe-mode workspace sync,
 and the launch warning names it. A symlink that is committed to the repository
 is left exactly as Git checked it out, absolute or not: replacing it would
-start every run with a typechange that the next `git add -A` commits. Safe mode
-is unchanged and still blocks every external symlink in its throwaway copy. The
-completion payload reports `includeDirty: true` and `syncedFiles`.
+start every run with a typechange that the next `git add -A` commits. A
+worktree is not a confinement boundary (see [Security boundary](#security-boundary)),
+so keeping a committed absolute symlink adds no exposure the worktree did not
+already have, while safe mode, which is a boundary, is unchanged and still
+blocks every external symlink in its throwaway copy. The completion payload
+reports `includeDirty: true` and `syncedFiles`.
 
 By default, a successful work-lane run retires its persistent worktree when the
 end-state is clean. Failed or cancelled runs are retained for inspection.
@@ -287,6 +290,31 @@ removed without `--discard-uncommitted`; the refusal, when there is one, names
 only the lane's own paths. Git itself still needs its `--force` to delete a
 checkout with any dirt, so Delegate applies it after its own check has passed.
 
+### Ledger edits are saved before removal
+
+Discounting the ledger paths keeps them from pinning a worktree, but it must not
+lose a real edit to them either. So before any removal of a worktree with
+changed ledger files (`.beads/issues.jsonl` edited, `.papercuts.jsonl`
+appended to, and so on), Delegate copies each changed file to
+
+```text
+<Registry>/salvage/<worktree-name>-<UTC timestamp>/<path relative to the worktree>
+```
+
+where `<Registry>` is the source repository's `.delegate/` directory. It checks
+the copy against the original byte for byte, and only then removes the
+worktree. If a copy fails, nothing is removed and the command reports
+`ledger_salvage_failed`. The JSON result of `remove` (and each entry of `prune`
+and `reap`) carries `salvagePath` and `salvagedPaths`, the text output prints a
+`saved N changed ledger file(s) to ...` line, and completion retirement records
+`worktreeSalvagePath` on the run. Launch-seeded files that still match their
+digest are not copied (the source checkout holds those bytes), and deleted
+ledger files have no content to copy. The copy is also made with
+`--discard-uncommitted`. Nothing in Delegate deletes a salvage directory:
+`worktree prune`, `runs prune`, and retention only remove run directories and
+worktrees, so clear old ones by hand. A source-gone `reap` deletes the path
+without a copy, because Git cannot report what changed there.
+
 Explicit override flags:
 
 ```bash
@@ -330,7 +358,8 @@ check as never-launched run sealing (a live pid that started after the run is
 a reused pid, not the launcher). It ends when the record turns terminal, so a
 run's own completion retirement is unaffected. `--force` does not override any
 live-owner guard (`run_active`, `run_not_terminal`, `process_group_alive`,
-`worktree_leased`, `nested_run_active`): a refused `remove` or `prune --force`
+`worktree_leased`, `nested_run_active`, `nested_registry_unreadable`): a refused
+`remove` or `prune --force`
 says so and names `--kill-live`, the only flag that does, on `remove`, `prune`,
 and `reap`. A skipped entry in `prune` and `reap` JSON carries the same hint.
 Uncommitted work is judged as described under `remove` in every one of these
@@ -349,8 +378,10 @@ the workspace they run in, so pass `--cwd <registryWorkspace>` for those.
 Because the parent's lease check only reads the parent's registry, removal and
 prune also look inside the worktree itself: a `running` run in its own
 `.delegate/` blocks removal as `nested_run_active` (override: `--kill-live`).
-The check is best effort and fails open when that registry cannot be read. It
-protects a live child only. That registry is inside the worktree, so once the
+A nested registry that exists but cannot be read, or holds a run whose state
+cannot be told, blocks removal as `nested_registry_unreadable` (same override):
+an unreadable answer is not a "no". A worktree with no nested registry is
+unaffected. The check protects a live child only. That registry is inside the worktree, so once the
 child finishes, removing the parent deletes the child's run record along with
 it; the branch and its commits are what survive. Read or `snapshot` a nested
 run's result with `--cwd <worktree>` before removing its parent.
@@ -399,17 +430,27 @@ re-run under the locks immediately before removal:
   construction), or whose metadata could not be read, is refused with the
   scan's reason.
 - Git still lists the path as a worktree of its source repository.
-- The source repository's own Registry does not hold a record for the path. If
-  it does, the entry is refused as `record_in_other_registry` with the
-  `--cwd` to run the command from, so that run's liveness check applies.
+- No Registry holds a record for the path. A run that registered it after the
+  reap was planned is refused as `record_owns_path` (re-run the reap so that
+  run's liveness check applies); one in the source repository's own Registry
+  is refused as `record_in_other_registry` with the `--cwd` to run the command
+  from. This check runs again under the locks, but the source repository's
+  Registry is not locked, so a record written there between the check and the
+  removal is not caught.
 - There is no uncommitted work by the same definition as `remove`, unless
   `--discard-uncommitted` is passed (`dirty`, `dirty_unknown`).
 - No process has its current directory inside the path (`process_cwd_inside`,
   with the process ids and command names), unless `--kill-live` is passed. The
   check is one pass over every process (`/proc` on Linux, `lsof -d cwd` on
-  macOS), never a recursive `lsof +D`. Where neither is available, or another
-  user's processes cannot be read, the entry is still removed but a warning
-  says the check could not be completed.
+  macOS), never a recursive `lsof +D`. If the scan cannot run (neither is
+  available, or `lsof` fails or prints nothing) or cannot read one of your own
+  processes, the entry is refused as `process_scan_unavailable`: finding
+  nothing is not the same as looking. `--kill-live` removes it anyway. Other
+  users' processes are invisible to any such scan; they are noted in a warning
+  and do not block.
+- Changed ledger files are saved first (see [Ledger edits are saved before
+  removal](#ledger-edits-are-saved-before-removal)); if that fails the entry is
+  refused as `ledger_salvage_failed`.
 
 The branch is kept. Without `--force` the entry is still skipped as
 `live_backlink`, now with a hint that names `--force`.

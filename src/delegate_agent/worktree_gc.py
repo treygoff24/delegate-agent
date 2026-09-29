@@ -42,6 +42,7 @@ from delegate_agent.worktree_records import (
     live_attachments_for_path,
     load_persistent_records,
 )
+from delegate_agent.worktree_salvage import LedgerSalvage
 
 REAP_AGE_MAX_ENTRIES = 100_000
 
@@ -61,16 +62,17 @@ def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -
     return entry
 
 
-LIVE_OWNER_HINT = (
-    "A live run holds this worktree. --force does not override that; "
-    "--kill-live does, and the run loses its workspace."
-)
+def _live_owner_hint(reason: str) -> str:
+    return (
+        f"{wm.live_owner_subject(reason)}. --force does not override that; "
+        "--kill-live does, and the run loses its workspace."
+    )
 
 
 def _live_owner_skip(record: PersistentWorktreeRecord, reason: str) -> JsonObject:
     entry = _entry_ref(record, reason=reason)
     if reason in wm.LIVE_OWNER_REASONS:
-        entry["hint"] = LIVE_OWNER_HINT
+        entry["hint"] = _live_owner_hint(reason)
     return entry
 
 
@@ -421,6 +423,33 @@ def _canonical_path_text(path: str) -> str:
         return path
 
 
+def _record_salvage_root(registry_root: Path | None) -> Path | Callable[[], Path]:
+    """Where a record-bearing reap saves ledger edits: the Registry holding the record.
+
+    ``registry_root`` is always set on that path (the record came from it); the
+    fallback only makes an impossible state fail closed instead of skipping the copy.
+    """
+
+    if registry_root is not None:
+        return registry_root
+
+    def no_registry() -> Path:
+        raise OSError("no Registry is available to hold the saved files")
+
+    return no_registry
+
+
+def _source_salvage_root(source_git_root: str) -> Callable[[], Path]:
+    """Where a reap of a record-less path saves ledger edits: its source repository's Registry.
+
+    The caller's own workspace may have no Registry at all (``reap`` runs
+    without one), and the saved files belong with the repository the worktree
+    came from. The directory is created only when there is something to save.
+    """
+
+    return lambda: run_registry.registry_root(Path(source_git_root))
+
+
 def _same_directory(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
@@ -462,7 +491,9 @@ def _check_linked_orphan(
     the conservative live verdict; with it, the entry must still be registered
     with Git under a source repository whose own Registry does not own it, be
     free of uncommitted work (unless ``--discard-uncommitted``), and have no
-    process working inside it (unless ``--kill-live``).
+    process working inside it (unless ``--kill-live``). A process scan that could
+    not run, or could not read one of this user's processes, refuses too
+    (``process_scan_unavailable``): finding nothing is not the same as looking.
     """
 
     if pool_warning is not None:
@@ -480,6 +511,21 @@ def _check_linked_orphan(
         return LinkedOrphanCheck(reason="worktree_list_failed", source_git_root=source)
     if not _registered_worktree_path_matches(listed, str(path)):
         return LinkedOrphanCheck(reason="not_registered_with_git", source_git_root=source)
+    # The caller found no record for this path when it planned, but a run may
+    # have registered it since (this check is re-run under the locks just before
+    # removal). A record means the ordinary owner-liveness rules apply, and this
+    # verb has not run them.
+    if registry_root is not None and any(
+        _resolved_record_path(item) == path for item in load_persistent_records(registry_root)
+    ):
+        return LinkedOrphanCheck(
+            reason="record_owns_path",
+            source_git_root=source,
+            fields={
+                "hint": "A run record in this Registry now owns this path. Re-run the reap "
+                "so that run's liveness checks apply."
+            },
+        )
     other = _record_in_other_registry(source, path, registry_root)
     if other is not None:
         return LinkedOrphanCheck(
@@ -528,11 +574,15 @@ def _check_linked_orphan(
             )
             return LinkedOrphanCheck("process_cwd_inside", source, raw_dirty, fields)
         if not scan.checked:
-            fields.setdefault("warnings", []).append(
-                f"process cwd check unavailable ({scan.note}); nothing verified that no "
-                "process is working inside this path."
+            # Nothing was found, but nothing could be ruled out either.
+            fields["processScan"] = scan.note or "the scan could not run"
+            fields["hint"] = (
+                "Delegate could not confirm that no process is working inside this path "
+                f"({fields['processScan']}). Check by hand, then pass --kill-live to "
+                "remove it anyway."
             )
-        elif scan.note:
+            return LinkedOrphanCheck("process_scan_unavailable", source, raw_dirty, fields)
+        if scan.note:
             fields.setdefault("warnings", []).append(scan.note)
     return LinkedOrphanCheck(None, source, raw_dirty, fields)
 
@@ -795,7 +845,7 @@ def reap_worktrees(
             if block_code is not None:
                 entry["reason"] = block_code
                 if block_code in wm.LIVE_OWNER_REASONS:
-                    entry["hint"] = LIVE_OWNER_HINT
+                    entry["hint"] = _live_owner_hint(block_code)
                 if block_code == "live_attachment":
                     entry["attachedRuns"] = list(inspection.attachments)
                 if inspection.dirty_paths:
@@ -901,6 +951,7 @@ def reap_worktrees(
                         errors.append({**entry, "code": "toctou_changed"})
                         continue
                     record = fresh_record
+                    salvage: LedgerSalvage | None = None
                     try:
                         if entry.get("linkedOrphan") is True:
                             fresh_linked = _check_linked_orphan(
@@ -914,15 +965,21 @@ def reap_worktrees(
                             )
                             if fresh_linked.reason is not None or not fresh_linked.source_git_root:
                                 errors.append(
-                                    {**entry, "code": fresh_linked.reason or "toctou_changed"}
+                                    {
+                                        **entry,
+                                        **(fresh_linked.fields or {}),
+                                        "code": fresh_linked.reason or "toctou_changed",
+                                    }
                                 )
                                 continue
-                            worktree_remove._remove_worktree_path(
+                            salvage = worktree_remove._remove_worktree_path(
                                 source_git_root=fresh_linked.source_git_root,
                                 execution_cwd=str(target),
                                 discard_uncommitted=fresh_linked.raw_dirty,
                                 record={"executionCwd": str(target)},
                                 alias=str(target),
+                                salvage_root=_source_salvage_root(fresh_linked.source_git_root),
+                                ledger_globs=ignore_globs,
                             )
                         elif record is not None and entry.get("sourceGone") is not True:
                             source = record.get("sourceGitRoot")
@@ -930,18 +987,31 @@ def reap_worktrees(
                             if not isinstance(source, str) or not isinstance(execution, str):
                                 errors.append({**entry, "code": "metadata_missing"})
                                 continue
-                            worktree_remove._remove_worktree_path(
+                            salvage = worktree_remove._remove_worktree_path(
                                 source_git_root=source,
                                 execution_cwd=execution,
                                 discard_uncommitted=force or discard_uncommitted,
                                 record=record,
                                 alias=str(record.get("alias") or record.get("runId")),
+                                salvage_root=_record_salvage_root(registry_root),
+                                ledger_globs=ignore_globs,
                             )
                         else:
                             shutil.rmtree(target)
-                    except (OSError, wm.WorktreeManagementError) as exc:
+                    except wm.WorktreeManagementError as exc:
+                        code = (
+                            "ledger_salvage_failed"
+                            if exc.code == "ledger_salvage_failed"
+                            else "reap_failed"
+                        )
+                        errors.append({**entry, "code": code, "message": exc.message})
+                        continue
+                    except OSError as exc:
                         errors.append({**entry, "code": "reap_failed", "message": str(exc)})
                         continue
+                    if salvage is not None:
+                        entry["salvagePath"] = salvage.path
+                        entry["salvagedPaths"] = list(salvage.files)
                     if record is not None and registry_root is not None:
                         run_registry.set_worktree_status_locked(
                             registry_root,
