@@ -487,6 +487,43 @@ class DegradedPreventionTests(DegradedRunsBase):
                 any(f"profile env {name} ignored" in warning for warning in warnings), warnings
             )
 
+    def test_workspace_env_for_an_owned_name_is_overridden_with_a_warning(self):
+        from types import SimpleNamespace
+
+        from delegate_agent import request_build
+
+        owned = {
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "BASH_DEFAULT_TIMEOUT_MS": "7200000",
+            "BASH_MAX_TIMEOUT_MS": "7200000",
+        }
+        launch = SimpleNamespace(
+            workspace_base=None,
+            workspace_setup=None,
+            workspace_env={
+                "BASH_MAX_TIMEOUT_MS": "1000",
+                "BASH_DEFAULT_TIMEOUT_MS": "7200000",
+                "MY_SETTING": "x",
+            },
+            workspace_env_files=(),
+        )
+        for engine, warned in (("claude", True), ("codex", False)):
+            with self.subTest(engine):
+                request = SimpleNamespace(
+                    engine=engine, env_overrides=dict(owned), warnings=("earlier",)
+                )
+                request_build._apply_workspace_spec(request, launch)
+                self.assertEqual(request.env_overrides["BASH_MAX_TIMEOUT_MS"], "7200000")
+                self.assertEqual(request.env_overrides["MY_SETTING"], "x")
+                self.assertEqual(request.warnings[0], "earlier")
+                ignored = [w for w in request.warnings if "workspace env" in w]
+                if warned:
+                    # Only the name whose value differs draws a warning.
+                    self.assertEqual(len(ignored), 1, request.warnings)
+                    self.assertIn("workspace env BASH_MAX_TIMEOUT_MS ignored", ignored[0])
+                else:
+                    self.assertEqual(ignored, [])
+
     def test_a_profile_that_agrees_with_the_prevention_environment_draws_no_warning(self):
         self.extra_config["profiles"] = {
             "detectFrom": [],

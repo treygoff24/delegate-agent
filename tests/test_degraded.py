@@ -228,6 +228,49 @@ class WaitingTextTests(unittest.TestCase):
         text = f"**Status:** done.\n- Fixed the parser.\n{bullet}"
         self.assertIsNone(degraded.waiting_on_unfinished_work(text))
 
+    def test_a_handoff_conditioned_on_someone_else_is_not_flagged(self):
+        # "I'll <act> when/after X" is unfinished work only when X is the child's own job.
+        for text in (
+            "I'll commit when you approve.",
+            "I'll report after CI posts the result.",
+            "I'll proceed once the maintainer confirms.",
+            "I'll follow up after review.",
+            "The commit follows once you approve.",
+            "The release notes follow after upstream tags the build.",
+        ):
+            with self.subTest(text):
+                self.assertIsNone(degraded.waiting_on_unfinished_work(text))
+        for text in (
+            "The full suite is still running; I'll commit when it finishes.",
+            "I'll report once the build completes.",
+        ):
+            with self.subTest(text):
+                self.assertIsNotNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_a_report_shaped_message_that_says_its_gate_is_still_running_is_flagged(self):
+        for text in (
+            "Status: completed implementation; the full gate is still running",
+            "**Status:** done.\n- Fixed the parser.\n- The full suite is still running.",
+            # A real Codex report from the field (wade-litigation-discovery, 2026-08-16).
+            "Status: **blocked** (implementation complete; global gate not yet green).\n\n"
+            "- Focused Ruff, Pyright, and falsifier tests pass.\n"
+            "- Full Pytest is still running; no final exit yet.",
+        ):
+            with self.subTest(text):
+                self.assertIsNotNone(degraded.waiting_on_unfinished_work(text))
+
+    def test_a_report_shaped_message_only_flags_the_childs_own_present_tense_job(self):
+        for text in (
+            "Status: completed. The full gate was still running when I checked, then passed.",
+            "Status: completed. CI's full suite is still running upstream.",
+            "Status: completed. The full gate is not still running.",
+            '**Status:** done.\n- Fixed it.\n- The log said "the full suite is still running".',
+            # Other waiting families stay off inside a report shape.
+            "**Status:** done.\n- Fixed the parser.\n- Waiting on the gate for the mirror only.",
+        ):
+            with self.subTest(text):
+                self.assertIsNone(degraded.waiting_on_unfinished_work(text))
+
     def test_a_long_message_is_never_flagged_even_if_it_says_waiting(self):
         text = "Waiting on the gate. " + ("Details of the finished work. " * 40)
         self.assertGreater(len(text), degraded.WAITING_TEXT_MAX_CHARS)
