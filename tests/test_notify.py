@@ -29,13 +29,14 @@ class NotifyTargetTests(unittest.TestCase):
 
 
 class NotifyArgvTests(unittest.TestCase):
-    def test_room_uses_post_send_and_channel_uses_chat_send_anyway(self) -> None:
+    def test_room_uses_post_send_and_channel_uses_chat_send(self) -> None:
         room = notify.notify_argv(notify.parse_notify_target("room:r"), "m")
         self.assertEqual(room[:4], ["post", "send", "--to", "r"])
         self.assertIn("--body", room)
         self.assertNotIn("--allow-self", room)
         channel = notify.notify_argv(notify.parse_notify_target("channel:c"), "m")
-        self.assertEqual(channel[:5], ["post", "chat", "c", "--send", "--anyway"])
+        self.assertEqual(channel[:4], ["post", "chat", "c", "--send"])
+        self.assertNotIn("--anyway", channel)
         self.assertEqual(channel[-2:], ["--body", "m"])
 
     def test_message_is_metadata_only(self) -> None:
@@ -107,7 +108,40 @@ class SendNotificationTests(unittest.TestCase):
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.message_id, "20260822-010000-000001-abcdef")
         argv = (self.dir / "argv.txt").read_text()
-        self.assertIn("chat c --send --anyway --body hello", argv)
+        self.assertIn("chat c --send --body hello", argv)
+
+    def test_an_older_posts_crossed_send_refusal_is_retried_with_anyway(self) -> None:
+        script = self.dir / "post"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{self.dir}/calls.txt"\n'
+            'case " $* " in\n'
+            '  *" --anyway "*) echo "post: sent #c 20260822-010000-000001-abcdef from r"; exit 0;;\n'
+            "esac\n"
+            'echo "post: crossed_send: an unseen message mentions you" >&2\n'
+            "exit 65\n"
+        )
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        env = {"PATH": f"{self.dir}:/usr/bin:/bin"}
+        outcome = notify.send_notification(self.target, "hello", cwd=self.temp.name, env=env)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.message_id, "20260822-010000-000001-abcdef")
+        calls = (self.dir / "calls.txt").read_text().splitlines()
+        self.assertEqual(
+            calls, ["chat c --send --body hello", "chat c --send --anyway --body hello"]
+        )
+
+    def test_other_failures_are_not_retried(self) -> None:
+        path = _fake_post(self.dir, exit_code=65, stdout="post: not_a_member")
+        script = self.dir / "post"
+        script.write_text(
+            script.read_text().replace(
+                '> "' + str(self.dir) + '/argv.txt"', '>> "' + str(self.dir) + '/argv.txt"'
+            )
+        )
+        outcome = notify.send_notification(self.target, "m", cwd=self.temp.name, env={"PATH": path})
+        self.assertFalse(outcome.ok)
+        self.assertEqual(len((self.dir / "argv.txt").read_text().splitlines()), 1)
 
     def test_nonzero_exit_degrades_with_first_line(self) -> None:
         path = _fake_post(self.dir, exit_code=65, stdout="post: not_a_member")

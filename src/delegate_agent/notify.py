@@ -57,6 +57,8 @@ class NotifyOutcome:
     reason: str | None = None
     detail: str | None = None
     message_id: str | None = None
+    # post said crossed_send (an older post's refusal); drives one retry only.
+    crossed_send: bool = False
 
     def payload(self) -> JsonObject:
         result: JsonObject = {"target": self.target, "ok": self.ok}
@@ -146,7 +148,15 @@ def notify_argv(target: NotifyTarget, message: str) -> list[str]:
             "--body",
             message,
         ]
-    return ["post", "chat", target.name, "--send", "--anyway", "--body", message]
+    # post 0.9.0 always delivers a channel send and lists what it crossed, and
+    # `--anyway` is no longer on its documented surface. An older post refuses a
+    # send that crossed an unseen mention with `crossed_send`; send_notification
+    # retries that one case with CHANNEL_CROSSED_SEND_FLAG.
+    return ["post", "chat", target.name, "--send", "--body", message]
+
+
+CHANNEL_CROSSED_SEND_FLAG = "--anyway"
+_CROSSED_SEND_RE = re.compile(r"\bcrossed_send\b")
 
 
 def send_notification(
@@ -167,6 +177,28 @@ def send_notification(
     if binary is None:
         return NotifyOutcome(ok=False, target=target.spec, reason=REASON_NOT_FOUND)
     argv = [binary, *notify_argv(target, message)[1:]]
+    outcome = _run_post(argv, target, cwd=cwd, env=env, timeout=timeout)
+    if (
+        target.kind == "channel"
+        and not outcome.ok
+        and outcome.reason == REASON_FAILED
+        and outcome.crossed_send
+    ):
+        # An older post refused because the send crossed an unseen mention; a
+        # status ping is not a reply to that conversation, so send it anyway.
+        retry = [*argv[:4], CHANNEL_CROSSED_SEND_FLAG, *argv[4:]]
+        outcome = _run_post(retry, target, cwd=cwd, env=env, timeout=timeout)
+    return outcome
+
+
+def _run_post(
+    argv: list[str],
+    target: NotifyTarget,
+    *,
+    cwd: str,
+    env: Mapping[str, str] | None,
+    timeout: float,
+) -> NotifyOutcome:
     try:
         process = subprocess.Popen(  # nosec B603 - fixed argv, shell=False.
             argv,
@@ -199,6 +231,7 @@ def send_notification(
             target=target.spec,
             reason=REASON_FAILED,
             detail=_error_detail(stdout or "", stderr or "") or f"post exited {process.returncode}",
+            crossed_send=bool(_CROSSED_SEND_RE.search(f"{stdout or ''}\n{stderr or ''}")),
         )
     found = _MESSAGE_ID_RE.search(stdout or "")
     return NotifyOutcome(ok=True, target=target.spec, message_id=found.group(0) if found else None)

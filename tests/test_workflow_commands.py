@@ -413,7 +413,6 @@ class WorkflowCommandTests(unittest.TestCase):
                 "chat",
                 "somewhere",
                 "--send",
-                "--anyway",
                 "--body",
                 f"delegate workflow {wf_id} succeeded",
             ],
