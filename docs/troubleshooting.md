@@ -361,8 +361,12 @@ and completion report carry a structured `providerError`:
 
 The message is bounded and redacted. Classification looks at the HTTP status
 first, then the provider's error code, then message text. One engine-keyed
-signature table decides it, so `failureReason`, `failureKind`, the hint, and the
-class always agree. `class` is one of:
+signature table decides it, so the signature, hint, and class always agree, and
+when a signature names a failure reason, `failureReason` and `failureKind` carry
+it. One signature deliberately names none: plain throttling (a bare HTTP 429
+with no quota wording) is recorded as `rate_limited`, but the run's failure
+reason comes from its ordinary exit classification, so throttling never reads
+as a usage limit and never steers credential rotation. `class` is one of:
 
 - `persistent`: it will keep failing until someone changes something.
 - `transient`: it clears on its own; relaunching later is reasonable.

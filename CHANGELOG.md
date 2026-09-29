@@ -8,6 +8,205 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `workflow resume` and `workflow status` say when a workflow's pinned runtime
+  differs from the live one. The notice names both runtimes (digest, delegate
+  version, and the pin or promotion date), and JSON carries the same facts as
+  `runtimePin` (`differs`, `pinned`, `live`; on a resume the notice text is
+  also in `warnings`). `status` prints no notice for a finished (`succeeded`
+  or `dry_run`) workflow, and a pin that cannot be read reports `checked:
+  false` with the reason instead of blocking the resume.
+- `--repin` on `workflow resume`, `workflow run --resume`, and `workflow
+  approve` is an opt-in that moves a workflow onto the live runtime; a plain
+  resume still keeps the pin. It keeps the journal, step keys, frozen script,
+  arguments, config, personas, and profile identity, moves the old runtime
+  into `runtimeHistory`, and journals one `runtime_repinned` event. The
+  identity check still runs first, and the new pin is written aside and
+  validated before it replaces the old one. A failed validation, a failed
+  launch, or a resume where no supervisor ever starts on the new pin restores
+  the old pin byte for byte and journals `runtime_repin_rolled_back`.
+  `--repin` is refused with `repin_children_running` while a child run is
+  running or still starting, with `invalid_option_combination` on a new run or
+  with `--dry-run`, with `workflow_locked` when another resume holds the lock,
+  and when the existing pin cannot be verified. `WORKFLOW_KEY_VERSION` remains
+  the guard against step-key drift. A script that branches on `capabilities`
+  can take a different branch after a repin, because the map then describes
+  the live runtime.
+- `workflow check` warns about unkeyed steps in a script that keys others.
+  When some `agent()`, `parallel()`, `pipeline()`, or `workflow()` calls pass
+  `key=` and others do not, it emits one `keying warning` per primitive kind
+  with the source lines of the unkeyed calls (at most eight), because those
+  calls still replay by position and prompt and lose settled work when a
+  resumed script shifts. A script that keys nothing is left alone, a call with
+  a `**kwargs` expansion is assumed to carry its key, and `judges()` and
+  `followup()` are never flagged.
+- A run or workflow id that is not in the current workspace is looked up in a
+  small roster of the other workspaces Delegate has launched in
+  (`~/.delegate/registries.json`, private, at most 256 entries, most recently
+  used first; workspaces whose `.delegate` is gone are skipped). `snapshot`
+  and `run-output` read a run id found in exactly one other workspace directly
+  and report `resolutionKind: "cross_registry"`, `resolvedWorkspace`, and a
+  `cross_registry:` warning. `wait`, `cancel`, `resume`, `followup`, and
+  `worktree show` never act across workspaces: they fail with
+  `unknown_handle`, name the workspace, and put the exact `delegate --cwd
+  <workspace> ...` command first in `nextActions`. The workflow read actions
+  `status`, `events`, `watch`, `wait`, and `result` read a workflow found in
+  exactly one other workspace, and `status`, `wait`, and `result` add
+  `resolvedWorkspace`; `approve`, `reject`, `kill`, and `run --resume` fail
+  with `workflow_not_found` and the exact command instead. An id found in
+  several workspaces is listed, never guessed, and a numbered alias is never
+  auto-resolved: the error lists every workspace that has it. Only workspaces
+  used for a launch after the roster shipped are known.
+- OMP `tool_execution_update` records whose `args` or `partialResult` is
+  oversized are shrunk to a `{"delegateCompacted": true, "originalBytes": N,
+  "head": ..., "tail": ...}` stub. The sub-agent `task` tool re-emits its
+  whole shared context on every update; `tool_execution_start` and
+  `tool_execution_end` carry the full arguments and result once and are never
+  touched. `stdoutCapture` (policy `omp-capture-v2`) reports
+  `compactedToolUpdateRecords` and `compactedToolUpdateBytes`, the run gets a
+  warning, and `--raw` cannot recover the compacted text.
+- Tracked Pi, OMP, and OpenCode runs ingest token `usage` from the stream,
+  summed per message or step and not double counted.
+- Run and call envelopes, run summaries, and snapshots carry `servedModel`
+  and, when the harness reports one, `servedProvider`: what the child's stream
+  says actually answered. They sit beside `modelResolved` (the request),
+  repeat inside `modelProvenance`, and are absent when the harness reported no
+  model. A Claude call reports only a per-run `modelUsage` total, so its
+  `servedModel` is set only when exactly one model produced output; with
+  several it is absent and a pinned call warns `pinned_continuity_unverified`.
+  An ungrouped `call` is now held to the same continuity rule as a tracked
+  run: a pinned call whose stream names another model or provider fails with
+  `model_continuity_paused` (text mode prints no answer text for it; JSON
+  keeps any text beside the error), and a fungible or panel call carries the
+  `model_substitution` warning, provider included.
+- A tracked run whose child ends its turn mid-job is flagged as degraded. A
+  headless child ends when its model stops, and background Bash tasks and
+  Monitors die with the session, so a Claude work run that said "Waiting on
+  the full gate" used to be recorded `succeeded` with `ok: true` while its
+  gate never finished. The status stays `succeeded` so the work can be
+  adopted, but the run now carries `degraded: true` (present only when true),
+  a `degradedReason`, `degradedEvidence` (bounded, redacted lines saying what
+  was seen), and a `degraded=...` warning. They appear on the launch envelope,
+  in state.json, on `wait` (JSON, `--structural`, and a `degraded:` line in
+  text), `snapshot`, `runs` and `ps` (the text table prefixes `current` with
+  `[degraded]`; `--structural` omits them), the `run-output
+  --completion-report` view, and, for a workflow child, the `agent_child`
+  journal event and `agent_meta()` (`degraded`, `degradedReason`). Nothing
+  fails a run or a workflow step, and `wait` still exits 0. `degradedReason`
+  is `ended_waiting_on_background_work` or
+  `background_work_unfinished_at_exit`. The first is a final-message check
+  that works for every engine: a short message that is not shaped like a
+  finished report and says the child is waiting on, or will act after,
+  unfinished work of its own. It ignores waiting on the requester ("I'll
+  commit when you approve"), a third party's independent result ("Waiting for
+  CI to post its result"), denials, and quoted text such as a tool's output; a
+  short report-shaped message matches only an explicit present-tense statement
+  that the child's own job is still running; runs with `--output-schema` are
+  not text-checked. The second reads Claude Code's `background_tasks_changed`
+  snapshot at the result event and catches a finished-looking report that
+  abandoned a running task; only Claude emits that event.
+- A provider failure is now data. The failed run's envelope, run state, and
+  completion report carry a structured `providerError` (`status`,
+  `providerCode`, `message`, `engine`, `signature`, `class`, `hint`); the
+  message is bounded, credentials are redacted, and email addresses are
+  masked. `class` is `persistent`, `transient`, or `unknown`, and a persistent
+  signature is either lane-scoped (credentials, billing, or model access are
+  wrong) or request-scoped (this prompt is the problem). One engine-keyed
+  signature table classifies by HTTP status first, then provider code, and
+  uses text patterns only as the fallback, so `failureReason`, `failureKind`,
+  the hint, and the class agree, and an OMP HTTP 400 naming an image count or
+  size limit is `request_image_limit`, never an auth failure. The signature
+  list is in `docs/troubleshooting.md`. Two new `failureKind` values are
+  `lane_known_bad` (a launch refused, below) and `provider_exhausted`
+  (workflow only).
+- A persistent, lane-scoped provider failure (rejected credentials, no credit,
+  usage limit, no access to the model, missing API key) marks its lane
+  known-bad for `providerErrors.knownBadLaneMinutes` (default `15`; `0` turns
+  markers off). Until the marker expires, another launch on that lane is
+  refused in milliseconds, before any worktree or child exists, with
+  `lane_known_bad` and the new exit code `4`; the payload carries `signature`,
+  `class`, `hint`, `expiresAt`, `secondsLeft`, and `markedRunId`. The global
+  `--force-launch` launches anyway (another persistent failure renews the
+  marker), a success clears the marker, and `--dry-run` never refuses.
+  `delegate doctor` lists live markers as `knownBadLanes`. Transient,
+  request-scoped, and unclassified failures never mark a lane, nor do endings
+  Delegate established itself (timeout, stall, output cap, cancel), and a
+  Codex usage limit with `codex.fallbackProfile` set stays with the profile
+  failover. The `providerErrors` config section is new, and an unknown key in
+  it fails as `invalid_provider_errors_config`.
+- A known-bad lane is one engine on one provider, model, and account (the
+  Codex failover identity, `CLAUDE_CONFIG_DIR`, or the auth profile), plus the
+  credentials the child will see: API keys, tokens, and broker, realm,
+  account, and endpoint settings in the environment, and for OpenCode the
+  provider keys, base URLs, and `Authorization` headers inside
+  `OPENCODE_CONFIG_CONTENT`. They are folded in as a salted hash (the salt is
+  `~/.delegate/state/lane-health.salt`, mode 0600), so a bad key on one
+  account never refuses a healthy account on the same model, and no key value
+  is stored or shown. `doctor` and the refusal print only a short `[credential
+  xxxxxxxx]` tag, an account label shaped like an email address is masked, and
+  a success clears its marker even when the marker store's lock is stuck.
+- A Codex or Claude work run that fails with a transient provider drop
+  (`stream_disconnected` or `provider_unavailable`: Codex's websocket closing
+  early, or a 5xx or overloaded Claude reply) and saved its native session is
+  continued once, automatically, the way `delegate followup` continues one:
+  same session, a new run linked to the first by `followupOf`. The
+  continuation's envelope and manifest carry `autoResume` (`automatic`,
+  `attempt`, `of`, `trigger`), and the final result is the continuation's.
+  There is no second automatic attempt, so a drop in the continuation is
+  final. It never applies to safe or call mode, `--pass-through`,
+  structured-output runs (the workflow supervisor owns that retry), runs that
+  saved no session, or runs in a temporary worktree; a worktree run attaches
+  to its own worktree and branch. When the continuation cannot be built the
+  first run's result is returned unchanged with `autoResume` set to
+  `attempted: false` and a `reason`. It is on by default, and
+  `providerErrors.autoResume: false` opts out; workflow children are
+  unresumable unless the call passes `resumable=True`, so it reaches them only
+  then.
+- Workflow `agent()` returns two new typed failure kinds under
+  `on_failure="typed"`: `lane_known_bad` (the child refused to launch because
+  its lane is marked known-bad; workflows never pass `--force-launch`) and
+  `provider_exhausted` (the call was skipped, with no run and a `run_id` of
+  `None`, because its stage already stopped launching on the lane).
+  `AgentFailure.provider_error` carries the child's `providerError` so a
+  script can branch on the signature instead of parsing prose, and
+  `capabilities["providerOutcomes"]` advertises the feature. A stage is one
+  `phase()` label and a lane is one engine on one model. When the first
+  `providerErrors.stageStopAfter` results (default `3`; `0` turns the stop
+  off) of a stage on a lane all fail with the same persistent, lane-scoped
+  signature, the rest of that stage's calls on that lane are not launched,
+  cells already queued behind the agent cap skip too, and a call with an
+  engine fallback chain moves on to its next engine. A success or any
+  different result among the first results means the lane is not uniformly
+  bad, and transient and request-scoped failures never count. The trip is
+  journaled once as `stage_lane_stopped` and each skipped call as
+  `agent_lane_skipped`; a skipped call still counts against the workflow's
+  agent budget.
+- `delegate capabilities refresh` records per-engine auth health. A successful
+  refresh runs the read-only probes named in `providerErrors.authProbes` (by
+  default `estate-cursor status` for `cursor` and `estate-omp usage` for
+  `omp`) and records what they clearly say as `authHealth`, in its JSON and
+  text output and in `~/.delegate/state/auth-health.json`: `ok`, `logged_out`
+  (Cursor reports it is not signed in), or `limit_reached` (an OMP quota
+  window is at 100%). OMP reports quota per provider and account, so its
+  reading also carries `lanes` (`<provider>/account <N>` to `ok`,
+  `limit_reached`, or `unknown`); the engine reads `limit_reached` only when
+  every lane is exhausted, `partial` when some are, and `unknown` for lanes
+  the report does not describe. A probe that is missing, slow, exits non-zero
+  without a recognisable message, or prints something unexpected records
+  `unknown` with a `reason`; `unknown` is never a failure and never refuses a
+  launch, and the probe's raw output is not stored. A subset refresh probes
+  only the named engines and keeps the others' last reading, and `delegate
+  doctor` shows the last reading as `authHealth`. `authProbes` accepts only
+  `cursor` and `omp` (each a command and its arguments, or `null` to turn that
+  probe off), and `DELEGATE_AUTH_PROBES=off` (or `0`, `false`, `no`) skips
+  every probe.
+- A conformance test requires the parser to accept every documented command
+  line. It extracts each `delegate` line from `docs/cli-reference.md` and each
+  usage and example line in `COMMAND_SPECS`, expands the usage synopses into
+  concrete argv lists (minimal, maximal, each alternative alone, and every
+  pair of optional groups), and fails on any the parser refuses, so a synopsis
+  that shows mutually exclusive options as independent cannot drift again. A
+  separate test runs the real launcher on `mail send --to coordinator -` with
+  a piped multi-byte UTF-8 stdin and compares the delivered bytes.
 - The stall watchdog stops runs for named reasons besides idle time. A run
   that streams roughly 100k tokens of model output with no tool activity stops
   as `runaway_output`; only model-output payload characters count, and
@@ -149,6 +348,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- A `--mail-push` Codex run no longer dies before the model starts. Delegate
+  injected `-c hooks=true`, which Codex 0.157 rejects at config load because
+  `hooks` is a table; it now passes `--enable hooks` (the same as `-c
+  features.hooks=true`) and does not add it twice when it is already present.
+- `--notify` room pings work against post 0.9.0. The notifier no longer passes
+  `--allow-self`, which post now rejects as an unexpected argument, and the
+  message-id match accepts post's room ids (which have no microsecond field)
+  as well as channel ids, so `messageId` is no longer empty for a room ping. A
+  room ping is a workspace fan-out that never reaches its own sender, so
+  `--notify` naming your own room reaches the room's other participants and
+  not the launching session; the troubleshooting guide now says so.
+- On a Python older than 3.11 (Xcode's 3.9, for example), `bin/delegate.py`
+  and the `delegate_agent` package now exit `2` with a message naming the
+  interpreter version and executable they found, instead of a raw
+  `ImportError` from inside the package. The tracked
+  `bin/delegate-profile-shim` picks a 3.11+ interpreter itself (`python3`,
+  then `python3.14` down to `python3.11`, then Homebrew's, then
+  `/usr/local/bin/python3`), honors a validated `DELEGATE_PYTHON` (an override
+  older than 3.11 is refused, not bypassed), and exits `2` with a plain
+  message when none is found.
+- The Codex and `post` argv Delegate builds is now tested against the
+  installed binaries (`tests/test_real_binary_contracts.py`), which is how the
+  two dead flags above shipped. A `codex` or `post` on `PATH` that fails
+  `--version`, times out, or cannot register the throwaway room now fails the
+  suite with its command, exit code, and output instead of skipping it; a
+  class skips only when its binary is absent or
+  `DELEGATE_SKIP_REAL_BINARY_CONTRACTS` is truthy, and says why.
+  `pytest-xdist` workers now see the real HOME through
+  `DELEGATE_TESTS_ORIGINAL_HOME`.
+- A run that fails keeps what the child had produced. A failed, timed-out, or
+  (opt-in) capped run's completion report now quotes the child's last
+  substantive assistant text, bounded and redacted, under "Partial output
+  recovered before the run stopped. This is not a completion report", as a
+  cancelled run's already did. Pi, OMP, and OpenCode keep that text across
+  turns and steps, so a long review followed by a tool turn and a provider
+  error is still recoverable (OpenCode used to clear it at every step). A
+  call-mode timeout or output overflow, including a child that had already
+  exited before Delegate noticed the overflow, returns the buffered draft as
+  `diagnostics` on the error (also flattened into the JSON error):
+  `partialText` (redacted and bounded), `stdoutTail`, and `stderrTail`; text
+  mode prints the partial text to stderr.
+- `followup` errors now say what is true. A source with no recorded native
+  session (launched with `--no-resumable`, before Codex and Claude work runs
+  saved their session by default, or as a workflow `agent()` call without
+  `resumable=True`) is refused with `session-missing` and pointed at `delegate
+  resume <handle>`, no longer told to relaunch with `--resumable`. A session
+  that was saved but cannot be found when resumed fails as `session_expired`
+  (`failureKind: session_lost`); the message names the usual cause, a launch
+  under a different account than the one holding the session, and offers
+  `delegate resume`.
+- `resume` and `followup` refuse a known option of that command that appears
+  in the prompt tail (`delegate followup x fix it --dry-run`) with
+  `option_after_handle` before anything launches, instead of sending it to the
+  child as prompt text while the run launches with the defaults. Put `--`
+  before the prompt to send such a token as literal text. `followup` accepts
+  options on either side of the handle but only before the prompt text, and
+  `resume` only before the handle; an option-shaped token that belongs to
+  another command keeps the existing warning.
+- A workflow structured retry on Codex or Claude whose resumed session cannot
+  be found (`session_lost`, reason `session_expired`) now falls back to a
+  fresh relaunch in the same worktree instead of ending, without spending a
+  retry; the journal records `agent_structured_retry` with `strategy:
+  "relaunch"` and `fellBackFrom: "resume"`. A fresh child redoes the task, so
+  the fallback relaunches only over a worktree known to be untouched, and
+  otherwise the call is refused (`agent_structured_retry_refused`) as
+  `work_changed_session_missing` when an earlier attempt already changed the
+  worktree, or `work_state_unverified` when that could not be checked. The
+  work summary now records `fileInspectionStatus` next to
+  `commitInspectionStatus` (each `verified` or `unverified`), because a failed
+  `git status` used to read as zero changed files; `noChanges` is true only
+  when both are `verified` and show nothing. In work mode both the prior
+  attempt and the resumed attempt must carry a verified summary that reports
+  no changes, and a missing summary, or one from a Delegate that predates
+  `fileInspectionStatus`, counts as unverified. Safe and call children have no
+  summary and keep the fallback.
+- `worktree reap --path P --older-than N --yes --force` now removes a pool
+  entry that has no run record but that Git still links; `reap` used to skip
+  it as `live_backlink` even with `--force`, and the only way out was `git
+  worktree remove --force` by hand. Every check is re-run under the locks
+  immediately before removal. The pool scan must have no warning for the entry
+  (an entry with broken-looking metadata changed within the last 15 minutes,
+  or whose metadata cannot be read, is refused); Git must still list the path
+  as a worktree of its source repository; no Registry may hold a record for it
+  (`record_owns_path`, including a run that claimed it after planning, or
+  `record_in_other_registry` with the `--cwd` to run from); there must be no
+  uncommitted work by the definition above (`dirty`, `dirty_unknown`) unless
+  `--discard-uncommitted` is passed; no process may have its current directory
+  inside the path (`process_cwd_inside`, from one pass over `/proc` or `lsof
+  -d cwd`, never `lsof +D`) unless `--kill-live` is passed; and changed ledger
+  files are saved first. A process scan that cannot run, or cannot read one of
+  your own processes, refuses as `process_scan_unavailable`; other users'
+  processes are noted in a warning and do not block. The branch is kept, and
+  without `--force` the entry is still skipped as `live_backlink`, now with a
+  hint naming `--force`.
+- Persistent worktrees no longer replace committed symlinks with placeholders.
+  The replacement showed up as typechanges that the next `git add -A` would
+  commit. A symlink committed to the repository is left as Git checked it out,
+  absolute or not; only an untracked symlink that points outside the source,
+  or at gitignored content, is replaced by a placeholder as it is mirrored in,
+  and the launch warning names it. Safe mode is unchanged and still blocks
+  every external symlink in its throwaway copy.
+- `worktree show` on a followup, resume, or attached run names the run that
+  owns the worktree, following the lineage up through followups and resumes
+  (up to 16 hops, with a cycle guard) and putting `delegate worktree show
+  <owner>` first in `nextActions`.
+- Two false or misleading model warnings are gone. Cursor labels are compared
+  after the context-window token (`256K`, `1M`) is dropped, so
+  `grok-4.7-xhigh` served as `Grok 4.7 256K Extra High` is the requested model
+  and not a `model_substitution`. A pinned call whose stream named a served
+  model is no longer told it "could not be verified"; that warning now fires
+  only when the stream was silent.
+- Usage synopses in `--help`, `describe`, and `docs/cli-reference.md` now
+  match what the parser accepts; the parser was right in each case. `claude
+  call` takes `[--read-only|--pure]`, not both. `runs` and `ps` take
+  `[--summary | [--limit N] [--structural]]`, because `--summary` prints
+  counts and no rows and is refused with either. `snapshot` and `run-output`
+  take `(<handle>|--latest HARNESS)`. `run-output` takes `[(--stdout|--stderr)
+  [--raw | [--tail N] [--max-chars N]]]`, with a second usage line,
+  `[--no-redact] (--raw | --tail N)`, for the standalone `--raw` and `--tail
+  N` forms. `worktree remove` takes `[--keep-branch | [--force-branch]
+  [--force]]`.
+- `describe --summary` is now described as the command index plus config
+  resolution, launch options, profiles, and workflows, larger than the default
+  and `--overview` views and smaller than `--full`, not as compact.
+- The workflow supervisor relays `SIGINT` to its children the way it does
+  `SIGTERM` and `SIGHUP`, and journals `supervisor_signalled`. `SIGINT` used
+  to reach the interpreter's default handler, which raised `KeyboardInterrupt`
+  and marked the workflow failed without cancelling its children; they ran on
+  unowned until a later resume sealed them.
+- The `agent_timeout` journal row written when a `followup()` call times out
+  now carries `key`, `label`, and `scope`, as the `agent()` timeout row does,
+  so a journal with several follow-ups says which step died.
+- The workflow docs no longer say a resume adopts running children. A resume
+  cancels every child the previous attempt still had running and relaunches
+  that work; adoption covers only children that already finished (or that this
+  supervisor lifetime is itself still launching). Waiting on a live orphan and
+  taking its result is deferred work, not current behavior.
 - `describe --full` documents the workflow DSL the runtime actually injects.
   Its `globals` list is read from the runtime's new `WORKFLOW_DSL_GLOBALS`,
   which the injector also checks, so it now names `park_gate`, `reject`,
@@ -180,9 +516,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory, so `uv run` no longer fails creating `.venv` under the read-only
   workspace bind. An existing `.venv` or an explicit `UV_PROJECT_ENVIRONMENT`
   is left alone.
-- Resume keeps the source run's `resumable` opt-in when the new engine is
-  codex or claude, so `followup` on the resumed alias works; a cross-engine
-  resume that cannot keep it drops the opt-in and says so.
+- Resume onto codex or claude keeps a source run's explicit `resumable`
+  opt-in, so `followup` on the resumed alias works (any other source now takes
+  the resumable-by-default launch setting); a cross-engine resume onto an
+  engine that cannot keep it drops the opt-in and says so.
 - Resume and followup that reuse the source run's auth profile now say the
   profile was inherited from the source run instead of warning about an
   `--auth-profile` flag the user never typed.
@@ -310,6 +647,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendUnavailable`. The isolated build path is unchanged.
 
 ### Changed
+- **The tracked output cap is now off by default.**
+  `<engine>.trackedStreamMaxBytes` used to default to 16 MiB (64 MiB for Pi
+  and OMP) and stopped a run as `output_limit_exceeded` when a stream passed
+  it. It now defaults to `null`: a verbose run is never killed, truncated, or
+  hidden from the parser for its size, and `stdout.log` keeps the whole stream
+  and is flushed on every write, so its size and modification time follow the
+  child. Set a positive integer to opt an engine back into a cap; the
+  `output_limit_exceeded` message then names the key to raise or clear. OMP's
+  256 MiB transport and 16 MiB per-record ceilings apply only with an opted-in
+  cap, and call mode keeps its own 16 MiB caps. Runaway streams remain the
+  stall watchdog's job (`runaway_output`). The 500-line limit in the
+  `events.jsonl` mirror was never a limit on `stdout.log`; its
+  `stream.lines_truncated` marker now says the child keeps running and
+  `stdout.log` keeps the full stream.
+- A Devin answer is held in memory as a bounded excerpt. Devin prints plain
+  lines with no message boundaries, so Delegate treats everything it prints as
+  one running answer; past 30,000 characters that answer is the first 20,000
+  and the last 10,000 with an `[N chars omitted]` marker between them.
+  `assistantText`, the completion report, and a failed run's recovered partial
+  output read the excerpt, `assistantTextChars` keeps the full length, and
+  `stdout.log` keeps the full stream. The answer used to be rebuilt as one
+  string on every line, which was quadratic and, with the cap off, held the
+  whole run in memory.
+- **Codex and Claude `work` runs are now resumable by default.** They save
+  their native session unless the launch says `--no-resumable` (JSON
+  `resumable: false`) or the engine config sets `codex.resumable` or
+  `claude.resumable` to `false` (both default `true`), so `delegate followup`
+  works without remembering `--resumable`. `--resumable` on a launch still
+  beats the config key, and `resume` takes the same default and
+  `--no-resumable`; a resume source recorded as exactly `true` keeps it, and
+  any other source takes the launch default. The default outranks
+  `codex.ephemeral` and `claude.noSessionPersistence`, which now apply only to
+  runs that are not resumable. Safe runs, call runs, `--pass-through` runs,
+  other engines, and workflow `agent()` children (unless the call passes
+  `resumable=True`) are unchanged, and `--no-resumable` is a quiet no-op
+  there. A succeeded persistent-worktree run that is resumable keeps its
+  worktree (`worktreeRetained: "resumable_session"`) instead of retiring it
+  when clean, so `followup` and `resume` can re-enter it; a fan-out of these
+  runs leaves one retained worktree per succeeded run until `worktree prune
+  --merged`, `worktree gc`, or `worktree remove` cleans up. Launch with
+  `--no-resumable` when a run's worktree should retire itself.
+- **`--force` no longer overrides a live run on the worktree commands.**
+  `worktree remove`, `worktree prune`, and `worktree reap` refuse a worktree
+  that a live owner still holds (`run_active`, `run_not_terminal`,
+  `process_group_alive`, `worktree_leased`) even with `--force`, and the
+  refusal names the new `--kill-live`, the only override, which removes the
+  worktree out from under the run. `--kill-live` does not discard uncommitted
+  work or force the branch by itself. Removal is also refused for a running
+  run recorded in the worktree's own `.delegate/` registry
+  (`nested_run_active`) and for a nested registry, or a run in it, that cannot
+  be read (`nested_registry_unreadable`), each overridable only by
+  `--kill-live`. A skipped entry in `prune` and `reap` JSON carries the same
+  hint.
+- Uncommitted work has one definition across `worktree remove`, `prune`,
+  `reap`, and completion retirement: what the lane actually changed. Files the
+  launch seeded from a dirty source that still match their digest, and the
+  ledger paths in `worktrees.retirementIgnoreGlobs` (default `.beads/**` and
+  `.papercuts.jsonl`), do not count, so a worktree that `prune` plans is one
+  `remove` accepts and a refusal names only the lane's own paths. Ledger edits
+  are saved before any removal: changed ledger files are copied and
+  byte-compared into `<Registry>/salvage/<worktree>-<UTC timestamp>/`. The
+  result reports `salvagePath` and `salvagedPaths`, the text output prints a
+  `saved N changed ledger file(s)` line, and completion retirement records
+  `worktreeSalvagePath` on the run. Deleted ledger files and the old name of a
+  renamed one are recorded in a `MANIFEST.tsv` (status, path, old path) in the
+  same directory and reported as `salvageRemovedPaths`. A copy that fails, or
+  a `git status` that cannot run, refuses the removal as
+  `ledger_salvage_failed`. Delegate never deletes a salvage directory, and a
+  source-gone `reap` deletes the path without a copy.
+- **An OMP `provider/model` id you type is now pinned by default.** A
+  `provider/model` given as `--model`, input-JSON `model`, a positional raw
+  id, or a literal workflow `agent(model=...)` behaves as `--continuity-mode
+  pinned` unless you name a mode. Delegate launches it with a private
+  `--config` overlay that sets `retry.modelFallback` and
+  `retry.usageAwareFallback` to `false`, so OMP's own retry chains cannot move
+  the run to another provider (retrying the same model is unaffected, the
+  overlay beats your `config.yml`, and a dry run shows `--config <omp config
+  overlay>`). If another provider or model is served anyway, the run fails as
+  `model_continuity_paused` with a message naming what OMP tried to serve, for
+  example `requested opencode-go/glm-5.3, but omp tried to serve
+  fireworks/glm-5p3`. A delegate alias (a key of `omp.models`) and
+  `omp.defaultModel` stay `fungible`, so multi-subscription failover keeps
+  working; the run records and warns (`model_substitution`) which provider
+  answered, and `--continuity-mode pinned` on an alias pins it.
+  `--continuity-mode fungible` or `panel` on a typed id opts out of the
+  overlay. Workflows have no continuity passthrough yet, so there a literal id
+  is pinned and an alias is fungible.
+- An `omp` model name that is not an `omp.models` alias and not a
+  `provider/model` selector fails with `invalid_alias` once a discovered omp
+  catalog exists, unless it is exactly a catalog model id; the error lists the
+  configured aliases and the nearest catalog selectors. OMP resolves a bare
+  name by fuzzy match against its own catalog and can serve a different
+  provider (a retired alias, `kimi`, resolved to `fireworks/kimi-k3`), so
+  Delegate refuses instead of passing it through. With no catalog the run
+  proceeds with a warning; `delegate capabilities refresh` lets bare names be
+  checked.
+- **Claude `work` runs and their followups now run with background tasks
+  disabled.** Delegate sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and adds
+  `--disallowedTools Monitor`, because a headless child ends when the model
+  stops and a background task or Monitor dies with the session. As a long gate
+  must then run in the foreground, Delegate also sets
+  `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` to the run's own
+  `--timeout`, never below two hours (a run with no `--timeout` gets two
+  hours), so Claude Code's 2-minute default and 10-minute maximum do not cut a
+  foreground command off. `claude.disableBackgroundTasks: false` turns all of
+  it off. An auth profile's `env` or a workspace `--env` cannot undo these
+  variables: Delegate keeps its own values and warns `profile env NAME
+  ignored` or `workspace env NAME ignored` when the value differed. Every
+  framed `work` and `safe` prompt also carries a two-sentence rule that ending
+  the turn ends the run and that long jobs must run in the foreground and
+  finish before the final message; verbatim slash pass-through prompts are not
+  rewritten.
+- **A finished run's scratch is now reclaimed on its own age.** Scratch, its
+  sidecars (for example mail-push engine homes), and the compact child temp
+  used to be removed only when the run record was pruned, so finished runs
+  kept their disk until then. The ambient retention pass now removes them for
+  terminal runs older than `tracking.retention.scratchDays` (default `3`; `0`
+  reclaims as soon as a run is terminal), keeps the run record, and stamps
+  `scratchReclaimedAt` and `scratchReclaimedBytes` into the run state;
+  `snapshot` shows both, and prints a `scratch reclaimed:` line in text.
+  `delegate runs reclaim [--older-than DAYS] [--dry-run]` does the same on
+  demand and lists sizes. Running, stale, and already-reclaimed runs are
+  skipped, and a run that fails is reported without stopping the others.
+  Reclaiming applies the recorded-path and ownership checks that pruning uses,
+  removes entries one at a time without following symlinks, and refuses a tree
+  that holds another owner's entry or crosses onto another filesystem. The
+  ambient pass spends at most 20 seconds, counted inside the walk and the
+  removal; a run it could not finish gets no marker, is reported as
+  `budget_exhausted`, and implicit reclaim then waits ten minutes before
+  continuing. `runs reclaim` has no budget or cooldown, and still works when
+  `tracking.retention.enabled` is `false`, which stops the ambient pass.
+- `--forbid-commit` now works in every isolation mode, including `--isolation
+  none`, which used to be refused; with isolation omitted it still implies
+  `--isolation worktree`. Delegate creates run-owned git hooks (`pre-commit`,
+  `prepare-commit-msg`, `commit-msg`, and `pre-merge-commit`) that refuse, and
+  points `core.hooksPath` at them through one variable,
+  `GIT_CONFIG_PARAMETERS`. Codex's default environment filter drops names
+  containing `KEY`, `SECRET`, or `TOKEN`, which left the indexed
+  `GIT_CONFIG_COUNT` form without its keys and broke every git command;
+  `GIT_CONFIG_PARAMETERS` survives it. The post-exit check stays as the
+  backstop: it fails the run if commits remain ahead of the creation base (the
+  HEAD recorded at launch for `--isolation none`) or if the checkout's own
+  HEAD reflog shows a commit made since launch and left behind, on a side
+  branch or reset away, for in-place and worktree runs. An unreadable reflog
+  with nothing found otherwise leaves the policy unverified, which also fails
+  the run. The hooks are a tripwire, not a wall: `git -c
+  core.hooksPath=/dev/null commit` or `git commit-tree` bypasses them, and the
+  post-exit check can be defeated on purpose too.
 - A mail send that reaches no inbox fails with `mail_not_delivered` (exit 1)
   instead of returning `ok` with exit 0. The message names each recipient's
   outcome and reason and states the eligibility rule, the diagnostics carry the
@@ -434,6 +919,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review retries had rebuilt a root-array schema as an object wrapper and failed
   again.
 
+### Security
+- Native Codex and Claude session files now persist for every work run,
+  because those runs are resumable by default. Codex's rollout under
+  `CODEX_HOME/sessions` and Claude Code's transcript under its `projects`
+  directory hold the prompt as sent, the child's replies, and tool inputs and
+  results (file contents the child read, command output). They live in the
+  harness's own store, outside `.delegate/`, outside Delegate's redaction, and
+  outside `runs prune` and the worktree cleanup commands, and Delegate does
+  not prune them. A profile with a separate `CODEX_HOME` or Claude config
+  directory keeps them in that account's store. Reduce the footprint with
+  `--no-resumable`, `codex.resumable: false`, or `claude.resumable: false`.
+  The untrusted-input boundaries are unchanged: safe runs, call runs (Claude
+  `call --pure` still passes `--no-session-persistence`), `--pass-through`
+  runs, other engines, and workflow children without `resumable=True` never
+  save a session.
+- **Work runs now have a write guard, on by default on Linux.** Work mode runs
+  the child with the caller's own filesystem rights, so one confused lane (`rm
+  -rf ~`, a stray redirect into a sibling checkout) could destroy things
+  nobody can recreate. The guard is a protect-list, not a home allowlist: a
+  named set of irreplaceable paths becomes read-only and everything else stays
+  writable, and reads are never restricted. By default it protects, each only
+  when it exists, the credential stores `~/.ssh`, `~/.gnupg`, `~/.config/gh`,
+  `~/.config/gcloud`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.netrc`,
+  `~/.git-credentials`, and `~/.password-store`; `~/.ai-profiles`; the
+  installed Delegate runtime (`~/.local/bin/delegate` plus `~/.delegate/src`,
+  `releases`, `bin`, and `config*.json`); and the code root (`~/Code`), so a
+  lane in one checkout cannot write into a sibling. Inside those paths the
+  run's own needs are re-opened: the execution root, the git common directory,
+  the run registry, run scratch and compact temp, mail-push homes, and the
+  selected engine's home. `/tmp`, `TMPDIR`, and home caches such as `~/.cache`
+  are not protected. The guard never applies to safe mode, `--pass-through`
+  runs are not guarded, and it does not stop reads, network use, or use of
+  credentials already in the environment.
+- Backends and platform defaults for the write guard. On Linux the child runs
+  under bubblewrap (`bwrap --dev-bind / /` with each protected path bound
+  read-only), preflighted before launch; the execution root is bound as a
+  mount of its own so a lane cannot rename its checkout away, a new hard link
+  to a protected file cannot be made, and writes through symlinks to protected
+  paths are refused. **On macOS the Seatbelt guard is opt-in:** with
+  `isolation.writeGuard.macosSeatbelt` at its default `false`, the guard
+  status is `off` with no warning and no refusal, and setting it `true` opts
+  in to the `sandbox-exec` guard, which then wraps every engine except a Codex
+  lane whose own `workspace-write` sandbox is on (a Codex lane with its sandbox
+  bypassed is wrapped, and that combination is not yet live-tested). To keep the `external-sandbox` policy
+  profile but put Codex's own sandbox back for work lanes, set
+  `policy.harness.codex.work.bypassApprovalsAndSandbox` to `false`; Delegate
+  then emits `--sandbox workspace-write` with `--add-dir` roots for the git
+  common directory, registry, scratch, temp, `--writable` paths, and existing
+  home caches.
+- Configure and inspect the write guard with `isolation.writeGuard`
+  (`enabled`, `onUnavailable`, `macosSeatbelt`, `codeRoot`, `add`, `remove`,
+  `writable`, `homeCaches`; an unknown key or wrong type fails as
+  `invalid_isolation_config`), the `DELEGATE_WRITE_GUARD` environment variable
+  (`off`, `0`, `false`, or `no` disables, `on`, `1`, `true`, or `yes` enables,
+  and it overrides the config), and `--writable PATH` (repeatable, `work`
+  mode, CLI-only), which re-opens an existing path for one run. The plan
+  (backend, protected paths, and each re-open with its reason) is recorded in
+  the run manifest under `writeGuard` and printed by `--dry-run`, and
+  work-mode prompts gain a two-sentence note naming the protected paths so a
+  lane reports a blocked write instead of working around it. When no backend
+  is usable, `isolation.writeGuard.onUnavailable` decides: `warn` (the
+  default) launches unguarded and records a warning, and `refuse` fails the
+  launch with `write_guard_unavailable`. On Linux with `warn`, a bwrap
+  preflight that fails on one unbindable path drops only that path (listed
+  under `writeGuard.unbound`, with a warning) instead of the whole guard; when
+  a protected path was dropped the status is `partial` rather than `enforced`
+  and the warning starts "work write guard is PARTIAL". `refuse` never
+  retries.
+- Only the selected engine's own home variable (`CODEX_HOME`,
+  `CLAUDE_CONFIG_DIR`, `KIMI_CODE_HOME`, or that engine's default directory)
+  can re-open a directory inside a protected path, and only when it is
+  provably one profile. The home must itself carry an identity file
+  (`.claude.json`, `.credentials.json`, or `auth.json` beside `config.toml`),
+  and a bounded scan below it (three levels, no symlinks, at most 2000
+  directories) must finish and find no other profile's home. A parent of
+  profiles, a home that is itself protected, and a scan that hits the cap or
+  cannot list a directory are refused: the directory stays read-only, the
+  manifest lists it under `writeGuard.refused` with the reason, and the run
+  gets a warning. An engine Delegate has no home variable for (droid, for one)
+  gets no automatic re-open; name its profile directory in
+  `isolation.writeGuard.writable` or pass `--writable`. Known limits: a second
+  profile nested deeper than three levels is not found; a hard link that
+  already exists between a protected file and a writable name is the same
+  inode, so a write through it changes the protected file; and a protected
+  path that is itself a symlink is protected at its target while the link
+  stays replaceable.
 
 ## [0.31.0] - 2026-09-14
 
