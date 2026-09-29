@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO, TextIO, cast
 
@@ -229,6 +229,9 @@ class RunContext:
     source_prompt: str | None = None
     progress_requested: str | None = None
     timeout_seconds: int | None = None
+    # Wall-clock ISO UTC end of the timeout clock; set when that clock starts,
+    # after workspace preparation, so `runs` reports the real time left.
+    deadline_at: str | None = None
     output_schema_text: str | None = None
     agent: str | None = None
     resumed_from: JsonObject | None = None
@@ -935,6 +938,8 @@ def build_run_record(
         "completionReportSource": None,
         "resultQuality": RESULT_QUALITY_OK,
     }
+    if status == run_registry.STATUS_RUNNING and ctx.deadline_at is not None:
+        record["deadlineAt"] = ctx.deadline_at
     record.update(_served_envelope_fields(record["modelProvenance"]))
     warnings = list(ctx.warnings)
     if (
@@ -5023,6 +5028,13 @@ def _execute_tracked(
         _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)
     started = time.monotonic()
     deadline = None if timeout is None else started + timeout
+    if timeout is not None:
+        ctx = replace(
+            ctx,
+            deadline_at=(datetime.now(UTC) + timedelta(seconds=timeout)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        )
     scratch_profile = (
         f"delegate_safe_{os.urandom(16).hex()}"
         if ctx.engine == "codex" and files.scratch_dir is not None
