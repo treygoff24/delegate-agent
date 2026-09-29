@@ -139,6 +139,10 @@ class EngineKeyedTests(unittest.TestCase):
         self.assertEqual(missing["signature"], "api_key_missing")
         self.assertIn("opencode-go", missing["hint"])
         self.assertIn("pick another alias", missing["hint"])
+        # omp's real message ends in a period (live 2026-09-28: "error: No API key
+        # found for mistral."); the sentence's period is not part of the name.
+        sentence = record("omp", "error: No API key found for mistral.")
+        self.assertIn("provider mistral has no API key", sentence["hint"])
 
     def test_only_stream_drops_and_server_errors_are_auto_resume_candidates(self):
         resumable = {s.id for s in provider_errors.SIGNATURES if s.auto_resume}
