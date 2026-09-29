@@ -300,6 +300,22 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
     write_text_atomic(exclude_file, existing + GIT_EXCLUDE_ENTRY + "\n")
 
 
+def ensure_delegate_gitignore(registry_root: Path) -> None:
+    """Write ``.delegate/.gitignore`` (``*``) when absent.
+
+    Packaging and search tools that honour ``.gitignore`` but not
+    ``.git/info/exclude`` would otherwise sweep run artifacts into an sdist.
+    Best effort: a read-only or odd directory never blocks a launch.
+    """
+    target = registry_root / ".gitignore"
+    try:
+        if target.exists() or target.is_symlink():
+            return
+        write_text_atomic(target, "*\n")
+    except OSError:
+        return
+
+
 def ensure_registry(
     workspace: Path,
     *,
@@ -312,6 +328,7 @@ def ensure_registry(
     with registry_lock(root, timeout_seconds=timeout_seconds):
         ensure_private_dir(aliases_dir(root))
         ensure_private_dir(runs_dir(root))
+        ensure_delegate_gitignore(root)
         if workspace_kind == "git":
             ensure_git_delegate_exclude(workspace)
         if not index_path(root).exists():
