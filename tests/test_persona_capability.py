@@ -80,6 +80,7 @@ class PersonaCapabilityTests(CommandTestBase):
 
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
+        self.assertIn(self._PERSONA_TEXT, request.stdin_text or "")
         self.assertEqual(request.warnings, (self._FALLBACK_WARNING,))
 
     def test_stale_false_capability_falls_back_with_warning(self):

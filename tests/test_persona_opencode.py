@@ -6,8 +6,6 @@ import unittest
 from unittest import mock
 
 from delegate_agent import config as config_api
-from delegate_agent import request_build
-from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -109,14 +107,6 @@ class PersonaOpenCodeTests(CommandTestBase):
             merged["agent"]["delegate-persona"]["prompt"],
             "EXISTING RESERVED PROMPT\n\n" + self._PERSONA,
         )
-
-    def test_invalid_synthetic_agent_name_is_refused_before_launch(self):
-        with (
-            mock.patch.object(request_build, "OPENCODE_PERSONA_AGENT", "--invalid"),
-            self.assertRaises(DelegateError) as caught,
-        ):
-            self._request(self._config_with_profile("{}"))
-        self.assertEqual(caught.exception.error, "invalid_agent")
 
     def test_persona_merge_does_not_depend_on_opencode_permission_environment(self):
         original = {

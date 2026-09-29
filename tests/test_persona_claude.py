@@ -76,17 +76,6 @@ class PersonaClaudeTests(CommandTestBase):
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir)
 
-    def test_unproven_capability_uses_prepend_and_avoids_native_file_flag(self):
-        request = self._request({"harnesses": {"claude": {}}})
-
-        self.assertEqual(request.persona_transport, "prepend")
-        self.assertIn(self._SENTINEL, request.stdin_text or "")
-        self.assertNotIn("--append-system-prompt-file", request.argv)
-        self.assertEqual(
-            request.warnings,
-            ("claude native-file persona transport was not proven by discovery; using prepend.",),
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

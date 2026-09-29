@@ -1,12 +1,14 @@
+import hashlib
 import io
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import cli, request_build, run_registry, runner
 from delegate_agent import config as config_api
-from delegate_agent import request_build, runner
 from delegate_agent.errors import DelegateError
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import Request, ResolvedWorkspace
@@ -171,6 +173,38 @@ class PersonaResolutionTests(unittest.TestCase):
                     allow_repo_persona=True,
                 )
 
+    def _tracked_manifest_for(self, source: Path, persona: str, stderr: io.StringIO) -> dict:
+        with mock.patch.object(
+            request_build, "_runtime_discovery_for_engine", return_value=(None, ())
+        ):
+            request = request_build.build_request(
+                "cursor",
+                "work",
+                None,
+                ResolvedWorkspace(str(source), "directory"),
+                "prompt",
+                config_api.embedded_default_config(),
+                dry_run=True,
+                persona=persona,
+                stderr=stderr,
+            )
+        registry_root = run_registry.ensure_registry(source, workspace_kind="directory")
+        run_id, alias = run_registry.register_run(
+            registry_root,
+            harness="cursor",
+            metadata={"mode": "work", "cwd": str(source)},
+        )
+        ctx = cli.make_run_context(
+            registry_root,
+            request,
+            run_id=run_id,
+            alias=alias,
+            source_workspace=ResolvedWorkspace(str(source), "directory"),
+        )
+        files = runner._prepare_tracked_run(["agent", "prompt"], ctx, manifest_argv=["agent"])
+        manifest_path = files.run_path / run_registry.MANIFEST_FILE
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+
     def test_source_is_logged_and_persisted_in_manifest(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             source = Path(tmp) / "source"
@@ -178,123 +212,21 @@ class PersonaResolutionTests(unittest.TestCase):
             global_path = Path(tmp) / ".delegate" / "personas" / "reviewer.md"
             global_path.parent.mkdir(parents=True, exist_ok=True)
             global_path.write_text("global log me", encoding="utf-8")
+
             stderr = io.StringIO()
-            captured = {}
-            sentinel = Request("cursor", "work", str(source), "prompt", [], None)
-
-            def capture(*args, **kwargs):
-                captured.update(kwargs)
-                return sentinel
-
-            with (
-                mock.patch.object(
-                    request_build, "_build_request_for_workspace", side_effect=capture
-                ),
-                mock.patch.object(
-                    request_build, "_runtime_discovery_for_engine", return_value=(None, ())
-                ),
-            ):
-                request_build.build_request(
-                    "cursor",
-                    "work",
-                    None,
-                    ResolvedWorkspace(str(source), "directory"),
-                    "prompt",
-                    config_api.embedded_default_config(),
-                    dry_run=True,
-                    persona="editor",
-                    stderr=stderr,
-                )
-
-            resolved = captured["persona_resolution"]
+            manifest = self._tracked_manifest_for(source, "editor", stderr)
             self.assertEqual(stderr.getvalue(), "persona: editor (workspace)\n")
-            context = runner.RunContext(
-                registry_root=source,
-                run_id="run-1",
-                alias="run-1",
-                harness="cursor",
-                engine="cursor",
-                mode="work",
-                model=None,
-                source_cwd=str(source),
-                execution_cwd=str(source),
-                workspace_kind="directory",
-                isolated_workspace=False,
-                started_at="2026-07-31T00:00:00Z",
-                persona_name=resolved.name,
-                persona_source=resolved.source,
-                persona_transport="prepend",
-                persona_digest=resolved.digest,
-                persona_file="persona.txt",
-                persona_text=resolved.text,
-            )
-            manifest = runner.build_manifest(context, [])
-            self.assertEqual(
-                {
-                    key: manifest[key]
-                    for key in (
-                        "personaName",
-                        "personaSource",
-                        "personaTransport",
-                        "personaDigest",
-                        "personaFile",
-                    )
-                },
-                {
-                    "personaName": "editor",
-                    "personaSource": "workspace",
-                    "personaTransport": "prepend",
-                    "personaDigest": resolved.digest,
-                    "personaFile": "persona.txt",
-                },
-            )
+            self.assertEqual(manifest["personaName"], "editor")
+            self.assertEqual(manifest["personaSource"], "workspace")
+            self.assertEqual(manifest["personaFile"], "persona.txt")
+            self.assertEqual(manifest["personaDigest"], hashlib.sha256(b"log me").hexdigest())
             self.assertEqual(persona_path.read_text(encoding="utf-8"), "log me")
 
-            captured.clear()
-            stderr.seek(0)
-            stderr.truncate(0)
-            with (
-                mock.patch.object(
-                    request_build, "_build_request_for_workspace", side_effect=capture
-                ),
-                mock.patch.object(
-                    request_build, "_runtime_discovery_for_engine", return_value=(None, ())
-                ),
-            ):
-                request_build.build_request(
-                    "cursor",
-                    "work",
-                    None,
-                    ResolvedWorkspace(str(source), "directory"),
-                    "prompt",
-                    config_api.embedded_default_config(),
-                    dry_run=True,
-                    persona="reviewer",
-                    stderr=stderr,
-                )
-            global_resolved = captured["persona_resolution"]
+            stderr = io.StringIO()
+            manifest = self._tracked_manifest_for(source, "reviewer", stderr)
             self.assertEqual(stderr.getvalue(), "persona: reviewer (global)\n")
-            global_context = runner.RunContext(
-                registry_root=source,
-                run_id="run-2",
-                alias="run-2",
-                harness="cursor",
-                engine="cursor",
-                mode="work",
-                model=None,
-                source_cwd=str(source),
-                execution_cwd=str(source),
-                workspace_kind="directory",
-                isolated_workspace=False,
-                started_at="2026-07-31T00:00:00Z",
-                persona_name=global_resolved.name,
-                persona_source=global_resolved.source,
-                persona_transport="prepend",
-                persona_digest=global_resolved.digest,
-                persona_file="persona.txt",
-                persona_text=global_resolved.text,
-            )
-            self.assertEqual(runner.build_manifest(global_context, [])["personaSource"], "global")
+            self.assertEqual(manifest["personaName"], "reviewer")
+            self.assertEqual(manifest["personaSource"], "global")
 
 
 if __name__ == "__main__":

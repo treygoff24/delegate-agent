@@ -279,26 +279,24 @@ class PersonaRecordTests(unittest.TestCase):
     def test_persona_is_not_an_archive_member_and_prune_removes_it(self) -> None:
         self.assertNotIn(run_registry.PERSONA_TXT_FILE, retention.ARCHIVE_MEMBER_NAMES)
         alias, run_path = self._seed_resume_run()
-        result = run_registry.prune_runs(
-            self.root,
-            older_than_days=30,
-            now=datetime(2026, 8, 15, tzinfo=UTC),
-        )
-        self.assertEqual([entry["alias"] for entry in result["removed"]], [alias])
-        self.assertFalse(run_path.exists())
-
-    def test_prune_dry_run_writes_nothing_for_persona_artifact(self) -> None:
-        _alias, run_path = self._seed_resume_run()
+        now = datetime(2026, 8, 15, tzinfo=UTC)
         before = (run_path / run_registry.PERSONA_TXT_FILE).read_bytes()
-        result = run_registry.prune_runs(
+        planned = run_registry.prune_runs(
             self.root,
             older_than_days=30,
             dry_run=True,
-            now=datetime(2026, 8, 15, tzinfo=UTC),
+            now=now,
         )
-        self.assertEqual(result["removed"], [])
-        self.assertEqual(result["planned"][0]["runId"], run_path.name)
+        self.assertEqual(planned["removed"], [])
+        self.assertEqual(planned["planned"][0]["runId"], run_path.name)
         self.assertEqual((run_path / run_registry.PERSONA_TXT_FILE).read_bytes(), before)
+        result = run_registry.prune_runs(
+            self.root,
+            older_than_days=30,
+            now=now,
+        )
+        self.assertEqual([entry["alias"] for entry in result["removed"]], [alias])
+        self.assertFalse(run_path.exists())
 
     def test_snapshot_and_runs_projection_include_persona_only_when_used(self) -> None:
         alias, run_path = self._seed_resume_run()
