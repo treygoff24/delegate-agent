@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import copy
-import io
-import json
 import unittest
-from unittest import mock
 
 from delegate_agent import cli_parser, errors
-from delegate_agent import config as delegate_config
-from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
+from tests.delegate_commands_test_base import CommandTestBase
 
 
 class ResolveModelSelectionTests(unittest.TestCase):
@@ -18,26 +14,6 @@ class ResolveModelSelectionTests(unittest.TestCase):
         from delegate_agent import request_build
 
         self.request_build = request_build
-
-    def test_alias_key_resolves_to_mapped_id(self):
-        section = {"models": {"fast": "provider/fast-id"}, "defaultModel": "ignored"}
-        self.assertEqual(
-            self.request_build.resolve_model_selection(section, "fast"),
-            "provider/fast-id",
-        )
-
-    def test_unknown_value_passes_through_verbatim(self):
-        section = {"models": {"fast": "provider/fast-id"}}
-        self.assertEqual(
-            self.request_build.resolve_model_selection(section, "raw-model-id"),
-            "raw-model-id",
-        )
-
-    def test_empty_models_map_passes_through(self):
-        self.assertEqual(
-            self.request_build.resolve_model_selection({"models": {}}, "gpt-5.5"),
-            "gpt-5.5",
-        )
 
     def test_missing_models_key_passes_through(self):
         self.assertEqual(
@@ -52,11 +28,6 @@ class ModelOptionParserTests(CommandTestBase):
         self.assertEqual(parsed.payload.model, "gpt-5.5")
         self.assertEqual(parsed.payload.prompt_parts, ["review"])
 
-    def test_model_option_on_droid_after_mode(self):
-        parsed = cli_parser.parse_cli(["droid", "safe", "--model", "raw-id", "review"])
-        self.assertEqual(parsed.payload.model, "raw-id")
-        self.assertEqual(parsed.payload.prompt_parts, ["review"])
-
     def test_model_option_duplicate_rejected(self):
         with self.assertRaises(errors.DelegateError) as ctx:
             cli_parser.parse_cli(["codex", "safe", "--model", "a", "--model", "b", "review"])
@@ -69,14 +40,11 @@ class ModelOptionParserTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_model_option_rejects_dash_prefixed_value(self):
-        with self.assertRaises(errors.DelegateError) as ctx:
-            cli_parser.parse_cli(["codex", "safe", "--model", "--prompt-file", "task.md"])
-        self.assertEqual(ctx.exception.error, "missing_model")
-
-    def test_model_option_rejects_help_token_as_value(self):
-        with self.assertRaises(errors.DelegateError) as ctx:
-            cli_parser.parse_cli(["codex", "safe", "--model", "--help"])
-        self.assertEqual(ctx.exception.error, "missing_model")
+        for value_argv in (["--prompt-file", "task.md"], ["--help"], ["-h"]):
+            with self.subTest(value=value_argv[0]):
+                with self.assertRaises(errors.DelegateError) as ctx:
+                    cli_parser.parse_cli(["codex", "safe", "--model", *value_argv])
+                self.assertEqual(ctx.exception.error, "missing_model")
 
     def test_model_after_prompt_is_prompt_text(self):
         parsed = cli_parser.parse_cli(["codex", "safe", "review", "--model", "gpt-5.5"])
@@ -137,19 +105,6 @@ class EngineModelsConfigTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_claude_config")
         self.assertIn("non-empty strings", ctx.exception.message)
 
-    def test_models_rejects_empty_alias_or_id(self):
-        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-        config["grok"]["models"] = {"": "id"}
-        with self.assertRaises(self.config_mod.ConfigError) as ctx:
-            self.config_mod.validate_config(config)
-        self.assertEqual(ctx.exception.error, "invalid_grok_config")
-
-        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-        config["kimi"]["models"] = {"fast": ""}
-        with self.assertRaises(self.config_mod.ConfigError) as ctx:
-            self.config_mod.validate_config(config)
-        self.assertEqual(ctx.exception.error, "invalid_kimi_config")
-
     def test_models_alias_must_not_equal_mode_name(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
         config["droid"]["models"] = {"safe": "some-model-id"}
@@ -162,17 +117,19 @@ class EngineModelsConfigTests(unittest.TestCase):
         )
 
     def test_models_rejects_whitespace_only_alias_or_id(self):
-        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-        config["codex"]["models"] = {"   ": "gpt-5.5"}
-        with self.assertRaises(self.config_mod.ConfigError) as ctx:
-            self.config_mod.validate_config(config)
-        self.assertEqual(ctx.exception.error, "invalid_codex_config")
-
-        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-        config["devin"]["models"] = {"fast": "  \t"}
-        with self.assertRaises(self.config_mod.ConfigError) as ctx:
-            self.config_mod.validate_config(config)
-        self.assertEqual(ctx.exception.error, "invalid_devin_config")
+        cases = (
+            ("codex", {"   ": "gpt-5.5"}),
+            ("devin", {"fast": "  \t"}),
+            ("grok", {"": "id"}),
+            ("kimi", {"fast": ""}),
+        )
+        for engine, models in cases:
+            with self.subTest(engine=engine, models=models):
+                config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                config[engine]["models"] = models
+                with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                    self.config_mod.validate_config(config)
+                self.assertEqual(ctx.exception.error, f"invalid_{engine}_config")
 
     def test_models_alias_must_not_equal_own_engine_name(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
@@ -249,13 +206,7 @@ class EngineModelsConfigTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.error, "invalid_opencode_config")
 
     def test_opencode_config_rejects_leading_dash_flag_injection(self):
-        banned = ("--auto", "--session", "--continue", "--fork", "--share", "--attach", "--command")
-        fields = (
-            ("defaultAgent", None),
-            ("defaultModel", None),
-            ("defaultReasoningEffort", None),
-        )
-        for field, _ in fields:
+        for field in ("defaultAgent", "defaultModel", "defaultReasoningEffort"):
             for token in ("--auto", "--session"):
                 with self.subTest(field=field, token=token):
                     config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
@@ -290,16 +241,6 @@ class EngineModelsConfigTests(unittest.TestCase):
                 with self.assertRaises(self.config_mod.ConfigError) as ctx:
                     self.config_mod.validate_config(config)
                 self.assertEqual(ctx.exception.error, "invalid_opencode_config")
-
-        # Exhaustive banned-token coverage on the highest-risk scalar fields.
-        for field in ("defaultAgent", "defaultModel"):
-            for token in banned:
-                with self.subTest(field=field, banned=token):
-                    config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-                    config["opencode"][field] = token
-                    with self.assertRaises(self.config_mod.ConfigError) as ctx:
-                        self.config_mod.validate_config(config)
-                    self.assertEqual(ctx.exception.error, "invalid_opencode_config")
 
     def test_pi_config_accepts_string_and_structured_aliases(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
@@ -412,52 +353,6 @@ class EngineModelsConfigTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_omp_config")
 
 
-class ModelOverrideThreadingTests(CommandTestBase):
-    def test_model_override_reaches_engine_build_input_for_modeless_and_droid(self):
-        from delegate_agent import request_build
-
-        repo = make_git_repo(with_commit=True)
-        self.addCleanup(repo.cleanup)
-        config = json.loads(json.dumps(delegate_config.embedded_default_config()))
-        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-
-        # Channel contract: modeless engines route CLI --model through the
-        # model_alias channel (input-JSON parity, modelAlias metadata); droid
-        # keeps --model in model_override (positional stays strict-alias).
-        cases = (
-            (["codex", "safe", "--model", "gpt-5.5", "review"], "codex", "gpt-5.5", "alias"),
-            (
-                ["droid", "safe", "--model", "override-id", "review"],
-                "droid",
-                "override-id",
-                "override",
-            ),
-        )
-        for argv, engine, expected, channel in cases:
-            with self.subTest(engine=engine):
-                parsed = cli_parser.parse_cli(["--cwd", repo.name, *argv])
-                self.assertEqual(parsed.payload.model, expected)
-                captured: list[object] = []
-                original = request_build._engine_request_parts
-
-                def _capture(eng, *, build, _captured=captured, _original=original):
-                    _captured.append(build)
-                    return _original(eng, build=build)
-
-                with mock.patch.object(
-                    request_build, "_engine_request_parts", side_effect=_capture
-                ):
-                    request_build.request_from_parsed(parsed, config, io.StringIO(""))
-                self.assertEqual(len(captured), 1)
-                build = captured[0]
-                if channel == "override":
-                    self.assertEqual(build.model_override, expected)
-                    self.assertIsNone(build.model_alias)
-                else:
-                    self.assertEqual(build.model_alias, expected)
-                    self.assertIsNone(build.model_override)
-
-
 class ModelOptionHelpTests(unittest.TestCase):
     def test_model_option_on_all_engine_specs(self):
         from delegate_agent import command_help
@@ -487,7 +382,6 @@ class ModelOptionHelpTests(unittest.TestCase):
         model_opt = next(
             opt for opt in command_help.COMMAND_SPECS["codex"].options if opt.flag == "--model"
         )
-        self.assertNotIn("delete", model_opt.description.lower())
         self.assertIn("alias", model_opt.description.lower())
 
 

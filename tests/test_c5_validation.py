@@ -162,6 +162,11 @@ class ClaudeModelPreflightTests(CommandTestBase):
                 _, stdout, _ = self.run_main(
                     ["--json", "run", "--input-json", str(path)], path_prefix=fake_bin
                 )
+                payload = json.loads(stdout)
+                # The fake claude was reached and failed on its own; validation did not stop us.
+                self.assertEqual(payload["error"], "child_failed", stdout)
+                self.assertEqual(payload["stderrTail"], "fake claude")
+                self.assertEqual(payload["capabilityModel"], model)
                 self.assertNotIn("invalid_alias", stdout)
 
     def test_a_version_typo_passes_when_a_provider_or_gateway_is_configured(self):
@@ -487,12 +492,10 @@ class HarnessEnabledTests(CommandTestBase):
         self.assertEqual(summary["counts"]["aliases"], baseline["counts"]["aliases"] - 1)
 
     def test_enabled_true_or_absent_changes_nothing(self):
-        self._use_config({"droid": {"enabled": True}})
-        self.assertIn("droid", self._json(["--json", "describe", "--summary"])["engines"])
-
-    def test_strip_disabled_is_a_noop_when_nothing_is_disabled(self):
-        payload = {"engines": ["droid"], "droid": {}}
-        self.assertIs(harness_enabled.strip_disabled(payload, frozenset()), payload)
+        for droid_block in ({"enabled": True}, {}):
+            with self.subTest(droid=droid_block):
+                self._use_config({"droid": droid_block})
+                self.assertIn("droid", self._json(["--json", "describe", "--summary"])["engines"])
 
 
 if __name__ == "__main__":

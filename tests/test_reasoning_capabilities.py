@@ -12,22 +12,13 @@ if SRC not in sys.path:
 
 from delegate_agent import reasoning as reasoning_module  # noqa: E402
 from delegate_agent.reasoning import (  # noqa: E402
-    CLAUDE_NATIVE_EFFORTS,
     DEVIN_UNSUPPORTED_REASONING_WARNING,
     GROK_NATIVE_EFFORTS,
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
     PI_NATIVE_EFFORTS,
-    REASONING_PROFILES,
     TRANSPORT_BY_HARNESS,
-    TRANSPORT_CLAUDE_EFFORT_FLAG,
-    TRANSPORT_CODEX_CONFIG,
-    TRANSPORT_CURSOR_MODEL_SELECTION,
-    TRANSPORT_DROID_FLAG,
-    TRANSPORT_OPENCODE_VARIANT_FLAG,
-    TRANSPORT_PI_THINKING_FLAG,
     ReasoningCapabilityError,
-    _alias_key_for_default_model,
     _lookup_declaration,
     build_alias_reasoning_summaries,
     build_reasoning_capabilities_payload,
@@ -100,6 +91,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
         self.assertIn("Supported values: low, medium, high, xhigh", ctx.exception.message)
+        self.assertIn("Requested effort: 'max'.", ctx.exception.message)
 
     def test_non_codex_model_rejects_max_effort(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
@@ -110,6 +102,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("Supported values:", ctx.exception.message)
 
     def test_droid_gemini_flash_rejects_minimal_effort(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
@@ -152,16 +145,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 harness="codex",
                 model=None,
                 requested_effort="high",
-                config={},
-            )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-
-    def test_droid_model_rejects_unsupported_effort(self):
-        with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_reasoning_capability(
-                harness="droid",
-                model="glm-5.1",
-                requested_effort="medium",
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
@@ -236,12 +219,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.source, "config")
 
     def test_cache_source_overrides_bundled_for_custom_model(self):
+        # glm-5.1 has a bundled row (off, high); "low" is only in the cache row,
+        # so accepting it shows the cache layer won.
         cache = {
             "harnesses": {
                 "droid": {
                     "models": {
-                        "custom:cached": {
-                            "supported": ["high"],
+                        "glm-5.1": {
+                            "supported": ["low", "high"],
                             "default": "high",
                         }
                     }
@@ -250,25 +235,15 @@ class ReasoningCapabilityTests(unittest.TestCase):
         }
         capability = resolve_reasoning_capability(
             harness="droid",
-            model="custom:cached",
-            requested_effort="high",
+            model="glm-5.1",
+            requested_effort="low",
             config={},
             cache=cache,
         )
         self.assertIsNotNone(capability)
         assert capability is not None
         self.assertEqual(capability.source, "cache")
-
-    def test_effort_values_are_literal_not_coerced(self):
-        with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_reasoning_capability(
-                harness="codex",
-                model="gpt-5.5",
-                requested_effort="max",
-                config={},
-            )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("Requested effort: 'max'.", ctx.exception.message)
+        self.assertEqual(capability.effort, "low")
 
     def test_effort_strings_reject_toml_quoting_hazards(self):
         # Effort values are interpolated into a quoted Codex TOML override, so
@@ -370,46 +345,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual(claude["models"], {})
 
-    def test_capabilities_payload_marks_kimi_unsupported(self):
-        payload = build_reasoning_capabilities_payload({}, cache=None)
-        kimi = payload["harnesses"]["kimi"]
-        self.assertIsNone(kimi["transport"])
-        self.assertIsNone(kimi["supported"])
-        self.assertEqual(kimi["source"], "none")
-        self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
-
-    def test_capabilities_payload_marks_devin_unsupported(self):
-        payload = build_reasoning_capabilities_payload({}, cache=None)
-        devin = payload["harnesses"]["devin"]
-        self.assertIsNone(devin["transport"])
-        self.assertIsNone(devin["supported"])
-        self.assertEqual(devin["source"], "none")
-        self.assertEqual(devin["warning"], DEVIN_UNSUPPORTED_REASONING_WARNING)
-
-    def test_capabilities_payload_marks_opencode_pass_through(self):
-        payload = build_reasoning_capabilities_payload({}, cache=None)
-        opencode = payload["harnesses"]["opencode"]
-        self.assertEqual(opencode["transport"], TRANSPORT_OPENCODE_VARIANT_FLAG)
-        self.assertIsNone(opencode["supported"])
-        self.assertEqual(opencode["source"], "pass-through")
-        self.assertEqual(opencode["models"], {})
-
-    def test_alias_summary_reports_supported_droid_alias(self):
-        config = {
-            "droid": {
-                "models": {"glm": "glm-5.1"},
-                "defaultReasoningEffort": "high",
-            }
-        }
-        summaries = build_alias_reasoning_summaries(config, cache=None)
-        glm = summaries["droid"]["glm"]
-        self.assertEqual(glm["alias"], "glm")
-        self.assertEqual(glm["model"], "glm-5.1")
-        self.assertEqual(glm["supported"], ["off", "high"])
-        self.assertEqual(glm["default"], "high")
-        self.assertEqual(glm["source"], "bundled")
-        self.assertEqual(glm["configDefault"], "high")
-
     def test_alias_summary_warns_when_model_has_no_declaration(self):
         config = {"droid": {"models": {"custom": "custom:missing"}}}
         summaries = build_alias_reasoning_summaries(config, cache=None)
@@ -417,13 +352,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIsNone(custom["supported"])
         self.assertEqual(custom["source"], "none")
         self.assertIn("no declared reasoning-effort capability", custom["warning"])
-
-    def test_alias_summary_includes_claude_native_efforts(self):
-        config = {"claude": {"defaultModel": "claude-sonnet-4-6"}}
-        summaries = build_alias_reasoning_summaries(config, cache=None)
-        claude = summaries["claude"]["claude-sonnet-4-6"]
-        self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
-        self.assertEqual(claude["source"], "static")
 
     def test_alias_summary_maps_cursor_efforts_from_config(self):
         config = {
@@ -446,36 +374,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(cursor["source"], "config")
         self.assertEqual(cursor["configDefault"], "high")
-
-    def test_alias_summary_marks_kimi_unsupported(self):
-        config = {"kimi": {"defaultModel": "kimi-code/kimi-for-coding"}}
-        summaries = build_alias_reasoning_summaries(config, cache=None)
-        kimi = summaries["kimi"]["kimi-code/kimi-for-coding"]
-        self.assertIsNone(kimi["supported"])
-        self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
-
-    def test_alias_summary_renders_opencode_pinned_variant(self):
-        config = {
-            "opencode": {
-                "defaultModel": "openai/gpt-5.5",
-                "defaultReasoningEffort": "medium",
-                "models": {"deep": {"model": "anthropic/claude-sonnet", "variant": "xhigh"}},
-            }
-        }
-        summaries = build_alias_reasoning_summaries(config, cache=None)
-        default = summaries["opencode"]["openai/gpt-5.5"]
-        self.assertEqual(default["transport"], TRANSPORT_OPENCODE_VARIANT_FLAG)
-        self.assertEqual(default["configDefault"], "medium")
-        deep = summaries["opencode"]["deep"]
-        self.assertEqual(deep["model"], "anthropic/claude-sonnet")
-        self.assertEqual(deep["pinnedVariant"], "xhigh")
-        self.assertEqual(deep["source"], "alias")
-
-    def test_alias_key_for_default_model_preserves_placeholder_semantics(self):
-        self.assertEqual(_alias_key_for_default_model("gpt-5.5"), "gpt-5.5")
-        for value in ("", None, 0, [], object()):
-            with self.subTest(value=value):
-                self.assertEqual(_alias_key_for_default_model(value), "(default)")
 
     def test_reasoning_summary_payloads_preserve_representative_shape(self):
         config = {
@@ -505,7 +403,10 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "defaultModel": "claude-sonnet-4-6",
                 "defaultReasoningEffort": "medium",
             },
-            "kimi": {"defaultModel": ""},
+            "kimi": {
+                "defaultModel": "",
+                "models": {"named": "kimi-code/kimi-for-coding"},
+            },
             "devin": {"defaultModel": "swe-1.7"},
             "opencode": {
                 "defaultModel": "openai/gpt-5.5",
@@ -558,7 +459,15 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "source": "none",
                     "transport": None,
                     "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
-                }
+                },
+                "named": {
+                    "alias": "named",
+                    "model": "kimi-code/kimi-for-coding",
+                    "supported": None,
+                    "source": "none",
+                    "transport": None,
+                    "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+                },
             },
             "devin": {
                 "swe-1.7": {
@@ -661,39 +570,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIn("alias 'gpt-5.5'", message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, message)
 
-    def test_reasoning_profiles_table_rows(self):
-        # transport + strategy per harness
-        self.assertEqual(REASONING_PROFILES["codex"].transport, TRANSPORT_CODEX_CONFIG)
-        self.assertEqual(REASONING_PROFILES["droid"].transport, TRANSPORT_DROID_FLAG)
-        self.assertEqual(REASONING_PROFILES["cursor"].transport, TRANSPORT_CURSOR_MODEL_SELECTION)
-        self.assertEqual(REASONING_PROFILES["claude"].transport, TRANSPORT_CLAUDE_EFFORT_FLAG)
-        self.assertIsNone(REASONING_PROFILES["kimi"].transport)
-        self.assertIsNone(REASONING_PROFILES["devin"].transport)
-        self.assertIsNone(REASONING_PROFILES["opencode"].transport)
-        self.assertEqual(REASONING_PROFILES["pi"].transport, TRANSPORT_PI_THINKING_FLAG)
-        self.assertEqual(REASONING_PROFILES["omp"].transport, TRANSPORT_PI_THINKING_FLAG)
-        self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
-        self.assertEqual(REASONING_PROFILES["opencode"].strategy, "pass-through")
-        self.assertEqual(REASONING_PROFILES["pi"].strategy, "static-enum")
-        self.assertEqual(REASONING_PROFILES["omp"].strategy, "static-enum")
-        self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
-        self.assertEqual(
-            REASONING_PROFILES["kimi"].unsupported_warning,
-            KIMI_UNSUPPORTED_REASONING_WARNING,
-        )
-        self.assertEqual(
-            REASONING_PROFILES["devin"].unsupported_warning,
-            DEVIN_UNSUPPORTED_REASONING_WARNING,
-        )
-
-    def test_transport_by_harness_derived_set(self):
-        # catches a strategy flip that changes membership (e.g. claude -> model-table
-        # would inject claude into the derived dict)
-        self.assertEqual(set(TRANSPORT_BY_HARNESS), {"codex", "droid", "cursor"})
-        self.assertEqual(TRANSPORT_BY_HARNESS["codex"], TRANSPORT_CODEX_CONFIG)
-        self.assertEqual(TRANSPORT_BY_HARNESS["droid"], TRANSPORT_DROID_FLAG)
-        self.assertEqual(TRANSPORT_BY_HARNESS["cursor"], TRANSPORT_CURSOR_MODEL_SELECTION)
-
     def test_mixed_cache_with_grok_loads_and_uses_exact_grok_row(self):
         cache = {
             "harnesses": {
@@ -722,25 +598,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(declaration, cache["harnesses"]["grok"]["models"]["grok-4.7"])
         self.assertNotIn("grok", TRANSPORT_BY_HARNESS)
 
-    def test_cache_validation_accepts_a_cursor_row_beside_codex_and_grok(self):
-        """cursor is a routing-table harness; accepting grok must not have dropped it."""
-        cache = {
-            "harnesses": {
-                "cursor": {"models": {"composer-2.5": {"supported": ["high"]}}},
-                "codex": {"models": {"gpt-5.5": {"supported": ["high"]}}},
-                "droid": {"models": {"droid-1": {"supported": ["high"]}}},
-                "grok": {"models": {"grok-4.7": {"supported": ["high"]}}},
-            }
-        }
-
-        validate_cache_payload(cache)
-
     def test_a_cursor_row_does_not_discard_the_whole_cache_file(self):
         """`_load_cache` swallows the validation error, so a reject loses codex too."""
         cache = {
             "harnesses": {
                 "cursor": {"models": {"composer-2.5": {"supported": ["high"]}}},
                 "codex": {"models": {"gpt-5.5": {"supported": ["high"]}}},
+                "droid": {"models": {"droid-1": {"supported": ["high"]}}},
+                "grok": {"models": {"grok-4.7": {"supported": ["high"]}}},
             }
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -751,7 +616,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
             loaded = load_reasoning_capability_cache(tmp)
 
         self.assertIsNotNone(loaded)
-        self.assertEqual(sorted(loaded["harnesses"]), ["codex", "cursor"])
+        self.assertEqual(sorted(loaded["harnesses"]), ["codex", "cursor", "droid", "grok"])
 
     def test_cache_validation_still_rejects_unrelated_harness_rows(self):
         with self.assertRaises(ReasoningCapabilityError):

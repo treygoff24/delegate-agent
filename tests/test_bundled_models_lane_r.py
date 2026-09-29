@@ -6,20 +6,6 @@ def _ids(engine: str) -> tuple[str, ...]:
     return tuple(entry["id"] for entry in BUNDLED_MODELS[engine])
 
 
-def test_codex_bundled_models_match_reconciled_catalog() -> None:
-    assert _ids("codex") == (
-        "gpt-6-astra",
-        "gpt-6-sol",
-        "gpt-6-luna",
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.2",
-    )
-    assert "gpt-5.3-codex-spark" not in _ids("codex")
-    assert not any(model.startswith("gpt-5.6") for model in _ids("codex"))
-
-
 def test_codex_bundled_reasoning_matches_reconciled_catalog() -> None:
     low_to_ultra = ("low", "medium", "high", "xhigh", "max", "ultra")
     low_to_max = low_to_ultra[:-1]

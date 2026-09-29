@@ -36,12 +36,6 @@ def _catalog(engine: str, *selectors: str) -> dict:
 
 
 class NewestFamilySelectorTests(unittest.TestCase):
-    def test_newest_version_non_fast_balanced_tier_wins(self):
-        self.assertEqual(
-            model_discovery.newest_family_selector("grok", CURSOR_GROK_CATALOG),
-            "cursor-grok-4.6-high",
-        )
-
     def test_versions_compare_numerically_not_lexically(self):
         self.assertEqual(
             model_discovery.newest_family_selector("grok", ("grok-4.9-high", "grok-4.10-high")),

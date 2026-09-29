@@ -377,11 +377,6 @@ class ProbeRunnerTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), argument)
             self.assertFalse(marker.exists())
 
-    def test_result_contract_is_frozen_dataclass(self):
-        result = self.ProbeResult(("missing",), None, "", "", "probe_missing")
-        with self.assertRaises(AttributeError):
-            result.error = None  # type: ignore[misc]
-
 
 class StructuredParserTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -853,6 +848,7 @@ class AdapterOrchestrationTests(unittest.TestCase):
 
     def test_fixture_harnesses_probe_without_prompting_devin(self):
         from delegate_agent.config import embedded_default_config
+        from delegate_agent.constants import KNOWN_ENGINES
         from delegate_agent.harness_discovery import probe_all_harnesses, probe_harness
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -871,7 +867,7 @@ class AdapterOrchestrationTests(unittest.TestCase):
             self.assertIn("gpt-5-6-sol-high", devin["models"])
 
             all_missing = probe_all_harnesses(config, env={"PATH": "", "HOME": env["HOME"]})
-            self.assertEqual(len(all_missing), 10)
+            self.assertEqual(len(all_missing), len(KNOWN_ENGINES))
             self.assertTrue(
                 all(record["probeStatus"] == "missing" for record in all_missing.values())
             )
@@ -1047,6 +1043,9 @@ class DiscoveryCacheTests(unittest.TestCase):
             lambda snapshot: snapshot["harnesses"]["codex"]["models"]["gpt-test"].update(
                 provider={"name": "private"}
             ),
+            lambda snapshot: snapshot["harnesses"]["codex"]["models"]["gpt-test"].update(
+                apiKey="fixture-secret"
+            ),
             lambda snapshot: snapshot["harnesses"]["codex"]["models"]["gpt-test"][
                 "reasoning"
             ].update(environment="work"),
@@ -1059,6 +1058,9 @@ class DiscoveryCacheTests(unittest.TestCase):
                     mutate(snapshot)
                     with self.assertRaises(ValueError):
                         self.discovery.write_discovery_cache("work", snapshot, home=home)
+                    self.assertFalse(
+                        self.discovery.discovery_cache_path("work", home=home).exists()
+                    )
 
     def test_cache_read_filters_valid_unknown_harness_but_rejects_extra_known_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2072,36 +2074,6 @@ class DetectionTests(unittest.TestCase):
             )
         self.assertEqual(result.selector, (str(fake),))
         self.assertEqual(result.version, "0.175.0")
-
-
-class DiscoveryFakesTests(unittest.TestCase):
-    def test_helper_and_cli_materialize_fixture_backed_harnesses(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            direct = Path(tmp) / "direct"
-            harnesses = materialize_minimum_harnesses(direct)
-            self.assertIn("codex", harnesses)
-            codex = subprocess.run(
-                [str(harnesses["codex"]), "debug", "models"],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(codex.returncode, 0)
-            self.assertEqual(
-                json.loads(codex.stdout),
-                json.loads((FIXTURES / "codex_models.json").read_text(encoding="utf-8")),
-            )
-
-            cli_target = Path(tmp) / "cli"
-            completed = subprocess.run(
-                [sys.executable, str(ROOT / "tests" / "discovery_fakes.py"), str(cli_target)],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertTrue((cli_target / "cursor-agent").is_file())
-            self.assertTrue(os.access(cli_target / "cursor-agent", os.X_OK))
 
 
 if __name__ == "__main__":

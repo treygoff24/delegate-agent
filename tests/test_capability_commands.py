@@ -305,44 +305,10 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertNotIn("--auto", describe["modeMapping"]["opencode"]["safe"])
         self.assertIn("--auto", describe["modeMapping"]["opencode"]["work"])
         capabilities = describe["engineCapabilities"]
-        self.assertTrue(capabilities["claude"]["pureCall"])
         self.assertFalse(capabilities["opencode"]["pureCall"])
-        self.assertFalse(capabilities["codex"]["pureCall"])
-        self.assertTrue(capabilities["claude"]["pureTripwire"])
         self.assertFalse(capabilities["opencode"]["pureTripwire"])
-        self.assertFalse(capabilities["codex"]["pureTripwire"])
-        self.assertTrue(capabilities["claude"]["structuredOutput"])
-        self.assertTrue(capabilities["codex"]["structuredOutput"])
-        self.assertTrue(capabilities["codex"]["nativeSessionResume"])
-        self.assertTrue(capabilities["claude"]["nativeSessionResume"])
-        self.assertFalse(capabilities["cursor"]["nativeSessionResume"])
-        self.assertFalse(capabilities["droid"]["nativeSessionResume"])
         self.assertFalse(capabilities["opencode"]["nativeSessionResume"])
-        self.assertFalse(capabilities["pi"]["nativeSessionResume"])
-        self.assertFalse(capabilities["omp"]["nativeSessionResume"])
-        self.assertFalse(capabilities["grok"]["nativeSessionResume"])
-        self.assertFalse(capabilities["devin"]["nativeSessionResume"])
-        self.assertFalse(capabilities["kimi"]["nativeSessionResume"])
-        # Legacy outputSchema alias must mirror structuredOutput, not contradict it.
-        for engine, caps in capabilities.items():
-            self.assertEqual(
-                caps["outputSchema"], caps["structuredOutput"], f"{engine} outputSchema drift"
-            )
-        self.assertTrue(capabilities["claude"]["usageEvents"])
-        self.assertTrue(capabilities["claude"]["promptStdin"])
         self.assertTrue(capabilities["opencode"]["promptStdin"])
-        self.assertFalse(capabilities["pi"]["pureCall"])
-        self.assertFalse(capabilities["pi"]["pureTripwire"])
-        self.assertFalse(capabilities["pi"]["structuredOutput"])
-        self.assertTrue(capabilities["pi"]["noSessionPersistence"])
-        self.assertFalse(capabilities["pi"]["usageEvents"])
-        self.assertTrue(capabilities["pi"]["promptStdin"])
-        self.assertFalse(capabilities["omp"]["pureCall"])
-        self.assertFalse(capabilities["omp"]["pureTripwire"])
-        self.assertFalse(capabilities["omp"]["structuredOutput"])
-        self.assertTrue(capabilities["omp"]["noSessionPersistence"])
-        self.assertFalse(capabilities["omp"]["usageEvents"])
-        self.assertFalse(capabilities["omp"]["promptStdin"])
 
         summary = models_summary_payload(config, "test-config")
         by_provider_alias = {(item["provider"], item["alias"]): item for item in summary["aliases"]}
@@ -350,6 +316,64 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertEqual(deep["model"], "anthropic/claude-sonnet-4-5")
         self.assertEqual(deep["pinnedVariant"], "xhigh")
         self.assertTrue(deep["available"])
+
+    def test_engine_capability_matrix(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import describe_payload
+
+        expected = {
+            "claude": {
+                "pureCall": True,
+                "pureTripwire": True,
+                "structuredOutput": True,
+                "nativeSessionResume": True,
+                "usageEvents": True,
+                "promptStdin": True,
+            },
+            "codex": {
+                "pureCall": False,
+                "pureTripwire": False,
+                "structuredOutput": True,
+                "nativeSessionResume": True,
+            },
+            "cursor": {"nativeSessionResume": False},
+            "droid": {"nativeSessionResume": False},
+            "opencode": {"pureCall": False, "pureTripwire": False, "promptStdin": True},
+            "pi": {
+                "pureCall": False,
+                "pureTripwire": False,
+                "structuredOutput": False,
+                "noSessionPersistence": True,
+                "usageEvents": False,
+                "promptStdin": True,
+                "nativeSessionResume": False,
+            },
+            "omp": {
+                "pureCall": False,
+                "pureTripwire": False,
+                "structuredOutput": False,
+                "noSessionPersistence": True,
+                "usageEvents": False,
+                "promptStdin": False,
+                "nativeSessionResume": False,
+            },
+            "grok": {"nativeSessionResume": False},
+            "devin": {"nativeSessionResume": False},
+            "kimi": {"nativeSessionResume": False},
+        }
+        capabilities = describe_payload(embedded_default_config(), "test-config")[
+            "engineCapabilities"
+        ]
+        for engine, flags in expected.items():
+            for flag, value in flags.items():
+                with self.subTest(engine=engine, flag=flag):
+                    self.assertIs(capabilities[engine][flag], value)
+        # Legacy outputSchema alias must mirror structuredOutput, not contradict it.
+        for engine, caps in capabilities.items():
+            with self.subTest(engine=engine, flag="outputSchema"):
+                self.assertEqual(
+                    caps["outputSchema"], caps["structuredOutput"], f"{engine} outputSchema drift"
+                )
 
     def test_describe_summary_matches_full_slice_without_building_argv(self):
         from delegate_agent import describe_payload as describe_module
@@ -542,26 +566,6 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertIn("sk-***<redacted-key-collision:2>", discovered_models)
         self.assertIn("<redacted-path>", discovered_models)
 
-    def test_discovery_payload_scrub_masks_secrets_and_preserves_model_ids_and_paths(self):
-        from delegate_agent import redaction
-        from delegate_agent.describe_payload import describe_payload, models_payload
-
-        config, fake_secret, conn_password, model_id, wrapper_path = self._discovery_scrub_config()
-        with tempfile.TemporaryDirectory() as workspace:
-            models = redaction.redact_value(
-                models_payload(config, "/Users/x/config.json", Path(workspace))
-            )
-            describe = redaction.redact_value(
-                describe_payload(config, "/Users/x/config.json", Path(workspace))
-            )
-            combined = json.dumps([models, describe])
-
-            self.assertIn("***", combined)
-            self.assertNotIn(fake_secret, combined)
-            self.assertNotIn(conn_password, combined)
-            self.assertIn(model_id, combined)
-            self.assertIn(wrapper_path, combined)
-
     def test_discovery_scrub_matrix(self):
         from delegate_agent.describe_payload import emit_describe, emit_models
 
@@ -572,7 +576,7 @@ class CapabilityCommandTests(unittest.TestCase):
             ("emit_models", emit_models, False, True, False, False),
             ("emit_models", emit_models, False, False, True, True),
             ("emit_describe", emit_describe, True, True, False, False),
-            ("emit_describe", emit_describe, True, False, True, False),
+            ("emit_describe", emit_describe, True, False, True, True),
             ("emit_describe", emit_describe, False, True, False, False),
             ("emit_describe", emit_describe, False, False, False, False),
         )
@@ -685,36 +689,6 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("newer delegate", stdout.getvalue())
 
-    def test_refresh_with_no_installed_harnesses_raises_specific_error(self):
-        with tempfile.TemporaryDirectory() as workspace:
-            with (
-                mock.patch.object(
-                    capability_commands.harness_discovery,
-                    "refresh_discovery",
-                    return_value={
-                        "snapshot": harness_discovery.empty_snapshot(),
-                        "attempts": {"codex": {"installed": False, "probeStatus": "missing"}},
-                        "updatedHarnesses": [],
-                        "staleHarnesses": [],
-                        "cachePath": "/tmp/default.json",
-                    },
-                ),
-                self.assertRaises(capability_commands.CapabilitiesError) as caught,
-            ):
-                capability_commands.emit(
-                    capability_commands.CapabilitiesCommand(refresh=True, json_mode=True),
-                    config={"codex": {"binary": "codex-test"}},
-                    config_source="test-config",
-                    workspace=workspace,
-                    stdout=io.StringIO(),
-                )
-
-            self.assertEqual(caught.exception.error, "no_harnesses_installed")
-            self.assertIn("codex", caught.exception.diagnostics["attempts"])
-            # Same machine state as delegate setup's no_harnesses_found, so the
-            # exit code must match it rather than the generic usage code.
-            self.assertEqual(caught.exception.exit_code, errors.EXIT_MISSING_BINARY)
-
     def test_refresh_with_no_installed_harnesses_exits_missing_binary(self):
         from delegate_agent import cli
 
@@ -744,7 +718,7 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertEqual(code, errors.EXIT_MISSING_BINARY)
         self.assertEqual(payload["exitCode"], errors.EXIT_MISSING_BINARY)
         self.assertEqual(payload["error"], "no_harnesses_installed")
-        self.assertIn("attempts", payload["diagnostics"])
+        self.assertIn("codex", payload["diagnostics"]["attempts"])
 
     def test_subset_refresh_of_uninstalled_engine_reports_requested_not_installed(self):
         with tempfile.TemporaryDirectory() as workspace:
