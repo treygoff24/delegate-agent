@@ -3832,7 +3832,10 @@ def _finalize_tracked_run(
         else None
     )
     provider_error = provider_errors.provider_error_record(
-        engine=ctx.engine, raw=final_accumulator.provider_error, fallback_text=signal_text
+        engine=ctx.engine,
+        raw=final_accumulator.provider_error,
+        fallback_text=signal_text,
+        profile=ctx.auth_profile,
     )
     # A named signature names the failure reason; an error the table does not know
     # still marks the failure as the provider's (`provider_error`), not a bare exit.
@@ -6189,6 +6192,7 @@ def _execute_call_once(
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
     call_model: CallModelIdentity | None = None,
+    auth_profile: str | None = None,
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -6312,7 +6316,7 @@ def _execute_call_once(
             failure_signal = "\n".join(part for part in (stderr_tail, raw_text) if part)
         claude_provider_error = (
             provider_errors.provider_error_record(
-                engine=harness, raw=None, fallback_text=failure_signal
+                engine=harness, raw=None, fallback_text=failure_signal, profile=auth_profile
             )
             if result_exit_code != 0
             else None
@@ -6393,7 +6397,10 @@ def _execute_call_once(
     )
     call_provider_error = (
         provider_errors.provider_error_record(
-            engine=harness, raw=accumulator.provider_error, fallback_text=call_signal_text
+            engine=harness,
+            raw=accumulator.provider_error,
+            fallback_text=call_signal_text,
+            profile=auth_profile,
         )
         if result_exit_code != 0
         else None
@@ -6500,6 +6507,7 @@ def execute_call(
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
     call_model: CallModelIdentity | None = None,
+    auth_profile: str | None = None,
 ) -> CallResult:
     deadline = None if timeout is None else time.monotonic() + timeout
 
@@ -6527,6 +6535,7 @@ def execute_call(
             sensitive_texts=sensitive_texts,
             process_group_grace_seconds=process_group_grace_seconds,
             call_model=call_model,
+            auth_profile=auth_profile,
         )
 
     result = call_once(argv)

@@ -797,6 +797,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Reasoning effort maps directly to omp --thinking: "
             f"{thinking_vocabulary_prose(OMP_NATIVE_EFFORTS)}.",
             "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
+            'An omp.models alias object takes exactly two keys, both required: {"builder": '
+            '{"model": "<provider>/<model-id>", "thinking": "high"}}. Reasoning effort is '
+            "spelled `thinking` there (not reasoningEffort or effort); any other key is refused "
+            "at config load with the allowed keys named.",
             "A provider/model ID you type is pinned by default: omp's retry failover is switched off "
             "for the run and a run served by another provider fails; --continuity-mode fungible "
             "allows failover. An alias or omp.defaultModel stays fungible (multi-subscription "

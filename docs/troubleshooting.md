@@ -125,6 +125,26 @@ Inspect `configResolution.layers`; `DELEGATE_CONFIG` can override the user
 config. Workspace `.delegate/config.json` is reported but remains unapplied
 unless selected explicitly through `DELEGATE_CONFIG`.
 
+`claude` raises `invalid_alias` before launch (dry runs included) for a typed
+`--model` that looks like a mistyped alias: a family word followed by a version,
+such as `opus-5.5`, `Sonnet 5`, or `claude_opus_5`. `Unknown Claude model
+'opus-5.5'` names the closest choice (`opus (claude-opus-5-5)`) and the valid
+values. A bare `claude-` or an empty `[]` suffix is refused too. Everything else
+launches: Claude aliases, catalog ids, any `claude-...` id (new models ship
+before the catalog), and provider names such as Bedrock ARNs, Foundry deployment
+names, and gateway strings; a name missing from a discovered catalog gets a
+catalog warning. The version-typo refusal is skipped entirely when
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
+or `ANTHROPIC_BASE_URL` is set in the launching environment. A target of a
+configured `claude.models` alias is never refused, and neither is a followup or
+resume. The check applies to `claude` subcommand launches and
+`run --input-json`.
+
+`harness_disabled` means `<engine>.enabled` is `false` in the active
+config: the harness is hidden from `models`, `describe`, and `capabilities`, and
+launching it (or `delegate models <name>`) fails with this error. Set the key to
+`true` or remove it to restore the harness.
+
 `omp` also raises `invalid_alias` for a bare model name that is not a key of
 `omp.models` and not exactly the model ID of an entry in the discovered omp
 catalog (`Unknown omp model alias 'kimi'`). OMP resolves a bare name by fuzzy
@@ -384,7 +404,7 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 | `forbidden` | persistent | HTTP 403: the account may not use this model or region. Check access; re-authenticate if the login changed. |
 | `auth_token_rejected` | persistent | The harness reports an expired or rejected token. Re-authenticate. |
 | `claude_login_required` | persistent | Claude is not signed in or its login expired. Sign in again with `/login`. |
-| `cursor_auth_required` | persistent | Cursor is not signed in. Run `estate-cursor login`. |
+| `cursor_auth_required` | persistent | Cursor is not signed in. The hint names the auth realm the run used (from `AI_PROFILE`) and the other one to try: if the Cursor login lives in the work realm, relaunch with `--auth-profile work` and `DELEGATE_CONFIG` unset; otherwise run `estate-cursor login`. |
 | `api_key_missing` | persistent | The provider behind an OMP, Pi, or OpenCode alias has no API key. Set it or pick another alias. |
 | `payment_required` | persistent | HTTP 402: no credit on the account. Add credit. |
 | `usage_limit` | persistent | Usage or quota limit reached (HTTP 429 with a quota message). Wait for the reset or use another account or lane. |

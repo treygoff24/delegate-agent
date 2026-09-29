@@ -81,6 +81,9 @@ class LaunchOptions:
     resumable: bool | None = None
     resume_session_id: str | None = None
     continuity_mode: str | None = None
+    # True when `delegate resume` rebuilt this launch from a recorded manifest:
+    # its model is replayed, not typed, so typed-selector preflights skip it.
+    replayed_from_manifest: bool = False
     # Parse-time advisories that only the parser can see (token positions are
     # gone by the time the prompt is one joined string).
     warnings: tuple[str, ...] = ()

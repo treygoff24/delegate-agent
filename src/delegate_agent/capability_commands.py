@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import auth_health, harness_discovery, profiles, reasoning, redaction
+from delegate_agent import (
+    auth_health,
+    harness_discovery,
+    harness_enabled,
+    profiles,
+    reasoning,
+    redaction,
+)
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.errors import EXIT_MISSING_BINARY, DelegateError
@@ -150,7 +157,9 @@ def capabilities_payload(
     if drifted_harnesses:
         payload["driftedHarnesses"] = drifted_harnesses
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
-    return redaction.scrub_public_projection(payload)
+    return redaction.scrub_public_projection(
+        harness_enabled.strip_disabled(payload, harness_enabled.disabled_harnesses(config))
+    )
 
 
 def _add_legacy_cache_fields(
@@ -182,6 +191,11 @@ def _refresh_payload(
     engines: tuple[str, ...] | None = None,
     progress: harness_discovery.ProgressCallback | None = None,
 ) -> JsonObject:
+    disabled = harness_enabled.disabled_harnesses(config)
+    for engine in engines or ():
+        harness_enabled.require_enabled(config, engine)
+    if disabled and not engines:
+        engines = tuple(name for name in KNOWN_ENGINES if name not in disabled)
     try:
         result = harness_discovery.refresh_discovery(
             config, profile=profile, engines=engines, progress=progress
@@ -288,7 +302,9 @@ def _refresh_payload(
     if result.get("futureSchemaCache") is True:
         payload["cacheWriteSkipped"] = harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
-    return redaction.scrub_public_projection(payload)
+    return redaction.scrub_public_projection(
+        harness_enabled.strip_disabled(payload, harness_enabled.disabled_harnesses(config))
+    )
 
 
 def emit(

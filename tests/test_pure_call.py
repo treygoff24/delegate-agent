@@ -370,7 +370,7 @@ class PureCallTests(CommandTestBase):
                     "call",
                     "--pure",
                     "--model",
-                    "requested-alias",
+                    "claude-requested-alias",
                     "--output-schema",
                     str(schema),
                     "answer",
@@ -407,7 +407,7 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(code, 0)
         self.assertTrue(payload["pure"])
         self.assertTrue(payload["structuredOutput"])
-        self.assertEqual(payload["modelRequested"], "requested-alias")
+        self.assertEqual(payload["modelRequested"], "claude-requested-alias")
         self.assertEqual(payload["modelResolved"], "resolved-model")
         self.assertEqual(payload["usage"]["basis"], "exact")
 

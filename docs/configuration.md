@@ -728,6 +728,15 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only Pi's `read` tool and disable extensions, skills, prompt templates, and project approval discovery.
 - `delegate models pi --live` probes Pi's local model catalog without reading or printing provider credentials.
 
+### Disabling a harness (`<engine>.enabled`)
+
+```json
+{ "droid": { "enabled": false } }
+```
+
+- Every engine block (`cursor`, `droid`, `codex`, `kimi`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`) accepts an optional boolean `enabled`, default `true`. A non-boolean value fails config load with `invalid_<engine>_config`.
+- `enabled: false` removes the harness from `delegate models`, `describe`, and `capabilities` listings (JSON and text), skips it in `capabilities refresh`, and makes every launch of it (and `delegate models <name>`) fail fast with `harness_disabled` naming `<engine>.enabled`. Static help text and the `describe` overview still mention the harness. Use it to retire a harness whose binary is still on `PATH`.
+
 ### `omp`
 
 ```json
@@ -748,7 +757,7 @@ provider, including configured custom or local providers.
 - `defaultModel`: optional `provider/model` ID. `null` preserves Oh My Pi's configured default.
 - `defaultReasoningEffort`: optional `low`, `medium`, `high`, `xhigh`, or `max` default.
 - `trackedStreamMaxBytes`: retained-stream byte cap for tracked runs. Off by default (`null`): nothing is truncated, hidden from the parser, or killed for being verbose, and `stdout.log` keeps the whole stream. Set a positive integer to opt in; a Run that then exceeds it is stopped as `output_limit_exceeded` with its partial output kept in the completion report. Only an opted-in cap applies the OMP 256 MiB transport and 16 MiB per-record ceilings, which are not configurable.
-- `models`: the same string or `{ "model", "thinking" }` alias shape as `pi.models`; model values containing a colon suffix are rejected.
+- `models`: the same string or `{ "model", "thinking" }` alias shape as `pi.models`; model values containing a colon suffix are rejected. An alias object takes exactly `model` and `thinking`, both required (`"quick": { "model": "provider/model-id", "thinking": "minimal" }`); reasoning effort is spelled `thinking`, and any other key (for example `reasoningEffort`) fails config load with the allowed keys named.
 - Explicit `--reasoning-effort` overrides alias-pinned thinking, which overrides the configured default.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.

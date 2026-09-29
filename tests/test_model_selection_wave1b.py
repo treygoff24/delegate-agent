@@ -148,7 +148,7 @@ class ModelOverrideDryRunTests(CommandTestBase):
         cases = (
             ("cursor", ["cursor", "safe", "--model", "pinned-cursor", "review"], "pinned-cursor"),
             ("codex", ["codex", "safe", "--model", "pinned-codex", "review"], "pinned-codex"),
-            ("claude", ["claude", "safe", "--model", "pinned-claude", "review"], "pinned-claude"),
+            ("claude", ["claude", "safe", "--model", "claude-pinned", "review"], "claude-pinned"),
             ("grok", ["grok", "safe", "--model", "pinned-grok", "review"], "pinned-grok"),
             ("devin", ["devin", "work", "--model", "pinned-devin", "review"], "pinned-devin"),
             ("kimi", ["kimi", "safe", "--model", "pinned-kimi", "review"], "pinned-kimi"),
@@ -197,7 +197,7 @@ class ModelOverrideDryRunTests(CommandTestBase):
 
         for engine in ("codex", "claude", "grok", "devin", "kimi", "cursor"):
             with self.subTest(engine=engine, kind="passthrough"):
-                raw = f"raw-{engine}-id"
+                raw = "claude-raw-id" if engine == "claude" else f"raw-{engine}-id"
                 mode = "work" if engine == "devin" else "safe"
                 parsed = parser_api.parse_cli(
                     ["--cwd", repo.name, "dry-run", engine, mode, "--model", raw, "x"]
