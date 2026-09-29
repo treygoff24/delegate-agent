@@ -10,7 +10,6 @@ if SRC not in sys.path:
 
 from delegate_agent import structured_output  # noqa: E402
 
-
 ADJUDICATION_SCHEMA = {
     "type": "object",
     "properties": {
