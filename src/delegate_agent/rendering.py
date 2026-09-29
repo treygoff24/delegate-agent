@@ -274,10 +274,10 @@ def render_runs_text(
     show_group = any(isinstance(summary.get("group"), str) for summary in summaries)
     if show_group:
         print(
-            "alias      status    harness  age      iso          group       current", file=stdout
+            "alias      status    harness  idle     iso          group       current", file=stdout
         )
     else:
-        print("alias      status    harness  age      iso          current", file=stdout)
+        print("alias      status    harness  idle     iso          current", file=stdout)
     for summary in summaries:
         alias = summary.get("alias") or summary.get("runId") or "?"
         status = summary.get("status", "unknown")
