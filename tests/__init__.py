@@ -108,8 +108,14 @@ tempfile.tempdir = None
 # Stashed for the rare test that must run a real credentialed binary (the
 # live omp write-probe): everything credential-bearing lives under the real
 # home, so a probe subprocess launched with the hermetic HOME dies keyless in
-# milliseconds and reads as a dead lane.
-ORIGINAL_HOME = os.environ.get("HOME")
+# milliseconds and reads as a dead lane. pytest-xdist workers are spawned after
+# this module has already redirected HOME in the controller, so the real home
+# travels to them through an env var; without it every worker would stash the
+# throwaway HOME here (observed: the real-binary codex contract tests errored
+# under `-n 2` because the codex shim looked for its helpers in the temp HOME).
+ORIGINAL_HOME = os.environ.get("DELEGATE_TESTS_ORIGINAL_HOME") or os.environ.get("HOME")
+if ORIGINAL_HOME:
+    os.environ["DELEGATE_TESTS_ORIGINAL_HOME"] = ORIGINAL_HOME
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="dt-"))
 _TEST_HOME = str(_TEST_ROOT / "home")
