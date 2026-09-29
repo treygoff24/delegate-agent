@@ -225,6 +225,13 @@ def test_work_mode_relaunches_when_every_inspection_verified_a_clean_tree(dsl):
         # No summary at all for a work-mode child that owns a tree.
         pytest.param(None, VERIFIED_CLEAN, id="prior-attempt-has-no-summary"),
         pytest.param(None, None, id="neither-attempt-has-a-summary"),
+        # The resumed child also ran in the tree; its missing summary is not evidence
+        # that the tree is still clean (round-2 review).
+        pytest.param(VERIFIED_CLEAN, None, id="resumed-attempt-has-no-summary"),
+        # Both inspections ran, yet the summary does not call the tree clean.
+        pytest.param(
+            VERIFIED_CLEAN, {**VERIFIED_CLEAN, "noChanges": False}, id="resumed-not-reported-clean"
+        ),
     ],
 )
 def test_work_mode_refuses_to_relaunch_over_a_tree_it_could_not_verify(dsl, first, resumed):
