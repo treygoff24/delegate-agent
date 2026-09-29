@@ -71,6 +71,13 @@ class SnapshotRenderingTests(SnapshotCommandTestBase):
         )
         self.assertIn("auto-prune: removed 1, skipped 0, errors 0", stdout.getvalue())
 
+    def test_worktree_list_table_labels_time_since_activity_as_idle_not_age(self):
+        stdout = io.StringIO()
+        self.rendering.render_worktree_list_text({"entries": []}, stdout)
+        header = stdout.getvalue().splitlines()[0].split()
+        self.assertIn("idle", header)
+        self.assertNotIn("age", header)
+
     def test_render_worktree_list_text_includes_auto_prune_skip_and_failure(self):
         skipped = io.StringIO()
         self.rendering.render_worktree_list_text(
