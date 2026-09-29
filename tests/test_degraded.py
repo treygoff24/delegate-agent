@@ -397,6 +397,8 @@ NOT_AWAITING_FINALS = {
     "long": "Fixed parser.py. " * 60 + "Awaiting approval for the implementation.",
     "completed_plan": "The plan is complete. Awaiting approval of the implementation design.",
     "delivered_design": "Design doc delivered in docs/plan.md. Pending approval to implement.",
+    "completed_plan_should_i": "The plan is complete. Should I proceed?",
+    "completed_review_should_i": "Completed the requested review. Should I implement the fix?",
 }
 
 
