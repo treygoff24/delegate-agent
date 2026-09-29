@@ -3044,9 +3044,8 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pinned = resolve_model_selection(cursor, build.model_alias)
 
     warnings: list[str] = []
-    base_model, family_warning = _resolve_cursor_family_name(
-        pinned or cursor["defaultModel"], build.discovery
-    )
+    selected_name = pinned or cursor["defaultModel"]
+    base_model, family_warning = _resolve_cursor_family_name(selected_name, build.discovery)
     if pinned is not None:
         pinned = base_model
     capability: reasoning.ReasoningCapability | None = None
@@ -3173,7 +3172,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     elif family_warning is not None and capability_model_source == "discovery":
         # Effort routing moved off the family's newest selector; name the final one.
         warnings.append(
-            f"cursor model {pinned or cursor['defaultModel']!r} is a family name cursor-agent "
+            f"cursor model {selected_name!r} is a family name cursor-agent "
             f"rejects; resolved it to {base_model!r}, then reasoning-effort routing selected "
             f"{model!r} from the same discovered model family. Pin a concrete id to choose "
             "another version, effort, or speed."

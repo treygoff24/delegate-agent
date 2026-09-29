@@ -133,6 +133,35 @@ class CursorFamilyNameTests(CommandTestBase):
         self.assertIn("'cursor-grok-4.6-low'", family[0])
         self.assertNotIn("the newest", family[0])
 
+    def test_explicit_family_pin_with_effort_route_warns_with_what_was_typed(self):
+        discovery = _catalog("cursor", "cursor-grok-4.6-high", "cursor-grok-4.6-low")
+        for model, entry in discovery["harnesses"]["cursor"]["models"].items():
+            entry.update(
+                routeFamily="grok-4.6",
+                routeEffort=model.rsplit("-", 1)[1],
+                reasoning={"evidence": "inferred-route"},
+            )
+        with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=discovery):
+            request = self.build_git_request(
+                "cursor",
+                "work",
+                None,
+                "/repo",
+                "implement",
+                delegate_config.embedded_default_config(),
+                dry_run=True,
+                model_override="grok",
+                reasoning_effort="low",
+                reasoning_effort_source="cli",
+            )
+
+        self.assertEqual(request.model, "cursor-grok-4.6-low")
+        family = [warning for warning in request.warnings if "family name" in warning]
+        self.assertEqual(len(family), 1, request.warnings)
+        self.assertIn("cursor model 'grok' is a family name", family[0])
+        self.assertIn("'cursor-grok-4.6-low'", family[0])
+        self.assertNotIn("cursor model 'cursor-grok-4.6-high'", family[0])
+
     def test_configured_reasoning_route_family_resolves_before_argv(self):
         config = delegate_config.embedded_default_config()
         config["cursor"]["defaultReasoningEffort"] = "high"
