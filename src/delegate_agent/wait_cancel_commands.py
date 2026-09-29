@@ -394,6 +394,19 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
         }
         if command.structural:
             warnings = [*warnings, *(w for w in _resolution_warnings(runs) if w not in warnings)]
+        if timed_out and not command.structural:
+            pending = [
+                target.alias or target.run_id
+                for target in targets
+                if not states[target.run_id].get("terminal")
+            ]
+            warnings = [
+                *warnings,
+                "wait timed out with full run snapshots in this payload. For a compact view "
+                "rerun with: delegate --json wait --structural "
+                + " ".join(pending or ["HANDLE"])
+                + " ; for one run's full view: delegate snapshot HANDLE.",
+            ]
         if warnings:
             payload["warnings"] = warnings
         delegate_rendering.print_json(payload, stdout)

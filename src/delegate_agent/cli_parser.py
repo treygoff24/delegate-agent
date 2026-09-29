@@ -2661,6 +2661,11 @@ _RUNS_HANDLE_OPTION_GUESSES = frozenset(
 )
 
 
+_RUNS_READER_WORD_GUESSES = frozenset(
+    {"show", "get", "status", "info", "inspect", "view", "read", "cat", "output", "logs"}
+)
+
+
 def _looks_like_run_handle(token: str) -> bool:
     """A run id or a ``<harness>-<n>`` alias, the two forms `snapshot` accepts."""
     if RUN_ID_RE.match(token):
@@ -2672,6 +2677,18 @@ def _looks_like_run_handle(token: str) -> bool:
 def _runs_unknown_token_error(command_label: str, token: str) -> DelegateError:
     """A listing takes filters only; point one-run requests at the per-run commands."""
     option = token.split("=", 1)[0]
+    if token in _RUNS_READER_WORD_GUESSES:
+        return DelegateError(
+            "unknown_option",
+            f"{command_label} has no {token!r} action: it only lists runs. To read one run: "
+            "delegate snapshot HANDLE (status and metadata), delegate run-output HANDLE "
+            "(the run's output), or the completion report at "
+            ".delegate/runs/<run-id>/completion-report.md (the run-output/snapshot JSON gives "
+            "its path).",
+            command=command_label,
+            help_topic=command_label,
+            next_actions=["delegate snapshot HANDLE", "delegate run-output HANDLE"],
+        )
     if option in _RUNS_HANDLE_OPTION_GUESSES or _looks_like_run_handle(token):
         shown = option if token.startswith("-") else f"the argument {token!r}"
         return DelegateError(

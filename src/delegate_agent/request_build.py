@@ -440,6 +440,8 @@ def resolve_prompt(
     prompt_parts: list[str] | None,
     prompt_file: str | None,
     stdin: TextIO | None,
+    cwd: str | None = None,
+    warnings: list[str] | None = None,
 ) -> str:
     direct = " ".join(prompt_parts or [])
     has_direct = bool(direct)
@@ -469,10 +471,33 @@ def resolve_prompt(
         assert prompt_file is not None
         _reject_windows_path(prompt_file, "--prompt-file")
         path = Path(prompt_file).expanduser()
+        tried = [path]
+        if not path.is_absolute() and cwd is not None and not path.exists():
+            under_cwd = Path(cwd).expanduser() / path
+            tried.append(under_cwd)
+            if under_cwd.exists():
+                path = under_cwd
+                if warnings is not None:
+                    warnings.append(
+                        f"--prompt-file {prompt_file} was not found relative to the shell cwd; "
+                        f"used {under_cwd.resolve()} (relative to --cwd). Pass an absolute "
+                        "--prompt-file to make this explicit."
+                    )
         try:
             return validate_prompt(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise DelegateError("prompt_file_not_found", f"Prompt file not found: {path}") from None
+            if len(tried) > 1:
+                where = " and ".join(str(Path(os.path.abspath(t))) for t in tried)
+                message = (
+                    f"Prompt file not found: {prompt_file} (tried {where}). "
+                    "Pass an absolute --prompt-file path."
+                )
+            else:
+                message = (
+                    f"Prompt file not found: {Path(os.path.abspath(path))}. "
+                    "Pass an absolute --prompt-file path."
+                )
+            raise DelegateError("prompt_file_not_found", message) from None
     if stdin_text is not None:
         return validate_prompt(stdin_text)
     raise DelegateError(
@@ -1587,6 +1612,16 @@ def _plan_launch_isolation(
     )
     if forbid_commit_note is not None:
         warnings = (*warnings, forbid_commit_note)
+    if include_dirty and mode == MODE_SAFE:
+        # Safe runs already see the dirty tree (a mirrored copy, or the real
+        # checkout under --isolation none), so the flag is redundant, not wrong.
+        warnings = (
+            *warnings,
+            "--include-dirty is a no-op in safe mode: safe runs already see your uncommitted "
+            "files. Drop the flag; it only changes anything for work mode with "
+            "--isolation worktree.",
+        )
+        include_dirty = False
     context = build_isolation_context(
         source_workspace=workspace.path,
         resolved_isolation=effective,
@@ -1954,7 +1989,16 @@ def request_from_parsed(
     )
     if launch.mode != MODE_CALL:
         workspace = workspace or resolve_workspace(global_options.cwd)
-    prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+    prompt_warnings: list[str] = []
+    prompt = resolve_prompt(
+        launch.prompt_parts,
+        launch.prompt_file,
+        stdin,
+        cwd=global_options.cwd,
+        warnings=prompt_warnings,
+    )
+    if prompt_warnings:
+        launch = replace(launch, warnings=(*launch.warnings, *prompt_warnings))
     if (
         launch.mode == MODE_CALL
         and launch.read_only
