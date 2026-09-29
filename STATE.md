@@ -13,7 +13,8 @@ Updated: 2026-09-29 (test-value audit merged to main and installed on the devbox
 
 ## Open loops
 
-- Full gate is ~20 min on one core; Trey (2026-09-29) asked for targeted tests while iterating and one full run at the end. Speed-up task: `dlg-8e3`.
+- Full gate is ~20 min serial; Trey (2026-09-29) asked for targeted tests while iterating and one full run at the end. Measured 2026-09-29 on the devbox after the audit: `testrun` + `pytest -n 8 --dist loadfile -p no:cacheprovider` ran the whole suite in about 5.5 min (4686 passed, 17 skipped). The one red test is the image-scan child-import bug `dlg-kv4`. Speed-up task: `dlg-8e3`, next up.
+- Mutation proofs: set `PYTHONDONTWRITEBYTECODE=1`. A same-size edit restored within the same second leaves a stale `.pyc` that Python trusts; this bit the audit's first full gate.
 - Live Mac config change awaiting Trey's "install" word: `policy.harness.codex.work.bypassApprovalsAndSandbox: false`, optionally `isolation.writeGuard.macosSeatbelt: true`. Codex under Seatbelt with its own sandbox bypassed is not live-tested.
 - The write guard re-opens `~/.ai-profiles` for lanes started through an `estate-*` launcher; `~/.ssh`, the installed runtime, and `~/Code` stay protected. Known limits: `docs/security-model.md`.
 - Deferred items are beads (`bd ready`). The estate launcher and `bin/delegate-profile-shim` still disagree on `DELEGATE_CONFIG` versus `--auth-profile` (a linux-devbox change).
