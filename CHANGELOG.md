@@ -409,6 +409,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- Parallel Runs launched at the same moment (workflow `parallel()` children,
+  a fan-out) no longer fail at random with `unsafe_scratch_directory` ("File
+  exists: 'run-scratch'"). Two launches racing to create the shared scratch
+  root now both use it; the symlink, non-directory, and foreign-owner checks
+  still run on the directory either way.
 - The Claude model-typo refusal is skipped when `CLAUDE_CODE_USE_BEDROCK`,
   `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, or `ANTHROPIC_BASE_URL`
   comes from `--env` or `--env-file`, not only from the launching
