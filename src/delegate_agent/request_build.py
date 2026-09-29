@@ -41,6 +41,7 @@ from delegate_agent import (
 from delegate_agent import config as delegate_config
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
+    OMP_NO_MODEL_FALLBACK_OVERLAY,
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
     _grok_harness_bypass_enabled,
@@ -93,6 +94,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
     devin_display_argv,
+    omp_display_argv,
     persona_display_argv,
     prompt_file_display_argv,
 )
@@ -2134,12 +2136,14 @@ def request_from_input_json(
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use resumable with codex or claude."],
         )
-    raw_continuity_mode = raw.get("continuityMode", DEFAULT_CONTINUITY_MODE)
-    if not isinstance(raw_continuity_mode, str) or raw_continuity_mode not in CONTINUITY_MODES:
-        raise DelegateError(
-            "invalid_continuity_mode",
-            "continuityMode must be pinned, fungible, or panel.",
-        )
+    raw_continuity_mode: str | None = None
+    if "continuityMode" in raw:
+        raw_continuity_mode = raw["continuityMode"]
+        if not isinstance(raw_continuity_mode, str) or raw_continuity_mode not in CONTINUITY_MODES:
+            raise DelegateError(
+                "invalid_continuity_mode",
+                "continuityMode must be pinned, fungible, or panel.",
+            )
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -2551,9 +2555,11 @@ def build_request(
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use --resumable with codex or claude."],
         )
-    if continuity_mode is None:
-        continuity_mode = DEFAULT_CONTINUITY_MODE
-    elif not isinstance(continuity_mode, str) or continuity_mode not in CONTINUITY_MODES:
+    # None means the caller named no mode; it stays None until the engine's
+    # request parts exist, because omp's default depends on the resolved selector.
+    if continuity_mode is not None and (
+        not isinstance(continuity_mode, str) or continuity_mode not in CONTINUITY_MODES
+    ):
         raise DelegateError(
             "invalid_continuity_mode",
             "continuity mode must be pinned, fungible, or panel.",
@@ -3580,10 +3586,11 @@ def _omp_catalog_absence_warning(
 
     omp resolves --model by exact provider/modelId, then exact bare id, then a
     provider-scoped fuzzy and substring pass, so a stale exact-form selector does
-    not fail — it can land on a different concrete model, and omp runs under
-    fungible continuity so the substitution is not recorded as a violation. The
-    operator's alias is never rewritten and the launch is never refused: an empty
-    or missing catalog is absence of evidence, not evidence of absence.
+    not fail — it can land on a different concrete model. A provider/model
+    selector the caller typed is pinned by default so a swap to another provider
+    fails the run; this warning names the stale selector itself. The operator's alias is never
+    rewritten and a provider/model selector is never refused for absence: an
+    empty or missing catalog is absence of evidence, not evidence of absence.
     """
     if not model:
         return ()
@@ -3608,6 +3615,27 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build,
         engine="omp",
     )
+    selection = build.model_override or build.model_alias
+    selection_warnings: tuple[str, ...] = ()
+    if selection:
+        unknown_alias = model_discovery.omp_unknown_alias_error(
+            selection, omp.get("models"), build.discovery
+        )
+        if unknown_alias is not None:
+            raise unknown_alias
+        selection_warnings = model_discovery.omp_unverifiable_selection_warning(
+            selection, omp.get("models"), build.discovery
+        )
+    # A provider/model id the caller typed is pinned unless they named a mode: they
+    # chose that provider, so omp's retry chain must not move the run to another
+    # one. A named mode (fungible, panel) is the opt-in to failover. An alias (a key
+    # of omp.models) and omp.defaultModel stay fungible even when their targets
+    # carry a provider, because aliases are how the fleet gets multi-subscription
+    # failover; naming `pinned` on an alias still pins it.
+    pinned_by_default = build.continuity_mode is None and model_discovery.is_explicit_provider_id(
+        selection, omp.get("models")
+    )
+    no_model_fallback = build.continuity_mode == "pinned" or pinned_by_default
     if model is not None:
         capability_model = model
         capability_model_source = (
@@ -3659,6 +3687,7 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
         persist_session=build.persist_session,
         resume_session_id=build.resume_session_id,
+        no_model_fallback=no_model_fallback,
     )
     return EngineRequestParts(
         model=model,
@@ -3666,10 +3695,13 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
-        display_argv=list(argv),
+        agent_config_text=OMP_NO_MODEL_FALLBACK_OVERLAY if no_model_fallback else None,
+        display_argv=omp_display_argv(argv),
+        default_continuity_mode="pinned" if pinned_by_default else None,
         warnings=(
             *capability_warnings,
             *fallback_warnings,
+            *selection_warnings,
             *_omp_catalog_absence_warning(model, build.discovery),
         ),
         **_model_context_kwargs(capability_model, capability_model_source),
@@ -3791,7 +3823,7 @@ def _build_request_for_workspace(
     frame_prompt: bool = True,
     persist_session: bool = False,
     preserve_safe_workspace: bool = False,
-    continuity_mode: str = DEFAULT_CONTINUITY_MODE,
+    continuity_mode: str | None = None,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -3926,8 +3958,11 @@ def _build_request_for_workspace(
             resumable=resumable,
             persist_session=persist_session,
             resume_session_id=resume_session_id,
+            continuity_mode=continuity_mode,
         ),
     )
+    if continuity_mode is None:
+        continuity_mode = parts.default_continuity_mode or DEFAULT_CONTINUITY_MODE
     _preflight_pinned_claude_alias(engine, parts.model, continuity_mode)
     catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
@@ -3951,6 +3986,11 @@ def _build_request_for_workspace(
             model_requested=model_override or model_alias,
             capability_model=parts.capability_model,
             capability_model_source=parts.capability_model_source,
+            model_display_name=(
+                model_discovery.catalog_display_name(discovery, engine, parts.model)
+                if engine == "cursor"
+                else None
+            ),
             output_schema=output_schema,
             output_schema_text=materialized_schema_text,
             launch_cwd=launch_cwd,

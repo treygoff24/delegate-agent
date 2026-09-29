@@ -559,6 +559,19 @@ def _label_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
+# Cursor's catalog and stream labels carry the context window as a word of its
+# own ("Grok 4.7 256K Extra High", "GPT-5.6 Sol 1M Extra High"); the selector
+# never spells it, so rebuilding the label from the selector cannot produce it.
+# The window is a variant of the same model, not a different one, so it is
+# dropped from the served label before comparing. The whole-token boundaries keep
+# version numbers ("4.7") and words that merely end in k or m intact.
+_CURSOR_CONTEXT_LABEL_PATTERN = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?[KkMm](?![A-Za-z0-9.])")
+
+
+def _cursor_label_key(label: str) -> str:
+    return _label_key(_CURSOR_CONTEXT_LABEL_PATTERN.sub(" ", label))
+
+
 def _cursor_expected_label_keys(requested: str) -> set[str]:
     keys = {_label_key(requested)}
     match = _CURSOR_SELECTOR_PATTERN.fullmatch(requested)
@@ -573,10 +586,14 @@ def _cursor_expected_label_keys(requested: str) -> set[str]:
 def _cursor_pin_matches(requested: str, served: str, display_name: str | None) -> bool:
     if display_name is not None and served == display_name:
         return True
-    served_key = _label_key(served)
+    served_key = _cursor_label_key(served)
     if not served_key:
         return False
-    return served_key in _cursor_expected_label_keys(requested)
+    expected = _cursor_expected_label_keys(requested)
+    if display_name is not None:
+        expected.add(_cursor_label_key(display_name))
+        expected.discard("")
+    return served_key in expected
 
 
 def _claude_pin_matches(requested: str, served: str) -> bool:
@@ -1133,6 +1150,8 @@ class StreamAccumulator:
             "event": event_type,
             "observedAt": observed_at,
         }
+        if provider is not None:
+            observation["provider"] = provider
         self.model_observations_total += 1
         append_bounded_model_event(self.model_observations, observation)
         if prior is None:
@@ -1156,13 +1175,14 @@ class StreamAccumulator:
                     "reason": "served_model_mismatch",
                     "requestedModel": requested,
                     "servedModel": model,
+                    "servedProvider": provider,
                     "turn": turn,
                     "observedAt": observed_at,
                 }
                 self._record_terminal_event(
                     event="model.continuity_paused",
                     status="failed",
-                    reason=f"pinned model {requested} was replaced by {model}",
+                    reason=f"pinned model {requested} was replaced by {identity}",
                 )
             return
         hop: JsonObject = {
@@ -1173,6 +1193,11 @@ class StreamAccumulator:
             "stickyFromTurn": turn,
             "observedAt": observed_at,
         }
+        # A cross-provider swap keeps the model id in some chains, so the hop
+        # names both providers when the harness reported either.
+        if provider is not None or self.served_model_provider is not None:
+            hop["fromProvider"] = self.served_model_provider
+            hop["toProvider"] = provider
         self.model_fallback_hops_total += 1
         append_bounded_model_event(self.model_fallback_hops, hop)
         self.served_model = model
@@ -1185,13 +1210,17 @@ class StreamAccumulator:
                 "requestedModel": self.requested_model,
                 "fromModel": prior,
                 "servedModel": model,
+                "servedProvider": provider,
                 "turn": turn,
                 "observedAt": observed_at,
             }
             self._record_terminal_event(
                 event="model.continuity_paused",
                 status="failed",
-                reason=f"pinned model changed from {prior} to {model} at turn {turn}",
+                reason=(
+                    f"pinned model changed from {prior_identity or prior} to {identity} "
+                    f"at turn {turn}"
+                ),
             )
 
     def _capture_session_id(self, payload: JsonObject, event_type: str) -> None:

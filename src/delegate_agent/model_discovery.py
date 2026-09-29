@@ -294,6 +294,136 @@ def discovered_model_ids(discovery: JsonObject | None, engine: str) -> tuple[str
     )
 
 
+def catalog_display_name(
+    discovery: JsonObject | None, engine: str, selector: str | None
+) -> str | None:
+    """The catalog ``displayName`` recorded for one selector, or None.
+
+    Cursor's stream reports a model's display name rather than the selector it
+    was launched with, so this is the authoritative selector-to-label mapping
+    when a discovery snapshot carries one.
+    """
+    if not isinstance(discovery, dict) or not selector:
+        return None
+    harnesses = discovery.get("harnesses")
+    record = harnesses.get(engine) if isinstance(harnesses, dict) else None
+    models = record.get("models") if isinstance(record, dict) else None
+    entry = models.get(selector) if isinstance(models, dict) else None
+    name = entry.get("displayName") if isinstance(entry, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def is_provider_qualified(selector: str | None) -> bool:
+    """Does an omp selector name its provider (``provider/model``)?
+
+    This is the one place Delegate tells an explicit provider id from a bare
+    name. omp splits the provider at the FIRST slash and keeps the rest as the
+    model id, so ``gateway/acme/model-pro`` is provider ``gateway``; a leading
+    or trailing slash names no provider or no model and is not qualified.
+    """
+    if not isinstance(selector, str):
+        return False
+    provider, separator, model_id = selector.partition("/")
+    return bool(separator and provider and model_id)
+
+
+def is_explicit_provider_id(selection: str | None, aliases: object) -> bool:
+    """Is an omp selection a ``provider/model`` id the caller typed, not an alias?
+
+    A key of ``omp.models`` is a Delegate alias even when its target names a
+    provider, and it wins over the raw-id reading exactly as it does when the
+    model is resolved. Aliases and ``omp.defaultModel`` carry the fleet's
+    multi-subscription failover, so only a typed id counts as an operator's
+    choice of one provider.
+    """
+    if not is_provider_qualified(selection):
+        return False
+    return not (isinstance(aliases, dict) and selection in aliases)
+
+
+def _is_bare_omp_selection(selection: str, aliases: object) -> bool:
+    """A selection that is neither a Delegate alias nor a provider-qualified id."""
+    if not selection or is_provider_qualified(selection):
+        return False
+    return not (isinstance(aliases, dict) and selection in aliases)
+
+
+def omp_unverifiable_selection_warning(
+    selection: str,
+    aliases: object,
+    discovery: JsonObject | None,
+) -> tuple[str, ...]:
+    """Warn that a bare omp selection could not be checked for lack of a catalog.
+
+    ``omp_unknown_alias_error`` refuses a bare token the discovered catalog does
+    not list; with no catalog it cannot, and saying nothing would let a retired
+    alias resolve by fuzzy match in silence.
+    """
+    if not _is_bare_omp_selection(selection, aliases) or discovered_model_ids(discovery, "omp"):
+        return ()
+    return (
+        f"omp model {redaction.redact_string(selection)!r} is not a configured omp alias and no "
+        "discovered omp catalog is available to confirm it as an exact model id; omp resolves "
+        "such a name by fuzzy match and may serve a different provider. Use an explicit "
+        "provider/model id, or run `delegate capabilities refresh` so bare names can be checked.",
+    )
+
+
+def omp_unknown_alias_error(
+    selection: str,
+    aliases: object,
+    discovery: JsonObject | None,
+) -> DelegateError | None:
+    """An error for an omp selection that is neither an alias nor a real id.
+
+    A selection resolves in this order: a key of ``omp.models`` is a Delegate
+    alias; a ``provider/model`` selector is an explicit raw id and is never
+    second-guessed here; anything else is a bare token. omp resolves a bare
+    token by exact id and then by fuzzy match against its own bundled catalog,
+    so a retired alias such as ``kimi`` quietly lands on whatever model the
+    fuzzy pass finds first, on whatever provider owns it. A bare token is
+    accepted only when it is exactly the model id of a discovered catalog entry.
+
+    With no discovered catalog there is no evidence either way, so this returns
+    None and the launch keeps its catalog-absence warning: an unprobed machine
+    is not a reason to refuse a model id that may well be real.
+    """
+    if not _is_bare_omp_selection(selection, aliases):
+        return None
+    catalog = discovered_model_ids(discovery, "omp")
+    if not catalog:
+        return None
+    if any(entry == selection or entry.partition("/")[2] == selection for entry in catalog):
+        return None
+    shown = redaction.redact_string(selection)
+    configured = (
+        sorted(alias for alias in aliases if isinstance(alias, str))
+        if isinstance(aliases, dict)
+        else []
+    )
+    known = (
+        "Configured omp aliases: " + ", ".join(redaction.redact_string(a) for a in configured) + "."
+        if configured
+        else "No omp aliases are configured."
+    )
+    nearest = nearest_model_ids(selection, catalog)
+    suggestion = (
+        " Nearest catalog selectors: "
+        + ", ".join(redaction.redact_string(selector) for selector in nearest)
+        + "."
+        if nearest
+        else ""
+    )
+    return DelegateError(
+        "invalid_alias",
+        f"Unknown omp model alias {shown!r}: it is not a key of omp.models and not the exact "
+        f"model id of any catalog entry, so omp would resolve it by fuzzy match and could serve "
+        f"a different provider. {known}{suggestion} Use a configured alias or an explicit "
+        "provider/model id (see `delegate models omp`); if the catalog is stale, run "
+        "`delegate capabilities refresh`.",
+    )
+
+
 def nearest_model_ids(model: str, catalog: tuple[str, ...], *, limit: int = 5) -> list[str]:
     """Catalog selectors closest to ``model``, by shared prefix then length."""
     lowered = model.lower()

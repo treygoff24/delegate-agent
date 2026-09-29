@@ -290,6 +290,8 @@ def build_run_summary(
             "terminalRecord",
             "continuityMode",
             "modelProvenance",
+            "servedModel",
+            "servedProvider",
             "failureReason",
             "failureKind",
             "outcomeEvidence",

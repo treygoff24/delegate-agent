@@ -52,7 +52,7 @@ from delegate_agent import (
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.errors import DelegateError
-from delegate_agent.json_types import JsonObject, is_non_negative_int
+from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 STDOUT_LOG = run_registry.STDOUT_LOG
 STDERR_LOG = run_registry.STDERR_LOG
@@ -164,6 +164,8 @@ class RunContext:
     model_alias: str | None = None
     model_resolved: str | None = None
     model_requested: str | None = None
+    # Catalog display name for `model`; cursor's stream reports display names.
+    model_display_name: str | None = None
     continuity_mode: str = "fungible"
     capability_model: str | None = None
     capability_model_source: str | None = None
@@ -418,6 +420,18 @@ def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
 MODEL_SUBSTITUTION_WARNING_PREFIX = "model_substitution"
 
 
+def _served_identity(harness: str, accumulator: harness_events.StreamAccumulator) -> str:
+    """The served model as the harness names it, provider included for omp.
+
+    omp reports provider and model as separate fields, and a cross-provider swap
+    can keep the model id, so the bare id alone cannot say what served the run.
+    """
+    served = accumulator.served_model or ""
+    if harness == "omp" and accumulator.served_model_provider:
+        return f"{accumulator.served_model_provider}/{served}"
+    return served
+
+
 def model_substitution_warning(
     ctx: RunContext,
     accumulator: harness_events.StreamAccumulator | None,
@@ -437,26 +451,51 @@ def model_substitution_warning(
     completion report, and the doctor payload, all of which promise to scrub
     credential-shaped material.
     """
-    if ctx.continuity_mode not in ("fungible", "panel"):
+    resolved = ctx.model_resolved or ctx.model
+    return model_substitution_text(
+        ctx.harness,
+        ctx.continuity_mode,
+        accumulator,
+        requested=_requested_model(ctx) or resolved,
+        resolved=resolved,
+        display_name=ctx.model_display_name,
+    )
+
+
+def model_substitution_text(
+    harness: str,
+    continuity_mode: str,
+    accumulator: harness_events.StreamAccumulator | None,
+    *,
+    requested: str | None,
+    resolved: str | None,
+    display_name: str | None = None,
+) -> str | None:
+    """`model_substitution_warning` without a run context.
+
+    A one-shot call has no run context but the same question to ask of its
+    stream: `requested` is what the caller typed, `resolved` is the identity the
+    served model is compared against.
+    """
+    if continuity_mode not in ("fungible", "panel"):
         return None
     served = accumulator.served_model if accumulator is not None else None
-    resolved = ctx.model_resolved or ctx.model
-    if not served or not resolved:
+    if accumulator is None or not served or not resolved:
         return None
     if harness_events.served_model_matches_requested(
-        ctx.harness,
+        harness,
         resolved,
         served,
-        display_name=accumulator.requested_model_display_name,
+        display_name=accumulator.requested_model_display_name or display_name,
         served_provider=accumulator.served_model_provider,
     ):
         return None
-    requested = redaction.redact_string(_requested_model(ctx) or resolved)
+    label = redaction.redact_string(requested or resolved)
     return (
         f"{MODEL_SUBSTITUTION_WARNING_PREFIX}: requested "
-        f"{requested} resolved to {redaction.redact_string(resolved)} but the harness served "
-        f"{redaction.redact_string(served)} under {ctx.continuity_mode} continuity; this run's "
-        "output is not the requested model's"
+        f"{label} resolved to {redaction.redact_string(resolved)} but the harness served "
+        f"{redaction.redact_string(_served_identity(harness, accumulator))} under "
+        f"{continuity_mode} continuity; this run's output is not the requested model's"
     )
 
 
@@ -599,11 +638,75 @@ def _terminal_record(
     return record
 
 
-def _pinned_pause_notice(ctx: RunContext, *, reason: str) -> str:
+def _served_envelope_fields(provenance: JsonValue) -> JsonObject:
+    """The served model and provider, for the top level of an envelope.
+
+    The provenance block already carries the pair; a caller reading the envelope
+    looks at the top level first, where `modelResolved` names the request and
+    nothing else says what actually answered. Fields nobody observed are absent
+    rather than null.
+    """
+    fields: JsonObject = {}
+    if not isinstance(provenance, dict):
+        return fields
+    if provenance.get("servedModel") is not None:
+        fields["servedModel"] = provenance["servedModel"]
+        if provenance.get("servedProvider") is not None:
+            fields["servedProvider"] = provenance["servedProvider"]
+    return fields
+
+
+def _continuity_served_label(violation: JsonObject | None) -> str | None:
+    """What the harness tried to serve, provider-qualified when it reported one."""
+    if not isinstance(violation, dict):
+        return None
+    served = violation.get("servedModel")
+    if not isinstance(served, str) or not served:
+        return None
+    provider = violation.get("servedProvider")
+    label = f"{provider}/{served}" if isinstance(provider, str) and provider else served
+    return redaction.redact_string(label)
+
+
+def pinned_violation_text(harness: str, requested: str | None, violation: JsonObject | None) -> str:
+    """The failure message for a pinned run whose served model diverged.
+
+    The run failed because the harness (omp's retry chain, for one) moved to a
+    model other than the pinned one; the message names both so an operator can
+    tell a substituted provider from a dropped run without opening the record.
+    Tracked runs and one-shot calls share this text, and the
+    `model_continuity_paused` error code that carries it.
+    """
+    served = _continuity_served_label(violation)
+    if served is None:
+        return "Pinned model continuity was interrupted; the run paused with a checkpoint."
+    label = (redaction.redact_string(requested) if requested else "") or "the requested model"
+    return (
+        f"Pinned model continuity refused a substitution: requested {label}, but "
+        f"{harness} tried to serve {served}. The run was stopped and its output is not "
+        "the requested model's. Rerun with --continuity-mode fungible to allow failover."
+    )
+
+
+def _pinned_violation_message(ctx: RunContext, violation: JsonObject | None) -> str:
+    return pinned_violation_text(ctx.harness, _requested_model(ctx), violation)
+
+
+def _pinned_pause_notice(
+    ctx: RunContext, *, reason: str, violation: JsonObject | None = None
+) -> str:
     # This notice is persisted as `failoverNotice` and prepended to the
     # completion report, so the requested model is redacted like every other
     # model value that enters warning prose.
     model = redaction.redact_string(_requested_model(ctx)) or "requested model"
+    served = _continuity_served_label(violation)
+    if served is not None:
+        return (
+            f"[model-continuity] Pinned run paused: {model} was requested but {ctx.harness} "
+            f"tried to serve {served} ({reason}); Delegate stopped the run instead of "
+            "accepting the substitution. Restart explicitly with continuity mode "
+            "fungible/panel to allow failover."
+        )
     return (
         f"[model-continuity] Pinned run paused: {model} became unavailable ({reason}); "
         "Delegate did not start a fallback route. Resume after availability returns, or "
@@ -802,6 +905,7 @@ def build_run_record(
         "completionReportSource": None,
         "resultQuality": RESULT_QUALITY_OK,
     }
+    record.update(_served_envelope_fields(record["modelProvenance"]))
     warnings = list(ctx.warnings)
     if (
         status == run_registry.STATUS_SUCCEEDED
@@ -1884,6 +1988,10 @@ class CallResult:
     error: str | None = None
     message: str | None = None
     model_resolved: str | None = None
+    # What the child's stream said actually answered, when it said (omp reports
+    # provider and model separately; claude reports its resolved model).
+    served_model: str | None = None
+    served_provider: str | None = None
     usage: JsonObject = field(default_factory=lambda: {"basis": "unavailable"})
     result_quality: str = RESULT_QUALITY_OK
     empty_retry_attempted: bool = False
@@ -1897,6 +2005,23 @@ class CallResult:
     # attempt's own, the only stderr that may classify the outcome. None means
     # the call had one attempt, so stderr_tail is already the final one.
     final_attempt_stderr_tail: str | None = None
+
+
+@dataclass(frozen=True)
+class CallModelIdentity:
+    """What a one-shot call asked for, so its stream can be checked against it.
+
+    A tracked run carries this on its run context; an ungrouped call has none, so
+    the caller hands it in. `compared` is the identity the served model is held
+    to (the resolved model), `label` is what the caller typed and what messages
+    name, and `continuity_mode` decides between refusing a swap (`pinned`) and
+    reporting it (`fungible`, `panel`).
+    """
+
+    compared: str | None = None
+    label: str | None = None
+    display_name: str | None = None
+    continuity_mode: str = "fungible"
 
 
 @dataclass(frozen=True)
@@ -2617,6 +2742,7 @@ def _capture_tracked_process(
     accumulator = harness_events.StreamAccumulator(
         harness=ctx.harness,
         requested_model=ctx.model_resolved or ctx.model or _requested_model(ctx),
+        requested_model_display_name=ctx.model_display_name,
         continuity_mode=ctx.continuity_mode,
     )
     watchdog = stall_watchdog.StallWatchdog(
@@ -3460,7 +3586,7 @@ def _finalize_tracked_run(
         merged_extra.update(
             failureReason="model_continuity_paused",
             error="model_continuity_paused",
-            message="Pinned model continuity was interrupted; the run paused with a checkpoint.",
+            message=_pinned_violation_message(ctx, capture.accumulator.continuity_violation),
         )
     elif status == run_registry.STATUS_SUCCEEDED:
         for key in ("failureReason", "error", "message"):
@@ -3586,6 +3712,7 @@ def _finalize_tracked_run(
             else None
         ),
     )
+    merged_extra.update(_served_envelope_fields(merged_extra["modelProvenance"]))
     if result_quality != RESULT_QUALITY_OK:
         warnings = list(merged_extra.get("warnings") or [])
         _append_unique(warnings, _quality_warning(result_quality, harness=ctx.harness))
@@ -4107,6 +4234,7 @@ def _merge_tracked_attempt_captures(
     accumulator = harness_events.StreamAccumulator(
         harness=current_capture.accumulator.harness,
         requested_model=current_capture.accumulator.requested_model,
+        requested_model_display_name=current_capture.accumulator.requested_model_display_name,
         continuity_mode=current_capture.accumulator.continuity_mode,
     )
     accumulator.assistant_chunks = [
@@ -4291,7 +4419,22 @@ def _materialize_empty_retry(
     temp_base: Path | None = None,
 ) -> tuple[list[str], str | None, str | None]:
     if stdin_text is not None:
-        return list(argv), _append_empty_retry_instruction(stdin_text), None
+        # The prompt travels on stdin, but the argv can still carry an agent
+        # config or persona placeholder (omp's pinned no-fallback overlay rides
+        # `--config <placeholder>`); a retry launched without materializing it
+        # would hand the child the placeholder string as a path.
+        retry_argv, retry_dir = _materialize_prompt_file_argv(
+            argv,
+            prompt_file_text=None,
+            prompt_file_placeholder=None,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            agent_config_dir=agent_config_dir,
+            persona_file_text=persona_file_text,
+            persona_file_placeholder=persona_file_placeholder,
+            temp_base=temp_base,
+        )
+        return retry_argv, _append_empty_retry_instruction(stdin_text), retry_dir
     if prompt_file_text is not None:
         retry_argv, retry_dir = _materialize_prompt_file_argv(
             argv,
@@ -4904,7 +5047,9 @@ def _execute_tracked(
             capture.accumulator.continuity_violation.get("reason") or "model_continuity_violation"
         )
         final_extra["pinnedContinuityPause"] = True
-        final_extra["failoverNotice"] = _pinned_pause_notice(ctx, reason=reason)
+        final_extra["failoverNotice"] = _pinned_pause_notice(
+            ctx, reason=reason, violation=capture.accumulator.continuity_violation
+        )
         final_extra["handoffCheckpoint"] = _pinned_handoff_checkpoint(
             ctx,
             reason=reason,
@@ -5372,6 +5517,30 @@ def _claude_model_resolved(event: JsonObject) -> str | None:
     return max(candidates)[1] if candidates else None
 
 
+def _claude_served_model(event: JsonObject) -> str | None:
+    """The model Claude's result says answered, only when that is unambiguous.
+
+    ``modelUsage`` is a per-run aggregate, not a per-answer record: Claude Code
+    also bills side models (titles, subagents, a ``--fallback-model`` retry)
+    there. Only a map where exactly one model produced output names what
+    answered; anything else stays unverified instead of guessing by volume.
+    """
+
+    model_usage = event.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    producing = [
+        model
+        for model, values in model_usage.items()
+        if isinstance(model, str)
+        and isinstance(values, dict)
+        and isinstance(values.get("outputTokens"), int)
+        and not isinstance(values.get("outputTokens"), bool)
+        and values["outputTokens"] > 0
+    ]
+    return producing[0] if len(producing) == 1 else None
+
+
 def _claude_usage(event: JsonObject) -> JsonObject:
     usage = event.get("usage")
     if not isinstance(usage, dict):
@@ -5388,15 +5557,20 @@ def _claude_usage(event: JsonObject) -> JsonObject:
 
 def _parse_claude_call_json(
     stdout_text: str, *, pure: bool
-) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None]:
+) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None, str | None]:
+    """Parse Claude's call JSON.
+
+    Returns ``(text, exit, warnings, model_resolved, usage, error, message,
+    served_model)``; ``served_model`` is ``_claude_served_model`` of the result.
+    """
     try:
         events = json.loads(stdout_text)
     except json.JSONDecodeError:
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     if isinstance(events, dict):
         events = [events]
     elif not isinstance(events, list):
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     result = next(
         (
             event
@@ -5406,7 +5580,7 @@ def _parse_claude_call_json(
         None,
     )
     if not isinstance(result, dict):
-        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
     result_text = harness_events.claude_result_text(result)
     if result_text is None:
         # `claude_result_text` requires a non-blank string because a blank one is
@@ -5417,7 +5591,7 @@ def _parse_claude_call_json(
         # transport, and `is_error` remains what decides the exit code.
         raw_result = result.get("result")
         if not isinstance(raw_result, str):
-            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+            return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None, None
         result_text = raw_result
     denials = result.get("permission_denials")
     if pure:
@@ -5430,6 +5604,7 @@ def _parse_claude_call_json(
                 _claude_usage(result),
                 "pure_boundary_unverified",
                 "Pure boundary unverified: permission_denials missing or malformed.",
+                _claude_served_model(result),
             )
         if denials:
             return (
@@ -5440,6 +5615,7 @@ def _parse_claude_call_json(
                 _claude_usage(result),
                 "pure_boundary_violation",
                 f"Pure boundary violation: {len(denials)} permission denial(s).",
+                _claude_served_model(result),
             )
     exit_code = 1 if result.get("is_error") is True else 0
     return (
@@ -5450,6 +5626,7 @@ def _parse_claude_call_json(
         _claude_usage(result),
         "child_failed" if exit_code else None,
         None,
+        _claude_served_model(result),
     )
 
 
@@ -5526,6 +5703,7 @@ def _execute_call_once(
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    call_model: CallModelIdentity | None = None,
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -5637,7 +5815,7 @@ def _execute_call_once(
     stdout_text = (stdout_data or b"").decode("utf-8", errors="replace")
     stderr_tail = _call_stderr_tail(stderr_data or b"", sensitive_texts)
     if harness == "claude" and (pure or structured_output):
-        raw_text, parsed_exit, warnings, model_resolved, usage, error, message = (
+        raw_text, parsed_exit, warnings, model_resolved, usage, error, message, served = (
             _parse_claude_call_json(stdout_text, pure=pure)
         )
         text = _bounded_call_fallback_text(raw_text)
@@ -5666,6 +5844,7 @@ def _execute_call_once(
             error=error,
             message=message,
             model_resolved=model_resolved,
+            served_model=served,
             usage=usage,
             result_quality=(
                 RESULT_QUALITY_EMPTY
@@ -5673,7 +5852,13 @@ def _execute_call_once(
                 else RESULT_QUALITY_OK
             ),
         )
-    accumulator = harness_events.StreamAccumulator(harness=harness)
+    identity = call_model or CallModelIdentity()
+    accumulator = harness_events.StreamAccumulator(
+        harness=harness,
+        requested_model=identity.compared,
+        requested_model_display_name=identity.display_name,
+        continuity_mode=identity.continuity_mode,
+    )
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
     accumulator.finish_stream()
@@ -5717,6 +5902,24 @@ def _execute_call_once(
     )
     if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
         error, message = failure.code, failure.message
+    if accumulator.continuity_violation is not None:
+        # A pinned call is refused the way a pinned tracked run is: the child may
+        # have exited 0, but its stream said another model or provider answered,
+        # so the output is not the one asked for. The pause is a failed terminal
+        # in the accumulator, which is what makes the exit code nonzero above.
+        error = "model_continuity_paused"
+        message = pinned_violation_text(harness, identity.label, accumulator.continuity_violation)
+    elif (
+        substitution := model_substitution_text(
+            harness,
+            identity.continuity_mode,
+            accumulator,
+            requested=identity.label,
+            resolved=identity.compared,
+            display_name=identity.display_name,
+        )
+    ) is not None:
+        warnings = (*warnings, substitution)
     if stdout_capture is not None:
         warning = stream_capture.capture_warning(stdout_capture)
         if warning is not None:
@@ -5733,6 +5936,8 @@ def _execute_call_once(
         warnings=warnings,
         error=error,
         message=message,
+        served_model=accumulator.served_model,
+        served_provider=accumulator.served_model_provider,
         usage=accumulator.usage or {"basis": "unavailable"},
         stdout_capture=stdout_capture,
         unrecovered_error=accumulator.unrecovered_error_message,
@@ -5790,6 +5995,7 @@ def execute_call(
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    call_model: CallModelIdentity | None = None,
 ) -> CallResult:
     deadline = None if timeout is None else time.monotonic() + timeout
 
@@ -5816,6 +6022,7 @@ def execute_call(
             structured_output=structured_output,
             sensitive_texts=sensitive_texts,
             process_group_grace_seconds=process_group_grace_seconds,
+            call_model=call_model,
         )
 
     result = call_once(argv)

@@ -77,6 +77,8 @@ class SnapshotView(TypedDict, total=False):
     terminalRecord: JsonObject
     continuityMode: str
     modelProvenance: JsonObject
+    servedModel: str
+    servedProvider: str
     usage: JsonObject
     malformedLines: int
     malformedSamples: list[str]
