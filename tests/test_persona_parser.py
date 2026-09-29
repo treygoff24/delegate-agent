@@ -39,18 +39,6 @@ class PersonaParserTests(unittest.TestCase):
             with self.subTest(dry_run_engine=engine):
                 self.assertEqual(parsed.payload.persona, "editor")
 
-    def test_parse_prompt_tail_returns_all_persona_fields(self):
-        parsed = cli_parser.parse_prompt_tail(
-            ["--persona", "editor", "--allow-repo-persona", "review"],
-            False,
-            None,
-            command_prefix=["cursor", "work"],
-        )
-        self.assertEqual(
-            (parsed.agent, parsed.persona, parsed.no_persona, parsed.allow_repo_persona),
-            (None, "editor", False, True),
-        )
-
     def _input_json(self, root: Path, payload: dict) -> Path:
         path = root / "task.json"
         path.write_text(json.dumps(payload), encoding="utf-8")

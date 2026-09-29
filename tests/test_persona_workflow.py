@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -9,10 +10,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
-from delegate_agent import config, describe_payload, run_registry, runner
-from delegate_agent.cli_parser import parse_cli
-from delegate_agent.errors import DelegateError
-from delegate_agent.request_build import request_from_parsed
+from delegate_agent import cli, config, describe_payload, run_registry, runner
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 
@@ -55,12 +53,14 @@ class PersonaWorkflowTests(unittest.TestCase):
             {"defaults": {"engine": "cursor", "mode": "safe"}},
         )
 
-    def _child_result(self, calls: list[dict[str, object]]):
+    def _child_result(self, calls: list[dict[str, object]], *, reported_digest: object = ...):
         def run_child(argv, *, cwd, timeout, environment=None, cancel_event=None):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
-            digest = payload.get("expectedPersonaDigest")
+            digest = (
+                payload.get("expectedPersonaDigest") if reported_digest is ... else reported_digest
+            )
             context = runner.RunContext(
                 registry_root=self.workspace,
                 run_id="del_persona_child",
@@ -94,6 +94,32 @@ class PersonaWorkflowTests(unittest.TestCase):
                 0,
                 json.dumps(envelope).encode(),
                 b"",
+            )
+
+        return run_child
+
+    def _pinned_child(self, calls: list[dict[str, object]]):
+        """Run the real `delegate run --input-json` entry point on the parent's payload.
+
+        The payload carries the parent's expectedPersonaDigest, so the child
+        resolves the live persona through the same pinned path production uses
+        and emits its own error envelope. A child that gets past persona
+        resolution would launch an engine, so that launch fails the test.
+        """
+
+        def run_child(argv, *, cwd, timeout, environment=None, cancel_event=None):
+            input_path = Path(argv[argv.index("--input-json") + 1])
+            calls.append(json.loads(input_path.read_text(encoding="utf-8")))
+            self.assertIn("expectedPersonaDigest", calls[-1])
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(
+                cli,
+                "execute_request",
+                side_effect=AssertionError("pinned child launched an engine"),
+            ):
+                rc = cli.main(argv[1:], stdin=io.StringIO(), stdout=stdout, stderr=stderr)
+            return CompletedProcess(
+                argv, rc, stdout.getvalue().encode(), stderr.getvalue().encode()
             )
 
         return run_child
@@ -228,6 +254,30 @@ class PersonaWorkflowTests(unittest.TestCase):
         self.assertIn("persona=None", signature)
         self.assertIn("allow_repo_persona=False", signature)
 
+        for wf_id, reported in (("wf_dddddddddddd", "0" * 64), ("wf_eeeeeeeeeeee", None)):
+            with self.subTest(reported_digest=reported):
+                rejecting_state = self._state(wf_id=wf_id)
+                rejecting_calls: list[dict[str, object]] = []
+                with (
+                    self.assertRaises(workflow_runtime.PersonaDigestMismatch),
+                    mock.patch.object(
+                        workflow_runtime,
+                        "_run_child_command",
+                        side_effect=self._child_result(rejecting_calls, reported_digest=reported),
+                    ),
+                ):
+                    self._dsl(rejecting_state).agent(
+                        "Review this workflow",
+                        engine="cursor",
+                        mode="safe",
+                        persona="editor",
+                        allow_repo_persona=True,
+                    )
+                self.assertEqual(len(rejecting_calls), 1)
+                rejected_key = rejecting_calls[0]["workflowAgentKey"]
+                self.assertNotIn(rejected_key, rejecting_state.replay)
+                self.assertNotIn(rejected_key, rejecting_state.replay_keys)
+
     def test_persona_digest_is_structural_key_and_edited_file_is_cache_miss(self) -> None:
         state = self._state()
         first_calls: list[dict[str, object]] = []
@@ -282,39 +332,18 @@ class PersonaWorkflowTests(unittest.TestCase):
     def test_child_digest_mismatch_after_persona_mutation_fails_without_cache_entry(self) -> None:
         state = self._state()
         calls: list[dict[str, object]] = []
+        real_child = self._pinned_child(calls)
 
-        def mutate_before_child_resolution(
-            argv, *, cwd, timeout, cancel_event=None, environment=None
-        ):
-            input_path = Path(argv[argv.index("--input-json") + 1])
-            payload = json.loads(input_path.read_text(encoding="utf-8"))
-            calls.append(payload)
+        def mutate_then_run_pinned_child(argv, **kwargs):
             (self.workspace / ".delegate" / "personas" / "editor.md").write_text(
                 self.new_text, encoding="utf-8"
             )
-            with self.assertRaises(DelegateError) as caught:
-                request_from_parsed(
-                    parse_cli(["run", "--input-json", str(input_path)]),
-                    config.embedded_default_config(),
-                    mock.MagicMock(),
-                )
-            self.assertEqual(caught.exception.error, "workflow_persona_digest_mismatch")
-            return CompletedProcess(
-                argv,
-                2,
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": "workflow_persona_digest_mismatch",
-                    }
-                ).encode(),
-                b"",
-            )
+            return real_child(argv, **kwargs)
 
         with (
             self.assertRaises(workflow_runtime.PersonaDigestMismatch),
             mock.patch.object(
-                workflow_runtime, "_run_child_command", side_effect=mutate_before_child_resolution
+                workflow_runtime, "_run_child_command", side_effect=mutate_then_run_pinned_child
             ),
         ):
             self._dsl(state).agent(
@@ -324,69 +353,60 @@ class PersonaWorkflowTests(unittest.TestCase):
                 persona="editor",
                 allow_repo_persona=True,
             )
+        self.assertEqual(len(calls), 1)
         key = calls[0]["workflowAgentKey"]
         self.assertNotIn(key, state.replay)
         self.assertNotIn(key, state.replay_keys)
 
     def test_post_pin_persona_resolution_error_does_not_cache_none(self) -> None:
+        empty_home = self.workspace / "home"
+        empty_home.mkdir()
         state = self._state()
         calls: list[dict[str, object]] = []
+        real_child = self._pinned_child(calls)
 
-        def delete_before_child_resolution(
-            argv, *, cwd, timeout, cancel_event=None, environment=None
-        ):
-            input_path = Path(argv[argv.index("--input-json") + 1])
-            payload = json.loads(input_path.read_text(encoding="utf-8"))
-            calls.append(payload)
+        def delete_then_run_pinned_child(argv, **kwargs):
             (self.workspace / ".delegate" / "personas" / "editor.md").unlink()
-            with self.assertRaises(DelegateError) as caught:
-                request_from_parsed(
-                    parse_cli(["run", "--input-json", str(input_path)]),
-                    config.embedded_default_config(),
-                    mock.MagicMock(),
-                )
-            self.assertEqual(caught.exception.error, "persona_not_found")
-            return CompletedProcess(
-                argv,
-                2,
-                json.dumps({"ok": False, "error": caught.exception.error}).encode(),
-                b"",
-            )
+            return real_child(argv, **kwargs)
 
-        with (
-            self.assertRaises(workflow_runtime.PersonaDigestMismatch),
-            mock.patch.object(
-                workflow_runtime, "_run_child_command", side_effect=delete_before_child_resolution
-            ),
-        ):
-            self._dsl(state).agent(
-                "same prompt",
-                engine="cursor",
-                mode="safe",
-                persona="editor",
-                allow_repo_persona=True,
-            )
-        key = calls[0]["workflowAgentKey"]
-        self.assertNotIn(key, state.replay)
-        self.assertNotIn(key, state.replay_keys)
-
-        (self.workspace / ".delegate" / "personas" / "editor.md").write_text(
-            self.old_text, encoding="utf-8"
-        )
-        restored_calls: list[dict[str, object]] = []
-        with mock.patch.object(
-            workflow_runtime, "_run_child_command", side_effect=self._child_result(restored_calls)
-        ):
-            self.assertEqual(
+        with mock.patch.dict(os.environ, {"HOME": str(empty_home)}):
+            with (
+                self.assertRaises(workflow_runtime.PersonaDigestMismatch),
+                mock.patch.object(
+                    workflow_runtime, "_run_child_command", side_effect=delete_then_run_pinned_child
+                ),
+            ):
                 self._dsl(state).agent(
                     "same prompt",
                     engine="cursor",
                     mode="safe",
                     persona="editor",
                     allow_repo_persona=True,
-                ),
-                "child result",
+                )
+            self.assertEqual(len(calls), 1)
+            key = calls[0]["workflowAgentKey"]
+            self.assertNotIn(key, state.replay)
+            self.assertNotIn(key, state.replay_keys)
+
+            (self.workspace / ".delegate" / "personas" / "editor.md").write_text(
+                self.old_text, encoding="utf-8"
             )
+            restored_calls: list[dict[str, object]] = []
+            with mock.patch.object(
+                workflow_runtime,
+                "_run_child_command",
+                side_effect=self._child_result(restored_calls),
+            ):
+                self.assertEqual(
+                    self._dsl(state).agent(
+                        "same prompt",
+                        engine="cursor",
+                        mode="safe",
+                        persona="editor",
+                        allow_repo_persona=True,
+                    ),
+                    "child result",
+                )
         self.assertEqual(len(restored_calls), 1)
 
     def test_post_pin_workspace_refusal_does_not_cache_none(self) -> None:
@@ -398,35 +418,23 @@ class PersonaWorkflowTests(unittest.TestCase):
         global_persona.write_text(self.old_text, encoding="utf-8")
         state = self._state()
         calls: list[dict[str, object]] = []
+        real_child = self._pinned_child(calls)
 
-        def create_workspace_shadow(argv, *, cwd, timeout, cancel_event=None, environment=None):
-            input_path = Path(argv[argv.index("--input-json") + 1])
-            calls.append(json.loads(input_path.read_text(encoding="utf-8")))
+        def shadow_then_run_pinned_child(argv, **kwargs):
             workspace_persona.write_text("shadow", encoding="utf-8")
-            with self.assertRaises(DelegateError) as caught:
-                request_from_parsed(
-                    parse_cli(["run", "--input-json", str(input_path)]),
-                    config.embedded_default_config(),
-                    mock.MagicMock(),
-                )
-            self.assertEqual(caught.exception.error, "workspace_persona_refused")
-            return CompletedProcess(
-                argv,
-                2,
-                json.dumps({"ok": False, "error": caught.exception.error}).encode(),
-                b"",
-            )
+            return real_child(argv, **kwargs)
 
         with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
             with (
                 self.assertRaises(workflow_runtime.PersonaDigestMismatch),
                 mock.patch.object(
-                    workflow_runtime, "_run_child_command", side_effect=create_workspace_shadow
+                    workflow_runtime, "_run_child_command", side_effect=shadow_then_run_pinned_child
                 ),
             ):
                 self._dsl(state).agent(
                     "same prompt", engine="cursor", mode="safe", persona="editor"
                 )
+            self.assertEqual(len(calls), 1)
             key = calls[0]["workflowAgentKey"]
             self.assertNotIn(key, state.replay)
             self.assertNotIn(key, state.replay_keys)

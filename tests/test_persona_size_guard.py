@@ -189,6 +189,18 @@ class PersonaSizeGuardTests(unittest.TestCase):
         self.assertLess(entry["promptBytes"], limit)
         self.assertNotIn("warnings", entry)
 
+        parsed = parse_cli(
+            ["--cwd", str(self.workspace), "kimi", "safe", "--persona", "editor", over]
+        )
+        with self.assertRaises(DelegateError) as caught:
+            request_from_parsed(
+                parsed,
+                self._preamble_enabled_config(),
+                io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(caught.exception.error, "prompt_too_large")
+
 
 if __name__ == "__main__":
     unittest.main()
