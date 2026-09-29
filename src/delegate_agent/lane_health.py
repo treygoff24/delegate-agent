@@ -460,6 +460,8 @@ def refusal(marker: Marker, lane: Lane, *, now: float | None = None) -> Delegate
         f"{FORCE_LAUNCH_FLAG} (a success clears the marker)."
     )
     diagnostics: JsonObject = {
+        # The closed failureKind a caller branches on (outcome.FAILURE_LANE_KNOWN_BAD).
+        "failureKind": LANE_KNOWN_BAD_ERROR,
         "laneKnownBad": True,
         "lane": lane.public(),
         "signature": marker.signature,
