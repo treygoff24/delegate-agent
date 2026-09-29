@@ -469,6 +469,7 @@ def _collect_nested_worktrees(
     registry_root: Path,
     stack: contextlib.ExitStack,
     top_record: PersistentWorktreeRecord,
+    absent: list[Path],
 ) -> list[tuple[Path, PersistentWorktreeRecord]]:
     """Lock and read every nested Registry under a worktree, deepest records first.
 
@@ -476,7 +477,10 @@ def _collect_nested_worktrees(
     ``.delegate``, so the owning Registry never lists its worktree; removing the
     parent would orphan it. Locks are taken parent then nested, depth first, and
     stay held on ``stack`` so nothing can register between selection and removal.
-    Anything unreadable or unlockable fails closed.
+    Anything unreadable or unlockable fails closed. A Registry directory that
+    exists is locked before its index is read, so a launch creating the index
+    concurrently is either seen or blocked; a directory that does not exist yet
+    is appended to ``absent`` so the caller can recheck it right before deleting.
     """
     execution = parent_record.get("executionCwd")
     if not isinstance(execution, str) or not execution:
@@ -484,14 +488,16 @@ def _collect_nested_worktrees(
     parent_cwd = str(top_record.get("executionCwd") or execution)
     nested_root = run_registry.registry_root(Path(execution))
     try:
-        os.stat(run_registry.index_path(nested_root))
+        os.stat(nested_root)
     except (FileNotFoundError, NotADirectoryError):
+        absent.append(nested_root)
         return []
     except OSError as exc:
         raise _nested_registry_error(
             "nested_registry_unreadable",
             f"Cannot read the nested Registry at {nested_root} ({exc}); removing "
-            f"{parent_cwd} could orphan worktrees registered there.",
+            f"{parent_cwd} could orphan worktrees registered there. --kill-live does not "
+            "override this. Repair or move aside that Registry, then retry.",
             parent_record=top_record,
             nested_root=nested_root,
             parent_cwd=parent_cwd,
@@ -505,7 +511,9 @@ def _collect_nested_worktrees(
         raise _nested_registry_error(
             "nested_registry_unreadable",
             f"Cannot lock or read the nested Registry at {nested_root} ({exc}); removing "
-            f"{parent_cwd} could orphan worktrees registered there. Nothing was removed.",
+            f"{parent_cwd} could orphan worktrees registered there. Nothing was removed; "
+            "--kill-live does not override this. Repair or move aside that Registry, then "
+            "retry.",
             parent_record=top_record,
             nested_root=nested_root,
             parent_cwd=parent_cwd,
@@ -514,9 +522,90 @@ def _collect_nested_worktrees(
     for record in records:
         if record.get("registryWorktreeStatus") == STATUS_REMOVED:
             continue
-        collected.extend(_collect_nested_worktrees(record, nested_root, stack, top_record))
+        collected.extend(_collect_nested_worktrees(record, nested_root, stack, top_record, absent))
         collected.append((nested_root, record))
     return collected
+
+
+def _refuse_if_registry_appeared(
+    absent: list[Path],
+    parent_record: PersistentWorktreeRecord,
+    nested_removed: list[JsonObject],
+) -> None:
+    """Refuse when a Registry that did not exist during the walk exists now.
+
+    It could only have been created by a launch into the worktree after the walk,
+    and it is not locked, so deleting the parent could take a new run's record.
+    """
+    appeared = [root for root in absent if os.path.lexists(root)]
+    if not appeared:
+        return
+    alias = str(parent_record.get("alias") or parent_record.get("runId"))
+    parent_cwd = str(parent_record.get("executionCwd") or "")
+    payload = _nested_registry_error(
+        "nested_registry_appeared",
+        f"A run registered inside {parent_cwd} while {alias} was being removed "
+        f"(new Registry at {appeared[0]}); {alias} was not removed. Check that run "
+        "with `worktree list`, then remove the parent again.",
+        parent_record=parent_record,
+        nested_root=appeared[0],
+        parent_cwd=parent_cwd,
+    ).payload
+    if nested_removed:
+        payload["nestedRemoved"] = _nested_summary(nested_removed)
+    raise wm.WorktreeManagementError(payload)
+
+
+def nested_worktrees_reap_block(target: Path, stack: contextlib.ExitStack) -> JsonObject | None:
+    """Why a delete that bypasses ``remove_worktree`` (``reap``) must not take ``target``.
+
+    Runs launched with ``--cwd <target>`` keep their Registry in
+    ``<target>/.delegate``; deleting the path deletes those records while their
+    worktrees live on elsewhere. Reap never removes nested worktrees itself: any
+    unremoved one refuses, naming the command that removes the parent properly.
+    The nested Registry lock is held on ``stack`` through the caller's delete.
+    """
+    nested_root = run_registry.registry_root(target)
+    try:
+        os.stat(nested_root)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        return {
+            "code": "nested_registry_unreadable",
+            "nestedRegistry": str(nested_root),
+            "message": f"Cannot read the nested Registry at {nested_root} ({exc}).",
+        }
+    try:
+        stack.enter_context(run_registry.registry_lock(nested_root))
+        records = wm.load_persistent_records(nested_root)
+    except (OSError, RuntimeError, ValueError, TimeoutError, DelegateError) as exc:
+        return {
+            "code": "nested_registry_unreadable",
+            "nestedRegistry": str(nested_root),
+            "message": f"Cannot lock or read the nested Registry at {nested_root} ({exc}).",
+        }
+    nested = [r for r in records if r.get("registryWorktreeStatus") != STATUS_REMOVED]
+    if not nested:
+        return None
+    return {
+        "code": "nested_worktrees_present",
+        "nestedRegistry": str(nested_root),
+        "nestedWorktrees": [
+            {
+                "alias": r.get("alias"),
+                "runId": r.get("runId"),
+                "executionCwd": r.get("executionCwd"),
+            }
+            for r in nested
+        ],
+        "message": (
+            f"{len(nested)} worktree(s) from runs launched with --cwd {target} are "
+            "registered inside it; reaping it would orphan them. Remove them by name "
+            f"(delegate --cwd {target} worktree list), or remove the parent with "
+            "`worktree remove`, which removes clean, merged nested worktrees first."
+        ),
+    }
 
 
 def _nested_blockers(
@@ -576,6 +665,7 @@ def _remove_nested_worktrees(
     stack: contextlib.ExitStack,
     *,
     options: RemoveWorktreeOptions,
+    absent: list[Path],
 ) -> list[JsonObject]:
     """Remove clean, merged nested worktrees first; refuse, naming each, if any is not.
 
@@ -584,7 +674,7 @@ def _remove_nested_worktrees(
     """
     parent_alias = str(parent_record.get("alias") or parent_record.get("runId"))
     parent_cwd = str(parent_record.get("executionCwd") or "")
-    targets = _collect_nested_worktrees(parent_record, registry_root, stack, parent_record)
+    targets = _collect_nested_worktrees(parent_record, registry_root, stack, parent_record, absent)
     blockers = _nested_blockers(
         targets,
         parent_cwd=parent_cwd,
@@ -753,7 +843,11 @@ def _remove_locked(
     with contextlib.ExitStack() as stack:
         nested_removed: list[JsonObject] = []
         if not nested:
-            nested_removed = _remove_nested_worktrees(record, registry_root, stack, options=options)
+            absent: list[Path] = []
+            nested_removed = _remove_nested_worktrees(
+                record, registry_root, stack, options=options, absent=absent
+            )
+            _refuse_if_registry_appeared(absent, record, nested_removed)
             # Nested Registry locks are still held: recheck immediately before the
             # delete that would take those Registries with it.
             block = wm._owner_run_block_reason(registry_root, record) or (

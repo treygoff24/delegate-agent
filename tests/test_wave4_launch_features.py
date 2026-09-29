@@ -317,6 +317,60 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 )
             )
 
+    def test_explicit_include_dirty_names_the_synced_count_and_paths(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            repo_path = Path(repo.name)
+            (repo_path / "tracked.txt").write_text("clean\n", encoding="utf-8")
+            git(repo.name, "add", "tracked.txt")
+            git(repo.name, "commit", "-m", "base")
+            (repo_path / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+            (repo_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+            agent = self.write_executable(
+                "agent",
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- explicit include-dirty fake\"}\\n'\n"
+                "exit 0\n",
+            )
+            config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            config_path = self.write_config(config)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "--include-dirty",
+                        "hello",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0, stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["includeDirty"])
+            self.assertIn(
+                "dirty_source_included: synced 1 tracked-modified and 1 untracked file(s).",
+                payload["warnings"],
+            )
+            paths = [w for w in payload["warnings"] if w.startswith("dirty_source_included_paths:")]
+            self.assertEqual(len(paths), 1, payload["warnings"])
+            self.assertIn("'tracked.txt'", paths[0])
+            self.assertIn("'untracked.txt'", paths[0])
+            self.assertFalse(
+                any(w.startswith("dirty_source_auto_included") for w in payload["warnings"])
+            )
+
     def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _git_cd = self._make_git_repo_with_commit()

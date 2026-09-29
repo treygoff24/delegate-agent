@@ -473,7 +473,9 @@ class NestedRegistryTests(EffectiveDirtTestBase):
             self.assertIn("--kill-live", skipped["hint"])
             self.assertIn("could not be read", skipped["hint"])
 
-    def test_kill_live_overrides_an_unreadable_nested_registry(self):
+    def test_kill_live_does_not_override_an_unreadable_nested_registry(self):
+        # --kill-live overrides a live run, not an unknown: an unreadable nested
+        # Registry may list worktrees that deleting the parent would orphan.
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
             _run_id, wt_path = self._tree_with_child_run(
@@ -481,15 +483,17 @@ class NestedRegistryTests(EffectiveDirtTestBase):
             )
             self._corrupt_nested_index(wt_path)
 
-            result = worktree_remove_api.remove_worktree(
-                self._registry_root(path),
-                handle="cursor-parent",
-                keep_branch=True,
-                kill_live=True,
-            )
+            with self.assertRaises(worktree_mgmt.WorktreeManagementError) as caught:
+                worktree_remove_api.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-parent",
+                    keep_branch=True,
+                    kill_live=True,
+                )
 
-            self.assertTrue(result["pathRemoved"], result)
-            self.assertFalse(Path(wt_path).exists())
+            self.assertEqual(caught.exception.payload["code"], "nested_registry_unreadable")
+            self.assertIn("move aside", caught.exception.payload["message"])
+            self.assertTrue(Path(wt_path).exists())
 
     def test_a_worktree_with_no_nested_registry_is_unaffected(self):
         _repo, path = self._make_repo()
