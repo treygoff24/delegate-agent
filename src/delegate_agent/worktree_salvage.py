@@ -6,7 +6,12 @@ because the harness rewrites those files on its own and counting them pinned
 every worktree. The discount cannot tell that churn from a real edit, so no
 removal is allowed to be silent about them: the changed files are copied to
 ``<registry>/salvage/<worktree>-<timestamp>/<relative path>`` first, the copy is
-compared byte for byte, and a copy that fails refuses the removal.
+compared byte for byte, and a copy that fails refuses the removal. A deleted or
+renamed ledger file has nothing (or not everything) left to copy, so every
+discounted change, deletions and rename sources included, is also written to a
+``MANIFEST.tsv`` in the same directory and read back before anything is
+removed. A worktree whose status Git cannot report refuses the removal too:
+an unreadable status is not "no ledger changes".
 
 Nothing in Delegate reads or deletes a salvage directory; retention and
 ``worktree prune`` only ever remove run directories and worktrees.
@@ -31,6 +36,7 @@ from delegate_agent.private_io import ensure_private_dir
 from delegate_agent.worktree_records import SYNCED_FILE_DIGESTS_KEY
 
 SALVAGE_DIR_NAME = "salvage"
+MANIFEST_NAME = "MANIFEST.tsv"
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,9 @@ class LedgerSalvage:
 
     path: str
     files: tuple[str, ...]
+    # Ledger paths the worktree deleted or renamed away: recorded in the
+    # manifest, with no bytes to copy.
+    removed: tuple[str, ...] = ()
 
 
 def _status_entries(execution_cwd: str) -> list[tuple[str, list[str]]] | None:
@@ -68,37 +77,59 @@ def _status_entries(execution_cwd: str) -> list[tuple[str, list[str]]] | None:
     return entries
 
 
-def ledger_changes(
+def ledger_entries(
     execution_cwd: str,
     creation_context: JsonObject | None,
     ignore_globs: tuple[str, ...],
-) -> list[str]:
-    """Relative paths of changed files that only the ledger globs keep from counting as dirt.
+) -> list[tuple[str, list[str]]]:
+    """``(status, [path, old path?])`` for each change only the ledger globs discount.
 
-    Launch-seeded files that still match their launch digest are not listed:
-    the source checkout holds identical bytes. Deleted files have nothing left
-    to copy (their content is in ``HEAD``) and are not listed either.
+    Launch-seeded files that still match their launch digest are left out: the
+    source checkout holds identical bytes. Raises ``OSError`` when Git cannot
+    report the worktree's status, because the caller is about to remove it.
     """
 
     if not ignore_globs:
         return []
     entries = _status_entries(execution_cwd)
     if entries is None:
-        return []
+        raise OSError("git status could not read the worktree")
     creation = creation_context if isinstance(creation_context, dict) else {}
     digests = creation.get(SYNCED_FILE_DIGESTS_KEY)
     seeded = digests if isinstance(digests, dict) else {}
-    root = Path(execution_cwd)
-    changed: list[str] = []
-    for _status, paths in entries:
+    kept: list[tuple[str, list[str]]] = []
+    for status, paths in entries:
         if not worktree_summary.matches_ignore_globs(paths, ignore_globs):
             continue
         if worktree_summary.is_seeded_unchanged(paths, execution_cwd=execution_cwd, seeded=seeded):
             continue
-        relative = paths[0]
-        if os.path.lexists(root / relative):
-            changed.append(relative)
-    return changed
+        kept.append((status, paths))
+    return kept
+
+
+def ledger_changes(
+    execution_cwd: str,
+    creation_context: JsonObject | None,
+    ignore_globs: tuple[str, ...],
+) -> list[str]:
+    """Relative paths of discounted ledger files that still exist to be copied."""
+
+    root = Path(execution_cwd)
+    return [
+        paths[0]
+        for _status, paths in ledger_entries(execution_cwd, creation_context, ignore_globs)
+        if os.path.lexists(root / paths[0])
+    ]
+
+
+def _manifest_text(entries: list[tuple[str, list[str]]]) -> str:
+    """One line per discounted change: status, path, and the old path of a rename."""
+
+    lines = ["status\tpath\tfrom"]
+    for status, paths in entries:
+        old = paths[1] if len(paths) > 1 else ""
+        lines.append(f"{status.strip() or status}\t{paths[0]}\t{old}")
+    return "\n".join(lines) + "\n"
 
 
 def _fail(name: str, detail: str) -> wm.WorktreeManagementError:
@@ -153,23 +184,41 @@ def salvage_ledger_changes(
     (``ledger_salvage_failed``) when any file cannot be saved and verified.
     """
 
-    changed = ledger_changes(execution_cwd, creation_context, ignore_globs)
-    if not changed:
-        return None
     root = Path(execution_cwd)
     name = root.name
+    try:
+        entries = ledger_entries(execution_cwd, creation_context, ignore_globs)
+    except OSError as exc:
+        raise _fail(name, str(exc)) from exc
+    if not entries:
+        return None
+    changed: list[str] = []
+    removed: list[str] = []
+    for _status, paths in entries:
+        if os.path.lexists(root / paths[0]):
+            changed.append(paths[0])
+        else:
+            removed.append(paths[0])
+        # A rename's source is gone from the worktree either way.
+        removed.extend(paths[1:])
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     directory: Path | None = None
     try:
         base = registry_root() if callable(registry_root) else registry_root
         directory = _unique_directory(base / SALVAGE_DIR_NAME, f"{name}-{stamp}")
-        for relative in changed:
+        for relative in [*changed, *removed]:
             parts = PurePosixPath(relative).parts
             if PurePosixPath(relative).is_absolute() or ".." in parts:
                 raise OSError(f"unsafe path {relative!r}")
+        for relative in changed:
             _copy_one(root / relative, directory / relative)
+        manifest = directory / MANIFEST_NAME
+        expected = _manifest_text(entries)
+        manifest.write_text(expected, encoding="utf-8")
+        if manifest.read_text(encoding="utf-8") != expected:
+            raise OSError("salvage manifest does not read back")
     except (OSError, shutil.Error, DelegateError) as exc:
         if directory is not None:
             shutil.rmtree(directory, ignore_errors=True)
         raise _fail(name, str(exc)) from exc
-    return LedgerSalvage(str(directory), tuple(changed))
+    return LedgerSalvage(str(directory), tuple(changed), tuple(removed))

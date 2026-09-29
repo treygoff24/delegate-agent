@@ -92,6 +92,65 @@ class RemoveSalvageTests(SalvageTestBase):
             self.assertEqual(saved.read_bytes(), edited)
             self.assertEqual(payload["salvagedPaths"], [".beads/issues.jsonl"])
 
+    def _manifest_rows(self, salvage: Path) -> list[list[str]]:
+        lines = (salvage / worktree_salvage.MANIFEST_NAME).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "status\tpath\tfrom")
+        return [line.split("\t") for line in lines[1:]]
+
+    def test_a_deleted_tracked_ledger_file_is_recorded_in_the_manifest(self):
+        _repo, path = self._make_repo()
+        self._commit_ledger(path, ".beads/issues.jsonl", "committed\n")
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._worktree(path, fake_home, "cursor-deleted")
+            (Path(wt_path) / ".beads" / "issues.jsonl").unlink()
+
+            code, out, _err = self._remove_cli(path, fake_home, "cursor-deleted")
+
+            self.assertEqual(code, 0, out)
+            payload = json.loads(out)
+            self.assertFalse(Path(wt_path).exists())
+            salvage = Path(payload["salvagePath"])
+            self.assertEqual(payload["salvagedPaths"], [])
+            self.assertEqual(payload["salvageRemovedPaths"], [".beads/issues.jsonl"])
+            self.assertEqual(self._manifest_rows(salvage), [["D", ".beads/issues.jsonl", ""]])
+
+    def test_a_renamed_ledger_file_keeps_its_new_bytes_and_records_its_old_name(self):
+        _repo, path = self._make_repo()
+        self._commit_ledger(path, ".beads/old.jsonl", "committed\n")
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._worktree(path, fake_home, "cursor-renamed")
+            git("mv", ".beads/old.jsonl", ".beads/new.jsonl", cwd=wt_path)
+
+            code, out, _err = self._remove_cli(path, fake_home, "cursor-renamed")
+
+            self.assertEqual(code, 0, out)
+            payload = json.loads(out)
+            salvage = Path(payload["salvagePath"])
+            self.assertEqual(payload["salvagedPaths"], [".beads/new.jsonl"])
+            self.assertEqual(payload["salvageRemovedPaths"], [".beads/old.jsonl"])
+            self.assertEqual((salvage / ".beads" / "new.jsonl").read_bytes(), b"committed\n")
+            self.assertEqual(
+                self._manifest_rows(salvage), [["R", ".beads/new.jsonl", ".beads/old.jsonl"]]
+            )
+
+    def test_an_unreadable_status_refuses_the_removal(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._seeded_tree(path, fake_home, "cursor-blind")
+
+            # The dirt check already passed; the salvage's own status read fails.
+            with (
+                mock.patch.object(worktree_salvage, "_status_entries", return_value=None),
+                self.assertRaises(worktree_salvage.wm.WorktreeManagementError) as raised,
+            ):
+                worktree_remove_api.remove_worktree(
+                    self._registry_root(path), handle="cursor-blind", keep_branch=True
+                )
+
+            self.assertEqual(raised.exception.code, "ledger_salvage_failed")
+            self.assertIn("git status", str(raised.exception))
+            self.assertTrue(Path(wt_path).exists())
+
     def test_text_output_says_where_the_files_went(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -138,18 +197,25 @@ class RemoveSalvageTests(SalvageTestBase):
             self.assertEqual(code, 0, out)
             self.assertEqual(json.loads(out)["salvagedPaths"], [".beads/issues.jsonl"])
 
-    def test_a_deleted_ledger_file_has_nothing_to_copy_and_does_not_block(self):
+    def test_a_deleted_ledger_file_does_not_block_and_its_deletion_is_recorded(self):
+        # Nothing is left to copy, but the deletion itself was the user's change:
+        # it goes in the manifest rather than vanishing with the worktree.
         _repo, path = self._make_repo()
         self._commit_ledger(path, ".papercuts.jsonl", "old cut\n")
         with tempfile.TemporaryDirectory() as fake_home:
-            _run_id, wt_path = self._worktree(path, fake_home, "cursor-deleted")
+            _run_id, wt_path = self._worktree(path, fake_home, "cursor-deleted-cut")
             (Path(wt_path) / ".papercuts.jsonl").unlink()
 
-            code, out, _err = self._remove_cli(path, fake_home, "cursor-deleted")
+            code, out, _err = self._remove_cli(path, fake_home, "cursor-deleted-cut")
 
             self.assertEqual(code, 0, out)
-            self.assertNotIn("salvagePath", json.loads(out))
+            payload = json.loads(out)
             self.assertFalse(Path(wt_path).exists())
+            self.assertEqual(payload["salvageRemovedPaths"], [".papercuts.jsonl"])
+            self.assertEqual(
+                self._manifest_rows(Path(payload["salvagePath"])),
+                [["D", ".papercuts.jsonl", ""]],
+            )
 
     def test_discard_uncommitted_still_saves_the_ledger_and_discards_real_work(self):
         _repo, path = self._make_repo()
@@ -222,7 +288,7 @@ class RemoveSalvageTests(SalvageTestBase):
 
             with (
                 mock.patch.object(
-                    worktree_salvage, "ledger_changes", return_value=["../../outside.txt"]
+                    worktree_salvage, "ledger_entries", return_value=[("??", ["../../outside.txt"])]
                 ),
                 self.assertRaises(worktree_salvage.wm.WorktreeManagementError) as raised,
             ):

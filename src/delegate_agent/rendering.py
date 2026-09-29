@@ -582,7 +582,10 @@ def _print_salvage(item: object, stdout: TextIO, *, indent: str = "") -> None:
         return
     files = item.get("salvagedPaths")
     count = len(files) if isinstance(files, list) else 0
-    print(f"{indent}saved {count} changed ledger file(s) to {path}", file=stdout)
+    removed = item.get("salvageRemovedPaths")
+    gone = len(removed) if isinstance(removed, list) else 0
+    also = f"; {gone} deleted or renamed one(s) listed in its MANIFEST.tsv" if gone else ""
+    print(f"{indent}saved {count} changed ledger file(s) to {path}{also}", file=stdout)
 
 
 def render_worktree_remove_text(payload: JsonObject, stdout: TextIO) -> None:

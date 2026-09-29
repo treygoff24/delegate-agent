@@ -604,10 +604,30 @@ def _reap_block_code(
     return None
 
 
-def _reap_pool_orphans(pool_data_home: Path) -> dict[str, JsonObject]:
+def _pool_warnings_by_path(report: JsonObject) -> dict[str, str]:
+    """Pool warning reasons keyed by canonical path.
+
+    Keyed like the orphans and the candidates: the pool may be reached through
+    an alias (macOS /tmp or /var), and a warning that missed its candidate would
+    let an unsettled or unverifiable entry through.
+    """
+
+    return {
+        _canonical_path_text(str(item.get("path"))): str(item.get("reason"))
+        for item in report.get("warnings", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("reason"), str)
+    }
+
+
+def _reap_pool_orphans(
+    pool_data_home: Path, report: JsonObject | None = None
+) -> dict[str, JsonObject]:
     """Return settled, source-gone pool entries keyed by canonical path."""
 
-    report = scan_worktree_pool(pool_data_home, required=True)
+    if report is None:
+        report = scan_worktree_pool(pool_data_home, required=True)
     result: dict[str, JsonObject] = {}
     for item in report.get("orphans", []):
         if not isinstance(item, dict):
@@ -691,17 +711,8 @@ def reap_worktrees(
 
     pool = Path(pool_data_home).expanduser()
     pool_report = scan_worktree_pool(pool, required=True)
-    orphan_by_path = _reap_pool_orphans(pool)
-    # Keyed by canonical path, like ``orphan_by_path`` and the candidates: the pool
-    # may be reached through an alias (macOS /tmp or /var), and a warning that
-    # missed its candidate would let an unsettled or unverifiable entry through.
-    pool_warnings_by_path = {
-        _canonical_path_text(str(item.get("path"))): str(item.get("reason"))
-        for item in pool_report.get("warnings", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("path"), str)
-        and isinstance(item.get("reason"), str)
-    }
+    orphan_by_path = _reap_pool_orphans(pool, pool_report)
+    pool_warnings_by_path = _pool_warnings_by_path(pool_report)
     records = load_persistent_records(registry_root) if registry_root is not None else []
     selector_name, selector_value = selected[0]
 
@@ -901,7 +912,11 @@ def reap_worktrees(
                 else contextlib.nullcontext()
             )
             with registry_context:
-                fresh_orphans = _reap_pool_orphans(pool)
+                # One locked rescan feeds both checks below: a path that became
+                # unsettled or unverifiable since planning must block now.
+                fresh_report = scan_worktree_pool(pool, required=True)
+                fresh_orphans = _reap_pool_orphans(pool, fresh_report)
+                fresh_warnings_by_path = _pool_warnings_by_path(fresh_report)
                 for entry in planned:
                     target = Path(str(entry["worktreePath"]))
                     fresh_target, path_error = _reap_pool_path(pool, str(target))
@@ -957,7 +972,7 @@ def reap_worktrees(
                             fresh_linked = _check_linked_orphan(
                                 target,
                                 registry_root=registry_root,
-                                pool_warning=pool_warnings_by_path.get(str(target)),
+                                pool_warning=fresh_warnings_by_path.get(str(target)),
                                 force=force,
                                 kill_live=kill_live,
                                 discard_uncommitted=discard_uncommitted,
@@ -1012,6 +1027,8 @@ def reap_worktrees(
                     if salvage is not None:
                         entry["salvagePath"] = salvage.path
                         entry["salvagedPaths"] = list(salvage.files)
+                        if salvage.removed:
+                            entry["salvageRemovedPaths"] = list(salvage.removed)
                     if record is not None and registry_root is not None:
                         run_registry.set_worktree_status_locked(
                             registry_root,

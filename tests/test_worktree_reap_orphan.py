@@ -352,6 +352,36 @@ class ReapLinkedOrphanTests(WorktreeMgmtTestBase):
             self.assertEqual(skipped["reason"], "worktree_unsettled")
             self.assertTrue(worktree.exists())
 
+    def test_a_pool_warning_that_appears_after_planning_stops_the_removal(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_entry(path, pool, "orphan-late-warning")
+            real_scan = worktree_gc_api.scan_worktree_pool
+            calls = []
+
+            def scan(pool_home, *args, **kwargs):
+                report = real_scan(pool_home, *args, **kwargs)
+                calls.append(report)
+                if len(calls) > 1:
+                    # The entry became unverifiable between planning and removal.
+                    report = {
+                        **report,
+                        "warnings": [
+                            *report.get("warnings", []),
+                            {"path": str(worktree), "reason": "worktree_unsettled"},
+                        ],
+                    }
+                return report
+
+            with mock.patch.object(worktree_gc_api, "scan_worktree_pool", side_effect=scan):
+                result = self._reap(pool, worktree, force=True)
+
+            self.assertGreaterEqual(len(calls), 2, "the destructive pass must rescan the pool")
+            self.assertEqual(result["reaped"], [])
+            self.assertEqual([error["code"] for error in result["errors"]], ["worktree_unsettled"])
+            self.assertTrue(worktree.exists())
+
     def test_a_pool_scan_warning_still_applies_when_the_pool_is_reached_by_an_alias(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,8 +570,16 @@ class ProcessCwdScanTests(unittest.TestCase):
         self.assertFalse(scan.checked, scan)
         self.assertIn("boom", scan.note)
 
+    def test_lsof_exit_one_that_finds_no_holder_is_not_a_clean_answer(self):
+        # A complete scan with no search items exits 0; exit 1 means lsof hit an
+        # error partway, so a missing holder may simply be missing from the rows.
+        scan = self._lsof(1, "p11\ncsh\nfcwd\nn/other\n", "lsof: WARNING: can't stat")
+        self.assertFalse(scan.checked, scan)
+        self.assertIn("incomplete", scan.note)
+        self.assertEqual(scan.holders, ())
+
     def test_lsof_partial_answer_with_exit_one_still_counts_and_finds_holders(self):
-        # Exit 1 is lsof's "some processes were unreadable"; the rest is printed.
+        # A holder lsof did print still blocks, whatever else it missed.
         scan = self._lsof(1, "p10\ncbash\nfcwd\nn/nonexistent/wt/deep\np11\ncsh\nfcwd\nn/other\n")
         self.assertTrue(scan.checked, scan)
         self.assertEqual([(h.pid, h.command) for h in scan.holders], [(10, "bash")])

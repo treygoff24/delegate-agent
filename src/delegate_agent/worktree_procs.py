@@ -126,8 +126,7 @@ def _scan_lsof(target: str) -> ProcessCwdScan:
         return ProcessCwdScan(checked=False, note="lsof is not installed")
     except (OSError, subprocess.SubprocessError) as exc:
         return ProcessCwdScan(checked=False, note=f"lsof failed: {exc}")
-    # lsof exits 1 when some processes are unreadable but still prints the rest;
-    # an empty answer, or an exit code it uses for real failures, means it
+    # An empty answer, or an exit code lsof uses for real failures, means it
     # produced nothing to trust.
     if result.returncode not in (0, 1) or not result.stdout.strip():
         detail = result.stderr.strip() or f"exit {result.returncode}"
@@ -137,6 +136,13 @@ def _scan_lsof(target: str) -> ProcessCwdScan:
         for pid, command, cwd in _parse_lsof_cwds(result.stdout)
         if _is_inside(cwd, target)
     ]
+    # With no search items, a complete scan exits 0 (checked on macOS 27 with
+    # other users' and root's processes present). Exit 1 means lsof hit an
+    # error partway, so the printed rows may omit a process working in the
+    # path: holders it did find still count, but finding none proves nothing.
+    if result.returncode == 1 and not holders:
+        detail = result.stderr.strip() or "exit 1"
+        return ProcessCwdScan(checked=False, note=f"lsof scan was incomplete ({detail})")
     return ProcessCwdScan(tuple(holders), True, None)
 
 
