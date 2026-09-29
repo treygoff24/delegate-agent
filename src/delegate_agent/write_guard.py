@@ -419,19 +419,31 @@ def _looks_like_engine_home(directory: str) -> bool:
     return all(os.path.lexists(os.path.join(directory, name)) for name in _HOME_IDENTITY_PAIR)
 
 
-def other_profile_home_within(directory: str) -> str | None:
-    """A directory below ``directory`` that looks like another engine or profile home.
+@dataclass(frozen=True)
+class NestedHomeScan:
+    """What a bounded scan below an engine-home candidate established."""
 
-    The scan is bounded (depth, directories visited) and does not follow symlinks.
-    It answers whether reopening ``directory`` would also open a sibling profile.
-    When the bound is hit it stops and reports nothing: a huge home must stay usable.
+    found: str | None = None
+    incomplete: str | None = None
+
+
+def scan_for_nested_home(directory: str) -> NestedHomeScan:
+    """Look below ``directory`` for another engine or profile home.
+
+    The scan does not follow symlinks (a write through one lands on its real
+    target, which a reopen by real path does not cover). Directories deeper than
+    ``_HOME_SCAN_DEPTH`` are checked for identity files but not listed. A scan
+    that hits ``_HOME_SCAN_MAX_DIRS`` or cannot list a directory is reported as
+    incomplete, and the caller fails closed: an unproven scope is never reopened.
     """
     pending: list[tuple[str, int]] = [(directory, 0)]
     scanned = 0
     while pending:
         current, depth = pending.pop()
-        if depth >= _HOME_SCAN_DEPTH or scanned >= _HOME_SCAN_MAX_DIRS:
+        if depth >= _HOME_SCAN_DEPTH:
             continue
+        if scanned >= _HOME_SCAN_MAX_DIRS:
+            return NestedHomeScan(incomplete=f"more than {_HOME_SCAN_MAX_DIRS} directories")
         scanned += 1
         try:
             with os.scandir(current) as entries:
@@ -440,32 +452,49 @@ def other_profile_home_within(directory: str) -> str | None:
                     for entry in entries
                     if entry.name not in _HOME_SCAN_SKIP and entry.is_dir(follow_symlinks=False)
                 )
-        except OSError:
-            continue
+        except OSError as exc:
+            return NestedHomeScan(incomplete=f"{current} could not be listed ({exc.strerror})")
         for child in children:
             if _looks_like_engine_home(child):
-                return child
+                return NestedHomeScan(found=child)
             pending.append((child, depth + 1))
-    return None
+    return NestedHomeScan()
+
+
+def other_profile_home_within(directory: str) -> str | None:
+    """A directory below ``directory`` that looks like another engine or profile home."""
+    return scan_for_nested_home(directory).found
 
 
 def home_candidate_problem(real: str, protected: Sequence[str]) -> str | None:
     """Why an engine-home candidate must not reopen protected ground, or None.
 
     A candidate outside every protected path reopens nothing, so it is fine. One
-    inside a protected path is refused when it is that path itself, or when it
-    contains another profile's home (an environment variable naming a parent such
-    as ``~/.ai-profiles/accounts/claude`` would otherwise make every sibling
-    profile writable). A protected path nested inside the candidate stays
-    protected: mounts and rules apply deepest-last.
+    inside a protected path is reopened only when it is provably a single
+    profile: it must itself carry an engine identity file (``.claude.json``,
+    ``.credentials.json``, or Codex's ``auth.json`` with ``config.toml``), and a
+    complete bounded scan below it must find no other profile home. So an
+    environment variable naming a parent such as ``~/.ai-profiles/accounts/claude``
+    (no identity file of its own) is refused even when its children carry no
+    markers, and a scan that could not finish refuses rather than allows. A
+    protected path nested inside the candidate stays protected: mounts and rules
+    apply deepest-last.
     """
     if not any(_is_within(real, path) for path in protected):
         return None
     if real in protected:
         return "is itself a protected path; use writable or --writable to lift it"
-    sibling = other_profile_home_within(real)
-    if sibling is not None:
-        return f"contains another profile home ({sibling})"
+    if not _looks_like_engine_home(real):
+        return (
+            "is not itself a profile home (no .claude.json, .credentials.json, or "
+            "auth.json with config.toml), so it may hold other profiles; name it with "
+            "writable or --writable to open it deliberately"
+        )
+    scan = scan_for_nested_home(real)
+    if scan.found is not None:
+        return f"contains another profile home ({scan.found})"
+    if scan.incomplete is not None:
+        return f"could not be proven to hold no other profile ({scan.incomplete})"
     return None
 
 

@@ -272,7 +272,9 @@ child through run-owned git hooks (`core.hooksPath` set through the single
 variable `GIT_CONFIG_PARAMETERS`, which survives Codex's secret-name env
 filter), and fails the run
 if commits remain ahead of the creation base when the child exits (for
-`--isolation none`, the HEAD recorded at launch). The hooks can be bypassed with
+`--isolation none`, the HEAD recorded at launch) or if the checkout's HEAD
+reflog shows a commit made there since launch and left behind on a side branch
+or reset away. The hooks can be bypassed with
 `git -c core.hooksPath=/dev/null commit` or `git commit-tree`; the post-exit
 check is the backstop. Without the flag, Delegate still reports remaining child
 commits in the work summary, emits a warning plus suggested review commands,

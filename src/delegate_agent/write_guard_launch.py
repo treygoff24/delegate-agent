@@ -23,6 +23,8 @@ from delegate_agent.json_types import JsonObject
 from delegate_agent.write_guard import GuardFacts, Reopen, WriteGuardSettings
 
 STATUS_ENFORCED = "enforced"
+# Guarded, but at least one protected path could not be bound and is open this run.
+STATUS_PARTIAL = "partial"
 STATUS_UNAVAILABLE = write_guard.STATUS_UNAVAILABLE
 STATUS_OFF = write_guard.STATUS_OFF
 STATUS_PLANNED = "planned"
@@ -96,8 +98,13 @@ def _unbound_warning(unbound: Sequence[tuple[str, str, str]]) -> str:
         f"{path} ({'left unprotected' if mode == 'ro' else 'not reopened'}: {reason})"
         for mode, path, reason in unbound
     )
+    lead = (
+        "work write guard is PARTIAL: "
+        if any(mode == "ro" for mode, _path, _reason in unbound)
+        else "work write guard "
+    )
     return (
-        f"work write guard could not bind {detail}. Every other protected path is still "
+        f"{lead}could not bind {detail}. Every other protected path is still "
         'guarded. Set isolation.writeGuard.onUnavailable to "refuse" to stop a run instead.'
     )
 
@@ -228,7 +235,10 @@ def _apply_bwrap(
         except DelegateError as again:
             return _fallback(settings, again.message, argv, backend="bwrap")
     record = plan.payload()
-    record["status"] = STATUS_ENFORCED
+    # A protected path left unbound means the run is not what "enforced" promises.
+    record["status"] = (
+        STATUS_PARTIAL if any(mode == "ro" for mode, _p, _r in unbound) else STATUS_ENFORCED
+    )
     warnings = [message for message in (_refusal_warning(plan),) if message]
     if unbound:
         _record_unbound(record, unbound)
