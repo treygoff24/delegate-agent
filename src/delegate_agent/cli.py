@@ -1145,6 +1145,14 @@ def execute_request(
                     structured_output=request.output_schema is not None,
                     sensitive_texts=tuple(sensitive_texts),
                     process_group_grace_seconds=request.process_group_termination_grace_sec,
+                    # The same identity a tracked run's context carries, so a
+                    # pinned call is refused on a swap and a fungible one warns.
+                    call_model=delegate_runner.CallModelIdentity(
+                        compared=request.model,
+                        label=request.model_requested or request.model_alias or request.model,
+                        display_name=request.model_display_name,
+                        continuity_mode=request.continuity_mode,
+                    ),
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
@@ -1229,11 +1237,12 @@ def execute_request(
                     request.continuity_mode == "pinned"
                     and result.error is None
                     and result.exit_code == 0
-                    and not (request.engine == "claude" and result.model_resolved)
+                    and result.served_model is None
                 ):
                     # An ungrouped call never builds a run record, so the
-                    # tracked-path warning does not reach it; only Claude's call
-                    # result carries a served model.
+                    # tracked-path warning does not reach it. A call whose stream
+                    # named a served model (Claude's resolved model, omp's
+                    # provider/model) was checked, so only silence warrants it.
                     from delegate_agent import runner as delegate_runner
 
                     payload.setdefault("warnings", []).append(

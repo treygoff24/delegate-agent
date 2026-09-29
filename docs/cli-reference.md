@@ -116,8 +116,11 @@ tried to serve fireworks/glm-5p3`). The check depends on the harness reporting a
 pinned run that completes with `modelProvenance.servedModelSource:
 "unavailable"` carries a `pinned_continuity_unverified` warning naming the
 harness, because nothing was observed to check; an ungrouped `call` carries
-the same warning on its payload. Codex and Grok streams carry no model field
-today. Fungible (the default) and panel runs never pause on a switch; when the
+the same warning on its payload when its stream named no model. Codex and Grok
+streams carry no model field today. An ungrouped `call` is held to the same
+rule as a tracked run: a pinned call whose stream reports another model or
+provider fails with `model_continuity_paused`, and a fungible or panel call
+carries the `model_substitution` warning on its payload. Fungible (the default) and panel runs never pause on a switch; when the
 harness reports a served model that differs from the resolved one, the record
 carries a `model_substitution` warning naming requested, resolved, and served
 models (`provider/model` for OMP), so a substituted lane is not read as the

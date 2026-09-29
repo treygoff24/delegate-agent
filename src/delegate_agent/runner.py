@@ -413,14 +413,14 @@ def pinned_continuity_unverified_warning(ctx: RunContext) -> str:
 MODEL_SUBSTITUTION_WARNING_PREFIX = "model_substitution"
 
 
-def _served_identity(ctx: RunContext, accumulator: harness_events.StreamAccumulator) -> str:
+def _served_identity(harness: str, accumulator: harness_events.StreamAccumulator) -> str:
     """The served model as the harness names it, provider included for omp.
 
     omp reports provider and model as separate fields, and a cross-provider swap
     can keep the model id, so the bare id alone cannot say what served the run.
     """
     served = accumulator.served_model or ""
-    if ctx.harness == "omp" and accumulator.served_model_provider:
+    if harness == "omp" and accumulator.served_model_provider:
         return f"{accumulator.served_model_provider}/{served}"
     return served
 
@@ -444,26 +444,51 @@ def model_substitution_warning(
     completion report, and the doctor payload, all of which promise to scrub
     credential-shaped material.
     """
-    if ctx.continuity_mode not in ("fungible", "panel"):
+    resolved = ctx.model_resolved or ctx.model
+    return model_substitution_text(
+        ctx.harness,
+        ctx.continuity_mode,
+        accumulator,
+        requested=_requested_model(ctx) or resolved,
+        resolved=resolved,
+        display_name=ctx.model_display_name,
+    )
+
+
+def model_substitution_text(
+    harness: str,
+    continuity_mode: str,
+    accumulator: harness_events.StreamAccumulator | None,
+    *,
+    requested: str | None,
+    resolved: str | None,
+    display_name: str | None = None,
+) -> str | None:
+    """`model_substitution_warning` without a run context.
+
+    A one-shot call has no run context but the same question to ask of its
+    stream: `requested` is what the caller typed, `resolved` is the identity the
+    served model is compared against.
+    """
+    if continuity_mode not in ("fungible", "panel"):
         return None
     served = accumulator.served_model if accumulator is not None else None
-    resolved = ctx.model_resolved or ctx.model
-    if not served or not resolved:
+    if accumulator is None or not served or not resolved:
         return None
     if harness_events.served_model_matches_requested(
-        ctx.harness,
+        harness,
         resolved,
         served,
-        display_name=accumulator.requested_model_display_name or ctx.model_display_name,
+        display_name=accumulator.requested_model_display_name or display_name,
         served_provider=accumulator.served_model_provider,
     ):
         return None
-    requested = redaction.redact_string(_requested_model(ctx) or resolved)
+    label = redaction.redact_string(requested or resolved)
     return (
         f"{MODEL_SUBSTITUTION_WARNING_PREFIX}: requested "
-        f"{requested} resolved to {redaction.redact_string(resolved)} but the harness served "
-        f"{redaction.redact_string(_served_identity(ctx, accumulator))} under "
-        f"{ctx.continuity_mode} continuity; this run's output is not the requested model's"
+        f"{label} resolved to {redaction.redact_string(resolved)} but the harness served "
+        f"{redaction.redact_string(_served_identity(harness, accumulator))} under "
+        f"{continuity_mode} continuity; this run's output is not the requested model's"
     )
 
 
@@ -636,22 +661,28 @@ def _continuity_served_label(violation: JsonObject | None) -> str | None:
     return redaction.redact_string(label)
 
 
-def _pinned_violation_message(ctx: RunContext, violation: JsonObject | None) -> str:
+def pinned_violation_text(harness: str, requested: str | None, violation: JsonObject | None) -> str:
     """The failure message for a pinned run whose served model diverged.
 
     The run failed because the harness (omp's retry chain, for one) moved to a
     model other than the pinned one; the message names both so an operator can
     tell a substituted provider from a dropped run without opening the record.
+    Tracked runs and one-shot calls share this text, and the
+    `model_continuity_paused` error code that carries it.
     """
     served = _continuity_served_label(violation)
     if served is None:
         return "Pinned model continuity was interrupted; the run paused with a checkpoint."
-    requested = redaction.redact_string(_requested_model(ctx)) or "the requested model"
+    label = (redaction.redact_string(requested) if requested else "") or "the requested model"
     return (
-        f"Pinned model continuity refused a substitution: requested {requested}, but "
-        f"{ctx.harness} tried to serve {served}. The run was stopped and its output is not "
+        f"Pinned model continuity refused a substitution: requested {label}, but "
+        f"{harness} tried to serve {served}. The run was stopped and its output is not "
         "the requested model's. Rerun with --continuity-mode fungible to allow failover."
     )
+
+
+def _pinned_violation_message(ctx: RunContext, violation: JsonObject | None) -> str:
+    return pinned_violation_text(ctx.harness, _requested_model(ctx), violation)
 
 
 def _pinned_pause_notice(
@@ -1940,6 +1971,23 @@ class CallResult:
     # attempt's own, the only stderr that may classify the outcome. None means
     # the call had one attempt, so stderr_tail is already the final one.
     final_attempt_stderr_tail: str | None = None
+
+
+@dataclass(frozen=True)
+class CallModelIdentity:
+    """What a one-shot call asked for, so its stream can be checked against it.
+
+    A tracked run carries this on its run context; an ungrouped call has none, so
+    the caller hands it in. `compared` is the identity the served model is held
+    to (the resolved model), `label` is what the caller typed and what messages
+    name, and `continuity_mode` decides between refusing a swap (`pinned`) and
+    reporting it (`fungible`, `panel`).
+    """
+
+    compared: str | None = None
+    label: str | None = None
+    display_name: str | None = None
+    continuity_mode: str = "fungible"
 
 
 @dataclass(frozen=True)
@@ -5503,6 +5551,7 @@ def _execute_call_once(
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    call_model: CallModelIdentity | None = None,
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -5645,7 +5694,13 @@ def _execute_call_once(
                 else RESULT_QUALITY_OK
             ),
         )
-    accumulator = harness_events.StreamAccumulator(harness=harness)
+    identity = call_model or CallModelIdentity()
+    accumulator = harness_events.StreamAccumulator(
+        harness=harness,
+        requested_model=identity.compared,
+        requested_model_display_name=identity.display_name,
+        continuity_mode=identity.continuity_mode,
+    )
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
     accumulator.finish_stream()
@@ -5689,6 +5744,24 @@ def _execute_call_once(
     )
     if error == "child_failed" and (failure := _unclassified_provider_failure(accumulator)):
         error, message = failure.code, failure.message
+    if accumulator.continuity_violation is not None:
+        # A pinned call is refused the way a pinned tracked run is: the child may
+        # have exited 0, but its stream said another model or provider answered,
+        # so the output is not the one asked for. The pause is a failed terminal
+        # in the accumulator, which is what makes the exit code nonzero above.
+        error = "model_continuity_paused"
+        message = pinned_violation_text(harness, identity.label, accumulator.continuity_violation)
+    elif (
+        substitution := model_substitution_text(
+            harness,
+            identity.continuity_mode,
+            accumulator,
+            requested=identity.label,
+            resolved=identity.compared,
+            display_name=identity.display_name,
+        )
+    ) is not None:
+        warnings = (*warnings, substitution)
     if stdout_capture is not None:
         warning = stream_capture.capture_warning(stdout_capture)
         if warning is not None:
@@ -5764,6 +5837,7 @@ def execute_call(
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
     process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+    call_model: CallModelIdentity | None = None,
 ) -> CallResult:
     deadline = None if timeout is None else time.monotonic() + timeout
 
@@ -5790,6 +5864,7 @@ def execute_call(
             structured_output=structured_output,
             sensitive_texts=sensitive_texts,
             process_group_grace_seconds=process_group_grace_seconds,
+            call_model=call_model,
         )
 
     result = call_once(argv)
