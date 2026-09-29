@@ -4085,7 +4085,9 @@ def _build_request_for_workspace(
         # Only a selector the caller typed on a fresh CLI launch and no alias
         # table rewrote: a configured alias target is the operator's own (Bedrock
         # ARNs, gateways), and a followup/resume replays the source run's model.
-        unknown_claude_model = model_discovery.claude_unknown_model_error(parts.model, discovery)
+        unknown_claude_model = model_discovery.claude_unknown_model_error(
+            parts.model, discovery, {**os.environ, **(parts.env_overrides or {})}
+        )
         if unknown_claude_model is not None:
             raise unknown_claude_model
     catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)

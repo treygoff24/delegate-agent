@@ -126,15 +126,19 @@ config. Workspace `.delegate/config.json` is reported but remains unapplied
 unless selected explicitly through `DELEGATE_CONFIG`.
 
 `claude` raises `invalid_alias` before launch (dry runs included) for a typed
-`--model` that is not a Claude alias (`opus`, `sonnet`, `haiku`, `fable`, `best`,
-`opusplan`, `default`, optionally with a `[1m]` suffix), not a catalog id, and
-not a `claude-...` id. `Unknown Claude model 'opus-5.5'` names the closest
-choice (`opus (claude-opus-5-5)`) and the valid values. A `claude-...` id the
-catalog does not list still launches with a catalog warning, because new models
-ship before the catalog. A target of a configured `claude.models` alias is never
-refused, and neither is a followup or resume. The check applies to `claude`
-subcommand launches and `run --input-json`; a bare `claude-` or an empty `[]`
-suffix is refused, and bracket suffix shapes are not otherwise validated.
+`--model` that looks like a mistyped alias: a family word followed by a version,
+such as `opus-5.5`, `Sonnet 5`, or `claude_opus_5`. `Unknown Claude model
+'opus-5.5'` names the closest choice (`opus (claude-opus-5-5)`) and the valid
+values. A bare `claude-` or an empty `[]` suffix is refused too. Everything else
+launches: Claude aliases, catalog ids, any `claude-...` id (new models ship
+before the catalog), and provider names such as Bedrock ARNs, Foundry deployment
+names, and gateway strings; a name missing from a discovered catalog gets a
+catalog warning. The version-typo refusal is skipped entirely when
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
+or `ANTHROPIC_BASE_URL` is set in the launching environment. A target of a
+configured `claude.models` alias is never refused, and neither is a followup or
+resume. The check applies to `claude` subcommand launches and
+`run --input-json`.
 
 `harness_disabled` means `<engine>.enabled` is `false` in the active
 config: the harness is hidden from `models`, `describe`, and `capabilities`, and
