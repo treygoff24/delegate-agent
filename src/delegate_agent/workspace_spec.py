@@ -229,6 +229,18 @@ def mask_recorded_env_fragments(text: str, env: Mapping[str, str] | None) -> str
             )
     if not grams:
         return text
+    # Masking can bring the halves of a mask-containing value together, so
+    # repeat until a pass changes nothing. Each changing pass replaces a span
+    # of at least SETUP_FRAGMENT_GRAM characters with the shorter mask, so the
+    # text strictly shrinks and the loop terminates.
+    while True:
+        masked = _mask_fragment_grams_once(text, grams)
+        if masked == text:
+            return text
+        text = masked
+
+
+def _mask_fragment_grams_once(text: str, grams: set[str]) -> str:
     covered = [False] * len(text)
     for start in range(len(text) - SETUP_FRAGMENT_GRAM + 1):
         if text[start : start + SETUP_FRAGMENT_GRAM] in grams:

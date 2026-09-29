@@ -903,6 +903,17 @@ class SetupProcessUnitTests(unittest.TestCase):
                     )
                     self.assertEqual(result.output_tail, "prefix *** suffix")
 
+    def test_fragment_masking_does_not_reassemble_a_mask_containing_secret(self):
+        env = {"SECRET": "ZZABCD***EFGHZZ", "FILL": "WWWWWWWWZZ"}
+        text = "ABCDWWWWWWWWEFGH"
+        masked = workspace_spec.mask_recorded_env_fragments(text, env)
+        self.assertEqual(masked, "***")
+        for start in range(len(masked)):
+            for end in range(start + 8, len(masked) + 1):
+                self.assertNotIn(masked[start:end], env["SECRET"])
+        result = self._run_setup(f"printf '%s' {text}", mask_values=env)
+        self.assertEqual(result.output_tail, "***")
+
     def test_a_sigterm_during_the_setup_pgid_clear_is_not_swallowed(self):
         """The clear waits on the registry lock, the launcher's longest window.
 
