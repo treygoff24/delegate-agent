@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `runs` and `ps` show how long a running Run has left: a running Run with a
+  timeout carries `deadlineAt` (recorded by the runner when its timeout clock
+  starts, after workspace setup) and `remainingSeconds`, and the text listing
+  prefixes `current` with `12m left`. Terminal Runs carry neither.
 - **A live Run shows the tool call it is waiting on.** While a tool call is in
   flight, `runs` and `snapshot` carry `pendingTool` (`name`, optional
   `target`, `startedAt`, `seconds`; the oldest pending call, redacted like
@@ -405,6 +409,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- The Claude model-typo refusal is skipped when `CLAUDE_CODE_USE_BEDROCK`,
+  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, or `ANTHROPIC_BASE_URL`
+  comes from `--env` or `--env-file`, not only from the launching
+  environment. The env files are read once per launch, so the check and the
+  child see the same values.
 - A Run's `current` no longer keeps showing a provider error after the
   harness has moved on. Pi and OMP show `retrying after provider error
   (429)` while they retry and then the new activity; a Codex `turn.started`
