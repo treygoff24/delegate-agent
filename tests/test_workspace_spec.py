@@ -914,6 +914,14 @@ class SetupProcessUnitTests(unittest.TestCase):
         result = self._run_setup(f"printf '%s' {text}", mask_values=env)
         self.assertEqual(result.output_tail, "***")
 
+    def test_fragment_output_that_assembles_a_short_secret_is_masked_again(self):
+        env = {"LONG": "ZABCDEFGHZ", "SHORT": "A***B"}
+        text = "AABCDEFGHB"
+        self.assertEqual(workspace_spec.mask_recorded_env(text, env), "***")
+        result = self._run_setup(f"printf '%s' {text}", mask_values=env)
+        self.assertEqual(result.output_tail, "***")
+        self.assertNotIn("A***B", result.output_tail)
+
     def test_record_level_masking_does_not_join_halves_of_a_secret(self):
         # Masking the short value turns the text into an 11-character piece of
         # SECRET; whole-value masking alone would leave it in the record.

@@ -213,13 +213,18 @@ def mask_recorded_env_values(text: str, env: Mapping[str, str] | None) -> str:
 
 
 def mask_recorded_env(text: str, env: Mapping[str, str] | None) -> str:
-    """Whole-value masking, then fragment masking to a fixpoint.
+    """Whole-value then fragment masking, repeated until a round changes nothing.
 
-    Whole-value masking can join the halves of a mask-containing value (a
-    four-character value between them becomes ``***``), so any pass that
-    re-masks already-cut text runs both, in this order.
+    Either pass can assemble a recorded value from its neighbours (fragment
+    masking turns ``AABCDEFGHB`` into ``A***B``, a four-to-seven-character
+    value). Every changing pass replaces at least four characters with three,
+    so the text strictly shrinks and the loop terminates.
     """
-    return mask_recorded_env_fragments(mask_recorded_env_values(text, env), env)
+    while True:
+        masked = mask_recorded_env_fragments(mask_recorded_env_values(text, env), env)
+        if masked == text:
+            return text
+        text = masked
 
 
 def mask_recorded_env_fragments(text: str, env: Mapping[str, str] | None) -> str:
@@ -601,7 +606,7 @@ def run_setup(
     # value and expose its suffix when replacements shrink the window. Then
     # mask fragments from values whose writer wrapped them across lines.
     text = mask_recorded_env_values(data.decode("utf-8", errors="replace"), mask_values)
-    tail = mask_recorded_env_fragments(text[-SETUP_TAIL_CHARS:], mask_values)
+    tail = mask_recorded_env(text[-SETUP_TAIL_CHARS:], mask_values)
     return SetupResult(
         exit_code=exit_code,
         duration_ms=duration_ms,
