@@ -206,6 +206,14 @@ class WorkflowCommandTests(unittest.TestCase):
             "if argv_log:\n"
             "    with open(argv_log, 'a', encoding='utf-8') as f:\n"
             "        f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('FAKE_CODEX_RESUME_ERROR') and 'resume' in sys.argv:\n"
+            "    print(json.dumps({'type': 'error', 'message': os.environ['FAKE_CODEX_RESUME_ERROR']}))\n"
+            "    sys.exit(1)\n"
+            "if os.environ.get('FAKE_CODEX_BREAK_INDEX') and 'resume' not in sys.argv:\n"
+            "    import subprocess\n"
+            "    open('landed.txt', 'w', encoding='utf-8').write('uncommitted work\\n')\n"
+            "    index = subprocess.run(['git', 'rev-parse', '--git-path', 'index'], capture_output=True, text=True).stdout.strip()\n"
+            "    open(os.path.abspath(index), 'wb').write(b'not an index')\n"
             "if session_id and not os.environ.get('FAKE_CODEX_SESSION_BEFORE_SLEEP'):\n"
             "    print(json.dumps({'type': 'thread.started', 'thread_id': session_id}))\n"
             "thread_id = os.environ.get('FAKE_CODEX_THREAD_ID')\n"
@@ -4763,6 +4771,142 @@ class WorkflowCommandTests(unittest.TestCase):
         retry = next(event for event in events if event["type"] == "agent_structured_retry")
         self.assertEqual(retry["strategy"], "resume")
         self.assertEqual(retry["sessionId"], "thread-structured-1")
+
+    def _init_missing_session_repo(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+        # The fixture's HOME and fake binaries live inside this repo. Ignoring them keeps
+        # the child's work summary at "no changes", so the changed-tree guard, which
+        # refuses a relaunch over landed work, does not fire on fixture noise.
+        (self.workspace / ".gitignore").write_text(
+            "/home/\n/bin/\n/.delegate/\n/wf_*.py\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "-C", str(self.workspace), "add", "tracked.txt", ".gitignore"], check=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+
+    def test_codex_structured_retry_refuses_to_relaunch_when_git_status_fails(self) -> None:
+        # The first attempt lands uncommitted work and leaves a corrupt index, so the
+        # child's `git status` fails while its commit count still reads zero: the
+        # summary alone looks like a clean tree. The resume then finds no session. A
+        # fresh relaunch here would redo the task on top of that work, so the call
+        # must refuse rather than fall back.
+        self._init_missing_session_repo()
+        argv_log = self.workspace / "broken-index-argv.json"
+        attempt_file = self.workspace / "broken-index-attempts.txt"
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-broken-index", "defaults": {"engine": "codex", "mode": "work"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("review the entire repository", schema=SCHEMA, retries=2, isolation="worktree")
+            """
+        )
+        env = {
+            "FAKE_CODEX_ARGV_LOG": str(argv_log),
+            "FAKE_CODEX_ATTEMPT_FILE": str(attempt_file),
+            "FAKE_CODEX_SESSION_ID": "thread-structured-1",
+            "FAKE_CODEX_RESUME_ERROR": "no thread with id: thread-structured-1",
+            "FAKE_CODEX_BREAK_INDEX": "1",
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launched = json.loads(launch.stdout)
+        self.run_delegate(
+            ["--json", "workflow", "wait", launched["wfId"], "--timeout", "20"], env_extra=env
+        )
+
+        launches = [
+            json.loads(line) for line in argv_log.read_text(encoding="utf-8").strip().splitlines()
+        ]
+        resumed = ["resume" in argv for argv in launches]
+        self.assertEqual(resumed[0], False)
+        # Only the first launch is fresh: no relaunch followed the missing session.
+        self.assertTrue(all(resumed[1:]) and len(resumed) > 1, resumed)
+        events = [
+            json.loads(line)
+            for line in Path(launched["journalPath"]).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertFalse(
+            [event for event in events if event.get("fellBackFrom")],
+            "the missing-session fallback relaunched over an unverified tree",
+        )
+        refused = [event for event in events if event["type"] == "agent_structured_retry_refused"]
+        self.assertEqual([event["reason"] for event in refused], ["work_state_unverified"])
+        self.assertEqual(refused[0]["workSummary"]["fileInspectionStatus"], "unverified")
+
+    def test_codex_structured_retry_relaunches_when_the_resumed_session_is_missing(self) -> None:
+        self._init_missing_session_repo()
+        argv_log = self.workspace / "missing-session-argv.json"
+        attempt_file = self.workspace / "missing-session-attempts.txt"
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-missing-session", "defaults": {"engine": "codex", "mode": "work"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("review the entire repository", schema=SCHEMA, retries=1, isolation="worktree")
+            """
+        )
+        env = {
+            "FAKE_CODEX_ARGV_LOG": str(argv_log),
+            "FAKE_CODEX_ATTEMPT_FILE": str(attempt_file),
+            "FAKE_CODEX_SESSION_ID": "thread-structured-1",
+            # The resume launch finds no such session, as when the launcher lands on
+            # a different account than the one holding it.
+            "FAKE_CODEX_RESUME_ERROR": "no thread with id: thread-structured-1",
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launched = json.loads(launch.stdout)
+        wf_id = launched["wfId"]
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "20"], env_extra=env
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+
+        launches = [
+            json.loads(line) for line in argv_log.read_text(encoding="utf-8").strip().splitlines()
+        ]
+        # First attempt, then resume launches that find no session (the codex runner
+        # re-probes a lost thread itself before giving up), then one fresh relaunch.
+        resumed = ["resume" in argv for argv in launches]
+        self.assertEqual(resumed[0], False)
+        self.assertEqual(resumed[-1], False)
+        self.assertTrue(all(resumed[1:-1]) and len(resumed) > 2, resumed)
+        for argv in launches[1:-1]:
+            self.assertEqual(
+                argv[argv.index("resume") : argv.index("resume") + 2],
+                ["resume", "thread-structured-1"],
+            )
+        events = [
+            json.loads(line)
+            for line in Path(launched["journalPath"]).read_text(encoding="utf-8").splitlines()
+        ]
+        fallback = next(
+            event
+            for event in events
+            if event["type"] == "agent_structured_retry" and event.get("fellBackFrom")
+        )
+        self.assertEqual(fallback["fellBackFrom"], "resume")
+        self.assertEqual(fallback["strategy"], "relaunch")
+        self.assertEqual(fallback["sessionId"], "thread-structured-1")
+        self.assertEqual(fallback["childAttemptOutcome"]["failureReason"], "session_expired")
+        self.assertEqual(fallback["childAttemptOutcome"]["failureKind"], "session_lost")
 
     def test_structured_retry_relaunches_unsupported_engine_in_same_worktree(self) -> None:
         subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)

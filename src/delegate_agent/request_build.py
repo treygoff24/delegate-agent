@@ -2112,8 +2112,10 @@ def request_from_input_json(
     raw_mail_push = raw.get("mailPush", False)
     if not isinstance(raw_mail_push, bool):
         raise DelegateError("invalid_mail_push", "mailPush must be true or false.")
-    raw_resumable = raw.get("resumable", False)
-    if not isinstance(raw_resumable, bool):
+    # Absent takes the default (codex/claude work Runs save their native session);
+    # an explicit false opts out.
+    raw_resumable: bool | None = raw.get("resumable")
+    if "resumable" in raw and not isinstance(raw_resumable, bool):
         raise DelegateError("invalid_resumable", "resumable must be true or false.")
     if raw_resumable and mode == MODE_CALL:
         raise DelegateError(
@@ -2439,6 +2441,25 @@ def _structured_retry_launch(
     return execution_workspace, isolation_context
 
 
+def default_resumable(
+    engine: str, mode: str, config: JsonObject, *, pass_through: bool = False
+) -> bool:
+    """Whether a launch that did not say --resumable/--no-resumable saves its session.
+
+    Codex and Claude tracked work Runs do, so `delegate followup` works without
+    remembering a launch flag. Safe and call Runs run in throwaway workspaces with
+    no re-entry path, other engines have no native session to resume, and a
+    pass-through Run is untracked and records no session id, so all of those keep
+    today's ephemeral behavior. The engine's `resumable` config key (default true)
+    flips the default; it also outranks `codex.ephemeral` and
+    `claude.noSessionPersistence`, which apply only to Runs that are not resumable.
+    """
+    if engine not in ("codex", "claude") or mode != MODE_WORK or pass_through:
+        return False
+    section = config.get(engine)
+    return not (isinstance(section, dict) and section.get("resumable") is False)
+
+
 def build_request(
     engine: str,
     mode: str,
@@ -2487,7 +2508,7 @@ def build_request(
     persona_path_override: str | None = None,
     expected_persona_digest: str | None = None,
     mail_push: bool = False,
-    resumable: bool = False,
+    resumable: bool | None = None,
     resume_session_id: str | None = None,
     followup_of: str | None = None,
     frame_prompt: bool | None = None,
@@ -2509,7 +2530,9 @@ def build_request(
     )
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "fast is only supported by codex.")
-    if not isinstance(resumable, bool):
+    if resumable is None:
+        resumable = default_resumable(engine, mode, config, pass_through=pass_through)
+    elif not isinstance(resumable, bool):
         raise DelegateError("invalid_resumable", "resumable must be a boolean.")
     if resumable and mode == MODE_CALL:
         raise DelegateError(

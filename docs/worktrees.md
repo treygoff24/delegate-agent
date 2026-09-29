@@ -158,6 +158,19 @@ and `setup` are creation-only and are not re-run. A run that failed in setup is
 resumable on those terms: `resume` attaches to the kept worktree without
 re-running setup.
 
+### Resumable runs keep their worktree
+
+A succeeded Codex or Claude work Run that used a persistent worktree keeps it
+when the Run is resumable (`worktreeRetained: "resumable_session"`), even if the
+end-state is clean, so `followup` and `resume` can re-enter the same tree. Codex
+and Claude work Runs are resumable by default, so a fan-out of them leaves one
+retained worktree per succeeded Run until you clean up (`worktree prune
+--merged`, `worktree gc`, or `worktree remove`). Launch with `--no-resumable`
+(or set `codex.resumable` / `claude.resumable` to `false`) when a Run's worktree
+should retire itself and no native `followup` will be needed. Workflow `agent()`
+children stay non-resumable unless the call passes `resumable=True`, so
+workflow fan-outs are unaffected.
+
 ### Resume attachment
 
 To continue a terminal Run that used a persistent worktree, use the Run handle
@@ -220,6 +233,12 @@ persistent worktree; `worktree list` keeps this deep summary out of overview
 entries for responsiveness. Completion summaries also expose
 `rawChangedFilesCount` and `seededOnlyChanges` so an orchestrator can tell when
 the raw Git status consisted only of unchanged source dirt copied at launch.
+
+`fileInspectionStatus` and `commitInspectionStatus` are each `verified` or
+`unverified`, saying whether `git status` and the commit count actually ran. A
+failed inspection reports zero files or no commit count rather than an error, so
+read the status before treating zeros as a clean tree; `noChanges` is true only
+when both inspections are `verified` and show nothing.
 
 ### Integration state semantics
 

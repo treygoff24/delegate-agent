@@ -124,6 +124,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultReasoningEffort": None,
         "workPermissionMode": "auto",
         "noSessionPersistence": True,
+        # Work Runs save their native session by default so `delegate followup`
+        # works without --resumable at launch. Wins over noSessionPersistence.
+        "resumable": True,
         "bare": False,
         "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
@@ -184,6 +187,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "fallbackProfile": None,
         "workSandbox": "workspace-write",
         "ephemeral": True,
+        # Work Runs save their native session by default so `delegate followup`
+        # works without --resumable at launch. Wins over ephemeral.
+        "resumable": True,
         "ignoreUserConfig": False,
         "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
@@ -808,6 +814,7 @@ def _validate_codex_section(codex: JsonValue) -> None:
             "codex.safeSandbox is not supported; Codex safe always uses read-only.",
         )
     require_bool(codex.get("ephemeral", True), path="codex.ephemeral", error="invalid_codex_config")
+    require_bool(codex.get("resumable", True), path="codex.resumable", error="invalid_codex_config")
     require_bool(
         codex.get("ignoreUserConfig", False),
         path="codex.ignoreUserConfig",
@@ -887,6 +894,9 @@ def _validate_claude_section(claude: JsonValue) -> None:
         claude.get("noSessionPersistence", True),
         path="claude.noSessionPersistence",
         error="invalid_claude_config",
+    )
+    require_bool(
+        claude.get("resumable", True), path="claude.resumable", error="invalid_claude_config"
     )
     require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")
     _validate_engine_models(claude.get("models"), engine="claude", error="invalid_claude_config")

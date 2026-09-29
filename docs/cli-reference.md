@@ -1280,7 +1280,7 @@ delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
-delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
+delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--no-resumable] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
 ```
@@ -1292,7 +1292,12 @@ contains the original prompt, then a bounded prior-run Completion Report (or a
 Snapshot digest), then the new instructions last. Prior-run content is framed
 as untrusted data and is disclosed to the target Harness, including on a
 cross-engine resume. Resume options must appear before the handle; trailing
-tokens are continuation instructions.
+tokens are continuation instructions. A trailing token that exactly names a
+resume option (`--model`, `--dry-run`, `--engine=claude`, ...) is refused before
+anything launches (`option_after_handle`), because it would otherwise be sent to
+the child as prompt text while the Run launched with the defaults. To send such
+a token as literal text, put `--` before the instructions:
+`delegate resume <handle> -- <text>`.
 
 The new Run inherits source settings according to this table. `--engine` and
 the listed resume flags must precede the handle; `--group`, `--auth-profile`,
@@ -1307,7 +1312,7 @@ creating a Run or writing a prompt record.
 | --- | --- | --- | --- | --- |
 | Engine | `engine`, falling back to `harness` | `--engine` | A missing or unknown source engine refuses resume. | The selected engine becomes the target; engine-scoped fields below may drop. |
 | Mode | `mode` | None; v1 does not override mode. | A missing or invalid mode refuses resume. | Retained unchanged. |
-| Native session opt-in | `resumable` | None | Only an exact `true` opts in; omitted or legacy values leave it off. | Kept only for Codex or Claude work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
+| Native session | `resumable` | `--no-resumable` | A source recorded as exactly `true` keeps it. Any other source takes the launch default: Codex and Claude work Runs save their session unless `--no-resumable` or `codex.resumable` / `claude.resumable: false` opts out. | Kept only for Codex or Claude work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
 | Model selection | `modelAlias`, then `modelRequested`, `modelResolved`, then `model` | `--model` | No usable key uses the target engine configuration default and emits a note. | Source model selection drops; pass `--model` to pin a target model. |
 | Reasoning effort | `requestedReasoningEffort`, then `resolvedReasoningEffort`, together with `reasoningEffortSource` | `--reasoning-effort` | Missing effort uses the target default and emits a note. A source value from configuration is re-resolved through target capability/configuration; only `cli` and `input-json` source intent is inherited directly. | Source effort drops with a note; an explicit override remains valid. |
 | Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |
@@ -1324,6 +1329,41 @@ creating a Run or writing a prompt record.
 | Completion notification | None | Global `--notify` | Omitted sends no notification; source notification targets are not inherited. | Applies to the resumed Run, including launch and attachment-setup failures. |
 | Forbid commit | `commitPolicy.forbidCommit` when exactly `true` | None | Omitted or any other value leaves commit prohibition off. | Retained. |
 | Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
+
+#### Native followup
+
+```bash
+delegate followup [--timeout SEC] [--prompt-file PATH] [--dry-run] <alias|runId> [prompt...]
+```
+
+`delegate followup` continues a Codex or Claude Run by resuming its saved native
+session, so the child keeps its own conversation context. (`resume` instead
+relaunches from the original prompt and a report digest, and works across
+engines.)
+
+- **Launch default.** Codex and Claude work Runs save their native session by
+  default, so `followup` works without `--resumable` at launch. Launch with
+  `--no-resumable` (JSON `resumable: false`), or set `codex.resumable` /
+  `claude.resumable` to `false`, to skip it; `--resumable` on a launch beats the
+  config key. Safe Runs, call Runs, and engines other than Codex and Claude never
+  save a session. See [Configuration](configuration.md#native-session-files-and-the-resumable-default)
+  for the storage consequence.
+- **No session recorded.** A source with no recorded session (launched with
+  `--no-resumable`, before this default, or as a workflow `agent()` call without
+  `resumable=True`) is refused with `session-missing`. The message offers
+  `delegate resume <handle>` instead.
+- **Session not found.** When the resumed launch cannot find the session, the Run
+  fails with `session_expired` (failure kind `session_lost`). The session was
+  saved, so the usual cause is that the launch ran under a different account
+  than the one holding it (for example a launcher that picks an account by
+  usage). The message says so and offers `delegate resume <handle>`.
+- **Options and prompt text.** Options may sit on either side of the handle, but
+  only before the prompt text. A known followup option inside the prompt text
+  (`--dry-run`, `--timeout`, `--prompt-file`) is refused before anything
+  launches (`option_after_handle`): `delegate followup x fix it --dry-run`
+  launches nothing. Put `--` before the prompt to send such a token as literal
+  text: `delegate followup x -- explain what --dry-run does`. An option-shaped
+  token that belongs to another command keeps the existing warning.
 
 `delegate runs` defaults to recent runs. In a repository's main worktree it also lists runs registered in linked worktrees, tagged with `registryWorkspace` (see [Worktrees](worktrees.md#prune-many-worktrees)). `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,

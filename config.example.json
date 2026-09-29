@@ -48,6 +48,7 @@
     "fallbackProfile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,
+    "resumable": true,
     "ignoreUserConfig": false
   },
   "profiles": {
@@ -75,6 +76,7 @@
     "defaultReasoningEffort": null,
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
+    "resumable": true,
     "bare": false
   },
   "grok": {

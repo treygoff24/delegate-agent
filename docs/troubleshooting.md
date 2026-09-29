@@ -285,6 +285,38 @@ delegate codex safe --pass-through "Review only."
 To send a token that looks like a global option as literal child-prompt text,
 put it after the option terminator: `delegate codex safe -- --json`.
 
+## `option_after_handle` on `resume` or `followup`
+
+Everything after the handle is prompt text, so an option typed there would be
+sent to the child instead of applying (`delegate followup x fix it --dry-run`
+would start a real run). Delegate refuses that before launching. Move the option
+before the prompt text (`delegate followup --dry-run x fix it`; `followup`
+accepts options on either side of the handle, `resume` only before it), or, if
+the token really is prompt text, put `--` in front of the prompt:
+
+```bash
+delegate followup x -- explain what --dry-run does
+delegate resume x -- --model is the flag to change
+```
+
+## `session_expired` or `session-missing` on `followup`
+
+`session-missing` means the source Run recorded no native session: it was
+launched with `--no-resumable`, before Codex and Claude work Runs saved their
+session by default, or as a workflow `agent()` call without `resumable=True`.
+Use `delegate resume <handle> "<instructions>"`, which relaunches from the
+original prompt and a report digest and needs no native session.
+
+`session_expired` (failure kind `session_lost`) means the session was saved but
+the resumed launch could not find it (Claude reports "No conversation found",
+Codex "no thread with id"). The usual cause is a different account: the launch
+ran under an account other than the one holding the session, for example when a
+launcher chooses an account by usage on each start. Check that the followup runs
+with the same profile and `CODEX_HOME` or Claude config directory as the source
+Run, or use `delegate resume <handle>` to carry the report into a new Run. A
+workflow structured retry that hits this falls back to a fresh relaunch on its
+own; see [workflows](delegate-workflows.md).
+
 ## Long foreground run looks silent
 
 Tracked launches buffer child output so Delegate can return a bounded final
