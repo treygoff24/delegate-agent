@@ -370,17 +370,17 @@ class HarnessEventsTests(unittest.TestCase):
             )
         )
 
-    def test_pinned_cursor_run_is_not_paused_by_the_context_window_label(self):
-        acc = self.events.StreamAccumulator(
-            harness="cursor",
-            requested_model="grok-4.7-xhigh",
-            continuity_mode="pinned",
-        )
-        acc.ingest_line(
-            json.dumps({"type": "system", "subtype": "init", "model": "Grok 4.7 256K Extra High"})
-        )
-        self.assertIsNone(acc.continuity_violation)
-        self.assertEqual(acc.terminal_status, None)
+    def test_pinned_cursor_run_accepts_the_bare_and_context_window_labels(self):
+        for served in ("Grok 4.7  Extra High", "Grok 4.7 256K Extra High"):
+            with self.subTest(served=served):
+                acc = self.events.StreamAccumulator(
+                    harness="cursor",
+                    requested_model="grok-4.7-xhigh",
+                    continuity_mode="pinned",
+                )
+                acc.ingest_line(json.dumps({"type": "system", "subtype": "init", "model": served}))
+                self.assertIsNone(acc.continuity_violation)
+                self.assertEqual(acc.terminal_status, None)
 
     def test_pinned_claude_accepts_the_dated_served_id_for_an_alias(self):
         """claude L4: every documented alias trips a pinned run today."""
