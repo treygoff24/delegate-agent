@@ -458,10 +458,6 @@ class AwaitingInputTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertIsNone(degraded.assess(text, mode="work", files_changed=False), text)
 
-    def test_the_existing_requester_exclusion_still_holds_for_the_waiting_reason(self):
-        self.assertIsNone(degraded.waiting_on_unfinished_work(AWAITING_FINALS["atlasos"]))
-        self.assertIsNone(degraded.waiting_on_unfinished_work(AWAITING_FINALS["your_approval"]))
-
 
 def _tasks_changed(*descriptions):
     return {

@@ -29,7 +29,8 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         )
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertIsNone(payload.get("model"))
+        self.assertIn("model", payload)
+        self.assertIsNone(payload["model"])
 
     def test_snapshot_exact_handle_text(self):
         _, alias = self.write_run()
@@ -500,7 +501,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("# default done", stdout.getvalue())
 
     def test_run_output_completion_report_falls_back_to_codex_stdout(self):
-        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "stdout.log").write_text(
             "\n".join(
@@ -1284,7 +1285,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_requires_codex_turn_completion(self):
-        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "stdout.log").write_text(
             json.dumps(
@@ -1292,7 +1293,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                     "type": "item.completed",
                     "item": {
                         "type": "agent_message",
-                        "text": "I am still investigating.",
+                        "text": "Status: completed\n- final from stdout",
                     },
                 }
             )
@@ -1758,7 +1759,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         run_id, alias = self.write_run(harness="codex", status="failed", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "completion-report.md").write_text(
-            "Synthesized by delegate.\n\nStatus: failed\nFailure reason: child_failed\n",
+            "Synthesized by delegate. No child output was recorded.\n",
             encoding="utf-8",
         )
         manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
@@ -1774,7 +1775,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         )
         self.assertEqual(code, 0)
         section = json.loads(stdout.getvalue())["sections"]["completionReport"]
-        self.assertNotEqual(section["resultQuality"], "suspect_short")
+        self.assertEqual(section["resultQuality"], "ok")
 
     def test_run_output_prefers_stored_state_result_quality(self):
         # F5 (read-time): run-output prefers the stored state.resultQuality and

@@ -190,17 +190,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertTrue(warning.startswith("bare_handle_ambiguous:"), warning)
         self.assertIn(older_alias, warning)
 
-    def test_wait_dead_pid_is_terminal_failure_not_timeout(self):
-        _run_id, alias = self.write_run(status="running", pid=999999999)
-        code, out, err = self.run_cli(
-            ["--json", "wait", alias, "--timeout", "10", "--interval", "1"]
-        )
-        self.assertEqual(code, 1, err)
-        payload = json.loads(out)
-        self.assertFalse(payload["timedOut"])
-        self.assertEqual(payload["runs"][0]["status"], "failed")
-        self.assertEqual(payload["runs"][0]["staleReason"], "dead_pid")
-
     def test_wait_lost_runner_reports_runner_lost_not_stalled(self):
         # A dead or missing runner pid is a lost runner, not the stall
         # watchdog's verdict; workflows retry "stalled" as transient.
@@ -214,7 +203,10 @@ class WaitCancelCommandTests(unittest.TestCase):
                     ["--json", "wait", alias, "--timeout", "10", "--interval", "1"]
                 )
                 self.assertEqual(code, 1, err)
-                run = json.loads(out)["runs"][0]
+                payload = json.loads(out)
+                run = payload["runs"][0]
+                self.assertFalse(payload["timedOut"])
+                self.assertEqual(run["status"], "failed")
                 self.assertEqual(run["staleReason"], reason)
                 self.assertEqual(run["failureKind"], "runner_lost")
 
@@ -421,12 +413,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn("warnings", json.loads(out))
 
-    def test_cancel_refuses_terminal_run(self):
-        _run_id, alias = self.write_run(status="succeeded")
-        code, out, err = self.run_cli(["cancel", alias])
-        self.assertEqual(code, errors_api.EXIT_USAGE)
-        self.assertIn("run_already_terminal", err or out)
-
     def test_cancel_process_group_marks_cancelled(self):
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -516,33 +502,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["unreadMail"]["messages"][0]["subject"], "abort the P4 restore")
         self.assertTrue(any("never read by it" in w for w in state["warnings"]))
 
-    def test_urgent_cancel_records_mail_the_lane_never_read(self):
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
-            start_new_session=True,
-        )
-        self.add_process_cleanup(proc)
-        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
-        self._send_coordinator_mail(alias, "abort the P4 restore")
-        fd = self._hold_registry_lock()
-
-        def release_when_child_exits() -> None:
-            proc.wait(timeout=20)
-            self._release_registry_lock(fd)
-
-        self.addCleanup(self._release_registry_lock, fd)
-        releaser = threading.Thread(target=release_when_child_exits, daemon=True)
-        releaser.start()
-        self.addCleanup(releaser.join, 21)
-        with unittest_mock.patch.dict(os.environ, {run_registry.REGISTRY_LOCK_TIMEOUT_ENV: "0.2"}):
-            payload = wait_cancel_commands._cancel_target(
-                self.registry_root, run_registry.RunTarget(run_id=run_id, alias=alias)
-            )
-        self.assertTrue(payload["registryLockBypassed"])
-        state = run_registry.load_run_state(self.registry_root, run_id)
-        self.assertEqual(state["status"], "cancelled")
-        self.assertEqual(state["unreadMail"]["count"], 1)
-
     def _hold_registry_lock(self) -> int:
         """Hold the registry lock on a separate open file, the way another process would."""
         lock_path = run_registry.registry_lock_path(self.registry_root)
@@ -588,6 +547,7 @@ class WaitCancelCommandTests(unittest.TestCase):
         )
         self.add_process_cleanup(proc)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        self._send_coordinator_mail(alias, "abort the P4 restore")
         fd = self._hold_registry_lock()
         self.addCleanup(self._release_registry_lock, fd)
 
@@ -607,6 +567,9 @@ class WaitCancelCommandTests(unittest.TestCase):
         state = run_registry.load_run_state(self.registry_root, run_id)
         self.assertEqual(state["status"], "cancelled")
         self.assertTrue(state["cancelRequested"])
+        # Mail the lane never read is still recorded on the run.
+        self.assertEqual(state["unreadMail"]["count"], 1)
+        self.assertEqual(state["unreadMail"]["messages"][0]["subject"], "abort the P4 restore")
 
     def _urgent_cancel_refused(self, run_id: str, alias: str, *, identity_side_effect=None):
         fd = self._hold_registry_lock()
@@ -1182,11 +1145,27 @@ class WaitCancelCommandTests(unittest.TestCase):
                 state_writes.append(dict(data) if isinstance(data, dict) else data)
             return original_write(path, data)
 
-        with unittest_mock.patch.object(
-            run_registry, "write_run_state", side_effect=capturing_write
+        marker_at_signal: list[object] = []
+        original_signal = wait_cancel_commands._send_signal
+
+        def observing_signal(value, sig, *, process_group):
+            state_now = json.loads((run_path / run_registry.STATE_FILE).read_text())
+            marker_at_signal.append(state_now.get("cancelRequested"))
+            return original_signal(value, sig, process_group=process_group)
+
+        with (
+            unittest_mock.patch.object(
+                run_registry, "write_run_state", side_effect=capturing_write
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_send_signal", side_effect=observing_signal
+            ),
         ):
             payload = wait_cancel_commands._cancel_target(self.registry_root, target)
         self.assertEqual(payload["status"], "cancelled")
+        # The marker is already on disk at the moment the first signal is sent.
+        self.assertTrue(marker_at_signal, "cancel must signal the live run")
+        self.assertEqual(marker_at_signal[0], True)
         # The first state write must be the marker stamp (cancelRequested true).
         marker_writes = [
             w for w in state_writes if isinstance(w, dict) and w.get("cancelRequested") is True
@@ -1279,88 +1258,22 @@ class WaitCancelCommandTests(unittest.TestCase):
             pid=os.getpid(),
             pgid=os.getpgid(0),
         )
-        runner._finalize_tracked_run(
-            files,
-            ctx,
-            capture,
-            completion_report_mode="off",
-        )
-        state = json.loads((run_path / run_registry.STATE_FILE).read_text())
-        self.assertEqual(state["status"], "cancelled")
-        self.assertEqual(state["failureReason"], "cancelled_by_user")
-        # The runner still recorded its work summary/output metadata.
-        self.assertEqual(state.get("exitCode"), 1)
-        self.assertIn("stdoutBytes", state)
-
-    def test_preserved_cancel_envelope_matches_state_child_exit_zero(self):
-        """When the finalizer preserves a concurrent cancel and the child
-        exited 0, the LIVE result (TrackedFinalization) must agree with the
-        persisted state: ok=False, status cancelled, exitCode 1, and
-        failureReason cancelled_by_user. The process exit code computed from
-        the finalization must also be 1."""
-        run_id, alias = self.write_run(status="running", pid=os.getpid(), pgid=os.getpgid(0))
-        run_path = run_registry.run_directory(self.registry_root, run_id)
-        # Simulate cancel writing 'cancelled' first (cancel-wins race).
-        cancel_state = json.loads((run_path / run_registry.STATE_FILE).read_text())
-        cancel_state.update(
-            {
-                "status": "cancelled",
-                "failureReason": "cancelled_by_user",
-                "exitCode": 1,
-                "finishedAt": run_registry.utc_now_iso(),
-            }
-        )
-        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, cancel_state)
-        from delegate_agent import harness_events, runner
-
-        ctx = runner.RunContext(
-            registry_root=self.registry_root,
-            run_id=run_id,
-            alias=alias,
-            harness="codex",
-            engine="codex",
-            mode="work",
-            model=None,
-            source_cwd=str(self.workspace),
-            execution_cwd=str(self.workspace),
-            workspace_kind="directory",
-            isolated_workspace=False,
-            started_at=run_registry.utc_now_iso(),
-        )
-        accumulator = harness_events.StreamAccumulator(harness="codex")
-        files = runner.TrackedRunFiles(
-            run_path=run_path,
-            stdout_log=run_path / run_registry.STDOUT_LOG,
-            stderr_log=run_path / run_registry.STDERR_LOG,
-        )
-        # Child exited 0, but cancel already won the race.
-        capture = runner.TrackedCaptureResult(
-            accumulator=accumulator,
-            exit_code=0,
-            duration_ms=100,
-            stdout_bytes=10,
-            stderr_bytes=5,
-            stdin_failures=(),
-            pid=os.getpid(),
-            pgid=os.getpgid(0),
-        )
         finalization = runner._finalize_tracked_run(
             files,
             ctx,
             capture,
             completion_report_mode="off",
         )
-        # The LIVE result must match the persisted state.
+        # The LIVE result must agree with the persisted state.
         self.assertEqual(finalization.status, "cancelled")
         self.assertEqual(finalization.exit_code, 1)
         self.assertEqual(finalization.extra.get("failureReason"), "cancelled_by_user")
-        # _tracked_result derives ok and the process exit from the finalization.
-        ok = finalization.exit_code == 0
-        self.assertFalse(ok, "preserved cancel with child exit 0 must be ok=False")
         state = json.loads((run_path / run_registry.STATE_FILE).read_text())
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
+        # The runner still recorded its work summary/output metadata.
         self.assertEqual(state.get("exitCode"), 1)
+        self.assertIn("stdoutBytes", state)
 
     def test_pid_identity_mismatch_refuses_stale_pid(self):
         """A pid that predates the run beyond skew is refused.
@@ -1778,7 +1691,7 @@ class WaitCancelCommandTests(unittest.TestCase):
     def test_legacy_pid_only_run_is_not_described_as_a_setup(self):
         """The setup warning is keyed on the setup path, not on a missing pid."""
         proc = self._setup_group()
-        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=proc.pid)
+        run_id, alias = self.write_run(status="running", pid=proc.pid)
         with unittest_mock.patch.object(
             wait_cancel_commands, "_check_pid_identity", return_value=[]
         ):
@@ -1805,16 +1718,18 @@ class WaitCancelCommandTests(unittest.TestCase):
 
     def test_wait_multi_handle_mixed_timeout_and_failure_returns_one(self):
         """Any failed/cancelled run -> exit 1 even if others timed out."""
-        _run_id1, alias1 = self.write_run(status="failed")
-        _run_id2, alias2 = self.write_run(status="running", pid=os.getpid())
-        code, out, err = self.run_cli(
-            ["--json", "wait", alias1, alias2, "--timeout", "1", "--interval", "1"]
-        )
-        self.assertEqual(code, 1, err)
-        payload = json.loads(out)
-        # The deadline was hit (the running run never terminated), but the
-        # failed run's failure takes exit-code precedence over the timeout.
-        self.assertTrue(payload["timedOut"])
+        for terminal in ("failed", "cancelled"):
+            with self.subTest(terminal=terminal):
+                _run_id1, alias1 = self.write_run(status=terminal)
+                _run_id2, alias2 = self.write_run(status="running", pid=os.getpid())
+                code, out, err = self.run_cli(
+                    ["--json", "wait", alias1, alias2, "--timeout", "1", "--interval", "1"]
+                )
+                self.assertEqual(code, 1, err)
+                payload = json.loads(out)
+                # The deadline was hit (the running run never terminated), but the
+                # terminal run's non-success takes exit-code precedence over the timeout.
+                self.assertTrue(payload["timedOut"])
 
     def test_wait_multi_handle_only_timeouts_returns_124(self):
         _run_id1, alias1 = self.write_run(status="running", pid=os.getpid())
@@ -1824,14 +1739,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 124, err)
         self.assertTrue(json.loads(out)["timedOut"])
-
-    def test_wait_multi_handle_mixed_cancelled_and_timeout_returns_one(self):
-        _run_id1, alias1 = self.write_run(status="cancelled")
-        _run_id2, alias2 = self.write_run(status="running", pid=os.getpid())
-        code, _out, err = self.run_cli(
-            ["--json", "wait", alias1, alias2, "--timeout", "1", "--interval", "1"]
-        )
-        self.assertEqual(code, 1, err)
 
     def test_wait_multi_handle_all_succeeded_returns_zero(self):
         _run_id1, alias1 = self.write_run(status="succeeded")

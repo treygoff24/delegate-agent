@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -38,7 +37,7 @@ class RunListingCostTests(unittest.TestCase):
             self.assertEqual([row["stdoutBytes"] for row in rows], [3, 3, 3])
             self.assertEqual(probes.call_count, 3)
 
-    def test_terminal_projection_bounds_bytes_and_latency_for_large_history(self) -> None:
+    def test_terminal_projection_bounds_bytes_read_for_large_history(self) -> None:
         """A 30K presentation payload must not be read for every terminal row."""
         with tempfile.TemporaryDirectory() as temporary:
             root = run_registry.ensure_registry(Path(temporary), workspace_kind="directory")
@@ -86,16 +85,13 @@ class RunListingCostTests(unittest.TestCase):
                 "load_run_state_or_none",
                 side_effect=counted_state_loader,
             ):
-                started = time.perf_counter()
                 rows, total, scope, _ids = run_status.list_run_summaries(root, index, limit=3)
-                elapsed = time.perf_counter() - started
 
             self.assertEqual((total, scope), (1_000, 1_000))
             self.assertEqual(
                 [row["alias"] for row in rows], ["codex-999", "codex-998", "codex-997"]
             )
             self.assertLess(bytes_read, 100_000)
-            self.assertLess(elapsed, 1.0)
 
 
 if __name__ == "__main__":

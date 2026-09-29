@@ -117,6 +117,10 @@ class SingleRunRecordTests(unittest.TestCase):
 
             persisted = run_registry.load_run_state(root, run_id)
             self.assertEqual(persisted["status"], "cancelled")
+            snapshot = run_registry.load_run_snapshot(root, run_id)
+            self.assertIsInstance(snapshot, dict)
+            self.assertEqual(snapshot["status"], "cancelled")
+            self.assertFalse(snapshot["ok"])
             self.assertFalse((run_path / run_registry.FINALIZE_WAL_FILE).exists())
 
     def test_finalizer_never_replaces_an_already_terminal_record(self) -> None:
