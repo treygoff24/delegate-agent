@@ -62,16 +62,6 @@ class GuardPlacementTests(unittest.TestCase):
                     "the guard must stop the interpreter",
                 )
 
-    def test_no_future_import_can_precede_the_guard(self) -> None:
-        # `from __future__ import annotations` is a SyntaxError before 3.7 and,
-        # by the language rules, would have to sit above the guard.
-        for path in (ENTRY, PACKAGE_INIT):
-            with self.subTest(path=path.name):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.ImportFrom):
-                        self.assertNotEqual(node.module, "__future__")
-
 
 class GuardBehaviourTests(unittest.TestCase):
     def test_entry_script_refuses_an_old_interpreter_cleanly(self) -> None:

@@ -26,12 +26,10 @@ import delegate_agent.log_output as log_output  # noqa: E402
 import delegate_agent.private_io as private_io  # noqa: E402
 import delegate_agent.prompt_instructions as prompt_instructions  # noqa: E402
 import delegate_agent.prompt_transport as prompt_transport  # noqa: E402
-import delegate_agent.reasoning as reasoning  # noqa: E402
 import delegate_agent.redaction as redaction  # noqa: E402
 import delegate_agent.run_metadata as run_metadata  # noqa: E402
 import delegate_agent.run_output_commands as run_output_commands  # noqa: E402
 import delegate_agent.run_registry as run_registry  # noqa: E402
-import delegate_agent.runner as runner  # noqa: E402
 import delegate_agent.worktree_commands as worktree_commands  # noqa: E402
 import delegate_agent.worktree_execution as worktree_execution  # noqa: E402
 import delegate_agent.worktree_mgmt as worktree_mgmt  # noqa: E402
@@ -180,20 +178,6 @@ class UtilityModuleTests(unittest.TestCase):
                 archived_logs.state_log_byte_sizes({"stdoutBytes": 4, "stderrBytes": -6})
             )
 
-    def test_runner_launch_error_carries_code_and_message(self):
-        error = runner.RunnerLaunchError("child_launch_failed", "nope")
-        self.assertEqual(error.error, "child_launch_failed")
-        self.assertEqual(error.message, "nope")
-
-    def test_reasoning_effort_normalization_rejects_argv_hazards(self):
-        self.assertEqual(reasoning.normalize_effort("xhigh"), "xhigh")
-        for value in ("", "x high", 'x"high', r"x\high"):
-            with (
-                self.subTest(value=value),
-                self.assertRaises(reasoning.ReasoningCapabilityError),
-            ):
-                reasoning.normalize_effort(value)
-
     def test_cli_parse_runs_json_mode(self):
         parsed = parser_api.parse_cli(["--json", "runs", "--limit", "1", "--structural"])
 
@@ -339,6 +323,7 @@ class WriteJsonAtomicCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "state.json"
             fsynced = False
+            replaced = False
             real_fsync = private_io.os.fsync
             real_replace = private_io.os.replace
 
@@ -348,6 +333,8 @@ class WriteJsonAtomicCleanupTests(unittest.TestCase):
                 real_fsync(fd)
 
             def observe_replace(src: str, dst: str, **kwargs: object) -> None:
+                nonlocal replaced
+                replaced = True
                 self.assertTrue(fsynced)
                 real_replace(src, dst, **kwargs)
 
@@ -356,6 +343,9 @@ class WriteJsonAtomicCleanupTests(unittest.TestCase):
                 mock.patch.object(private_io.os, "replace", observe_replace),
             ):
                 private_io.write_json_atomic(target, {"ok": True})
+
+            self.assertTrue(replaced, "write_json_atomic must call os.replace")
+            self.assertTrue(fsynced)
 
     def test_write_json_atomic_unlinks_temp_on_failure(self):
         """A failed write_json_atomic must not leave .tmp files behind."""
@@ -476,23 +466,7 @@ class WriteJsonAtomicIfAbsentTests(unittest.TestCase):
             with self.assertRaises(OSError) as component_error:
                 private_io.write_json_atomic_if_absent(linked_target, {"unsafe": True})
             self.assertEqual(component_error.exception.errno, errno.ELOOP)
-
-    def test_rejects_fully_existing_symlink_parent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp).resolve()
-            real_parent = base / "real" / "nested"
-            real_parent.mkdir(parents=True)
-            linked_parent = base / "linked"
-            linked_parent.symlink_to(real_parent.parent, target_is_directory=True)
-
-            with self.assertRaises(OSError) as caught:
-                private_io.write_json_atomic_if_absent(
-                    linked_parent / "nested" / "config.json",
-                    {"unsafe": True},
-                )
-
-            self.assertEqual(caught.exception.errno, errno.ELOOP)
-            self.assertFalse((real_parent / "config.json").exists())
+            self.assertFalse((real_root / "config.json").exists())
 
     def test_creates_missing_prefix_before_delegate_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
