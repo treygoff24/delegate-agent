@@ -191,6 +191,23 @@ class PausedStatusTests(_Fixture):
         self.assertTrue(any("--action accept" in c for c in pause["nextActions"]))
         self.assertFalse(any(c.endswith(f"approve {WF_ID}") for c in pause["nextActions"]))
 
+    def test_a_soft_parked_workflow_says_why_and_names_resume(self) -> None:
+        self.journal({"type": "phase", "title": "x"})
+        self.write_status(status="paused", softPark=True, parkedItems=["item-a", "item-b"])
+        pause = self.status_json()["pause"]
+        self.assertTrue(pause["softPark"])
+        self.assertEqual(pause["parkedItems"], ["item-a", "item-b"])
+        self.assertIn("item-a, item-b", pause["summary"])
+        self.assertIn("not a gate", pause["summary"])
+        self.assertEqual(pause["next"], f"delegate workflow resume {WF_ID}")
+        out = io.StringIO()
+        commands.emit_status(
+            commands.WorkflowCommand("status", wf_id=WF_ID), workspace=self.workspace, stdout=out
+        )
+        self.assertIn("paused: soft-parked (not a gate): item-a, item-b", out.getvalue())
+        self.assertNotIn("gate: None", out.getvalue())
+        self.assertIn(f"next: delegate workflow resume {WF_ID}", out.getvalue())
+
     def test_non_paused_status_has_no_pause_block(self) -> None:
         self.journal({"type": "phase", "title": "x"})
         self.write_status(status="succeeded")

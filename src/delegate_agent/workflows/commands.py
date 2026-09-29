@@ -1074,11 +1074,12 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
         pause = view.get("pause")
         if isinstance(pause, dict):
             print(f"paused: {pause.get('summary')}", file=stdout)
-            gate_line = f"gate: {pause.get('gateKey')}"
-            for field_name in ("gateName", "title", "assignee"):
-                if pause.get(field_name):
-                    gate_line += f" {field_name}={pause[field_name]}"
-            print(gate_line, file=stdout)
+            if pause.get("gateKey"):
+                gate_line = f"gate: {pause.get('gateKey')}"
+                for field_name in ("gateName", "title", "assignee"):
+                    if pause.get(field_name):
+                        gate_line += f" {field_name}={pause[field_name]}"
+                print(gate_line, file=stdout)
             if pause.get("next"):
                 print(f"next: {pause['next']}", file=stdout)
         for row in view.get("timeouts") or []:
@@ -1116,6 +1117,8 @@ def _add_journal_reasons(root: Path, view: JsonObject) -> None:
             pause["next"] = next_actions[0]
             pause["nextActions"] = next_actions
         view["pause"] = pause
+    elif view.get("status") == "paused" and view.get("softPark") is True:
+        view["pause"] = status_reasons.soft_park_reason(view.get("wfId"), view.get("parkedItems"))
     recent = status_reasons.timeouts(events)
     if recent:
         view["timeouts"] = recent

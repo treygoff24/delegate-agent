@@ -32,6 +32,27 @@ def _who(event: JsonObject) -> str:
     return f"{who} (item {item})" if item else who
 
 
+def soft_park_reason(wf_id: object, parked_items: object) -> JsonObject:
+    """Why a soft-parked workflow is paused: no gate, just items waiting for a resume.
+
+    A soft park is not an approval gate. The scheduler already ran every other
+    runnable item; resuming replays the script and re-enters the parked scopes.
+    """
+    items = [str(item) for item in parked_items] if isinstance(parked_items, list) else []
+    named = ", ".join(items) if items else "some items"
+    command = f"delegate workflow resume {wf_id}"
+    return {
+        "softPark": True,
+        "parkedItems": items,
+        "summary": _clip(
+            f"soft-parked (not a gate): {named} wait for a resume; every other runnable "
+            "item already ran"
+        ),
+        "next": command,
+        "nextActions": [command],
+    }
+
+
 def failure_summary(event: JsonObject) -> str:
     """One line naming what failed and why, from a failure journal row."""
     kind = event.get("type")

@@ -165,7 +165,9 @@ A dry run cancels and reaps nothing: it journals an
 `simulated: true`) for each child the live resume would have cancelled.
 A dry-run resume of an existing workflow writes its journal and nothing else:
 `status.json` keeps its status (a paused workflow stays paused), a `--budget`
-given with it is not persisted, and no gate approval is recorded.
+given with it is not persisted, and no gate approval is recorded. (Taking the
+workflow lock may create the empty `workflow.lock` file if the workflow never had
+one, for example after an initial dry run; it holds no state.)
 
 ### Reading a stopped workflow
 
@@ -177,7 +179,9 @@ one-sentence `summary`, and `next`/`nextActions`: commands built from the
 gate's declared actions (a gate offering only `retry`/`accept` gets
 `--gate NAME --action retry`, never a bare `approve`). Any status with recent agent
 timeouts adds `timeouts`: the last five rows with `label`, `item`, `engine`,
-`timeout`, and `nextEngine`.
+`timeout`, and `nextEngine`. A soft-parked workflow (paused with no gate) gets
+`pause` with `softPark: true`, `parkedItems`, a `summary`, and `next`:
+`delegate workflow resume <wfId>`; its text has no `gate:` line.
 
 `workflow approve` refuses with the real next step. On a failed, killed, or
 stalled workflow it names the last failure and `delegate workflow resume <wfId>`
