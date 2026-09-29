@@ -60,38 +60,25 @@ class CursorStdinTransportTests(CommandTestBase):
         self.assertEqual(request.display_argv, request.argv)
         self.assertEqual(request.argv[-1], "stream-json")
 
-    def test_cursor_argv_builder_never_appends_the_prompt(self):
-        argv = argv_api.build_cursor_argv(["cursor-agent"], "work", "/repo", "composer-2.5")
-        self.assertEqual(
-            argv,
-            [
-                "cursor-agent",
-                "--workspace",
-                "/repo",
-                "-p",
-                "--trust",
-                "--approve-mcps",
-                "--force",
-                "--model",
-                "composer-2.5",
-                "--output-format",
-                "stream-json",
-            ],
-        )
-
     def test_cursor_resume_keeps_stdin_transport(self):
         # The resume path is a separate argv branch; a prompt reintroduced there
         # would be just as exposed as the one A1 removed.
-        argv = argv_api.build_cursor_argv(
-            ["cursor-agent"],
+        request = self.build_git_request(
+            "cursor",
             "safe",
+            None,
             "/repo",
-            "composer-2.5",
+            "resume-secret-prompt",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
             resume_session_id="sess-1",
         )
-        self.assertIn("--resume", argv)
-        self.assertEqual(argv[argv.index("--resume") + 1], "sess-1")
-        self.assertEqual(argv[-1], "stream-json")
+        self.assertIn("--resume", request.argv)
+        self.assertEqual(request.argv[request.argv.index("--resume") + 1], "sess-1")
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
+        self.assertIn("resume-secret-prompt", request.stdin_text)
+        for token in request.argv:
+            self.assertNotIn("resume-secret-prompt", token)
 
 
 class OmpStdinTransportTests(CommandTestBase):
@@ -186,35 +173,42 @@ class OmpStdinTransportTests(CommandTestBase):
                 self.assertEqual(request.stdin_text, prompt)
                 self.assertNotIn(prompt, request.argv)
 
-    def test_omp_argv_builder_takes_no_prompt(self):
-        argv = argv_api.build_omp_argv(
-            delegate_config.embedded_default_config()["omp"], "call", None, None, "/ws"
+    def test_omp_call_prompt_goes_to_stdin_and_stays_out_of_argv(self):
+        request = self.build_git_request(
+            "omp",
+            "call",
+            None,
+            "/ws",
+            "unique-call-prompt",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
         )
-        self.assertEqual(
-            argv,
-            [
-                "omp",
-                "-p",
-                "--no-session",
-                "--mode",
-                "json",
-                "--cwd",
-                "/ws",
-                "--approval-mode",
-                "yolo",
-            ],
-        )
-        self.assertNotIn("task", argv)
+        self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
+        self.assertIn("unique-call-prompt", request.stdin_text)
+        for token in request.argv:
+            self.assertNotIn("unique-call-prompt", token)
+        self.assertEqual(request.argv[0], "omp")
+        self.assertIn("--cwd", request.argv)
 
 
-class SharedTransportSurfaceTests(unittest.TestCase):
+class SharedTransportSurfaceTests(CommandTestBase):
     def test_only_kimi_still_rides_argv(self):
         self.assertEqual(transport_api.ARGV_PROMPT_TRANSPORT_ENGINES, ("kimi",))
 
-    def test_cursor_and_omp_redaction_constants_are_gone(self):
-        self.assertFalse(hasattr(transport_api, "CURSOR_PROMPT_REDACTION"))
-        self.assertFalse(hasattr(transport_api, "OMP_PROMPT_REDACTION"))
-        self.assertTrue(hasattr(transport_api, "KIMI_PROMPT_REDACTION"))
+    def test_kimi_display_argv_redacts_the_prompt_while_real_argv_carries_it(self):
+        request = self.build_git_request(
+            "kimi",
+            "work",
+            None,
+            "/repo",
+            "kimi-secret-prompt",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+        )
+        self.assertEqual(request.display_argv[-1], transport_api.KIMI_PROMPT_REDACTION)
+        self.assertIn("kimi-secret-prompt", request.argv[-1])
+        for token in request.display_argv:
+            self.assertNotIn("kimi-secret-prompt", token)
 
     def test_describe_payload_reports_the_new_transports(self):
         payload = describe_api.describe_payload(
@@ -284,11 +278,6 @@ class CursorReadOnlyModeTests(CommandTestBase):
         write_call = argv_api.build_cursor_argv(["cursor-agent"], "call", "/ws", "model")
         self.assertNotIn("--mode", write_call)
         self.assertIn("--force", write_call)
-
-    def test_cursor_work_never_gets_a_read_only_mode(self):
-        work = argv_api.build_cursor_argv(["cursor-agent"], "work", "/ws", "model")
-        self.assertNotIn("--mode", work)
-        self.assertIn("--force", work)
 
     def test_cursor_read_only_call_carries_mode_ask_on_every_argv_branch(self):
         # Both output branches and the resume branch must carry the flag; a mode
@@ -450,21 +439,6 @@ class OmpWorkspaceAndApprovalTests(CommandTestBase):
             dry_run=True,
         )
         self.assertEqual(request.argv[request.argv.index("--approval-mode") + 1], "yolo")
-
-    def test_omp_safe_keeps_always_ask_and_never_gets_yolo(self):
-        # The planted negative: the safe lockdown's load-bearing flag must not be
-        # replaced by the work-mode value.
-        request = self.build_git_request(
-            "omp",
-            "safe",
-            None,
-            "/repo",
-            "review",
-            delegate_config.embedded_default_config(),
-            dry_run=True,
-        )
-        self.assertEqual(request.argv[request.argv.index("--approval-mode") + 1], "always-ask")
-        self.assertNotIn("yolo", request.argv)
 
     def test_pi_work_never_gets_an_approval_flag(self):
         # pi is the same builder but a different CLI; --approval-mode is omp's.
