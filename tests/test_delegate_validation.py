@@ -297,6 +297,30 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("schema.properties.rows.items", ctx.exception.message)
         self.assertIn("properties: {}", ctx.exception.message)
 
+    def test_codex_output_schema_ref_to_bare_object_is_refused_at_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "rows": {"type": "array", "items": {"$ref": "#/schemas/row"}}
+                        },
+                        "schemas": {"row": {"type": "object"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = parser_api.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
+            )
+            with self.assertRaises(error_types.DelegateError) as ctx:
+                request_api.request_from_parsed(parsed, DEFAULT_CONFIG, TtyStdin())
+
+        self.assertEqual(ctx.exception.error, "invalid_output_schema")
+        self.assertIn("schema.schemas.row", ctx.exception.message)
+
     def test_claude_call_schema_non_utf8_is_structured_and_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"

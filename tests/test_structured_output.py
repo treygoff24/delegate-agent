@@ -51,6 +51,34 @@ class CodexFreeFormObjectEligibilityTests(unittest.TestCase):
         }
         self.assertIsNone(structured_output.native_schema_eligible("codex", schema))
 
+    def test_ref_to_bare_object_is_not_native_eligible_for_codex(self):
+        schema = {
+            "type": "object",
+            "properties": {"rows": {"type": "array", "items": {"$ref": "#/schemas/row"}}},
+            "schemas": {"row": {"type": "object"}},
+        }
+        reason = structured_output.native_schema_eligible("codex", schema)
+        self.assertIsNotNone(reason)
+        self.assertIn("schema.schemas.row", reason)
+
+    def test_ref_to_declared_object_stays_eligible(self):
+        schema = {
+            "type": "object",
+            "properties": {"row": {"$ref": "#/$defs/row"}},
+            "$defs": {"row": {"type": "object", "properties": {"a": {"type": "string"}}}},
+        }
+        self.assertIsNone(structured_output.native_schema_eligible("codex", schema))
+
+    def test_ref_cycle_terminates(self):
+        schema = {
+            "type": "object",
+            "properties": {"node": {"$ref": "#/schemas/node"}},
+            "schemas": {
+                "node": {"type": "array", "items": {"$ref": "#/schemas/node"}},
+            },
+        }
+        self.assertIsNone(structured_output.native_schema_eligible("codex", schema))
+
     def test_claude_eligibility_is_unchanged_for_bare_object(self):
         self.assertIsNone(structured_output.native_schema_eligible("claude", ADJUDICATION_SCHEMA))
 
