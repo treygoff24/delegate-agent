@@ -1072,14 +1072,14 @@ def tool_events_from(events: Iterable[object]) -> tuple[ToolEvent, ...]:
 
 
 # The status word must end its line, followed only by spaces or tabs, closing
-# markup, and terminal punctuation. That rejects prose that merely starts with a
+# markup, and terminal punctuation (including a trailing semicolon). That rejects prose that merely starts with a
 # status word ("Status: completed the inventory") and the prompt's own template
 # line ("Status: completed / blocked / failed") a child may echo back. Nothing
 # in the pattern crosses a newline, so the next line cannot affect the match.
 # Accepted cost: "Status: completed (with caveats)" is not a report.
 _COMPLETION_REPORT_STATUS_RE = re.compile(
     r"^[ \t>*_`-]*[*_`]*status[*_`]*[ \t]*:[ \t]*[*_`]*[ \t]*"
-    r"(completed|blocked|failed)[*_`.! \t]*\r?$",
+    r"(completed|blocked|failed)[*_`.!; \t]*\r?$",
     re.IGNORECASE | re.MULTILINE,
 )
 # How far from the end of the output a completion report's status line may sit

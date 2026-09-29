@@ -1393,6 +1393,17 @@ class StreamAccumulator:
         if text:
             self._record_recoverable_assistant_text(text)
 
+    def _remember_pending_tool(self, tool_id: str, tool: str, target: str | None) -> None:
+        """Remember a start's tool and target until its result names the id.
+
+        Starts whose result never arrives would otherwise pile up for the rest
+        of the run; the oldest are the least likely to complete.
+        """
+        self._pending_tool_uses.pop(tool_id, None)
+        while len(self._pending_tool_uses) >= PI_PENDING_TOOL_LIMIT:
+            del self._pending_tool_uses[next(iter(self._pending_tool_uses))]
+        self._pending_tool_uses[tool_id] = (tool, target)
+
     def _ingest_kimi_tool_calls(self, payload: JsonObject) -> None:
         tool_calls = payload.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -1407,7 +1418,7 @@ class StreamAccumulator:
             target = _kimi_tool_target(function.get("arguments"))
             tool_id = _string_field(call, "id")
             if tool_id:
-                self._pending_tool_uses[tool_id] = (tool, target)
+                self._remember_pending_tool(tool_id, tool, target)
             self.events.append(
                 NormalizedEvent(
                     kind="tool.started",
@@ -1479,7 +1490,7 @@ class StreamAccumulator:
                         target = _tool_use_target(block)
                         tool_id = _string_field(block, "id")
                         if tool_id:
-                            self._pending_tool_uses[tool_id] = (tool, target)
+                            self._remember_pending_tool(tool_id, tool, target)
                         self.events.append(
                             NormalizedEvent(
                                 kind="tool.started",
@@ -2069,11 +2080,7 @@ class StreamAccumulator:
             if target is None and started is not None:
                 target = started[1]
         elif tool_id:
-            # Starts whose end never arrives would otherwise pile up for the
-            # rest of the run; the oldest are the least likely to complete.
-            while len(self._pending_tool_uses) >= PI_PENDING_TOOL_LIMIT:
-                del self._pending_tool_uses[next(iter(self._pending_tool_uses))]
-            self._pending_tool_uses[tool_id] = (tool, target)
+            self._remember_pending_tool(tool_id, tool, target)
         self.events.append(
             NormalizedEvent(
                 kind="tool.completed" if completed else "tool.started",
@@ -2092,7 +2099,7 @@ class StreamAccumulator:
         if tool_id:
             # grok resolves the call later on a `tool_call_update` that carries
             # only the id, so the name and target have to be remembered here.
-            self._pending_tool_uses[tool_id] = (tool, target)
+            self._remember_pending_tool(tool_id, tool, target)
         self.events.append(
             NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target),
         )
@@ -2137,7 +2144,7 @@ class StreamAccumulator:
         completed = subtype == "completed"
         if not completed:
             if call_id:
-                self._pending_tool_uses[call_id] = (tool, target)
+                self._remember_pending_tool(call_id, tool, target)
             self.events.append(
                 NormalizedEvent(kind="tool.started", tool=tool, target=target, path=target)
             )
