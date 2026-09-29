@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
@@ -331,6 +331,8 @@ def build_run_summary(
         pending = pending_tool.read_view(state)
         if pending is not None:
             summary["pendingTool"] = pending
+    if summary.get("effectiveStatus") == STATUS_RUNNING:
+        summary.update(deadline_fields(state, manifest))
     if isinstance(alias, str):
         summary["snapshotCommand"] = record_io.snapshot_command(alias, cwd=source_cwd)
 
@@ -349,6 +351,40 @@ def build_run_summary(
             summary["sourceGitRoot"] = source_git_root
 
     return summary
+
+
+def deadline_fields(
+    state: JsonObject | None, manifest: JsonObject | None, *, now: datetime | None = None
+) -> JsonObject:
+    """``deadlineAt`` and ``remainingSeconds`` for a running Run with a timeout.
+
+    Derived from the Run's own recorded start and ``timeoutSeconds``, so it holds
+    for any tracked Run. Empty when either is missing or unreadable.
+    """
+    timeout = first_present(manifest, state, "timeoutSeconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        return {}
+    started = record_io.parse_utc_timestamp(
+        first_string(
+            manifest.get("startedAt") if manifest else None,
+            state.get("startedAt") if state else None,
+        )
+    )
+    if started is None:
+        return {}
+    deadline = started + timedelta(seconds=timeout)
+    remaining = int((deadline - (now or datetime.now(UTC))).total_seconds())
+    return {
+        "deadlineAt": deadline.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "remainingSeconds": max(remaining, 0),
+    }
+
+
+def first_present(first: JsonObject | None, second: JsonObject | None, key: str) -> object:
+    for source in (first, second):
+        if source and source.get(key) is not None:
+            return source[key]
+    return None
 
 
 def _source_workspace(
