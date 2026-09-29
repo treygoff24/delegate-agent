@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -224,11 +223,22 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.assertFalse((root / registry.STATUS_FILE).exists())
 
     def test_registry_entry_deletion_cancels_real_supervisor(self) -> None:
-        _, root = self._launch(10)
+        wf_id, root = self._launch(10)
+        self._wait_for(
+            lambda: any(
+                run_status.raw_status(state) == run_status.STATUS_RUNNING
+                and isinstance(state.get("pgid"), int)
+                for state in self._workflow_child_states(wf_id).values()
+            )
+        )
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         pid = int(status["supervisorPid"])
-        shutil.rmtree(root)
+        # Remove the registry entry atomically: recursive deletion races with
+        # the live supervisor's status writes and can fail with ENOTEMPTY.
+        # Keep the detached files for cleanup after the producer is reaped.
+        root.rename(self.workspace / "removed-workflow")
         self._wait_process_gone(pid)
+        self.assertFalse((root / registry.STATUS_FILE).exists())
 
     def test_state_deletion_reaps_only_owned_parallel_children(self) -> None:
         wf_id, root = self._launch(
