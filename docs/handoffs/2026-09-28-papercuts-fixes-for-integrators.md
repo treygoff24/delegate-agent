@@ -4,7 +4,7 @@ Audience: agents building Loom, or anything else that launches `delegate` and re
 
 ## Status
 
-- The work is on `main` (2026-09-28, full test suite green: 4673 passed). Moving `main` installed it on the Mac. The devbox agent user installs it at its next daily estate-sync, which pulls `main` and promotes it.
+- The work is on `main` (2026-09-28, full test suite green: 4673 passed). Each machine installs it at its next daily estate-sync, which pulls `main` and promotes it (the Mac at 04:00, the devbox agent user at 04:43; a promote that finds live delegate runs defers to the next day).
 - A machine that has not picked it up yet still behaves like 0.31.0. Detect the contracts below at runtime (field present or absent) rather than by version number.
 - Diagnosis behind every change: `docs/audits/2026-09-28-papercuts/REPORT.md` and its `appendix/`.
 
