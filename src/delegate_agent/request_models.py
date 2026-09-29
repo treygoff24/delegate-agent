@@ -353,6 +353,9 @@ class Request:
     # (known-bad refusal, automatic resume). Applied after the request is built.
     lane: lane_health.Lane | None = None
     provider_policy: lane_health.Policy = field(default_factory=lane_health.Policy)
+    # Set only on the one continuation Delegate launches by itself after a
+    # transient provider drop (auto_resume.annotation); recorded on the run.
+    auto_resume: JsonObject | None = None
 
 
 @dataclass(frozen=True)

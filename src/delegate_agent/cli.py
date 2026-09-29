@@ -16,6 +16,7 @@ from delegate_agent import (
     VERSION,
     account_binding,
     argv_utils,
+    auto_resume,
     command_errors,
     command_help,
     harness_discovery,
@@ -474,6 +475,98 @@ def _apply_provider_policy(request: Request, config: JsonObject, *, force_launch
     )
     policy = lane_health.policy_from_config(config, force_launch=force_launch)
     return dc_replace(request, lane=lane, provider_policy=policy)
+
+
+def _maybe_auto_resume(
+    first: tuple[int, JsonObject | None],
+    note: auto_resume.RunNote,
+    request: Request,
+    global_options: _request_models.GlobalOptions,
+    *,
+    config: JsonObject,
+    config_source: str | None,
+    workspace: _request_models.ResolvedWorkspace,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> tuple[int, JsonObject | None]:
+    """After a transient provider drop, continue the run's saved session exactly once.
+
+    Returns the continuation's result, or ``first`` unchanged when the run is not
+    eligible (auto_resume.skip_reason) or the continuation could not be launched.
+    Launches like ``delegate followup``: same session, new run linked by
+    ``followupOf``. This never recurses; a drop in the continuation is final.
+    """
+    from delegate_agent import request_build
+
+    if (
+        auto_resume.skip_reason(
+            note,
+            enabled=request.provider_policy.auto_resume,
+            already_automatic=request.auto_resume is not None,
+        )
+        is not None
+    ):
+        return first
+
+    def keep_first(reason: str) -> tuple[int, JsonObject | None]:
+        exit_code, payload = first
+        if payload is not None:
+            payload["autoResume"] = auto_resume.skipped_annotation(note, reason)
+        elif not global_options.json_mode:
+            print(f"notice: automatic resume of {note.alias} skipped: {reason}", file=stderr)
+        return exit_code, payload
+
+    try:
+        plan = _followup_command.build_followup_plan(
+            _request_models.ParsedCommand(
+                note.engine,
+                global_options=global_options,
+                payload=_request_models.FollowupOptions(
+                    handle=note.run_id, prompt_parts=[auto_resume.CONTINUATION_PROMPT]
+                ),
+            ),
+            workspace,
+            config,
+            stderr=stderr,
+        )
+        resumed = request_build.request_from_parsed(
+            plan.parsed, config, stdin, stderr, workspace=workspace
+        )
+        resumed = _followup_command.apply_followup_to_request(resumed, plan)
+        resumed = _apply_stall_watchdog_policy(resumed, config)
+        resumed = _apply_provider_policy(resumed, config, force_launch=False)
+        annotation = auto_resume.annotation(note)
+        resumed = dc_replace(resumed, auto_resume=annotation)
+        if not global_options.json_mode:
+            signature = (note.provider_error or {}).get("signature")
+            print(
+                f"notice: {note.alias} lost its provider connection ({signature}); resuming "
+                "its saved session once automatically.",
+                file=stderr,
+            )
+        exit_code, payload = execute_request(
+            resumed,
+            global_options.json_mode,
+            config=config,
+            config_source=config_source,
+            pass_through=False,
+            completion_report_mode=request_build.resolve_completion_report_mode(
+                plan.parsed, config
+            ),
+            source_workspace=workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except Exception as exc:
+        # Best effort: the first run's result must survive a failed resume. A
+        # DelegateError or CommandError carries a stable code; anything else is
+        # named by type so the reason is never lost.
+        code = getattr(exc, "error", type(exc).__name__)
+        return keep_first(f"{code}: {getattr(exc, 'message', None) or exc}")
+    if payload is not None:
+        payload["autoResume"] = annotation
+    return exit_code, payload
 
 
 def _enforce_lane_health(request: Request) -> Request:
@@ -2067,17 +2160,31 @@ def main(
                     "(delegate instruction wrapping suppressed).",
                     file=stderr,
                 )
-        exit_code, payload = execute_request(
-            request,
-            global_options.json_mode,
-            config=config,
-            config_source=source,
-            pass_through=global_options.pass_through,
-            completion_report_mode=completion_report_mode,
-            source_workspace=workspace,
-            stdout=stdout,
-            stderr=stderr,
-        )
+        with auto_resume.watching() as finished_runs:
+            exit_code, payload = execute_request(
+                request,
+                global_options.json_mode,
+                config=config,
+                config_source=source,
+                pass_through=global_options.pass_through,
+                completion_report_mode=completion_report_mode,
+                source_workspace=workspace,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if finished_runs and not global_options.pass_through:
+            exit_code, payload = _maybe_auto_resume(
+                (exit_code, payload),
+                finished_runs[-1],
+                request,
+                global_options,
+                config=config,
+                config_source=source,
+                workspace=workspace,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
         if global_options.json_mode and payload is not None:
             delegate_rendering.print_json(payload, stdout)
         return exit_code
