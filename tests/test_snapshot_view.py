@@ -234,6 +234,33 @@ class SnapshotViewTests(unittest.TestCase):
         self.assertTrue(view["resumable"])
         self.assertEqual(view["harnessSessionId"], "019e88bc-8615-7232-b6cf-f22315386ee8")
 
+    def test_merge_snapshot_view_projects_the_effective_stall_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+            run_id, alias = run_registry.register_run(registry_root, harness="codex")
+            run_path = run_registry.run_directory(registry_root, run_id)
+            run_registry.write_json_atomic(
+                run_path / "state.json",
+                {"schema": run_registry.STATE_SCHEMA, "runId": run_id, "status": "running"},
+            )
+            run_registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "schema": run_registry.MANIFEST_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "harness": "codex",
+                    "cwd": str(workspace),
+                    "mode": "work",
+                    "startedAt": "2026-05-20T12:00:00Z",
+                    "stallWindow": {"minutes": 20.0, "source": "effort_default"},
+                },
+            )
+            view = snapshot_view.merge_snapshot_view(registry_root, run_id, None, redact=False)
+
+        self.assertEqual(view["stallWindow"], {"minutes": 20.0, "source": "effort_default"})
+
 
 if __name__ == "__main__":
     unittest.main()

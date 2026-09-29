@@ -633,7 +633,14 @@ class RunnerObservationTests(HomeCase):
     """`runner._observe_lane_health`: which finished runs are allowed to speak for the lane."""
 
     def observe(
-        self, *, status="failed", rec=PERSISTENT, established=False, fallback=None, retried=False
+        self,
+        *,
+        status="failed",
+        rec=PERSISTENT,
+        established=False,
+        fallback=None,
+        retried=False,
+        quiet=False,
     ):
         ctx = types.SimpleNamespace(
             auto_resume={"automatic": True} if retried else None,
@@ -651,6 +658,7 @@ class RunnerObservationTests(HomeCase):
             provider_error=rec,
             delegate_established=established,
             merged_extra=extra,
+            no_child_output=quiet,
         )
         return extra
 
@@ -704,21 +712,24 @@ class BrokerBindingMarkerTests(HomeCase):
         self.assertTrue(lane_health.earns_marker(self.BROKER))
 
     def test_a_first_refusal_is_deferred_to_the_retry_and_marks_nothing(self):
-        extra = self.observe(rec=self.BROKER)
+        extra = self.observe(rec=self.BROKER, quiet=True)
 
         self.assertEqual(extra, {"laneMarkerDeferred": "broker_binding_retry"})
         self.assertIsNone(lane_health.check(self.lane)[0])
 
     def test_the_retry_failing_too_marks_the_lane_as_before(self):
-        extra = self.observe(rec=self.BROKER, retried=True)
+        extra = self.observe(rec=self.BROKER, retried=True, quiet=True)
 
         self.assertIn("laneMarked", extra)
         self.assertIsNotNone(lane_health.check(self.lane)[0])
 
+    def test_a_refusal_after_child_output_is_not_deferred_and_marks_as_before(self):
+        self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=False))
+
     def test_with_auto_resume_off_a_refusal_marks_immediately(self):
         self.policy = dataclasses.replace(self.policy, auto_resume=False)
 
-        self.assertIn("laneMarked", self.observe(rec=self.BROKER))
+        self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=True))
 
 
 class RefusalTests(unittest.TestCase):

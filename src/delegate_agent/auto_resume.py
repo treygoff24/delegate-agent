@@ -63,6 +63,10 @@ class RunNote:
     session_id: str | None
     isolation_lifecycle: str
     structured: bool
+    # Positive launch-time evidence that the child did nothing: zero stdout
+    # bytes and events, no assistant text, no recorded workspace changes. False
+    # (the default) fails closed: a broker refusal is never retried without it.
+    no_child_output: bool = False
 
 
 _NOTES: ContextVar[list[RunNote] | None] = ContextVar("delegate_auto_resume_notes", default=None)
@@ -119,7 +123,11 @@ def skip_reason(note: RunNote, *, enabled: bool, already_automatic: bool) -> str
 
 
 def defers_lane_marker(
-    record: JsonObject | None, *, enabled: bool, already_automatic: bool
+    record: JsonObject | None,
+    *,
+    enabled: bool,
+    already_automatic: bool,
+    no_child_output: bool,
 ) -> bool:
     """True when a broker binding refusal will be retried once, so it earns no marker yet.
 
@@ -131,6 +139,7 @@ def defers_lane_marker(
     return (
         enabled
         and not already_automatic
+        and no_child_output
         and signature is not None
         and signature.id == BROKER_SIGNATURE
     )
@@ -155,7 +164,9 @@ def rerun_skip_reason(note: RunNote, *, enabled: bool, already_automatic: bool) 
     if signature is None:
         return "not_a_transient_drop"
     if signature.id == BROKER_SIGNATURE:
-        return None
+        # The error text can be read from stderr after the child already worked;
+        # only a run with no output and no workspace changes is a launch refusal.
+        return None if note.no_child_output else "child_produced_output"
     if signature.klass != provider_errors.CLASS_TRANSIENT or not signature.auto_resume:
         return "not_a_transient_drop"
     if note.mode != "safe":

@@ -48,6 +48,12 @@ if step == "broker403":
     )
     raise SystemExit(1)
 emit({"type": "thread.started", "thread_id": "thr_fake_session"})
+if step == "work_then_broker403":
+    emit({"type": "item.completed", "item": {"type": "agent_message", "text": "edited files"}})
+    sys.stderr.write(
+        "estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active\n"
+    )
+    raise SystemExit(1)
 if step == "ok":
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "fake codex done"}})
     emit({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}})
