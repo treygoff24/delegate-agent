@@ -458,6 +458,7 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         )
         if mail_warnings:
             payload["warnings"] = mail_warnings
+        payload["mailInbox"] = _mail.inbox_location(Path(request.workspace) / ".delegate")
     return payload
 
 
@@ -1016,13 +1017,11 @@ def _execute_attached_worktree(
         alias=alias,
         source_workspace=source_workspace,
     )
-    if provision is not None:
-        ctx_runner = dc_replace(
-            ctx_runner,
-            **mail_launch.context_updates(
-                ctx_runner.env_overrides, ctx_runner.fallback_env_overrides, ctx_runner.warnings
-            ),
-        )
+    mail_updates = mail_launch.context_updates(
+        ctx_runner.env_overrides, ctx_runner.fallback_env_overrides, ctx_runner.warnings
+    )
+    if mail_updates:
+        ctx_runner = dc_replace(ctx_runner, **mail_updates)
     attachment = {
         **(iso.attachment or {}),
         "startHeadOid": start_head_oid,
@@ -1657,15 +1656,13 @@ def execute_request(
                 alias=alias,
                 source_workspace=source_workspace,
             )
-            if provision is not None:
-                ctx_runner = dc_replace(
-                    ctx_runner,
-                    **mail_launch.context_updates(
-                        ctx_runner.env_overrides,
-                        ctx_runner.fallback_env_overrides,
-                        ctx_runner.warnings,
-                    ),
-                )
+            mail_updates = mail_launch.context_updates(
+                ctx_runner.env_overrides,
+                ctx_runner.fallback_env_overrides,
+                ctx_runner.warnings,
+            )
+            if mail_updates:
+                ctx_runner = dc_replace(ctx_runner, **mail_updates)
             # Evaluate every argument expression BEFORE marking ownership
             # transferred: a raise inside an argument (public_argv below) would
             # otherwise skip both the CLI cleanup and the runner's guard.

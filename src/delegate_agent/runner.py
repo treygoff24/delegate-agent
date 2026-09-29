@@ -239,6 +239,8 @@ class RunContext:
     persona_file: str | None = None
     persona_text: str | None = None
     mail_push: bool = False
+    # Where this run's mail lives (host and paths); None when mail is off.
+    mail_inbox: JsonObject | None = None
     resumable: bool = False
     followup_of: str | None = None
     resume_session_id: str | None = None
@@ -833,6 +835,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["workflowAgentKey"] = ctx.workflow_agent_key
     if ctx.mail_push:
         payload["mailPush"] = True
+    if ctx.mail_inbox is not None:
+        payload["mailInbox"] = ctx.mail_inbox
     if ctx.resumable:
         payload["resumable"] = True
     if ctx.harness_session_id is not None:
@@ -1147,6 +1151,7 @@ def _persist_final_progress(
     ) -> tuple[str, JsonObject, JsonObject]:
         persisted_status = status
         persisted_extra = dict(extra)
+        _refresh_unread_mail_locked(ctx, persisted_extra)
         if ctx.resumable and accumulator.harness_session_id is not None:
             persisted_extra["harnessSessionId"] = accumulator.harness_session_id
             persisted_extra["resumable"] = True
@@ -1398,6 +1403,7 @@ def delegate_report_notice(
     accumulator: harness_events.StreamAccumulator,
     *,
     usage: JsonObject | None,
+    unread_mail_warning: str | None = None,
 ) -> str | None:
     """Delegate-authored run metadata attached above a completion report.
 
@@ -1411,6 +1417,8 @@ def delegate_report_notice(
     substitution = model_substitution_warning(ctx, accumulator)
     if substitution is not None:
         lines.append(substitution)
+    if unread_mail_warning is not None:
+        lines.append(unread_mail_warning)
     label = rendering.usage_label(usage) if isinstance(usage, dict) else None
     if label is not None:
         lines.append(f"usage: {label}")
@@ -1711,6 +1719,8 @@ def completion_json_payload(
         payload["followupOf"] = ctx.followup_of
     if ctx.auto_resume is not None:
         payload["autoResume"] = ctx.auto_resume
+    if ctx.mail_inbox is not None:
+        payload["mailInbox"] = ctx.mail_inbox
     if ctx.resumable:
         payload["resumable"] = True
     if ctx.include_dirty:
@@ -3578,6 +3588,46 @@ def _append_mail_push_event(accumulator: harness_events.StreamAccumulator, warni
     )
 
 
+def _record_unread_mail(ctx: RunContext, merged_extra: JsonObject) -> str | None:
+    """Stamp ``unreadMail`` and its warning when a lane never read delivered mail."""
+    if ctx.mode != "work":
+        return None
+    unread = mail.unread_mail_extra(
+        ctx.registry_root, ctx.run_id, ctx.alias, mail_push=ctx.mail_push
+    )
+    if not unread:
+        return None
+    merged_extra["unreadMail"] = unread["unreadMail"]
+    warnings = list(merged_extra.get("warnings") or [])
+    for warning in unread["warnings"]:
+        _append_unique(warnings, warning)
+    merged_extra["warnings"] = warnings
+    return str(unread["warnings"][0])
+
+
+def _refresh_unread_mail_locked(ctx: RunContext, extra: JsonObject) -> None:
+    """Retake the unread snapshot while the lock that publishes the record is held.
+
+    ``mail send`` delivers under the registry lock while the run is still
+    running, so a message can land between the first scan and publication. The
+    snapshot taken here, under the publishing lock, is authoritative. It only
+    ever adds: a message cannot leave the box of a lane that has exited.
+    """
+    if ctx.mode != "work":
+        return
+    fresh = mail.unread_mail_extra(
+        ctx.registry_root, ctx.run_id, ctx.alias, mail_push=ctx.mail_push
+    ).get("unreadMail")
+    old = extra.get("unreadMail")
+    if not fresh or fresh == old:
+        return
+    stale_warning = mail.unread_mail_warning(old, ctx.alias) if isinstance(old, dict) else None
+    warnings = [w for w in extra.get("warnings") or [] if w != stale_warning]
+    _append_unique(warnings, mail.unread_mail_warning(fresh, ctx.alias))
+    extra["warnings"] = warnings
+    extra["unreadMail"] = fresh
+
+
 def _finalize_mail_push_state(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -3710,6 +3760,7 @@ def _finalize_tracked_run(
         merged_extra["warnings"] = warnings
         merged_extra["mailPushDegraded"] = True
         merged_extra["mailPushWarning"] = mail_warnings[0]
+    unread_mail_warning = _record_unread_mail(ctx, merged_extra)
     merged_extra = {
         **merged_extra,
         "pid": capture.pid,
@@ -3971,7 +4022,12 @@ def _finalize_tracked_run(
     # child's answer, and the record-derived views are not the only surface a
     # reviewer reads: without this the report artifact still presents a
     # substituted lane as the requested model's clean work.
-    notice = delegate_report_notice(ctx, capture.accumulator, usage=capture.accumulator.usage)
+    notice = delegate_report_notice(
+        ctx,
+        capture.accumulator,
+        usage=capture.accumulator.usage,
+        unread_mail_warning=unread_mail_warning,
+    )
     if notice is not None:
         report_text = f"{notice}\n\n{report_text}" if report_text.strip() else notice
     report_written = write_completion_report(files.run_path, report_text)
@@ -4038,6 +4094,20 @@ def _finalize_tracked_run(
         completion_report_written=report_written,
         extra=merged_extra,
     )
+    late_unread = persisted_extra.get("unreadMail")
+    if (
+        report_written
+        and isinstance(late_unread, dict)
+        and late_unread != merged_extra.get("unreadMail")
+    ):
+        # Mail landed between the first scan and publication: the report must
+        # carry the same unread count as the record.
+        late_warning = mail.unread_mail_warning(late_unread, ctx.alias)
+        if unread_mail_warning is not None and unread_mail_warning in report_text:
+            report_text = report_text.replace(unread_mail_warning, late_warning)
+        else:
+            report_text = f"{late_warning}\n\n{report_text}"
+        write_completion_report(files.run_path, report_text)
     cancel_was_reconciled = (
         persisted_status == run_registry.STATUS_CANCELLED
         and persisted_extra.get("failureReason") == "cancelled_by_user"

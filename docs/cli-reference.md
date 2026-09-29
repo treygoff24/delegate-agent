@@ -75,6 +75,39 @@ injected lane message includes the Tier-2 data-not-prompt framing. Claude and
 Codex are the only audited verified adapters; Cursor, Droid, Grok, and other
 harnesses keep the pull suffix and record a one-time degraded-to-pull warning.
 
+The launch prompt tells a lane to read its inbox before final verification or
+commit and again before its final report, because coordinator mail can correct
+the task. Mail a lane never reads is not lost silently: when a tracked work
+Run reaches a terminal state, Delegate counts the messages addressed to it (by
+handle or group) that were delivered and are still unread (messages a push hook
+already injected count as seen). If any remain, the Run record, the
+completion envelope, `snapshot`, and `wait` carry `unreadMail`
+(`{count, messages: [{msgId, from, subject, sent}, ...up to 3]}`), the
+`warnings` list gains a sentence naming the messages and the next command
+(`delegate followup <alias> "<correction>"` when they change the work), the
+completion report opens with the same line in its Delegate notice, and the
+`wait` table prints an `unread mail:` line. `wait --structural` includes
+`unreadMail`. The field is absent when nothing is unread. Cancelling a Run
+(including the urgent path taken when the registry lock is held) stamps
+`unreadMail` on the cancelled record the same way. A damaged file in the inbox
+is skipped rather than hiding the readable messages: it is counted in
+`unreadMail.unreadable` and named in a warning.
+
+Each tracked work launch also records `mailInbox` in its manifest, dry-run
+payload, and completion envelope: `host` (this machine), `root` (the mail
+root), `coordinatorInbox` (where the lane's reports land),
+`crossHostDelivery: false`, and, in the manifest and completion envelope only,
+`laneInbox` (the dry-run block omits it because no run id exists yet). Mail is workspace-local and pull-based, so a lane
+launched on another machine sends reports to that host's coordinator inbox, and
+a `delegate mail inbox` on your machine will not show them; read them on that
+host (for example over ssh) or use the completion report.
+
+`delegate followup` and `delegate resume` keep mail push when the source Run had
+it (manifest `mailPush: true`), provided mail is enabled and the new launch is a
+work launch on an engine with a verified push adapter; otherwise the launch
+continues on pull mail and prints a note saying why. `--mail-push` forces push
+on and `--no-mail-push` drops it, on both commands.
+
 `delegate mail hook-pump` is an internal command used only by those
 launch-scoped adapters. It is not a user-facing way to bypass the mailbox or
 launch prompt.
@@ -1392,7 +1425,7 @@ delegate ps [--harness HARNESS] [--group NAME] [--summary | [--limit N] [--struc
 delegate snapshot (<handle>|--latest HARNESS) [--no-redact]
 delegate run-output (<handle>|--latest HARNESS) [--completion-report] [--no-redact] [(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]
 delegate run-output (<handle>|--latest HARNESS) [--no-redact] (--raw | --tail N)
-delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--no-resumable] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
+delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--no-resumable] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push|--no-mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report] [--structural]
 delegate cancel <handle>...
 ```
@@ -1445,7 +1478,7 @@ creating a Run or writing a prompt record.
 #### Native followup
 
 ```bash
-delegate followup [--timeout SEC] [--prompt-file PATH] [--dry-run] <alias|runId> [prompt...]
+delegate followup [--timeout SEC] [--prompt-file PATH] [--mail-push|--no-mail-push] [--dry-run] <alias|runId> [prompt...]
 ```
 
 `delegate followup` continues a Codex or Claude Run by resuming its saved native
@@ -1471,7 +1504,7 @@ engines.)
   usage). The message says so and offers `delegate resume <handle>`.
 - **Options and prompt text.** Options may sit on either side of the handle, but
   only before the prompt text. A known followup option inside the prompt text
-  (`--dry-run`, `--timeout`, `--prompt-file`) is refused before anything
+  (`--dry-run`, `--timeout`, `--prompt-file`, `--mail-push`, `--no-mail-push`) is refused before anything
   launches (`option_after_handle`): `delegate followup x fix it --dry-run`
   launches nothing. Put `--` before the prompt to send such a token as literal
   text: `delegate followup x -- explain what --dry-run does`. An option-shaped

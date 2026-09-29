@@ -76,6 +76,8 @@ class SnapshotView(TypedDict, total=False):
     degraded: bool
     degradedReason: str
     degradedEvidence: list[str]
+    unreadMail: JsonObject
+    mailInbox: JsonObject
     terminalState: str
     terminalRecord: JsonObject
     continuityMode: str

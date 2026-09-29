@@ -413,6 +413,19 @@ def _hook_cursor(registry_root: Path, run_id: str) -> int:
     return value
 
 
+def pushed_through_seq(registry_root: Path, run_id: str) -> int:
+    """Highest message seq a stop hook already put in front of this run's model."""
+    seen = 0
+    try:
+        seen = _hook_cursor(registry_root, run_id)
+        pending = _hook_pending(registry_root, run_id)
+    except (MailError, OSError):
+        return seen
+    if pending is not None and pending.get("emitted") is True:
+        seen = max(seen, int(pending["lastSeq"]))
+    return seen
+
+
 def _hook_pending(registry_root: Path, run_id: str) -> JsonObject | None:
     pending = _read_json(_hook_pending_path(registry_root, run_id))
     if pending is None:
