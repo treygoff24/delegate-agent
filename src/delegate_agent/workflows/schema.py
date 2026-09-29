@@ -159,6 +159,27 @@ def validate_value(value: object, schema: JsonObject, *, path: str = "value") ->
             validate_value(item, schema["items"], path=f"{path}[{index}]")
 
 
+def unwrap_single_key_array(value: object, schema: JsonObject) -> tuple[JsonValue, str] | None:
+    """Unwrap `{"<key>": [...]}` when the schema root is an array.
+
+    Prompt-path engines (OMP, GLM) sometimes wrap a root-array answer in a
+    one-key object such as `{"items": [...]}`. Returns (array, wrapper_key)
+    only when the value is an object with exactly one key, that key's value is
+    a list, and the list validates against the root schema. Anything else
+    returns None so the original validation error stands.
+    """
+    if schema.get("type") != "array" or not isinstance(value, dict) or len(value) != 1:
+        return None
+    ((key, inner),) = value.items()
+    if not isinstance(inner, list):
+        return None
+    try:
+        validate_value(inner, schema)
+    except SchemaError:
+        return None
+    return inner, key
+
+
 def _matches_type(value: object, schema_type: object) -> bool:
     if isinstance(schema_type, list):
         return any(_matches_type(value, item) for item in schema_type)

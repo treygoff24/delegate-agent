@@ -572,6 +572,14 @@ def _preflight_codex_output_schema(
         raise DelegateError(
             "invalid_output_schema", f"Output schema is not readable: {output_schema}"
         ) from exc
+    free_form = structured_output.free_form_object_path(schema, "schema")
+    if free_form is not None:
+        raise DelegateError(
+            "invalid_output_schema",
+            f"Codex strict schema: {free_form} is an object with no declared properties; "
+            "strict mode would close it to zero keys so the model could only emit {}. "
+            "Declare its properties, or give it properties: {} if it must stay empty.",
+        )
     try:
         normalized, injected = structured_output.normalize_codex_schema(schema)
     except structured_output.SchemaPreflightError as exc:

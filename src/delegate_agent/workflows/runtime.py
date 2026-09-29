@@ -2564,6 +2564,43 @@ class WorkflowDsl:
         self._structured_attempt_lock = threading.Lock()
         self._soft_park_seen: set[str] = set()
 
+    def _validate_or_unwrap_array(
+        self,
+        value: JsonValue,
+        schema: JsonObject,
+        *,
+        key: str,
+        label: str | None,
+        engine: str,
+    ) -> JsonValue:
+        """Validate a structured value, unwrapping a one-key array wrapper.
+
+        A root-array schema answered with `{"items": [...]}` (or any single
+        key holding a valid array) is unwrapped and a warning event records it;
+        every other mismatch raises the original validation error.
+        """
+        try:
+            workflow_schema.validate_value(value, schema)
+        except workflow_schema.SchemaError:
+            unwrapped = workflow_schema.unwrap_single_key_array(value, schema)
+            if unwrapped is None:
+                raise
+            inner, wrapper_key = unwrapped
+            self.state.append_event(
+                "agent_output_unwrapped",
+                key=key,
+                label=label,
+                engine=engine,
+                wrapperKey=wrapper_key,
+                warning=(
+                    f"schema root is an array but the child returned an object wrapping it "
+                    f'under "{wrapper_key}"; unwrapped it. Return the bare array to avoid '
+                    "this warning."
+                ),
+            )
+            return inner
+        return value
+
     def _record_structured_attempt(
         self, key: str, outcome: StructuredAttemptOutcome | None
     ) -> None:
@@ -4557,7 +4594,9 @@ class WorkflowDsl:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 last_parsed_candidate = value
                 candidate_present = True
-                workflow_schema.validate_value(value, schema)
+                value = self._validate_or_unwrap_array(
+                    value, schema, key=key, label=label, engine=engine
+                )
                 self._record_structured_attempt(key, None)
                 _cleanup_structured_retry_workspace(workspace_cleanup)
                 if first_child_run_id is not None:
@@ -5324,7 +5363,9 @@ class WorkflowDsl:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 last_parsed_candidate = value
                 candidate_present = True
-                workflow_schema.validate_value(value, schema)
+                value = self._validate_or_unwrap_array(
+                    value, schema, key=key, label=label, engine=prior_child.engine
+                )
                 self._record_structured_attempt(key, None)
                 return _STRUCTURED_NULL if value is None else value
             except Exception as exc:
