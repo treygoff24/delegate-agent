@@ -798,6 +798,42 @@ class AdoptionAndUnlaunchedRunTests(_WorkflowFixture):
         self.assertEqual(adopted, "adopted answer")
         self.assertTrue(temp_base.exists(), "a dry run reaped the scratch of the run it adopted")
 
+    def stale_scope_child(self, *, dry_run: bool) -> tuple[str, Path, runtime.WorkflowState]:
+        """A prior lifetime's unfinished child whose scope now has a new key."""
+        cleanup, temp_base = self.scratch()
+        run_id = self.register_child(
+            "key-old",
+            {"status": "creating_isolation", "lastActivityAt": self.old(3600)},
+            cleanup=cleanup,
+        )
+        state = self.state()
+        state.dry_run = dry_run
+        state.started_scopes["key-old"] = "root/seq#0"
+        state.started_without_result.add("key-old")
+        return run_id, temp_base, state
+
+    def run_status(self, run_id: str) -> dict:
+        return run_registry.load_run_state_or_none(
+            run_registry.registry_root(self.workspace), run_id
+        )
+
+    def test_a_dry_run_leaves_a_stale_scope_child_and_its_scratch_alone(self) -> None:
+        run_id, temp_base, state = self.stale_scope_child(dry_run=True)
+        state.cancel_stale_scope_children("root/seq#0", "key-new")
+        self.assertEqual(self.run_status(run_id)["status"], "creating_isolation")
+        self.assertNotIn("cancelRequested", self.run_status(run_id))
+        self.assertTrue(temp_base.exists(), "a dry run reaped a stale child's scratch")
+        would = self.events("agent_stale_scope_would_cancel")[-1]
+        self.assertEqual((would["key"], would["replacedBy"]), ("key-old", "key-new"))
+        self.assertTrue(would["simulated"])
+
+    def test_a_live_resume_still_cancels_and_reaps_a_stale_scope_child(self) -> None:
+        run_id, temp_base, state = self.stale_scope_child(dry_run=False)
+        state.cancel_stale_scope_children("root/seq#0", "key-new")
+        self.assertEqual(self.run_status(run_id)["status"], "cancelled")
+        self.assertFalse(temp_base.exists())
+        self.assertEqual(self.events("agent_stale_scope_would_cancel"), [])
+
     def test_resume_seals_missing_pid_children_past_the_grace_window(self) -> None:
         run_id = self.register_child(
             "key-c", {"status": "running", "lastActivityAt": self.old(3600)}
