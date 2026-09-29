@@ -452,6 +452,50 @@ class ProcessCwdScanTests(unittest.TestCase):
             self.assertIn(holder.pid, pids)
             self.assertNotIn(bystander.pid, pids)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "non-dumpable /proc cwd is Linux-only")
+    def test_a_non_dumpable_process_of_this_user_does_not_blind_the_scan(self):
+        # Every Linux login has some (systemd --user, ssh-agent, sshd-session);
+        # counting them as blind spots refused every reap on a devbox cell.
+        with tempfile.TemporaryDirectory() as tmp:
+            inside = Path(tmp) / "wt"
+            inside.mkdir()
+            elsewhere = Path(tmp) / "elsewhere"
+            elsewhere.mkdir()
+            non_dumpable = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import ctypes, sys, time\n"
+                    "rc = ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+                    "print(rc, flush=True)\n"
+                    "time.sleep(120)\n",
+                ],
+                cwd=elsewhere,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            holder = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"], cwd=inside
+            )
+            for proc in (non_dumpable, holder):
+                self.addCleanup(proc.wait)
+                self.addCleanup(proc.kill)
+            self.addCleanup(non_dumpable.stdout.close)
+            self.assertEqual(non_dumpable.stdout.readline().strip(), "0", "prctl failed")
+            time.sleep(0.2)  # the holder only has to exist; its cwd is set at spawn
+            try:
+                os.readlink(f"/proc/{non_dumpable.pid}/cwd")
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("this process can read non-dumpable processes (CAP_SYS_PTRACE)")
+
+            scan = worktree_procs.processes_with_cwd_inside(inside)
+
+            self.assertTrue(scan.checked, scan)
+            self.assertIn(holder.pid, {holder_.pid for holder_ in scan.holders})
+            self.assertIn("non-dumpable", scan.note or "")
+
     def test_a_sibling_with_a_shared_name_prefix_is_not_inside(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "wt"
@@ -485,14 +529,29 @@ class ProcessCwdScanTests(unittest.TestCase):
         self.assertEqual(scan.holders, ())
         self.assertIn("lsof", scan.note)
 
-    def _fake_proc(self, tmp: str, processes: dict[str, str | None]) -> Path:
-        """A procfs-shaped tree: pid -> the directory its cwd link points at (None: no link)."""
+    def _fake_proc(
+        self,
+        tmp: str,
+        processes: dict[str, str | None],
+        *,
+        status: dict[str, str | None] | None = None,
+    ) -> Path:
+        """A procfs-shaped tree: pid -> the directory its cwd link points at (None: no link).
+
+        Each pid gets a ``status`` with our uid and gid unless ``status`` maps it
+        to other text (or None: no status file).
+        """
         root = Path(tmp) / "proc"
         (root / "self").mkdir(parents=True)
         (root / "self" / "cwd").symlink_to(tmp)
+        uid, gid = os.getuid(), os.getgid()
+        ours = f"Name:\tshell\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
         for pid, cwd in processes.items():
             (root / pid).mkdir()
             (root / pid / "comm").write_text("shell\n", encoding="utf-8")
+            text = (status or {}).get(pid, ours)
+            if text is not None:
+                (root / pid / "status").write_text(text, encoding="utf-8")
             if cwd is not None:
                 (root / pid / "cwd").symlink_to(cwd)
         return root
@@ -526,7 +585,9 @@ class ProcessCwdScanTests(unittest.TestCase):
             self.assertTrue(scan.checked, scan)
             self.assertEqual([(h.pid, h.command) for h in scan.holders], [(101, "shell")])
 
-    def test_proc_scan_that_cannot_read_a_process_of_this_user_is_not_a_clean_answer(self):
+    def test_proc_scan_notes_but_does_not_block_on_a_non_dumpable_process_of_this_user(self):
+        # Our uid and gid everywhere: only dumpability can deny cwd (systemd
+        # --user, ssh-agent). Blocking on these refused every reap on Linux.
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "wt"
             target.mkdir()
@@ -535,8 +596,79 @@ class ProcessCwdScanTests(unittest.TestCase):
             scan = self._proc_scan(root, target, unreadable=("202",))
 
             self.assertEqual(scan.holders, ())
-            self.assertFalse(scan.checked, scan)
-            self.assertIn("1 process(es) of this user could not be inspected", scan.note)
+            self.assertTrue(scan.checked, scan)
+            self.assertIn("1 non-dumpable process(es) of this user were not inspected", scan.note)
+
+    def test_proc_scan_does_not_block_on_a_set_id_program_that_dropped_back_to_us(self):
+        # ssh-agent on Debian is set-group-id _ssh: after dropping back to our
+        # group its saved gid is still _ssh (observed on the devbox cell).
+        uid, gid = os.getuid(), os.getgid()
+        for label, text in (
+            ("saved gid", f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t101\t{gid}\n"),
+            ("saved uid", f"Uid:\t{uid}\t{uid}\t0\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "wt"
+                target.mkdir()
+                root = self._fake_proc(
+                    tmp, {"201": str(Path(tmp)), "202": str(Path(tmp))}, status={"202": text}
+                )
+
+                scan = self._proc_scan(root, target, unreadable=("202",))
+
+                self.assertTrue(scan.checked, scan)
+                self.assertIn("non-dumpable", scan.note)
+
+    def test_proc_scan_survives_a_status_name_that_is_not_utf8(self):
+        uid, gid = os.getuid(), os.getgid()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wt"
+            target.mkdir()
+            root = self._fake_proc(tmp, {"201": str(Path(tmp)), "202": str(Path(tmp))})
+            (root / "202" / "status").write_bytes(
+                b"Name:\t\xe2\x82\n"
+                + f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n".encode()
+            )
+
+            scan = self._proc_scan(root, target, unreadable=("202",))
+
+            self.assertTrue(scan.checked, scan)
+            self.assertIn("non-dumpable", scan.note)
+
+    def test_proc_scan_that_cannot_read_a_process_under_another_group_is_not_a_clean_answer(self):
+        # A shell started with newgrp keeps our uid but not our gid, so the
+        # kernel denies its cwd; it may be working inside the worktree.
+        uid, gid = os.getuid(), os.getgid()
+        other = gid + 1
+        for label, text in (
+            ("real gid", f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{other}\t{gid}\t{gid}\t{gid}\n"),
+            (
+                "effective gid",
+                f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{other}\t{gid}\t{gid}\n",
+            ),
+            (
+                "real uid",
+                f"Uid:\t{uid + 1}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n",
+            ),
+            (
+                "effective uid",
+                f"Uid:\t{uid}\t{uid + 1}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n",
+            ),
+            ("no Gid line", f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+            ("no status file", None),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "wt"
+                target.mkdir()
+                root = self._fake_proc(
+                    tmp, {"201": str(Path(tmp)), "202": str(Path(tmp))}, status={"202": text}
+                )
+
+                scan = self._proc_scan(root, target, unreadable=("202",))
+
+                self.assertEqual(scan.holders, ())
+                self.assertFalse(scan.checked, scan)
+                self.assertIn("1 process(es) of this user could not be inspected", scan.note)
 
     def test_proc_scan_notes_but_does_not_block_on_other_users_processes(self):
         with tempfile.TemporaryDirectory() as tmp:

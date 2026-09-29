@@ -515,11 +515,19 @@ re-run under the locks immediately before removal:
   check is one pass over every process (`/proc` on Linux, `lsof -d cwd` on
   macOS), never a recursive `lsof +D`. If the scan cannot run (neither is
   available, or `lsof` fails, prints nothing, or exits 1 without naming a
-  process inside the path) or cannot read one of your own
-  processes, the entry is refused as `process_scan_unavailable`: finding
-  nothing is not the same as looking. `--kill-live` removes it anyway. Other
-  users' processes are invisible to any such scan; they are noted in a warning
-  and do not block.
+  process inside the path), the entry is refused as
+  `process_scan_unavailable`: finding nothing is not the same as looking.
+  `--kill-live` removes it anyway. Other users' processes are invisible to any
+  such scan; they are noted in a warning and do not block. On Linux the kernel
+  also hides the working directory of some of your own processes. When such a
+  process's real and effective user and group ids are yours, the denial is taken to be
+  a non-dumpable session process (`systemd --user`, `ssh-agent`,
+  `sshd-session`, a root-started service that dropped to your user), and it is
+  noted but does not block; every Linux login has some. One whose ids differ
+  from yours, such as a shell started with `newgrp`, still refuses the entry.
+  This is best-effort: a same-id process hidden for another reason (file
+  capabilities, a security module) is not seen. Shells, editors, agents, and
+  bubblewrap-sandboxed lanes are ordinary processes and are seen.
 - Changed ledger files are saved first (see [Ledger edits are saved before
   removal](#ledger-edits-are-saved-before-removal)); if that fails the entry is
   refused as `ledger_salvage_failed`.

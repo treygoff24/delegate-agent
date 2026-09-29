@@ -409,6 +409,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- `worktree reap` removes linked orphans on Linux again. Its process scan
+  refused every removal as `process_scan_unavailable` because Linux hides the
+  working directory of the user's own non-dumpable processes (`systemd
+  --user`, `ssh-agent`, `sshd-session`), which every login session has. A
+  hidden process whose real and effective user and group ids match the
+  caller's is now noted in a warning and does not block (the saved ids may
+  differ, as for set-group-id `ssh-agent` on Debian); one with other ids (a
+  `newgrp` shell) or an unreadable status still refuses. Shells,
+  agents, and bubblewrap-sandboxed lanes stay readable and still block
+  removal. The test helper that runs fake children also writes the script to
+  a file, since Linux caps one argument at 128 KiB.
 - A stale Run's `nextActions` (in `runs` and `snapshot`) now offers `delegate
   resume <handle>` (not for `call` Runs, which cannot resume). The CLI
   reference and troubleshooting guide say what killing a launch command does:

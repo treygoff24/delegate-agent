@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from delegate_agent import run_registry, runner
@@ -46,15 +47,20 @@ def run_tracked(
     Raises ``RunnerLaunchError`` when the runner does (for example an output cap).
     """
     ctx = make_context(workspace, harness, tracked_stream_max_bytes=tracked_stream_max_bytes)
-    code, payload = runner.execute_tracked(
-        [sys.executable, "-c", script],
-        str(workspace),
-        ctx,
-        json_mode=True,
-        stdout=io.StringIO(),
-        stderr=io.StringIO(),
-        timeout=timeout,
-    )
+    # The script goes in a file, not ``python -c``: Linux caps one argv string
+    # at 128 KiB (E2BIG), and the enormous-draft tests exceed it.
+    with tempfile.TemporaryDirectory() as script_dir:
+        script_path = Path(script_dir) / "child.py"
+        script_path.write_text(script, encoding="utf-8")
+        code, payload = runner.execute_tracked(
+            [sys.executable, str(script_path)],
+            str(workspace),
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            timeout=timeout,
+        )
     return code, payload, run_registry.run_directory(ctx.registry_root, ctx.run_id), ctx
 
 
