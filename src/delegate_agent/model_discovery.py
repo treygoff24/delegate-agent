@@ -618,7 +618,15 @@ def claude_unknown_model_error(
     base = model.partition("[")[0]
     lowered = base.lower()
     catalog, _ = launch_catalog(discovery, "claude")
-    if lowered in _CLAUDE_ALIASES or lowered.startswith("claude-") or base in catalog:
+    # Stay permissive: a false refusal of a working model costs more than a missed
+    # typo, so bracket suffix shapes are not whitelisted. Only a bare `claude-`
+    # and an empty `[]` suffix carry no model at all.
+    well_formed = (
+        lowered in _CLAUDE_ALIASES
+        or (lowered.startswith("claude-") and len(lowered) > len("claude-"))
+        or base in catalog
+    )
+    if well_formed and not model.endswith("[]"):
         return None
     families = [family for family in _CLAUDE_FAMILIES if family in lowered]
     suggestions: list[str] = []

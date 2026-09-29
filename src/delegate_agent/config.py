@@ -1684,9 +1684,9 @@ def load_config(
 
 
 def validate_config(config: JsonObject) -> None:
-    harnesses_problem = harness_enabled.validate_harnesses_section(config.get("harnesses"))
-    if harnesses_problem is not None:
-        raise ConfigError("invalid_harnesses_config", harnesses_problem)
+    enabled_problem = harness_enabled.validate_enabled_flags(config)
+    if enabled_problem is not None:
+        raise ConfigError(*enabled_problem)
     cursor = config.get("cursor")
     droid = config.get("droid")
     if not isinstance(cursor, dict):

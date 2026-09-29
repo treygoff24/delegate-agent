@@ -132,9 +132,11 @@ not a `claude-...` id. `Unknown Claude model 'opus-5.5'` names the closest
 choice (`opus (claude-opus-5-5)`) and the valid values. A `claude-...` id the
 catalog does not list still launches with a catalog warning, because new models
 ship before the catalog. A target of a configured `claude.models` alias is never
-refused.
+refused, and neither is a followup or resume. The check applies to `claude`
+subcommand launches and `run --input-json`; a bare `claude-` or an empty `[]`
+suffix is refused, and bracket suffix shapes are not otherwise validated.
 
-`harness_disabled` means `harnesses.<name>.enabled` is `false` in the active
+`harness_disabled` means `<engine>.enabled` is `false` in the active
 config: the harness is hidden from `models`, `describe`, and `capabilities`, and
 launching it (or `delegate models <name>`) fails with this error. Set the key to
 `true` or remove it to restore the harness.

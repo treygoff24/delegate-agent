@@ -728,14 +728,14 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only Pi's `read` tool and disable extensions, skills, prompt templates, and project approval discovery.
 - `delegate models pi --live` probes Pi's local model catalog without reading or printing provider credentials.
 
-### `harnesses`
+### Disabling a harness (`<engine>.enabled`)
 
 ```json
-{ "harnesses": { "droid": { "enabled": false } } }
+{ "droid": { "enabled": false } }
 ```
 
-- Optional. Keys are harness names (`cursor`, `droid`, `codex`, `kimi`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`); the only allowed field is `enabled`, a boolean that defaults to `true`. Any other name, key, or type fails config load with `invalid_harnesses_config`.
-- `enabled: false` removes the harness from `delegate models`, `describe`, and `capabilities` listings (JSON and text), skips it in `capabilities refresh`, and makes every launch of it (and `delegate models <name>`) fail fast with `harness_disabled` naming `harnesses.<name>.enabled`. Static help text and the `describe` overview still mention the harness. Use it to retire a harness whose binary is still on `PATH`.
+- Every engine block (`cursor`, `droid`, `codex`, `kimi`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`) accepts an optional boolean `enabled`, default `true`. A non-boolean value fails config load with `invalid_<engine>_config`.
+- `enabled: false` removes the harness from `delegate models`, `describe`, and `capabilities` listings (JSON and text), skips it in `capabilities refresh`, and makes every launch of it (and `delegate models <name>`) fail fast with `harness_disabled` naming `<engine>.enabled`. Static help text and the `describe` overview still mention the harness. Use it to retire a harness whose binary is still on `PATH`.
 
 ### `omp`
 

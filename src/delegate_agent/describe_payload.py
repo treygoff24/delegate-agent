@@ -1653,6 +1653,17 @@ def emit_models(
                 harness_enabled.disabled_harnesses(config),
             )
         )
+        aliases = payload.get("aliases")
+        counts = payload.get("counts")
+        if isinstance(aliases, list) and isinstance(counts, dict):
+            # Disabled harnesses were stripped after the counts were computed.
+            payload["counts"] = {
+                **counts,
+                "aliases": len(aliases),
+                "providers": len(
+                    {str(item.get("provider")) for item in aliases if isinstance(item, dict)}
+                ),
+            }
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
         else:
