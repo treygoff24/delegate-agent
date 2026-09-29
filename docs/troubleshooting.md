@@ -359,7 +359,11 @@ ran under an account other than the one holding the session, for example when a
 launcher chooses an account by usage on each start. Check that the followup runs
 with the same profile and `CODEX_HOME` or Claude config directory as the source
 Run, or use `delegate resume <handle>` to carry the report into a new Run. A
-workflow structured retry that hits this falls back to a fresh relaunch on its
+followup that fails with `child_failed` within 15 seconds and no stdout or
+stderr at all is the same shape without a message: the native session probably
+could not be loaded (an account switch, or an expired or corrupt session). The
+failure message says so; relaunch with `delegate resume <handle>` rather than
+retrying `followup`. A workflow structured retry that hits this falls back to a fresh relaunch on its
 own; see [workflows](delegate-workflows.md).
 
 ## Provider errors, known-bad lanes, and automatic resume

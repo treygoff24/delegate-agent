@@ -122,6 +122,30 @@ def is_usage_limit(text: str) -> bool:
     return bool(text.strip()) and provider_errors.matches_reason(text, "usage_limit")
 
 
+# A resumed launch that dies this fast with nothing on either stream never got
+# as far as the model: it failed at native-session load.
+EMPTY_FAST_FOLLOWUP_MAX_MS = 15_000
+
+
+def empty_fast_followup_failure(source: str | None) -> ChildFailure:
+    """The message for a followup that exited non-zero at once with no output.
+
+    The code stays `child_failed`: nothing was said about why, so nothing is
+    classified. The message says what the shape usually means and the next step.
+    """
+    relaunch = (
+        f"`delegate resume {source}` (a fresh Run carrying the prior context)"
+        if source
+        else "`delegate resume <handle>` (a fresh Run carrying the prior context)"
+    )
+    return ChildFailure(
+        "child_failed",
+        "Child failed immediately with no stdout or stderr. A resumed launch that dies "
+        "this way usually could not load the saved native session (account switch, "
+        f"expired or corrupt session). Relaunch with {relaunch} instead of `followup`.",
+    )
+
+
 def _retry_advice(source: str | None) -> str:
     if source is None:
         return "Retry."
