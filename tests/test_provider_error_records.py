@@ -2,10 +2,12 @@
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -137,7 +139,17 @@ class AccumulatorCaptureTests(unittest.TestCase):
 
 
 class TrackedRunProviderErrorTests(unittest.TestCase):
-    def _run(self, harness, events, workspace, *, exit_code=0, stderr="", mode="work"):
+    def _run(
+        self,
+        harness,
+        events,
+        workspace,
+        *,
+        exit_code=0,
+        stderr="",
+        mode="work",
+        auth_profile=None,
+    ):
         root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
         run_id, alias = run_registry.register_run(root, harness=harness)
         ctx = runner.RunContext(
@@ -153,6 +165,7 @@ class TrackedRunProviderErrorTests(unittest.TestCase):
             workspace_kind="directory",
             isolated_workspace=False,
             started_at=run_registry.utc_now_iso(),
+            auth_profile=auth_profile,
         )
         script = (
             "import json,sys\n"
@@ -222,6 +235,24 @@ class TrackedRunProviderErrorTests(unittest.TestCase):
         self.assertIn("estate-cursor login", payload["nextActions"][0])
         self.assertIn("Provider error: cursor_auth_required", report)
         self.assertIn("estate-cursor login", report)
+
+    def test_cursor_auth_hint_names_the_resolved_run_profile_not_the_environment(self):
+        # --auth-profile work while AI_PROFILE=personal: the run used the work realm.
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.dict(os.environ, {"AI_PROFILE": "personal"}),
+        ):
+            _code, payload, _state, _root, _run_id = self._run(
+                "cursor",
+                [],
+                workspace,
+                exit_code=1,
+                stderr="Authentication required. Please run agent login first\n",
+                auth_profile="work",
+            )
+        hint = payload["providerError"]["hint"]
+        self.assertIn("for the work realm this run used", hint)
+        self.assertIn("--auth-profile personal", hint)
 
     def test_codex_websocket_close_is_transient_and_carries_the_provider_text(self):
         with tempfile.TemporaryDirectory() as workspace:

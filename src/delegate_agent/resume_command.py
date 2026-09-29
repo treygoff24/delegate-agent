@@ -941,6 +941,7 @@ def build_resume_plan(
         persona_record_path=persona_record_path,
         mail_push=mail_push,
         continuity_mode=continuity_mode,
+        replayed_from_manifest=True,
         resumable=resumable,
         warnings=opts.warnings,
         workspace_env=workspace_env,

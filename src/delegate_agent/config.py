@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Final
 
-from delegate_agent import reasoning, redaction, stall_watchdog, write_guard, wsl
+from delegate_agent import harness_enabled, reasoning, redaction, stall_watchdog, write_guard, wsl
 from delegate_agent.constants import KNOWN_ENGINES, VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
@@ -1249,9 +1249,18 @@ def _validate_pi_family_models(models: JsonValue, *, engine: str) -> None:
             )
         unknown = sorted(set(mapping) - {"model", "thinking"})
         if unknown:
+            effort_synonyms = {"reasoning", "reasoningeffort", "reasoning_effort", "effort"}
+            hint = (
+                " Reasoning effort is spelled `thinking` here (for example "
+                f'{{"model": "<provider>/<model>", "thinking": "high"}}); rename '
+                f"{', '.join(k for k in unknown if k.lower() in effort_synonyms)} to `thinking`."
+                if any(k.lower() in effort_synonyms for k in unknown)
+                else ""
+            )
             raise ConfigError(
                 error,
-                f"{path}.{alias} has unknown keys: {', '.join(unknown)}.",
+                f"{path}.{alias} has unknown keys: {', '.join(unknown)}. "
+                f"Allowed keys are model and thinking (both required).{hint}",
             )
         model = mapping.get("model")
         thinking = mapping.get("thinking")
@@ -1675,6 +1684,9 @@ def load_config(
 
 
 def validate_config(config: JsonObject) -> None:
+    enabled_problem = harness_enabled.validate_enabled_flags(config)
+    if enabled_problem is not None:
+        raise ConfigError(*enabled_problem)
     cursor = config.get("cursor")
     droid = config.get("droid")
     if not isinstance(cursor, dict):
