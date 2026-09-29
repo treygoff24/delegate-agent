@@ -143,6 +143,23 @@ class PausedStatusTests(_Fixture):
         self.assertEqual(pause["rejection"]["reason"], "answer ignored the schema")
         self.assertIn("answer ignored the schema", pause["summary"])
 
+    def test_a_failed_attempt_names_its_reason_in_the_pause(self) -> None:
+        outcome = runtime.ChildAttemptOutcome(run_id="run-9", failure_reason="nonzero_exit")
+        self.journal(
+            {
+                "type": "agent_attempt_failed",
+                "key": "k1",
+                "label": "build",
+                "engine": "codex",
+                "attempt": 1,
+                "childAttemptOutcome": outcome.as_json(),
+            },
+            {"type": "gate", "key": "g", "gateName": "ship", "gateResultHash": "h", "result": {}},
+        )
+        self.write_status(status="paused", gateKey="g", gateResultHash="h")
+        pause = self.status_json()["pause"]
+        self.assertIn("attempt 1 failed: nonzero_exit on codex", pause["failure"])
+
     def test_text_status_prints_the_pause_summary(self) -> None:
         self.journal(
             {"type": "gate", "key": "g", "gateName": "ship", "gateResultHash": "h", "result": {}},

@@ -64,7 +64,7 @@ def failure_summary(event: JsonObject) -> str:
             detail += f"; next seat {event['nextEngine']}"
     elif kind == "agent_attempt_failed":
         outcome = event.get("childAttemptOutcome")
-        reason = outcome.get("failure_reason") if isinstance(outcome, dict) else None
+        reason = outcome.get("failureReason") if isinstance(outcome, dict) else None
         detail = f"attempt {event.get('attempt')} failed: {reason or 'unknown'}"
         if event.get("engine"):
             detail += f" on {event['engine']}"
