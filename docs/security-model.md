@@ -439,14 +439,30 @@ mode (safe has its own boundaries above).
 **Writable re-opens** inside those paths, so a protected parent never breaks the
 run itself: the execution root, the git common directory (so `git commit` works
 in a linked worktree), the run registry, the run's scratch and compact temp
-directories, mail-push homes, the selected engine's home (`CODEX_HOME`,
-`CLAUDE_CONFIG_DIR`, and any environment variable that points into
-`~/.ai-profiles`, so an engine's profile directory stays writable while sibling
-profiles stay protected), and anything named by `--writable PATH` or
-`isolation.writeGuard.writable`. An environment variable that names a
-credential store (for example `GNUPGHOME`) does not lift that store's
-protection. `TMPDIR`, `/tmp` and home caches such as `~/.cache` are not in the
-protected list and stay writable.
+directories, mail-push homes, the selected engine's home, and anything
+named by `--writable PATH` or `isolation.writeGuard.writable`. `TMPDIR`, `/tmp`
+and home caches such as `~/.cache` are not in the protected list and stay
+writable.
+
+The engine home is the one place the environment is read, and only the
+selected engine's own variable counts (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+`KIMI_CODE_HOME`, or that engine's default directory). No other variable can
+re-open anything: the child inherits whatever the caller exported, and a
+variable that happened to name `~/.ai-profiles` or `~/.ai-profiles/accounts/claude`
+would otherwise make every sibling profile writable. An environment variable
+that names a credential store (for example `GNUPGHOME`) does not lift that
+store's protection either.
+
+The engine home is checked before it is re-opened. A home that is itself a
+protected path, or a directory that contains another profile's home (one
+holding `.claude.json` or `.credentials.json`, or `auth.json` beside
+`config.toml`, found by a bounded scan that skips engine content directories
+and does not follow symlinks), is refused and stays read-only. The manifest
+lists it under `writeGuard.refused` with the reason, and the run gets a
+warning. A protected path nested inside an accepted home stays protected. An
+engine Delegate has no home variable for (droid, for one) gets no automatic
+re-open, so name its profile directory in `isolation.writeGuard.writable` or
+pass `--writable`.
 
 The list is configurable: `isolation.writeGuard.add` protects more paths,
 `remove` drops a default, and `writable` re-opens paths for every run (see
@@ -458,10 +474,15 @@ an existing path for one run only.
 - **Linux, bubblewrap.** The child runs under `bwrap --dev-bind / /` with each
   protected path bound read-only over itself and each re-open bound read-write,
   parents before children. The final argv is preflighted with `/bin/true`
-  before launch. The kernel also refuses to move or remove a mount point, so a
-  lane cannot rename `~/.ssh` out of the way. bwrap is a filesystem boundary
-  here, not a process sandbox: the pid namespace, network and `/proc` are the
-  host's.
+  before launch. The kernel also refuses to rename or remove a mount point, so a
+  lane cannot rename `~/.ssh` out of the way. The execution root is bound as a
+  mount of its own even when it sits outside every protected path (a worktree
+  under `~/.delegate/worktrees`), so a lane cannot rename its own checkout
+  either. `mv` across mounts falls back to copy-then-delete, and deleting files
+  inside a writable root is allowed, so `mv $PWD elsewhere` can still empty the
+  checkout (the mount point survives, and the files are at the destination).
+  bwrap is a filesystem boundary here, not a process sandbox: the pid
+  namespace, network and `/proc` are the host's.
 - **macOS, Seatbelt (opt-in).** `isolation.writeGuard.macosSeatbelt: true` wraps
   non-Codex engines in `sandbox-exec` with `(allow default)` followed by ordered
   `deny file-write*` and re-open rules (last match wins). The execution root
@@ -480,18 +501,40 @@ an existing path for one run only.
   compose: keep `policy.profile: "external-sandbox"` and set the one
   harness-scoped field to `false`; the profile's hook-trust bypass stays on.
 
-**When no backend is available** (Linux without a usable bwrap, or bwrap failing
-its preflight): `isolation.writeGuard.onUnavailable` decides. `warn` (default)
-launches unguarded and records a warning; `refuse` fails the launch with
-`write_guard_unavailable`. `isolation.writeGuard.enabled: false` or
-`DELEGATE_WRITE_GUARD=off` means Delegate adds nothing: no wrap, no `--add-dir`
-roots and no prompt note.
+**When no backend is available** (Linux without a usable bwrap, or bwrap or
+Seatbelt failing its preflight): `isolation.writeGuard.onUnavailable` decides,
+on both platforms. `warn` (default) launches unguarded and records a warning;
+`refuse` fails the launch with `write_guard_unavailable`.
+`isolation.writeGuard.enabled: false` or `DELEGATE_WRITE_GUARD=off` means
+Delegate adds nothing: no wrap, no `--add-dir` roots and no prompt note.
+
+One path the kernel will not bind does not switch the whole guard off. With
+`warn` on Linux, when the bwrap preflight fails, Delegate tries each mount alone
+and retries without exactly the ones that fail. The run is still guarded. The
+manifest lists what was dropped under `writeGuard.unbound` (the path, `ro` for
+a protected path left unprotected or `rw` for a re-open not applied, and bwrap's
+reason), takes it out of `protected` or `writable`, and the run gets a warning
+naming each path. If no single path is at fault (for example user namespaces
+are disabled), or the reduced plan still fails, the run is unguarded as before.
+`refuse` never retries: any preflight failure refuses the run. Seatbelt has no
+per-path retry; a failed preflight probe makes the guard unavailable as a whole.
 
 **What the operator can see.** The plan (backend, protected paths, writable
 re-opens with reasons) is in the run manifest under `writeGuard` and in
 `--dry-run` output. Work-mode prompts gain a two-sentence note naming the
 protected paths, so a lane reports a blocked write instead of working around
 it.
+
+**Links.** A symlink inside a writable directory that points at a protected
+path does not open it: both backends check the real path, so writing, removing
+or moving through the link is refused (tested live on Linux and macOS). Making a
+new hard link to a protected file from inside the guard fails too: bwrap refuses
+`link()` across the separate mounts, and Seatbelt refuses a link whose source is
+denied (tested live on both). A hard link that already exists outside the guard,
+between a protected file and a name in a writable directory, is the same inode,
+so a write through the writable name changes the protected file. That is a
+limit of any path-based guard; Delegate does not scan for such links. It was
+confirmed on macOS Seatbelt and follows from the shared inode on Linux.
 
 **Limits.** The guard does not stop reads, network use, or use of credentials
 already in the environment. `--pass-through` runs execute outside the tracked
@@ -506,9 +549,15 @@ blocked, because Delegate adds no `--add-dir` root.
 `--isolation none`. First, Delegate creates a run-owned hooks directory
 (`forbid-commit-hooks` under the run directory) whose `pre-commit`,
 `prepare-commit-msg`, `commit-msg` and `pre-merge-commit` hooks refuse, and
-injects `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (plus
-`GIT_CONFIG_PARAMETERS`, for engines that scrub variables named like secrets)
-so `core.hooksPath` points at it. `git commit --no-verify` does not skip
+injects one variable, `GIT_CONFIG_PARAMETERS`, so `core.hooksPath` points at
+it. Only that one, because Codex's default shell environment policy drops every
+variable whose name contains `KEY`, `SECRET` or `TOKEN` (any case) before a tool
+call runs: the indexed `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` form loses its keys
+that way, and git then fails every command with "missing config key".
+`GIT_CONFIG_PARAMETERS` survives the filter, and it outranks a repository's own
+`core.hooksPath` (a hook manager's), which a per-run `GIT_CONFIG_GLOBAL` file
+would not. It was confirmed under Codex 0.157: `git status` works and a commit
+is refused with the hook's message. `git commit --no-verify` does not skip
 `prepare-commit-msg`. Second, when the child exits Delegate checks for commits
 ahead of the creation base (`sourceHeadOid` for in-place runs) and fails the run
 if there are any. The hooks are a tripwire, not a wall: a child can bypass them

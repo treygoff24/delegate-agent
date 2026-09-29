@@ -48,39 +48,17 @@ def git_common_dir(cwd: str) -> str | None:
     return value if os.path.isabs(value) else os.path.normpath(os.path.join(cwd, value))
 
 
-def engine_home_roots(
-    engine: str, env: Mapping[str, str], home: str, extra: Sequence[str] = ()
-) -> tuple[Reopen, ...]:
-    """Directories the selected engine keeps its state in, from the final child env."""
-    roots: list[Reopen] = []
-    engine_home = sandbox_bwrap.engine_home(engine, env, home)
-    if engine_home:
-        roots.append(Reopen(engine_home, "engine home"))
-    for path in extra:
-        if path and os.path.isdir(path) and all(path != root.path for root in roots):
-            roots.append(Reopen(path, "profile home"))
-    return tuple(roots)
+def engine_home_candidates(engine: str, env: Mapping[str, str], home: str) -> tuple[Reopen, ...]:
+    """The selected engine's own home directory, from the final child env.
 
-
-def profile_home_roots(env: Mapping[str, str], home: str) -> tuple[Reopen, ...]:
-    """Profile directories the child's environment points at, inside ``~/.ai-profiles``.
-
-    A profile's engine state lives under ``~/.ai-profiles`` and is selected through
-    environment variables (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR`` and the other
-    engines' equivalents). The tree is protected, so exactly the directories this
-    child's own environment names stay writable; sibling profiles do not. Only
-    ``~/.ai-profiles`` gets this treatment: an env var naming ``~/.gnupg`` or
-    ``~/.ssh`` must not lift that protection.
+    Only the engine's own home variable (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``,
+    ``KIMI_CODE_HOME``) or default counts. No other environment value ever
+    reopens anything: an ambient variable that happens to name a directory under
+    ``~/.ai-profiles`` must not make that tree writable. The plan still checks
+    the candidate before using it (``write_guard.home_candidate_problem``).
     """
-    profiles_root = os.path.realpath(os.path.join(home, ".ai-profiles"))
-    seen: dict[str, Reopen] = {}
-    for value in env.values():
-        if not value or not os.path.isabs(value) or "\0" in value or not os.path.isdir(value):
-            continue
-        real = os.path.realpath(value)
-        if real != profiles_root and real.startswith(profiles_root + os.sep):
-            seen.setdefault(real, Reopen(real, "profile home"))
-    return tuple(seen.values())
+    engine_home = sandbox_bwrap.engine_home(engine, env, home)
+    return (Reopen(engine_home, "engine home"),) if engine_home else ()
 
 
 def _facts(
@@ -91,7 +69,6 @@ def _facts(
     registry_root: str | None,
     run_roots: Sequence[Reopen],
     common_dir: str | None,
-    profile_homes: Sequence[str],
 ) -> GuardFacts:
     home = env.get("HOME") or write_guard.default_home()
     return GuardFacts(
@@ -99,12 +76,49 @@ def _facts(
         exec_root=cwd,
         git_common_dir=common_dir if common_dir is not None else git_common_dir(cwd),
         registry_root=registry_root,
-        run_roots=(
-            *run_roots,
-            *engine_home_roots(engine, env, home, profile_homes),
-            *profile_home_roots(env, home),
-        ),
+        run_roots=tuple(run_roots),
+        home_candidates=engine_home_candidates(engine, env, home),
     )
+
+
+def _refusal_warning(plan: write_guard.GuardPlan) -> str | None:
+    if not plan.refused:
+        return None
+    detail = "; ".join(f"{entry.path} ({entry.reason})" for entry in plan.refused)
+    return (
+        f"work write guard: {detail}. The engine may be unable to write its own state; "
+        "name the directory with isolation.writeGuard.writable or --writable to open it."
+    )
+
+
+def _unbound_warning(unbound: Sequence[tuple[str, str, str]]) -> str:
+    detail = "; ".join(
+        f"{path} ({'left unprotected' if mode == 'ro' else 'not reopened'}: {reason})"
+        for mode, path, reason in unbound
+    )
+    return (
+        f"work write guard could not bind {detail}. Every other protected path is still "
+        'guarded. Set isolation.writeGuard.onUnavailable to "refuse" to stop a run instead.'
+    )
+
+
+def _record_unbound(record: JsonObject, unbound: Sequence[tuple[str, str, str]]) -> None:
+    """Make the manifest say what the guard did not do, not what it planned."""
+    unprotected = {path for mode, path, _reason in unbound if mode == "ro"}
+    unopened = {path for mode, path, _reason in unbound if mode == "rw"}
+    protected = record.get("protected")
+    if isinstance(protected, list):
+        record["protected"] = [path for path in protected if path not in unprotected]
+    writable = record.get("writable")
+    if isinstance(writable, list):
+        record["writable"] = [
+            entry
+            for entry in writable
+            if not (isinstance(entry, dict) and entry.get("path") in unopened)
+        ]
+    record["unbound"] = [
+        {"path": path, "mode": mode, "reason": reason} for mode, path, reason in unbound
+    ]
 
 
 def _fallback(
@@ -137,7 +151,6 @@ def apply_write_guard(
     registry_root: str | None = None,
     run_roots: Sequence[Reopen] = (),
     common_dir: str | None = None,
-    profile_homes: Sequence[str] = (),
 ) -> GuardLaunch:
     """Wrap ``argv`` in the write guard for this host, or apply the fallback.
 
@@ -156,7 +169,6 @@ def apply_write_guard(
             registry_root=registry_root,
             run_roots=run_roots,
             common_dir=common_dir,
-            profile_homes=profile_homes,
         )
 
     if engine == "codex" and write_guard.codex_native_sandbox_on(argv):
@@ -187,16 +199,41 @@ def _apply_bwrap(
     if bwrap_path is None:
         return _fallback(settings, "bubblewrap (bwrap) is not installed", argv, backend="bwrap")
     plan = write_guard.plan_guard(settings, facts, backend=write_guard.BACKEND_BWRAP)
+    # The execution root is pinned as a mount of its own so a lane cannot rename it away.
+    mounts = list(plan.mounts(pin=[os.path.realpath(cwd)]))
     wrapped = sandbox_bwrap.build_work_guard_argv(
-        mounts=plan.mounts(), engine_argv=argv, cwd=cwd, bwrap_path=bwrap_path
+        mounts=mounts, engine_argv=argv, cwd=cwd, bwrap_path=bwrap_path
     )
+    unbound: list[tuple[str, str, str]] = []
     try:
         sandbox_bwrap.preflight_plan(wrapped)
     except DelegateError as exc:
-        return _fallback(settings, exc.message, argv, backend="bwrap")
+        if settings.on_unavailable == write_guard.ON_UNAVAILABLE_REFUSE:
+            return _fallback(settings, exc.message, argv, backend="bwrap")
+        # One path the kernel will not bind must not switch the whole guard off (~/.ssh
+        # would lose its protection because some other path is unbindable). Retry
+        # without exactly the paths that fail on their own, and say which.
+        unbound = sandbox_bwrap.unbindable_mounts(mounts, bwrap_path=bwrap_path)
+        if not unbound:
+            return _fallback(settings, exc.message, argv, backend="bwrap")
+        dropped = {(mode, path) for mode, path, _reason in unbound}
+        wrapped = sandbox_bwrap.build_work_guard_argv(
+            mounts=[mount for mount in mounts if mount not in dropped],
+            engine_argv=argv,
+            cwd=cwd,
+            bwrap_path=bwrap_path,
+        )
+        try:
+            sandbox_bwrap.preflight_plan(wrapped)
+        except DelegateError as again:
+            return _fallback(settings, again.message, argv, backend="bwrap")
     record = plan.payload()
     record["status"] = STATUS_ENFORCED
-    return GuardLaunch(argv=wrapped, record=record)
+    warnings = [message for message in (_refusal_warning(plan),) if message]
+    if unbound:
+        _record_unbound(record, unbound)
+        warnings.append(_unbound_warning(unbound))
+    return GuardLaunch(argv=wrapped, record=record, warning=" ".join(warnings) or None)
 
 
 def _apply_seatbelt(
@@ -224,7 +261,11 @@ def _apply_seatbelt(
         )
     record = plan.payload()
     record["status"] = STATUS_ENFORCED
-    return GuardLaunch(argv=seatbelt.work_guard_argv(profile, argv), record=record)
+    return GuardLaunch(
+        argv=seatbelt.work_guard_argv(profile, argv),
+        record=record,
+        warning=_refusal_warning(plan),
+    )
 
 
 def native_record(roots: Sequence[Reopen]) -> JsonObject:

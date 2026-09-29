@@ -472,7 +472,10 @@ def build_work_guard_argv(
     ``--dev-bind`` (not ``--bind``) keeps device nodes usable: a plain ``--bind``
     would remount ``/dev`` with ``nodev``. Namespaces and lifetime flags match
     the safe boundary. The kernel refuses ``rmdir`` and ``rename`` of a mount
-    point, so ``rm -rf`` and ``mv`` of a protected root fail with ``EBUSY``.
+    point, so ``rm -rf`` of a protected root fails with ``EBUSY`` and a rename
+    of it fails with ``EBUSY`` or ``EXDEV``. (``mv`` across mounts falls back to
+    copy-then-delete: a file-by-file delete inside a writable root is allowed,
+    and the mount point itself survives, empty.)
     """
     argv: list[str] = [
         bwrap_path,
@@ -494,6 +497,36 @@ def build_work_guard_argv(
         argv.extend(("--ro-bind" if mode == "ro" else "--bind", path, path))
     argv.extend(("--chdir", cwd, "--", *engine_argv))
     return argv
+
+
+def unbindable_mounts(
+    mounts: Sequence[tuple[str, str]], *, bwrap_path: str = BWRAP_BINARY, timeout: float = 10.0
+) -> list[tuple[str, str, str]]:
+    """The ``(mode, path, reason)`` of each mount that fails to bind on its own.
+
+    Used only after the full plan failed its preflight, to tell one path the
+    kernel will not bind (permissions, a filesystem that refuses) from a boundary
+    that cannot run at all. Each mount is tried alone with ``/bin/true``. When
+    even an empty plan fails, the boundary itself is unusable and this returns an
+    empty list: dropping paths cannot help, so the caller falls back as before.
+    """
+    baseline = build_work_guard_argv(
+        mounts=[], engine_argv=["/bin/true"], cwd="/", bwrap_path=bwrap_path
+    )
+    try:
+        preflight_plan(baseline, timeout=timeout)
+    except DelegateError:
+        return []
+    failed: list[tuple[str, str, str]] = []
+    for mode, path in mounts:
+        probe = build_work_guard_argv(
+            mounts=[(mode, path)], engine_argv=["/bin/true"], cwd="/", bwrap_path=bwrap_path
+        )
+        try:
+            preflight_plan(probe, timeout=timeout)
+        except DelegateError as exc:
+            failed.append((mode, path, exc.message))
+    return failed
 
 
 UV_PROJECT_ENVIRONMENT_ENV = "UV_PROJECT_ENVIRONMENT"

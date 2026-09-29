@@ -72,7 +72,9 @@ echo x > "$GUARD_SIBLING/f" 2>/dev/null; note write_sibling_checkout $?
 rm -rf "$GUARD_SIBLING/canary" 2>/dev/null; note rm_sibling_canary $?
 rm -rf "$HOME/.ssh" 2>/dev/null; note rm_ssh_dir $?
 mv "$HOME/.ssh" "$TMPDIR/ssh-moved" 2>/dev/null; note mv_ssh_dir $?
-mv "$PWD" "$TMPDIR/checkout-moved" 2>/dev/null; note mv_exec_root $?
+# A plain rename: mv across mounts falls back to copy-then-delete, which is a file-by-file
+# delete inside a writable root and cannot be refused. Exit 1 is the refusal; perl missing is 127.
+perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$PWD" "$TMPDIR/checkout-moved" 2>/dev/null; note mv_exec_root $?
 
 # --- things a lane legitimately does ---
 echo x > "$PWD/exec-file"; note write_exec_root $?
@@ -122,6 +124,12 @@ class LiveWriteGuardTests(unittest.TestCase):
             "Code/sibling",
         ):
             (self.home / rel).mkdir(parents=True)
+        # A real profile home always holds its identity file.
+        for rel in (
+            ".ai-profiles/accounts/claude/work/work-d/.claude.json",
+            ".ai-profiles/accounts/claude/personal/.claude.json",
+        ):
+            (self.home / rel).write_text("{}", encoding="utf-8")
         for rel in (
             ".ssh/canary",
             ".gnupg/canary",
@@ -164,6 +172,11 @@ class LiveWriteGuardTests(unittest.TestCase):
             "GUARD_ENGINE_HOME": str(self.engine_home),
             "GUARD_RUN_SCRATCH": str(self.scratch),
             "GUARD_EXTRA": "",
+            # The fake HOME has no git config, and a Linux host cannot guess an identity.
+            "GIT_AUTHOR_NAME": "Delegate Test",
+            "GIT_AUTHOR_EMAIL": "delegate-test@example.com",
+            "GIT_COMMITTER_NAME": "Delegate Test",
+            "GIT_COMMITTER_EMAIL": "delegate-test@example.com",
             **(extra_env or {}),
         }
         record: dict = {}
@@ -217,6 +230,7 @@ class LiveWriteGuardTests(unittest.TestCase):
         for key in self.DENIED:
             with self.subTest(denied=key):
                 self.assertNotEqual(results[key], 0, f"{key} unexpectedly succeeded")
+        self.assertEqual(results["mv_exec_root"], 1, "the rename was not refused by the guard")
         for key in self.ALLOWED:
             with self.subTest(allowed=key):
                 self.assertEqual(results[key], 0, f"{key} was refused: {results}")
@@ -266,22 +280,137 @@ class LiveWriteGuardTests(unittest.TestCase):
         self.assertEqual(results["write_engine_home"], 0)
         self.assertTrue((self.engine_home / "state").exists())
 
-    def test_any_engine_home_variable_pointing_into_the_profiles_tree_stays_writable(self):
-        # An engine the guard has no built-in home variable for (droid here) still
-        # works when its profile selects a directory under ~/.ai-profiles.
+    def test_an_ambient_variable_naming_the_profiles_tree_reopens_nothing(self):
+        # profiles.child_environment inherits the caller's environment, so any variable
+        # could name a parent of every profile. None of them may make the tree writable.
+        parent = self.home / ".ai-profiles/accounts/claude"
+        results = self.run_engine(
+            self.repo,
+            extra_env={
+                "TOOL_STATE_DIR": str(parent),
+                "PROFILES_ROOT": str(self.home / ".ai-profiles"),
+                # A sibling leaf profile passes every check a candidate must pass, so only
+                # "not the engine's own variable" keeps it closed.
+                "OTHER_PROFILE_HOME": str(parent / "personal"),
+            },
+        )
+        self.assertNotEqual(results["rm_sibling_profile_canary"], 0)
+        self.assertTrue((parent / "personal/canary").exists())
+        self.assertEqual(results["write_engine_home"], 0)
+        self.assertNotIn(os.path.realpath(parent), [e["path"] for e in self.record["writable"]])
+
+    def test_an_engine_without_a_home_variable_gets_no_profile_reopen(self):
+        # Droid has no home variable Delegate knows, so a profile directory it uses under
+        # ~/.ai-profiles is not reopened. isolation.writeGuard.writable or --writable is
+        # how an operator opens one.
         profile = self.home / ".ai-profiles/accounts/droid/work"
         profile.mkdir(parents=True)
         results = self.run_engine(
             self.repo,
             engine="droid",
-            extra_env={
-                "FACTORY_PROFILE_DIR": str(profile),
-                "GUARD_ENGINE_HOME": str(profile),
-            },
+            extra_env={"FACTORY_PROFILE_DIR": str(profile), "GUARD_ENGINE_HOME": str(profile)},
+        )
+        self.assertNotEqual(results["write_engine_home"], 0)
+        self.assertFalse((profile / "state").exists())
+        results = self.run_engine(
+            self.repo,
+            engine="droid",
+            settings=self.settings(writable=(str(profile),)),
+            extra_env={"FACTORY_PROFILE_DIR": str(profile), "GUARD_ENGINE_HOME": str(profile)},
         )
         self.assertEqual(results["write_engine_home"], 0)
-        self.assertTrue((profile / "state").exists())
         self.assertNotEqual(results["rm_sibling_profile_canary"], 0)
+
+    def test_an_engine_home_naming_a_parent_of_other_profiles_is_refused(self):
+        parent = self.home / ".ai-profiles/accounts/claude"
+        results = self.run_engine(
+            self.repo,
+            extra_env={"CLAUDE_CONFIG_DIR": str(parent), "GUARD_ENGINE_HOME": str(parent)},
+        )
+        self.assertNotEqual(results["write_engine_home"], 0)
+        self.assertNotEqual(results["rm_sibling_profile_canary"], 0)
+        self.assertTrue((parent / "personal/canary").exists())
+        refused = {entry["path"]: entry["reason"] for entry in self.record["refused"]}
+        self.assertIn("another profile home", refused[os.path.realpath(parent)])
+        self.assertIn(os.path.realpath(parent), self.record["warning"])
+
+    def test_a_protected_path_inside_the_engine_home_stays_protected(self):
+        secrets = self.engine_home / "secrets"
+        secrets.mkdir()
+        (secrets / "canary").write_text("precious", encoding="utf-8")
+        script = self.root / "engine-nested.sh"
+        script.write_text(
+            '#!/bin/sh\nrm -rf "$GUARD_ENGINE_HOME/secrets/canary" 2>/dev/null\n'
+            'echo "rm_nested=$?" > "$GUARD_RESULT_DIR/results"\n'
+            'echo x > "$GUARD_ENGINE_HOME/state"; echo "write_home=$?" >> "$GUARD_RESULT_DIR/results"\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        self.script = script
+        results = self.run_engine(self.repo, settings=self.settings(add=(str(secrets),)))
+        self.assertNotEqual(results["rm_nested"], 0)
+        self.assertTrue((secrets / "canary").exists())
+        self.assertEqual(results["write_home"], 0)
+
+    def run_script(self, text: str, cwd: Path, **kwargs) -> dict[str, int]:
+        script = self.root / "engine-custom.sh"
+        script.write_text(
+            '#!/bin/sh\nR="$GUARD_RESULT_DIR/results"\n: > "$R"\nnote() { echo "$1=$2" >> "$R"; }\n'
+            + text,
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        self.script = script
+        return self.run_engine(cwd, **kwargs)
+
+    def test_a_hard_link_to_a_protected_file_cannot_be_made_or_written_through(self):
+        # Reachable only if the guard is a path check that a second name for the same inode
+        # slips past. Linux refuses across the two mounts; Seatbelt refuses a link whose
+        # source is denied (probed on macOS).
+        results = self.run_script(
+            'ln "$HOME/.ssh/canary" "$PWD/linked-canary" 2>/dev/null; note link_canary $?\n'
+            'echo tampered >> "$PWD/linked-canary" 2>/dev/null\n'
+            'ln "$HOME/.ssh/canary" "$TMPDIR/linked-canary" 2>/dev/null; note link_canary_tmp $?\n'
+            'echo tampered >> "$TMPDIR/linked-canary" 2>/dev/null\n',
+            self.repo,
+        )
+        self.assertNotEqual(results["link_canary"], 0)
+        self.assertNotEqual(results["link_canary_tmp"], 0)
+        canary = self.home / ".ssh/canary"
+        self.assertEqual(canary.read_text(encoding="utf-8"), "precious")
+        for name in (self.repo / "linked-canary", self.tmpdir / "linked-canary"):
+            # A later plain write may create an ordinary file of that name, but never
+            # one that shares the canary's inode.
+            if name.exists():
+                self.assertFalse(os.path.samefile(name, canary), f"{name} is the canary")
+
+    def test_a_symlink_to_a_protected_file_or_directory_does_not_open_it(self):
+        results = self.run_script(
+            'ln -s "$HOME/.ssh/canary" "$PWD/sym-canary"; note symlink_file $?\n'
+            'echo tampered >> "$PWD/sym-canary" 2>/dev/null; note write_through_file_link $?\n'
+            'rm -f "$PWD/sym-canary" 2>/dev/null\n'
+            'ln -s "$HOME/.ssh" "$PWD/sym-dir"; note symlink_dir $?\n'
+            'rm -rf "$PWD/sym-dir/canary" 2>/dev/null; note rm_through_dir_link $?\n'
+            'echo x > "$PWD/sym-dir/planted" 2>/dev/null; note create_through_dir_link $?\n'
+            'mv "$PWD/sym-dir/canary" "$PWD/moved-canary" 2>/dev/null; note mv_through_dir_link $?\n',
+            self.repo,
+        )
+        # The lane may make the links (its own checkout is writable); the writes through
+        # them land on protected ground and are refused.
+        self.assertEqual(results["symlink_file"], 0)
+        self.assertEqual(results["symlink_dir"], 0)
+        for key in (
+            "write_through_file_link",
+            "rm_through_dir_link",
+            "create_through_dir_link",
+            "mv_through_dir_link",
+        ):
+            with self.subTest(through_link=key):
+                self.assertNotEqual(results[key], 0, f"{key} unexpectedly succeeded")
+        self.assertEqual((self.home / ".ssh/canary").read_text(encoding="utf-8"), "precious")
+        self.assertFalse((self.home / ".ssh/planted").exists())
+        # (Linux mv across mounts may leave a *copy* in the checkout before the delete of the
+        # original is refused; a copy is a read, which the guard does not restrict.)
 
     def test_env_var_naming_a_credential_store_does_not_lift_its_protection(self):
         results = self.run_engine(

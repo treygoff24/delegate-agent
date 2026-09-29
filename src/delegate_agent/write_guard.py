@@ -161,9 +161,12 @@ class GuardFacts:
     exec_root: str
     git_common_dir: str | None = None
     registry_root: str | None = None
-    # Every other path this run must write: scratch, compact temp, mail-push
-    # homes, resolved engine homes.
+    # Every other path Delegate itself makes this run write: scratch, compact temp,
+    # mail-push homes.
     run_roots: tuple[Reopen, ...] = ()
+    # The selected engine's home. It comes from the environment, so it is checked
+    # before it may reopen anything inside a protected path (see plan_guard).
+    home_candidates: tuple[Reopen, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,17 +175,29 @@ class GuardPlan:
     protected: tuple[str, ...]
     writable: tuple[Reopen, ...]
     code_root: str | None = None
+    # Engine-home candidates plan_guard declined to reopen, with the reason.
+    refused: tuple[Reopen, ...] = ()
 
-    def mounts(self) -> tuple[tuple[str, str], ...]:
+    def mounts(self, pin: Sequence[str] = ()) -> tuple[tuple[str, str], ...]:
         """Ordered ``(mode, path)`` pairs; a later entry overrides an earlier one.
 
         Parents come before children, so a child's mode always wins inside its
         parent. bwrap applies them as mounts and Seatbelt as rules; both give
         "last match wins" semantics for nested paths.
+
+        ``pin`` names paths that must appear as their own mount even when their
+        mode already matches the parent's (bwrap only). A mount point cannot be
+        renamed or removed, so pinning the execution root is what stops a lane
+        moving its own checkout away when that checkout sits outside every
+        protected path (a worktree under ``~/.delegate/worktrees``). Paths must
+        be real paths; an existing entry keeps its mode.
         """
         entries: dict[str, str] = {path: "ro" for path in self.protected}
         for reopen in self.writable:
             entries[reopen.path] = "rw"
+        pinned = {path for path in pin if path and path != os.sep}
+        for path in pinned:
+            entries.setdefault(path, "rw")
         kept: list[tuple[str, str]] = []
         for path in sorted(entries, key=lambda p: (_depth(p), p)):
             mode = entries[path]
@@ -191,18 +206,21 @@ class GuardPlan:
                 if _is_within(path, kept_path):
                     parent_mode = kept_mode
                     break
-            if mode == parent_mode:
+            if mode == parent_mode and path not in pinned:
                 continue
             kept.append((mode, path))
         return tuple(kept)
 
     def payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "backend": self.backend,
             "codeRoot": self.code_root,
             "protected": list(self.protected),
             "writable": [{"path": r.path, "reason": r.reason} for r in self.writable],
         }
+        if self.refused:
+            payload["refused"] = [{"path": r.path, "reason": r.reason} for r in self.refused]
+        return payload
 
 
 def _depth(path: str) -> int:
@@ -369,13 +387,97 @@ def protected_candidates(settings: WriteGuardSettings, home: str) -> list[str]:
     return kept
 
 
+# A directory is another engine or profile home when it holds one of these
+# identity files. Claude keeps ``.claude.json`` (and ``.credentials.json`` on
+# Linux) at the top of its config directory; Codex keeps ``auth.json`` beside
+# ``config.toml``. ``auth.json`` alone is too common to mean anything.
+_HOME_IDENTITY_FILES = (".claude.json", ".credentials.json")
+_HOME_IDENTITY_PAIR = ("auth.json", "config.toml")
+# Engine content directories never hold a sibling profile, and can be huge.
+_HOME_SCAN_SKIP = frozenset(
+    {
+        ".git",
+        "backups",
+        "cache",
+        "file-history",
+        "node_modules",
+        "plugins",
+        "projects",
+        "sessions",
+        "shell-snapshots",
+        "skills",
+        "todos",
+    }
+)
+_HOME_SCAN_DEPTH = 3
+_HOME_SCAN_MAX_DIRS = 2000
+
+
+def _looks_like_engine_home(directory: str) -> bool:
+    if any(os.path.lexists(os.path.join(directory, name)) for name in _HOME_IDENTITY_FILES):
+        return True
+    return all(os.path.lexists(os.path.join(directory, name)) for name in _HOME_IDENTITY_PAIR)
+
+
+def other_profile_home_within(directory: str) -> str | None:
+    """A directory below ``directory`` that looks like another engine or profile home.
+
+    The scan is bounded (depth, directories visited) and does not follow symlinks.
+    It answers whether reopening ``directory`` would also open a sibling profile.
+    When the bound is hit it stops and reports nothing: a huge home must stay usable.
+    """
+    pending: list[tuple[str, int]] = [(directory, 0)]
+    scanned = 0
+    while pending:
+        current, depth = pending.pop()
+        if depth >= _HOME_SCAN_DEPTH or scanned >= _HOME_SCAN_MAX_DIRS:
+            continue
+        scanned += 1
+        try:
+            with os.scandir(current) as entries:
+                children = sorted(
+                    entry.path
+                    for entry in entries
+                    if entry.name not in _HOME_SCAN_SKIP and entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
+        for child in children:
+            if _looks_like_engine_home(child):
+                return child
+            pending.append((child, depth + 1))
+    return None
+
+
+def home_candidate_problem(real: str, protected: Sequence[str]) -> str | None:
+    """Why an engine-home candidate must not reopen protected ground, or None.
+
+    A candidate outside every protected path reopens nothing, so it is fine. One
+    inside a protected path is refused when it is that path itself, or when it
+    contains another profile's home (an environment variable naming a parent such
+    as ``~/.ai-profiles/accounts/claude`` would otherwise make every sibling
+    profile writable). A protected path nested inside the candidate stays
+    protected: mounts and rules apply deepest-last.
+    """
+    if not any(_is_within(real, path) for path in protected):
+        return None
+    if real in protected:
+        return "is itself a protected path; use writable or --writable to lift it"
+    sibling = other_profile_home_within(real)
+    if sibling is not None:
+        return f"contains another profile home ({sibling})"
+    return None
+
+
 def plan_guard(settings: WriteGuardSettings, facts: GuardFacts, *, backend: str) -> GuardPlan:
     """Build the protect/re-open plan from settings and launch facts.
 
     Protected paths that do not exist are dropped (a bind of a missing source
     fails, and there is nothing to lose); so are re-opens that do not exist.
     The payload lists only re-opens that matter: those inside a protected path,
-    plus any explicit re-open of a protected path itself.
+    plus any explicit re-open of a protected path itself. Engine-home candidates
+    are checked first (``home_candidate_problem``); refused ones are reported in
+    the plan and reopen nothing.
     """
     home = facts.home
     protected: list[str] = []
@@ -398,6 +500,16 @@ def plan_guard(settings: WriteGuardSettings, facts: GuardFacts, *, backend: str)
     reopen(facts.registry_root, "run registry")
     for root in facts.run_roots:
         reopen(root.path, root.reason)
+    refused: list[Reopen] = []
+    for candidate in facts.home_candidates:
+        if not candidate.path or not os.path.isdir(candidate.path):
+            continue
+        real = _real(candidate.path)
+        problem = home_candidate_problem(real, protected)
+        if problem is None:
+            reopens.setdefault(real, candidate.reason)
+        else:
+            refused.append(Reopen(real, f"{candidate.reason} not reopened: {problem}"))
     for entry in settings.writable:
         reopen(expand(entry, home), "isolation.writeGuard.writable")
     for entry in settings.run_writable:
@@ -411,6 +523,7 @@ def plan_guard(settings: WriteGuardSettings, facts: GuardFacts, *, backend: str)
         protected=tuple(protected),
         writable=tuple(Reopen(path, reason) for path, reason in reopens.items()),
         code_root=_real(expand(settings.code_root, home)) if settings.code_root else None,
+        refused=tuple(refused),
     )
     effective = {path for mode, path in plan.mounts() if mode == "rw"} | lifted
     return replace(
@@ -544,22 +657,16 @@ def _sq(value: str) -> str:
 def forbid_commit_env(hooks_dir: str, env: Mapping[str, str]) -> dict[str, str]:
     """Env additions pointing git at the refusing hooks for this child.
 
-    Both ``GIT_CONFIG_COUNT`` (the documented interface) and
-    ``GIT_CONFIG_PARAMETERS`` are set: Codex's default shell environment policy
-    drops variables whose names contain KEY, so ``GIT_CONFIG_KEY_n`` alone
-    would not reach a Codex tool call. Existing entries are preserved.
+    One variable, ``GIT_CONFIG_PARAMETERS``, carries the whole setting, and its
+    name has no KEY, SECRET or TOKEN in it. That matters because Codex's default
+    shell environment policy drops every variable with such a name before a tool
+    call runs. The indexed ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n`` interface
+    loses its KEY_n that way, and git then fails every command with "missing
+    config key". A per-run ``GIT_CONFIG_GLOBAL`` file would also survive the
+    filter, but the repository's own ``core.hooksPath`` (a hook manager's) beats
+    a global file, while parameters outrank repository config. Existing
+    parameters and indexed variables are left untouched.
     """
-    try:
-        count = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
-    except ValueError:
-        count = 0
-    count = max(count, 0)
-    updates = {
-        "GIT_CONFIG_COUNT": str(count + 1),
-        f"GIT_CONFIG_KEY_{count}": "core.hooksPath",
-        f"GIT_CONFIG_VALUE_{count}": hooks_dir,
-    }
     existing = env.get("GIT_CONFIG_PARAMETERS", "").strip()
     entry = _sq(f"core.hooksPath={hooks_dir}")
-    updates["GIT_CONFIG_PARAMETERS"] = f"{existing} {entry}" if existing else entry
-    return updates
+    return {"GIT_CONFIG_PARAMETERS": f"{existing} {entry}" if existing else entry}

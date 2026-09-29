@@ -268,8 +268,9 @@ omitted, it implies `--isolation worktree` and launch output prints
 `note: --forbid-commit implies --isolation worktree`. An explicit
 `--isolation none --forbid-commit` is accepted and enforced on the real
 workspace. It injects a no-commit prompt note, makes commits fail inside the
-child through run-owned git hooks (`core.hooksPath` set through
-`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`), and fails the run
+child through run-owned git hooks (`core.hooksPath` set through the single
+variable `GIT_CONFIG_PARAMETERS`, which survives Codex's secret-name env
+filter), and fails the run
 if commits remain ahead of the creation base when the child exits (for
 `--isolation none`, the HEAD recorded at launch). The hooks can be bypassed with
 `git -c core.hooksPath=/dev/null commit` or `git commit-tree`; the post-exit
