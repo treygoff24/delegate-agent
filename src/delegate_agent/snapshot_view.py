@@ -82,6 +82,8 @@ class SnapshotView(TypedDict, total=False):
     malformedSamples: list[str]
     unhandledEventTypes: JsonObject
     unhandledEventTypesTruncated: bool
+    scratchReclaimedAt: str
+    scratchReclaimedBytes: int
 
 
 def merge_snapshot_view(

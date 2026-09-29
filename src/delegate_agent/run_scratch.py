@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import stat
 import subprocess  # nosec B404 - fixed offline Git ancestry probe.
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -359,22 +360,158 @@ def tree_bytes(path: Path) -> int:
     return total
 
 
-def remove_targets(targets: list[Path]) -> None:
-    """Remove ``owned_targets`` results, refusing foreign-owned entries."""
-    if not targets:
+class ScratchBudgetExceeded(Exception):
+    """The caller's time budget ran out; whatever was freed so far stays freed."""
+
+
+class Deadline:
+    """A monotonic time budget checked between filesystem operations.
+
+    ``Deadline(None)`` never expires. The clock is injectable so a caller with
+    its own notion of time (and its tests) stays in charge of it.
+    """
+
+    def __init__(self, seconds: float | None, *, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._limit = None if seconds is None else clock() + seconds
+
+    def expired(self) -> bool:
+        return self._limit is not None and self._clock() >= self._limit
+
+    def check(self) -> None:
+        if self.expired():
+            raise ScratchBudgetExceeded
+
+
+@dataclass
+class RemovalProgress:
+    """What a removal freed, and whether it reached the end of every target."""
+
+    freed_bytes: int = 0
+    complete: bool = False
+
+
+_DIR_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _safe_removal_available() -> bool:
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.rmdir in os.supports_dir_fd
+        and os.scandir in os.supports_fd
+    )
+
+
+def _scan_for_foreign_owner(target: Path, deadline: Deadline | None) -> None:
+    """Refuse a tree holding an entry owned by someone else, before removing anything.
+
+    Symlinks are inspected with ``lstat`` semantics and never entered.
+    """
+    if not hasattr(os, "geteuid"):
         return
-    if not shutil.rmtree.avoids_symlink_attacks:
+    euid = os.geteuid()
+    pending = [target]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if deadline is not None:
+                    deadline.check()
+                info = entry.stat(follow_symlinks=False)
+                if info.st_uid != euid:
+                    raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry.path}")
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(Path(entry.path))
+
+
+def _list_directory(fd: int, deadline: Deadline | None) -> list[tuple[str, bool, int]]:
+    """(name, is directory, regular-file size) of each entry, without following symlinks."""
+    items: list[tuple[str, bool, int]] = []
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if deadline is not None:
+                deadline.check()
+            info = entry.stat(follow_symlinks=False)
+            size = info.st_size if stat.S_ISREG(info.st_mode) else 0
+            items.append((entry.name, stat.S_ISDIR(info.st_mode), size))
+    return items
+
+
+def _remove_tree(target: Path, deadline: Deadline | None, progress: RemovalProgress) -> None:
+    """Remove ``target`` bottom-up, one entry at a time, through directory descriptors.
+
+    Every directory is opened with ``O_NOFOLLOW`` relative to its parent's
+    descriptor, so a path swapped for a symlink after it was listed is refused
+    rather than followed. The deadline is checked before each entry; when it
+    fires the walk stops where it is (``ScratchBudgetExceeded``) and
+    ``progress.freed_bytes`` holds what was actually freed. Removal is resumable
+    because a half-removed tree is just a smaller tree.
+    """
+    parent_fd = os.open(target.parent, _DIR_OPEN_FLAGS)
+    stack: list[tuple[int, list[tuple[str, bool, int]], str]] = []
+    try:
+        root_fd = os.open(target.name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        try:
+            stack.append((root_fd, _list_directory(root_fd, deadline), target.name))
+        except BaseException:
+            os.close(root_fd)
+            raise
+        while stack:
+            fd, remaining, name = stack[-1]
+            if not remaining:
+                stack.pop()
+                os.close(fd)
+                container = stack[-1][0] if stack else parent_fd
+                os.rmdir(name, dir_fd=container)
+                continue
+            if deadline is not None:
+                deadline.check()
+            entry_name, is_directory, size = remaining.pop()
+            if is_directory:
+                child_fd = os.open(entry_name, _DIR_OPEN_FLAGS, dir_fd=fd)
+                try:
+                    stack.append((child_fd, _list_directory(child_fd, deadline), entry_name))
+                except BaseException:
+                    os.close(child_fd)
+                    raise
+            else:
+                os.unlink(entry_name, dir_fd=fd)
+                progress.freed_bytes += size
+    finally:
+        for fd, _remaining, _name in stack:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def remove_targets(targets: list[Path], *, deadline: Deadline | None = None) -> RemovalProgress:
+    """Remove ``owned_targets`` results, refusing foreign-owned entries.
+
+    Each target is checked as before (owned, owner-only, outside any Git
+    worktree, no foreign-owned entry inside) and then removed incrementally.
+    With a ``deadline`` the walk and the removal stop cleanly when it passes:
+    the result is incomplete, what was freed stays freed, and a later call
+    finishes the rest. Without one it runs to the end.
+    """
+    progress = RemovalProgress()
+    if not targets:
+        progress.complete = True
+        return progress
+    if not _safe_removal_available():
         raise ScratchSafetyError("safe no-follow directory removal is unavailable")
-    for target in targets:
-        _require_owned_directory(target, private=True)
-        _require_outside_git_worktree(target)
-        for root, directories, files in os.walk(target, topdown=True, followlinks=False):
-            for name in [*directories, *files]:
-                entry = Path(root) / name
-                info = entry.lstat()
-                if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
-                    raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry}")
-        shutil.rmtree(target)
+    try:
+        for target in targets:
+            if deadline is not None:
+                deadline.check()
+            _require_owned_directory(target, private=True)
+            _require_outside_git_worktree(target)
+            _scan_for_foreign_owner(target, deadline)
+            _remove_tree(target, deadline, progress)
+    except ScratchBudgetExceeded:
+        return progress
+    progress.complete = True
+    return progress
 
 
 def remove_owned(registry_root: Path, run_id: str) -> None:

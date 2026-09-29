@@ -1190,9 +1190,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "gains scratchReclaimedAt and scratchReclaimedBytes so later readers know the "
             "scratch is gone.",
             "The same reclamation runs on its own during the implicit retention pass, "
-            "bounded by a time budget; this command has none. Sizes are apparent bytes of "
+            "bounded by a time budget that also covers the walk and removal of one Run's "
+            "scratch; a Run it could not finish gets no marker and a later pass continues. "
+            "This command has no budget. A Run whose manifest recorded no scratch path is "
+            "still checked for leftover sidecars and child temp. Sizes are apparent bytes of "
             "regular files. JSON output uses schema delegate.runs-reclaim.v1 with planned, "
-            "reclaimed, skipped (each with a reason), errors, totalBytes, and budgetExhausted.",
+            "reclaimed, skipped (each with a reason, including budget_exhausted), errors, "
+            "totalBytes (bytes actually freed), and budgetExhausted.",
         ),
         see_also=("runs", "runs prune", "snapshot"),
         unsupported_global_options=(

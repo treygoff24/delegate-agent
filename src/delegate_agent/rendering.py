@@ -132,6 +132,17 @@ def _render_snapshot_current(view: SnapshotView, stdout: TextIO) -> None:
         print(f"current: {current}", file=stdout)
 
 
+def _render_snapshot_scratch(view: SnapshotView, stdout: TextIO) -> None:
+    reclaimed_at = view.get("scratchReclaimedAt")
+    if not isinstance(reclaimed_at, str) or not reclaimed_at:
+        return
+    size = view.get("scratchReclaimedBytes")
+    detail = ""
+    if isinstance(size, int) and not isinstance(size, bool):
+        detail = f" ({_format_mib(size)})"
+    print(f"scratch reclaimed: {reclaimed_at}{detail}", file=stdout)
+
+
 def _render_snapshot_cleanup(view: SnapshotView, stdout: TextIO) -> None:
     cleanup = view.get("worktreeCleanupCommands")
     if isinstance(cleanup, dict):
@@ -188,6 +199,7 @@ def _render_snapshot_completion(view: SnapshotView, stdout: TextIO) -> None:
 def render_snapshot_text(view: SnapshotView, stdout: TextIO) -> None:
     _render_snapshot_header(view, stdout)
     _render_snapshot_status_detail(view, stdout)
+    _render_snapshot_scratch(view, stdout)
     _render_snapshot_string_fields(view, SNAPSHOT_CONTEXT_FIELDS, stdout)
     _render_snapshot_isolation(view, stdout)
     _render_snapshot_reasoning(view, stdout)
