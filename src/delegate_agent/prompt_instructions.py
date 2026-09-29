@@ -35,6 +35,17 @@ TURN_END_INSTRUCTION = """## Delegate run rule
 
 Ending your turn ends this Run, and nothing will wake you afterward: any background task or monitor still running is killed and its result is never seen. Run long jobs (tests, builds, gates) in the foreground and finish them before your final message."""
 
+# Work mode only: a Run has no human on the other end, so a skill that gates
+# implementation behind approval (brainstorming, design review) would park it.
+# Safe mode is read-only by construction and never asked to implement.
+WORK_NO_APPROVAL_INSTRUCTION = (
+    "Nobody can answer a question or approve a step during this Run. Treat the task in this "
+    "prompt as the approval to carry it out, unless the prompt itself asks only for a plan, a "
+    "review, or a read-only answer, and do not stop to ask for confirmation. If you truly cannot "
+    "continue, end with a final report that says exactly what blocks you."
+)
+WORK_TURN_END_INSTRUCTION = TURN_END_INSTRUCTION + " " + WORK_NO_APPROVAL_INSTRUCTION
+
 COMPLETION_REPORT_SUFFIX = """
 
 ## Delegate completion report requirement
