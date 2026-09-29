@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -197,17 +198,20 @@ class MailPushAdapterTests(CommandTestBase):
                 self.assertEqual(env, before)
                 self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
-    def test_provisioning_is_absent_without_mail_push_flag(self):
-        parsed = parser_api.parse_cli(["claude", "work", "prompt"])
-        self.assertFalse(parsed.payload.mail_push)
-        self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
-
     def test_hook_pump_is_classified_as_a_mutation_by_both_python_and_shell_guards(self):
         parsed = parser_api.parse_cli(["mail", "hook-pump"])
         self.assertFalse(profile_guard.is_read_only_command(parsed))
         shim = Path(__file__).resolve().parents[1] / "bin" / "delegate-profile-shim"
-        shim_text = shim.read_text(encoding="utf-8")
-        self.assertIn("inbox|status|watch)", shim_text)
+        result = subprocess.run(
+            ["bash", str(shim), "mail", "hook-pump"],
+            cwd=self.workspace,
+            env={"HOME": str(self.user_home), "AI_PROFILE": "work", "PATH": os.environ["PATH"]},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to run a launch or mutation command", result.stderr)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import mail, run_registry, run_status
+from delegate_agent import mail, run_registry, run_status, runner
 
 
 class _FailBeforeInjection(io.StringIO):
@@ -135,13 +135,33 @@ class MailPushCursorTests(unittest.TestCase):
 
     def test_write_failure_leaves_cursor_unadvanced_without_post_response_output(self) -> None:
         message = self._send("retry before injection")
+        stderr = io.StringIO()
         self.assertEqual(
-            mail.hook_pump(self.registry_root, stdout=_FailBeforeInjection(), env=self.env),
+            mail.hook_pump(
+                self.registry_root, stdout=_FailBeforeInjection(), stderr=stderr, env=self.env
+            ),
             1,
         )
 
+        self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(self._cursor(), 0)
         self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
+        context = runner.RunContext(
+            registry_root=self.registry_root,
+            run_id=self.run_id,
+            alias=self.alias,
+            harness="claude",
+            engine="claude",
+            mode="work",
+            model=None,
+            source_cwd=str(self.workspace),
+            execution_cwd=str(self.workspace),
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=run_registry.utc_now_iso(),
+            mail_push=True,
+        )
+        self.assertIsNone(runner._mail_push_failure_marker(context, None))
         retry = self._pump()
         self.assertEqual(
             [row["message"]["msgId"] for row in self._payload(retry)["messages"]],
@@ -214,9 +234,9 @@ class MailPushCursorTests(unittest.TestCase):
         self.assertEqual(self._pump(), {})
         self.assertEqual(self._cursor(), message["seq"])
 
-    def test_grok_continuation_double_boundary_does_not_reinject_message(self) -> None:
-        self.env["DELEGATE_MAIL_HOOK_HARNESS"] = "grok"
-        message = self._send("grok continuation")
+    def test_codex_additional_context_double_boundary_does_not_reinject_message(self) -> None:
+        self.env["DELEGATE_MAIL_HOOK_HARNESS"] = "codex"
+        message = self._send("codex continuation")
 
         first = self._pump()
         self.assertIn("additionalContext", first)

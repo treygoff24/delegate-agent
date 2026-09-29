@@ -299,13 +299,17 @@ class MailDeliveryTests(unittest.TestCase):
         )
         canary = self.registry_root.parent / "outside-canary.mail"
         self.assertFalse(canary.exists())
-        with self.assertRaises(mail.MailError) as caught:
+        with (
+            mock.patch("delegate_agent.mail_core._box_dir") as path_probe,
+            self.assertRaises(mail.MailError) as caught,
+        ):
             mail.status(
                 self.registry_root,
                 mail.MailCommand(action="status", message_id=message_id),
                 env=sender_env,
             )
         self.assertEqual(caught.exception.error, "invalid_message_id")
+        path_probe.assert_not_called()
         self.assertFalse(canary.exists())
 
     def test_publication_link_failure_records_failed_and_does_not_claim_inbox(self):
