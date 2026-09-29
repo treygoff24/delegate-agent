@@ -420,10 +420,16 @@ session (failure kind `session_lost`, reason `session_expired`; typically the
 launcher landed on a different account than the one holding it), the call falls
 back to a fresh relaunch in the same worktree instead of ending. The fallback is
 journaled as `agent_structured_retry` with `strategy: "relaunch"` and
-`fellBackFrom: "resume"`, and it does not spend a retry. If an earlier attempt
-already changed the worktree, a fresh child would redo the task on top of landed
-work, so the call is refused instead (`agent_structured_retry_refused`, reason
-`work_changed_session_missing`).
+`fellBackFrom: "resume"`, and it does not spend a retry. A fresh child would redo
+the task, so the fallback relaunches only over a worktree known to be untouched;
+otherwise the call is refused (`agent_structured_retry_refused`). The reason is
+`work_changed_session_missing` when an earlier attempt already changed the
+worktree, and `work_state_unverified` when that could not be checked: the work
+summary's `fileInspectionStatus` or `commitInspectionStatus` is not `verified`
+(for example `git status` failed, which otherwise reads as zero changed files),
+its summary is missing or predates `fileInspectionStatus`, or a work-mode child
+has no summary at all. Safe and call children run in temporary workspaces with
+no summary and are not held to this.
 
 The supported schema subset includes `minLength` for strings and `minItems` for
 arrays. Both take non-negative integers and are enforced recursively. `required`

@@ -1159,6 +1159,71 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         self.assertEqual(len(summary["commitsCreated"]), worktree_summary.MAX_COMMITS_REPORTED)
         self.assertTrue(summary["commitsCreatedTruncated"])
 
+    def _head_oid(self, repo) -> str:
+        return subprocess.run(
+            ["git", "-C", repo.name, "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def test_work_summary_records_verified_file_inspection_for_a_clean_tree(self):
+        repo, _git_cd = self._make_git_repo_with_commit()
+
+        summary = worktree_summary.build_work_summary(
+            source_git_root=repo.name,
+            execution_cwd=repo.name,
+            branch="delegate/test",
+            creation_context={"sourceHeadOid": self._head_oid(repo)},
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["fileInspectionStatus"], "verified")
+        self.assertEqual(summary["commitInspectionStatus"], "verified")
+        self.assertTrue(summary["noChanges"])
+
+    def test_work_summary_does_not_call_a_tree_clean_when_git_status_fails(self):
+        # A corrupt index makes `git status` fail while rev-list and rev-parse (no
+        # index) still answer. The uncommitted file below is real work; before the
+        # status was recorded the summary read zero files and zero commits and
+        # reported noChanges.
+        repo, _git_cd = self._make_git_repo_with_commit()
+        base_oid = self._head_oid(repo)
+        (Path(repo.name) / "landed.txt").write_text("uncommitted work\n", encoding="utf-8")
+        (Path(repo.name) / ".git" / "index").write_bytes(b"not an index")
+
+        summary = worktree_summary.build_work_summary(
+            source_git_root=repo.name,
+            execution_cwd=repo.name,
+            branch="delegate/test",
+            creation_context={"sourceHeadOid": base_oid},
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["fileInspectionStatus"], "unverified")
+        self.assertEqual(summary["commitInspectionStatus"], "verified")
+        self.assertEqual(summary["commitsCreatedCount"], 0)
+        self.assertEqual(summary["changedFilesCount"], 0)
+        self.assertFalse(summary["noChanges"])
+        self.assertTrue(any("status" in warning for warning in summary["warnings"]))
+
+    def test_work_summary_with_prefetched_status_counts_as_verified(self):
+        # The list caller already ran `git status`; a later index problem is not
+        # this summary's inspection to fail.
+        repo, _git_cd = self._make_git_repo_with_commit()
+
+        summary = worktree_summary.build_work_summary(
+            source_git_root=repo.name,
+            execution_cwd=repo.name,
+            branch="delegate/test",
+            creation_context={"sourceHeadOid": self._head_oid(repo)},
+            prefetched_changed_files=([], 0),
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["fileInspectionStatus"], "verified")
+        self.assertTrue(summary["noChanges"])
+
     def test_forbid_commit_fails_when_child_creates_commit(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

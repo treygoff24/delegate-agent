@@ -348,6 +348,41 @@ def _session_missing(outcome: ChildAttemptOutcome) -> bool:
     return kind == run_outcome.FAILURE_SESSION_LOST
 
 
+def _work_inspection_verified(summary: JsonObject) -> bool:
+    """Did both the file-status and the commit inspection behind a summary run?"""
+    return (
+        summary.get("fileInspectionStatus") == "verified"
+        and summary.get("commitInspectionStatus") == "verified"
+    )
+
+
+def _session_missing_relaunch_refusal(
+    child: _DelegateChildResult,
+    prior_child: _DelegateChildResult | None,
+    *,
+    mode: str,
+) -> str | None:
+    """Why a fresh child must not launch over this tree, or None when it may.
+
+    A fresh child after a missing session redoes the whole task, so it is safe
+    only when the tree is positively known to be untouched: every inspection
+    behind the attempts' work summaries ran and shows no changes. A summary whose
+    inspection failed reads as a clean tree (an empty file list and a zero commit
+    count), so absence of changes alone is not evidence. A work-mode call always
+    has a tree to account for; the other modes run in temporary workspaces that
+    have no summary and nothing to protect.
+    """
+    attempts = [child] if prior_child is None else [child, prior_child]
+    if any(attempt.work_changed for attempt in attempts):
+        return "work_changed_session_missing"
+    summaries = [attempt.work_summary for attempt in attempts if attempt.work_summary is not None]
+    if mode == MODE_WORK and (prior_child is None or prior_child.work_summary is None):
+        return "work_state_unverified"
+    if not all(_work_inspection_verified(summary) for summary in summaries):
+        return "work_state_unverified"
+    return None
+
+
 def _exhaustion_failure_kind(child_outcome: ChildAttemptOutcome | None) -> str:
     """A structured call's failure kind: the last child's, else invalid output."""
     if child_outcome is None:
@@ -4402,10 +4437,14 @@ class WorkflowDsl:
                     # (typically the launcher landed on another account). No
                     # correction was attempted, so redo this attempt as a fresh
                     # launch from the last real failure instead of ending the call.
-                    if child.work_changed or (prior_child is not None and prior_child.work_changed):
+                    relaunch_refusal = _session_missing_relaunch_refusal(
+                        child, prior_child, mode=mode
+                    )
+                    if relaunch_refusal is not None:
                         # Only the missing session could have asked for the
                         # structured result alone; a fresh child would redo the
-                        # task on top of landed work.
+                        # task on top of landed work, or on a tree nobody could
+                        # confirm was untouched.
                         prior_output = text or ""
                         prior_error = f"child attempt {child.outcome.failure_reason}: {exc}"
                         changed_tree_refused = True
@@ -4415,7 +4454,7 @@ class WorkflowDsl:
                             label=label,
                             engine=engine,
                             attempt=attempt,
-                            reason="work_changed_session_missing",
+                            reason=relaunch_refusal,
                             runId=child.run_id,
                             workSummary=child.work_summary,
                             childAttemptOutcome=child.outcome.as_json(),
