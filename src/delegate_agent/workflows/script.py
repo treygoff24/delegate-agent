@@ -104,7 +104,11 @@ def compile_workflow(source: str, *, filename: str) -> CodeType:
 def check_source(source: str, *, filename: str = "<workflow>") -> CheckResult:
     meta = parse_meta(source, filename=filename)
     tree = wrapped_tree(source, filename=filename)
-    warnings = [*_determinism_warnings(tree), *_budget_loop_warnings(tree)]
+    warnings = [
+        *_determinism_warnings(tree),
+        *_budget_loop_warnings(tree),
+        *_unkeyed_step_warnings(tree),
+    ]
     _validate_literal_schemas(tree)
     _validate_literal_agent_modes(tree, meta)
     _validate_literal_judge_efforts(tree)
@@ -141,6 +145,51 @@ def _budget_loop_warnings(tree: ast.AST) -> list[str]:
             if isinstance(child, ast.Call) and _name_of(child.func) == "budget.remaining":
                 warnings.append("budget warning: budget.remaining() loops need an iteration bound")
                 break
+    return warnings
+
+
+# The calls that take ``key=``. judges() and followup() do not: a judge stage
+# is positional by design, and a followup is anchored by its prior label.
+_KEYABLE_STEPS = ("agent", "parallel", "pipeline", "workflow")
+_UNKEYED_LINES_SHOWN = 8
+
+
+def _unkeyed_step_warnings(tree: ast.AST) -> list[str]:
+    """Flag unkeyed steps in a script that keys others.
+
+    A script that passes ``key=`` anywhere has chosen stable replay identity,
+    which usually means it steers by mutable state and skips settled work. Its
+    unkeyed steps still replay by position and prompt text, so skipping or
+    adding one sibling shifts every later unkeyed one and settled work runs
+    again on resume. A script that keys nothing is left alone: that is the
+    original positional design, and warning about every call would be noise.
+    """
+    keyable: list[tuple[str, int, bool]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _name_of(node.func)
+        if name not in _KEYABLE_STEPS:
+            continue
+        # A `**options` expansion may carry the key; assume it does rather than
+        # warn on a call that is possibly keyed.
+        keyed = any(keyword.arg in {"key", None} for keyword in node.keywords)
+        keyable.append((name, node.lineno, keyed))
+    if not any(keyed for _name, _line, keyed in keyable):
+        return []
+    warnings: list[str] = []
+    for step in _KEYABLE_STEPS:
+        lines = sorted(line for name, line, keyed in keyable if name == step and not keyed)
+        if not lines:
+            continue
+        shown = ", ".join(str(line) for line in lines[:_UNKEYED_LINES_SHOWN])
+        more = len(lines) - _UNKEYED_LINES_SHOWN
+        where = f"{shown}, and {more} more" if more > 0 else shown
+        warnings.append(
+            f"keying warning: {len(lines)} {step}() call(s) without key= (line {where}) in a "
+            "script that keys other steps; unkeyed steps replay by position and prompt, so "
+            "skipping or adding a sibling shifts them and settled work can run again on resume"
+        )
     return warnings
 
 
