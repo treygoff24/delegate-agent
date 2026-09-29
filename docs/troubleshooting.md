@@ -456,31 +456,37 @@ with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
-### OMP thinking compaction and output limits
+### OMP output compaction and the (opt-in) output cap
 
-Long OMP thinking streams no longer consume the entire retained-output budget.
-Delegate keeps the first 64 KiB of recognized stripped `thinking_delta` records,
-then omits only that diagnostic shape. A `delegate.capture` line in raw stdout
-and a result warning disclose the omission; `stdoutCapture` in the result or
-snapshot reports byte counts, omitted records, limits, and a transport digest.
-These counters cover the final attempt, not all retries combined.
+Tracked runs have no output cap by default: a verbose child is never killed or
+truncated for its size, and `stdout.log` keeps growing. Two OMP shapes are still
+compacted so the log stays readable. Delegate keeps the first 64 KiB of
+recognized stripped `thinking_delta` records, then omits only that diagnostic
+shape, and it shrinks an oversized `args` or `partialResult` on a
+`tool_execution_update` record (OMP repeats the whole `task` sub-agent context on
+every update) to a `delegateCompacted` stub with the original size, a head, and a
+tail. A `delegate.capture` line in raw stdout (thinking only) and a result warning
+disclose the compaction; `stdoutCapture` in the result or snapshot reports byte
+counts, omitted and compacted records, limits, and a transport digest. These
+counters cover the final attempt, not all retries combined. `--raw` cannot
+recover omitted thinking or the compacted update text; `tool_execution_start` and
+`tool_execution_end` still hold the full arguments and result.
 
-The limits remain finite: OMP retains 64 MiB per tracked stream by default,
-allows 16 MiB per JSON record, and accepts at most 256 MiB of total stdout
-transport per attempt. Pi also defaults to 64 MiB per tracked stream; other
-engines default to 16 MiB. Override a tracked-run limit with
-`<engine>.trackedStreamMaxBytes`; call mode keeps its separate 16 MiB caps.
-Unknown records, malformed JSON, useful output, and metadata-bearing events
-still count against the retained cap. Check `stdoutCapture.limitKind` to
-distinguish a retained-output, record, or transport limit; an endlessly verbose
-child still fails and is terminated. `--raw` cannot recover omitted thinking
-diagnostics.
+To opt into a limit, set `<engine>.trackedStreamMaxBytes` to a positive byte
+count. Only then does a run stop with `output_limit_exceeded` (the message names
+the key to raise or set to `null`), and OMP's 16 MiB per-record and 256 MiB
+transport ceilings apply. Check `stdoutCapture.limitKind` to distinguish a
+retained-output, record, or transport limit. Call mode keeps its separate 16 MiB
+caps. A capped, failed, or timed-out run still quotes the child's last
+substantive text in its completion report.
 
 ## Parsing `events.jsonl` nested JSON
 
 Tracked Runs mirror retained child stdout lines into `.delegate/runs/<runId>/events.jsonl`
 as `stream.line` records, up to 500 lines followed by a
-`stream.lines_truncated` marker. Lines longer than 500 characters are clipped
+`stream.lines_truncated` marker. The 500-line limit applies to this mirror only:
+the child keeps running, and `stdout.log` (flushed on every write) keeps the full
+stream, so a stale `events.jsonl` is not a stalled child. Lines longer than 500 characters are clipped
 with a `…` sentinel and marked `truncated: true` /
 `textChars: <original length>`.
 Clipped lines that contained nested JSON are no longer valid JSON payloads, so

@@ -347,10 +347,12 @@ the child produced none — so `--completion-report` never dead-ends.
 A work run with `resultQuality=no_assistant_text` fails with `empty_result` and
 exit code `1` when persistent-worktree accounting also verifies that it made no
 file changes or commits; the child exit code remains available as `childExitCode`.
-Each tracked raw stream is capped per engine by `<engine>.trackedStreamMaxBytes`
-(16 MiB by default, 64 MiB for Pi and Oh My Pi). A child that exceeds the cap is
-terminated with `output_limit_exceeded`; a child that lingers after an explicit
-harness terminal event receives a short exit grace and is then stopped.
+Tracked raw streams have no byte cap by default, so a verbose run is never
+killed or truncated for its size and `stdout.log` keeps the whole stream. Set
+`<engine>.trackedStreamMaxBytes` to a positive integer to opt an engine into a
+cap; a child that exceeds it is terminated with `output_limit_exceeded` and its
+last substantive text stays in the completion report. A child that lingers after
+an explicit harness terminal event receives a short exit grace and is then stopped.
 
 Block on background runs instead of polling, and cancel them cleanly:
 

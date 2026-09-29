@@ -1147,7 +1147,9 @@ def execute_request(
                     process_group_grace_seconds=request.process_group_termination_grace_sec,
                 )
             except delegate_runner.RunnerLaunchError as exc:
-                raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
+                raise DelegateError(
+                    exc.error, exc.message, exc.exit_code, diagnostics=exc.diagnostics
+                ) from exc
             # The one outcome contract (outcome.compute_outcome): a child that
             # exited 0 with no output, or whose provider's last word was a quota
             # refusal, is a failed call, not a success with a warning attached.
@@ -1637,6 +1639,9 @@ def emit_error(
         )
     else:
         print(f"{error.error}: {error.message}", file=stderr)
+        partial_text = (error.diagnostics or {}).get("partialText")
+        if isinstance(partial_text, str) and partial_text:
+            print(f"Partial output recovered before the call stopped:\n{partial_text}", file=stderr)
         print(f"Help: {help_action}", file=stderr)
     return error.exit_code
 

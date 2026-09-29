@@ -69,7 +69,6 @@ DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
 CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
-TRACKED_STREAM_MAX_BYTES = delegate_config.DEFAULT_TRACKED_STREAM_MAX_BYTES
 STREAM_READ_CHUNK_BYTES = 64 * 1024
 TRACKED_PROCESS_POLL_SEC = 0.05
 TERMINAL_EXIT_GRACE_SEC = 1.0
@@ -139,6 +138,13 @@ class RunnerLaunchError(RuntimeError):
         self.error = error
         self.message = message
         self.exit_code = exit_code
+        # A call that timed out or overflowed keeps what it had read: the raw
+        # buffers are attached where it is raised, and `diagnostics` (partial
+        # assistant text and tails, redacted) is built from them once the harness
+        # is known.
+        self.partial_stdout: bytes | None = None
+        self.partial_stderr: bytes | None = None
+        self.diagnostics: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +290,7 @@ def _registry_lock_timeout(ctx: RunContext) -> float:
 
 
 def _tracked_stream_max_bytes(ctx: RunContext) -> int:
+    """The resolved tracked-stream byte cap; TRACKED_STREAM_UNCAPPED (0) means no cap."""
     if ctx.tracked_stream_max_bytes is not None:
         return ctx.tracked_stream_max_bytes
     # Normal CLI request construction pins this field from the already-validated
@@ -295,8 +302,8 @@ def _tracked_stream_max_bytes(ctx: RunContext) -> int:
     except (delegate_config.ConfigError, OSError):
         # Direct runner callers may intentionally supply an ambient config that
         # is unavailable to the parent (for example, a child-only profile path).
-        # The engine default is finite and safer than turning that late lookup
-        # into an untracked launch failure.
+        # The engine default is safer than turning that late lookup into an
+        # untracked launch failure.
         return delegate_config.default_tracked_stream_max_bytes(ctx.engine)
     return delegate_config.resolve_tracked_stream_max_bytes(config, ctx.engine)
 
@@ -723,7 +730,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         # inherit operator intent; a config or env default is re-resolved.
         payload["stallMinutes"] = ctx.stall_seconds / stall_watchdog.SECONDS_PER_MINUTE
     if ctx.tracked_stream_max_bytes is not None:
-        payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes
+        # null records "no cap" (the default) without a misleading 0.
+        payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes or None
     if ctx.output_schema_text is not None:
         payload["outputSchema"] = ctx.output_schema_text
     if ctx.agent is not None:
@@ -1263,6 +1271,16 @@ def delegate_report_notice(
     return "\n".join([DELEGATE_REPORT_NOTICE_HEADER, *(f"- {line}" for line in lines)])
 
 
+def _partial_output_lines(text: str) -> list[str]:
+    return [
+        "",
+        "Partial output recovered before the run stopped. This is not a completion report:",
+        "```text",
+        redaction.redact_string(text).rstrip(),
+        "```",
+    ]
+
+
 def _completion_report_text_and_source(
     ctx: RunContext,
     accumulator: harness_events.StreamAccumulator,
@@ -1317,16 +1335,7 @@ def _completion_report_text_and_source(
         # never returned as the child's own report, so nothing downstream can
         # mistake a truncated turn for a completed one.
         if child_text:
-            lines.extend(
-                [
-                    "",
-                    "Partial output recovered before the run stopped."
-                    " This is not a completion report:",
-                    "```text",
-                    redaction.redact_string(child_text).rstrip(),
-                    "```",
-                ]
-            )
+            lines.extend(_partial_output_lines(child_text))
         lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
         return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
     if accumulator.completion_text and child_text:
@@ -1357,6 +1366,14 @@ def _completion_report_text_and_source(
             lines.append(_auth_remediation_line(ctx))
         if stderr_tail.strip():
             lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
+        # A failed, timed-out, or capped Run usually did real work first; its last
+        # substantive message survives here the way a cancelled Run's does, quoted
+        # and never presented as the child's completion report.
+        partial_text = harness_events.bound_assistant_text(
+            (accumulator.recoverable_assistant_text or child_text).strip()
+        )
+        if partial_text:
+            lines.extend(_partial_output_lines(partial_text))
         lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
         return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
     if child_text:
@@ -1577,7 +1594,7 @@ def _drain_stream(
     byte_counter: ByteCounter,
     *,
     on_line: Callable[[str], None] | None,
-    max_bytes: int,
+    max_bytes: int | None,
     limit_signal: StreamLimitSignal,
     stream: str,
     capture_info: JsonObject | None = None,
@@ -1585,6 +1602,11 @@ def _drain_stream(
     handler_failures: list[str] | None = None,
 ) -> None:
     """Copy one child pipe to its log until EOF, feeding decoded text to ``on_line``.
+
+    ``max_bytes=None`` (or 0) is no cap: nothing is truncated, killed, or hidden
+    from the parser. The log is flushed after every write so its size and mtime
+    track the child's output; a buffered handle held short lines back for up to
+    8 KiB and a working lane's ``stdout.log`` read as hung.
 
     The pipe is drained no matter what the handlers do. A handler exception
     (a registry lock timeout while persisting progress, a parser bug) is
@@ -1619,6 +1641,7 @@ def _drain_stream(
 
         def write(captured: bytes) -> None:
             log_handle.write(captured)
+            log_handle.flush()
             byte_counter.total += len(captured)
             if on_line is not None and decoder is not None:
                 decoded = decoder.decode(captured, final=False)
@@ -1627,7 +1650,7 @@ def _drain_stream(
 
         capture = stream_capture.BoundedCapture(
             write,
-            max_bytes,
+            max_bytes or None,
             initial_bytes=log_handle.tell(),
             compact_omp=capture_info is not None,
             on_omitted=on_omitted,
@@ -2683,6 +2706,13 @@ def _capture_tracked_process(
                         "kind": "stream.lines_truncated",
                         "stream": "stdout",
                         "limit": harness_events.EVENT_LIMIT,
+                        # Only this mirror stops. Readers took the marker for a
+                        # stalled child and its stale mtime for a hang.
+                        "note": (
+                            "events.jsonl mirrors only the first "
+                            f"{harness_events.EVENT_LIMIT} stdout lines; stdout.log keeps "
+                            "the full stream and keeps growing."
+                        ),
                     },
                 )
                 stdout_line_events_truncated = True
@@ -3022,6 +3052,9 @@ def _capture_tracked_process(
                     f"Child engine {ctx.engine} {limit_signal.stream or 'output'} exceeded its "
                     f"configured tracked stream limit of {tracked_stream_max_bytes} bytes."
                 )
+            # The cap is opt-in, so whoever hit it set it: name the key that
+            # raises or removes it.
+            message += f" Raise {ctx.engine}.trackedStreamMaxBytes, or set it to null for no cap."
     return TrackedCaptureResult(
         accumulator=accumulator,
         exit_code=exit_code,
@@ -5219,16 +5252,22 @@ def _bounded_call_communicate(
         _join_io_threads()
         if overflow.is_set():
             stream = overflow_stream[0] or "stdout"
-            raise RunnerLaunchError(
+            failure = RunnerLaunchError(
                 f"call_{stream}_overflow",
                 overflow_message[0],
                 1,
             )
-        raise RunnerLaunchError(
-            "call_timeout",
-            f"Child command exceeded timeout of {timeout} seconds.",
-            1,
-        )
+        else:
+            failure = RunnerLaunchError(
+                "call_timeout",
+                f"Child command exceeded timeout of {timeout} seconds.",
+                1,
+            )
+        # The threads are joined, so the buffers are complete: hand them up
+        # instead of dropping a draft the child had already produced.
+        failure.partial_stdout = stdout_buf.getvalue()
+        failure.partial_stderr = stderr_buf.getvalue()
+        raise failure
 
     # A successful leader can leave grandchildren holding stdout/stderr open.
     # Kill the recorded group before joining drains so a daemon cannot make a
@@ -5245,12 +5284,56 @@ def _bounded_call_communicate(
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
 
-def _call_stderr_tail(data: bytes, sensitive_texts: tuple[str, ...]) -> str:
-    tail = data.decode("utf-8", errors="replace")
+def _redact_call_text(text: str, sensitive_texts: tuple[str, ...]) -> str:
     for value in sensitive_texts:
         if value:
-            tail = tail.replace(value, "[REDACTED]")
-    return redaction.redact_string(tail)[-profiles.STDERR_TAIL_LIMIT :]
+            text = text.replace(value, "[REDACTED]")
+    return redaction.redact_string(text)
+
+
+def _call_stderr_tail(data: bytes, sensitive_texts: tuple[str, ...]) -> str:
+    tail = _redact_call_text(data.decode("utf-8", errors="replace"), sensitive_texts)
+    return tail[-profiles.STDERR_TAIL_LIMIT :]
+
+
+CALL_PARTIAL_STDOUT_TAIL_CHARS = 2000
+
+
+def _call_partial_diagnostics(
+    harness: str,
+    stdout_data: bytes,
+    stderr_data: bytes,
+    sensitive_texts: tuple[str, ...],
+) -> JsonObject:
+    """What a call that timed out or overflowed had already produced, redacted.
+
+    `partialText` is the child's last substantive assistant text (bounded), read
+    with the same accumulator a finished call uses; a child whose stdout is not
+    structured falls back to its raw stdout. `stdoutTail` and `stderrTail` are
+    the ends of the raw buffers.
+    """
+    stdout_text = stdout_data.decode("utf-8", errors="replace")
+    accumulator = harness_events.StreamAccumulator(harness=harness)
+    for line in stdout_text.splitlines():
+        accumulator.ingest_line(line)
+    accumulator.finish_stream()
+    partial = (accumulator.recoverable_assistant_text or accumulator.assistant_text).strip()
+    if not partial and accumulator.structured_events_seen == 0:
+        partial = stdout_text.strip()
+    diagnostics: JsonObject = {}
+    if partial:
+        diagnostics["partialText"] = _redact_call_text(
+            harness_events.bound_assistant_text(partial), sensitive_texts
+        )
+        diagnostics["partialTextChars"] = len(partial)
+    if stdout_text.strip():
+        diagnostics["stdoutTail"] = _redact_call_text(stdout_text, sensitive_texts)[
+            -CALL_PARTIAL_STDOUT_TAIL_CHARS:
+        ]
+    stderr_tail = _call_stderr_tail(stderr_data, sensitive_texts)
+    if stderr_tail.strip():
+        diagnostics["stderrTail"] = stderr_tail
+    return diagnostics
 
 
 def _claude_model_resolved(event: JsonObject) -> str | None:
@@ -5505,6 +5588,12 @@ def _execute_call_once(
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
+        except RunnerLaunchError as exc:
+            if exc.partial_stdout is not None:
+                exc.diagnostics = _call_partial_diagnostics(
+                    harness, exc.partial_stdout, exc.partial_stderr or b"", sensitive_texts
+                )
+            raise
     finally:
         if process is not None:
             _terminate_call_process(
