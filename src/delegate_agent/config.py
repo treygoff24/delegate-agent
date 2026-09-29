@@ -120,6 +120,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultReasoningEffort": None,
         "workPermissionMode": "auto",
         "noSessionPersistence": True,
+        "disableBackgroundTasks": True,
         "bare": False,
         "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
@@ -880,6 +881,11 @@ def _validate_claude_section(claude: JsonValue) -> None:
     require_bool(
         claude.get("noSessionPersistence", True),
         path="claude.noSessionPersistence",
+        error="invalid_claude_config",
+    )
+    require_bool(
+        claude.get("disableBackgroundTasks", True),
+        path="claude.disableBackgroundTasks",
         error="invalid_claude_config",
     )
     require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")

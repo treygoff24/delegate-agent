@@ -63,6 +63,16 @@ CURSOR_READ_ONLY_MODE = ("--mode", "ask")
 
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
 
+# A headless `claude -p` child ends when the model stops, and background Bash
+# tasks and Monitors die with the session, so a work child that backgrounds its
+# test gate and "waits" has abandoned it. Claude Code 2.1.284 (verified against
+# the binary's strings, not a live probe): CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+# removes Bash `run_in_background` and the automatic backgrounding of long
+# commands, but Monitor is gated by a separate feature flag and needs the deny.
+# Safe runs are unchanged: CLAUDE_SAFE_TOOLS already excludes Monitor.
+CLAUDE_DISABLE_BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+CLAUDE_DISALLOWED_BACKGROUND_TOOLS = "Monitor"
+
 # Claude Code 2.1.259 added --permission-prompts; 2.1.263 documents "none" as
 # "nobody: anything that would prompt is denied automatically; the permission
 # mode still decides everything else". Delegate's read-only modes otherwise rely
@@ -322,6 +332,11 @@ def build_kimi_argv(
     return argv
 
 
+def claude_disables_background_tasks(claude: JsonObject) -> bool:
+    """Whether a Claude work child is launched without background tasks (default on)."""
+    return claude.get("disableBackgroundTasks", True) is True
+
+
 def build_claude_argv(
     claude: JsonObject,
     mode: str,
@@ -389,6 +404,8 @@ def build_claude_argv(
             else str(claude.get("workPermissionMode", "auto"))
         )
         argv.extend(["--permission-mode", permission_mode])
+        if claude_disables_background_tasks(claude):
+            argv.extend(["--disallowedTools", CLAUDE_DISALLOWED_BACKGROUND_TOOLS])
     elif mode == MODE_CALL:
         if call_read_only:
             argv.extend(

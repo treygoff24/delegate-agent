@@ -75,6 +75,7 @@
     "defaultReasoningEffort": null,
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
+    "disableBackgroundTasks": true,
     "bare": false
   },
   "grok": {

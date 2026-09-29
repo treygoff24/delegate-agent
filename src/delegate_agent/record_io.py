@@ -153,7 +153,6 @@ def merge_terminal_record(
         cancelled = {**current, **pending}
         cancelled["status"] = "cancelled"
         cancelled["ok"] = False
-        terminal_states.apply_operator_cancel_override(cancelled)
         for key in ("stdoutBytes", "stderrBytes"):
             old = current.get(key)
             new = pending.get(key)
@@ -172,6 +171,8 @@ def merge_terminal_record(
                 )
         if warnings:
             cancelled["warnings"] = warnings
+        # After the warnings merge, so a degraded warning carried by either record goes too.
+        terminal_states.apply_operator_cancel_override(cancelled)
         return cancelled
     if isinstance(current, dict) and current_status in TERMINAL_STATUSES:
         return current
