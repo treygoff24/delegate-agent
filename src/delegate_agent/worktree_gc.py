@@ -911,7 +911,9 @@ def reap_worktrees(
                 if registry_root is not None
                 else contextlib.nullcontext()
             )
-            with registry_context:
+            # held_nested keeps each reaped path's nested Registry lock until the
+            # pass ends (inner, so it is released before the registry lock).
+            with registry_context, contextlib.ExitStack() as held_nested:
                 # One locked rescan feeds both checks below: a path that became
                 # unsettled or unverifiable since planning must block now.
                 fresh_report = scan_worktree_pool(pool, required=True)
@@ -964,6 +966,15 @@ def reap_worktrees(
                             continue
                     if target.is_symlink() or not target.is_dir():
                         errors.append({**entry, "code": "toctou_changed"})
+                        continue
+                    # Runs launched inside the path registered worktrees in its own
+                    # .delegate; deleting it would orphan them. The nested lock stays
+                    # held until this entry's delete is done.
+                    nested_stack = held_nested.enter_context(contextlib.ExitStack())
+                    nested_block = worktree_remove.nested_worktrees_reap_block(target, nested_stack)
+                    if nested_block is not None:
+                        nested_stack.close()
+                        errors.append({**entry, **nested_block})
                         continue
                     record = fresh_record
                     salvage: LedgerSalvage | None = None

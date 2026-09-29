@@ -769,6 +769,61 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.assertIn("`notes.txt`", request.stdin_text)
         self.assertIn("git diff HEAD", request.stdin_text)
 
+    def test_safe_dirty_tree_warns_launcher_with_count_and_paths(self):
+        from delegate_agent import cli as cli_api
+
+        repo = self.make_dirty_repo()
+        workspace = request_types.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = isolation_api.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+
+        request = request_api.build_request(
+            "codex",
+            "safe",
+            None,
+            workspace,
+            "review",
+            config_api.embedded_default_config(),
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+
+        mirrored = [w for w in request.warnings if w.startswith("dirty_source_mirrored:")]
+        self.assertEqual(len(mirrored), 1)
+        self.assertIn("2 uncommitted/untracked file(s)", mirrored[0])
+        self.assertIn("'tracked.txt'", mirrored[0])
+        self.assertIn("'notes.txt'", mirrored[0])
+        payload = cli_api.dry_run_payload(request)
+        self.assertIn(mirrored[0], payload["warnings"])
+
+    def test_safe_clean_tree_has_no_dirty_source_warning(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        workspace = request_types.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = isolation_api.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+        request = request_api.build_request(
+            "codex",
+            "safe",
+            None,
+            workspace,
+            "review",
+            config_api.embedded_default_config(),
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+        self.assertFalse([w for w in request.warnings if w.startswith("dirty_source_mirrored:")])
+
     def test_safe_clean_tree_omits_dirty_tree_note(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)

@@ -102,8 +102,20 @@ def _remove_payload(
                 {
                     "ok": False,
                     "code": "no_matching_worktrees",
-                    "message": f"No persistent worktrees found for group: {command.group}",
+                    "message": (
+                        f"No persistent worktrees found for group: {command.group} in the "
+                        f"Registry at {registry_root}. Groups match only runs registered in "
+                        "this workspace's Registry: a run launched with a different --cwd "
+                        "(including a delegate worktree path) lives in that directory's "
+                        "Registry. List this Registry's worktrees, or pass --cwd for the "
+                        "workspace that launched the group."
+                    ),
                     "group": command.group,
+                    "registryRoot": str(registry_root),
+                    "nextActions": [
+                        "delegate worktree list",
+                        "delegate worktree reap --path PATH",
+                    ],
                     "matched": 0,
                     "retrySafe": False,
                 }

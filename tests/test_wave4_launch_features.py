@@ -216,6 +216,12 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                     for warning in payload["warnings"]
                 )
             )
+            path_warnings = [
+                w for w in payload["warnings"] if w.startswith("dirty_source_auto_included_paths:")
+            ]
+            self.assertEqual(len(path_warnings), 1)
+            self.assertIn("'tracked.txt'", path_warnings[0])
+            self.assertIn("'untracked.txt'", path_warnings[0])
 
             execution_cwd = Path(payload["executionCwd"])
             self.assertEqual((execution_cwd / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
@@ -271,6 +277,99 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 )
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertIn(repr(filename), stderr.getvalue())
+
+    def test_dry_run_previews_dirty_source_paths_for_persistent_worktree(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            (Path(repo.name) / "untracked.txt").write_text("new\n", encoding="utf-8")
+            agent = self.write_executable("agent", "exit 0\n")
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stdout = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "--isolation",
+                        "worktree",
+                        "dry-run",
+                        "cursor",
+                        "work",
+                        "hello",
+                    ],
+                    stdout=stdout,
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["dirtySourcePreview"]["untracked"], 1)
+            self.assertEqual(payload["dirtySourcePreview"]["examplePaths"], ["untracked.txt"])
+            self.assertTrue(
+                any(
+                    w.startswith("dirty_source_auto_included_paths:") and "'untracked.txt'" in w
+                    for w in payload["warnings"]
+                )
+            )
+
+    def test_explicit_include_dirty_names_the_synced_count_and_paths(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            repo_path = Path(repo.name)
+            (repo_path / "tracked.txt").write_text("clean\n", encoding="utf-8")
+            git(repo.name, "add", "tracked.txt")
+            git(repo.name, "commit", "-m", "base")
+            (repo_path / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+            (repo_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+            agent = self.write_executable(
+                "agent",
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- explicit include-dirty fake\"}\\n'\n"
+                "exit 0\n",
+            )
+            config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            config_path = self.write_config(config)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "--include-dirty",
+                        "hello",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0, stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["includeDirty"])
+            self.assertIn(
+                "dirty_source_included: synced 1 tracked-modified and 1 untracked file(s).",
+                payload["warnings"],
+            )
+            paths = [w for w in payload["warnings"] if w.startswith("dirty_source_included_paths:")]
+            self.assertEqual(len(paths), 1, payload["warnings"])
+            self.assertIn("'tracked.txt'", paths[0])
+            self.assertIn("'untracked.txt'", paths[0])
+            self.assertFalse(
+                any(w.startswith("dirty_source_auto_included") for w in payload["warnings"])
+            )
 
     def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
         with tempfile.TemporaryDirectory() as fake_home:

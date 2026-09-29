@@ -31,8 +31,16 @@ delegate --isolation worktree kimi work "Implement the scoped change and report 
 
 Dirty source checkouts automatically seed the new persistent worktree with
 uncommitted tracked edits and untracked non-ignored files. Delegate emits a
-`dirty_source_auto_included` warning with both counts. `--include-dirty` remains
-available as an explicit request and is a no-op when the source is clean:
+`dirty_source_auto_included` warning with both counts, followed by a
+`dirty_source_auto_included_paths` warning naming up to five paths (dry runs show
+both as `dirtySourcePreview` and a warning). `--include-dirty` remains
+available as an explicit request and is a no-op when the source is clean; when
+it does sync files, the same pair of warnings appears as `dirty_source_included`
+and `dirty_source_included_paths`. Safe
+runs with worktree isolation (reviews) also mirror the dirty source into their
+copy; the launcher gets a `dirty_source_mirrored` warning (envelope `warnings`
+and the dry-run output) with the file count and up to five paths, so a review
+launched while another lane is mid-edit is visible:
 
 ```bash
 delegate --isolation worktree cursor work --include-dirty "Implement using my local edits."
@@ -396,7 +404,7 @@ live-owner guard (`run_active`, `run_not_terminal`, `process_group_alive`,
 `worktree_leased`, `nested_run_active`, `nested_registry_unreadable`): a refused
 `remove` or `prune --force`
 says so and names `--kill-live`, the only flag that does, on `remove`, `prune`,
-and `reap`. A skipped entry in `prune` and `reap` JSON carries the same hint.
+and `reap` (except a nested Registry that cannot be read or locked, below). A skipped entry in `prune` and `reap` JSON carries the same hint.
 Uncommitted work is judged as described under `remove` in every one of these
 verbs, so a worktree that `prune` plans is one `remove` and retirement would
 also accept.
@@ -413,13 +421,32 @@ the workspace they run in, so pass `--cwd <registryWorkspace>` for those.
 Because the parent's lease check only reads the parent's registry, removal and
 prune also look inside the worktree itself: a `running` run in its own
 `.delegate/` blocks removal as `nested_run_active` (override: `--kill-live`).
-A nested registry that exists but cannot be read, or holds a run whose state
-cannot be told, blocks removal as `nested_registry_unreadable` (same override):
-an unreadable answer is not a "no". A worktree with no nested registry is
-unaffected. The check protects a live child only. That registry is inside the worktree, so once the
-child finishes, removing the parent deletes the child's run record along with
-it; the branch and its commits are what survive. Read or `snapshot` a nested
-run's result with `--cwd <worktree>` before removing its parent.
+A nested registry holding a run whose state cannot be told blocks removal as
+`nested_registry_unreadable` (override: `--kill-live`). One that exists but
+cannot be read or locked refuses with the same code even with `--kill-live`: an
+unreadable answer is not a "no", and it may list worktrees the delete would
+orphan. Repair or move aside that `.delegate/`, then retry. A worktree with no nested registry is
+unaffected. Once a nested run has finished, `worktree remove` of the parent
+also removes that run's worktree first, but only when it is clean and its
+branch merged (`nestedRemoved` in the result lists them). The parent's
+`--force`/`--discard-uncommitted`/`--force-branch` never reach a nested
+worktree. If a nested worktree is dirty, unmerged or otherwise refused, nothing
+is removed and the error `nested_worktrees_block_remove` names each one in
+`nestedWorktrees` with its `reason` and the exact `delegate --cwd <worktree>
+worktree remove <alias> [flags]` command in `nextActions`; run those by name,
+then remove the parent again. Nested Registries are locked (parent, then
+nested, depth first) while they are read and removed, and the running-run check
+is repeated right before the parent is deleted. A worktree whose `.delegate/`
+did not exist during the walk but exists by then (a launch into it landed
+mid-removal) refuses with `nested_registry_appeared`, keeping the parent; check
+that run with `worktree list` and remove again. A nested Registry that cannot be
+read or locked refuses with `nested_registry_unreadable` (even with
+`--kill-live`), naming its path in `nestedRegistry`; a nested removal that fails
+part-way (for example branch deletion) stops with `nested_worktree_remove_failed`
+and the nested result in `nestedResult`, and the parent stays. The nested run's
+record lives in the parent's `.delegate/` and goes away with it, so read or
+`snapshot` a nested run's result with `--cwd <worktree>` before removing its
+parent.
 
 ## Reap old pooled paths
 
@@ -431,6 +458,15 @@ delegate worktree reap --handle cursor-4 --older-than 14 --dry-run
 delegate worktree reap --path ~/.delegate/worktrees/abc123def456/cursor-1 --older-than 30 --yes --force
 delegate worktree reap --group wave4 --older-than 14 --yes --force
 ```
+
+Reap never removes worktrees that runs launched with `--cwd <path>` registered
+in the path's own `.delegate/`: while any of them is not recorded as removed,
+the entry fails with `nested_worktrees_present`, listing them in
+`nestedWorktrees` with `nestedRegistry` (remove them by name, or remove the
+parent with `worktree remove`, which removes clean, merged nested worktrees
+first). A nested Registry that cannot be read or locked fails the entry with
+`nested_registry_unreadable`. The nested Registry stays locked through the
+delete.
 
 `--path` is accepted only for an absolute pool entry exactly one fingerprint
 directory below the configured `worktrees.dataHome`; symlinked fingerprint or

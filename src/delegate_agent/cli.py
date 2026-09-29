@@ -383,6 +383,19 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         # branch/path. Temporary safe-mode isolation is created ephemerally at
         # execution time and must not claim a persistent worktree plan.
         if ctx.isolation_lifecycle in ("persistent", "attached"):
+            if (
+                ctx.isolation_lifecycle == "persistent"
+                and ctx.source_git_root is not None
+                and request.workspace_base is None
+            ):
+                from delegate_agent import worktree_execution
+
+                preview = worktree_execution.dirty_source_preview(ctx.source_git_root)
+                if preview is not None:
+                    warning = str(preview.pop("warning"))
+                    payload["dirtySourcePreview"] = preview
+                    if not request.include_dirty:
+                        payload["warnings"] = [*payload.get("warnings", []), warning]
             planned_cwd = ctx.planned_execution_cwd or "<planned-worktree-path>"
             planned_branch = ctx.planned_branch or "<planned-branch>"
             payload["plannedExecutionCwd"] = planned_cwd

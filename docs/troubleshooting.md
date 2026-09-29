@@ -933,9 +933,23 @@ Files the launch seeded from a dirty source and the ledger paths in
 `worktrees.retirementIgnoreGlobs` (`.beads/**`, `.papercuts.jsonl`) do not count
 as uncommitted edits, so they never cause this refusal. If the refusal names a
 live run (`run_active`, `run_not_terminal`, `process_group_alive`,
-`worktree_leased`, `nested_run_active`, or `nested_registry_unreadable`),
-`--force` will not override it; wait for the run, or pass `--kill-live` to remove
-the worktree out from under it. Edits to those ledger paths are not lost on
+`worktree_leased`, or `nested_run_active`), `--force` will not override it; wait
+for the run, or pass `--kill-live` to remove the worktree out from under it.
+`nested_registry_unreadable` yields to neither flag: repair or move aside the
+named `.delegate/`, then retry.
+If it says `nested_worktrees_block_remove`, runs launched with `--cwd <this
+worktree>` left dirty or unmerged worktrees of their own: each is listed in
+`nestedWorktrees` with the exact command to remove it by name; the parent's
+`--force` never reaches them. Clean, merged ones are removed automatically along
+with the parent. `nested_registry_appeared` means a run registered inside the
+worktree while it was being removed; the parent is kept, so check that run and
+remove again. `worktree reap` refuses such a path with `nested_worktrees_present`
+instead of removing nested worktrees itself. `nested_registry_unreadable` (a nested Registry that cannot be
+read or locked) and `nested_worktree_remove_failed` (a nested removal failed;
+the parent is kept) name the path or nested result to fix. `worktree remove
+--group NAME` and handles match only the Registry of the workspace the command
+runs in (the error names it as
+`registryRoot`); pass `--cwd` for the workspace that launched the run. Edits to those ledger paths are not lost on
 removal: they are copied to `<Registry>/salvage/<worktree>-<timestamp>/` first,
 and the result names that path.
 A pooled path with no run record is removed with `worktree reap --path <path>

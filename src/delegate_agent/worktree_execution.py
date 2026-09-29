@@ -146,6 +146,31 @@ def execute_persistent_worktree(
     return _launch_child_in_persistent_worktree(execution, preflight, registration)
 
 
+def dirty_source_paths_warning(paths: tuple[str, ...], *, automatic: bool = True) -> str:
+    """Follow-on to the dirty-sync count warning: which files were mirrored (up to 5)."""
+    shown = ", ".join(repr(path) for path in paths[:5])
+    more = len(paths) - 5
+    code = "dirty_source_auto_included_paths" if automatic else "dirty_source_included_paths"
+    return f"{code}: " + shown + (f", +{more} more" if more > 0 else "")
+
+
+def dirty_source_preview(source_git_root: str) -> JsonObject | None:
+    """Dry-run view of what a persistent work launch would auto-sync; None when clean."""
+    try:
+        snapshot = safe_workspace.dirty_sync_snapshot(source_git_root)
+    except Exception:  # a preview must never fail the dry run
+        return None
+    paths = snapshot.example_paths
+    if not paths:
+        return None
+    return {
+        "trackedModified": len(snapshot.diff_names),
+        "untracked": len(snapshot.untracked_names),
+        "examplePaths": list(paths[:5]),
+        "warning": dirty_source_paths_warning(paths),
+    }
+
+
 def _worktree_pool_count(data_home: Path) -> int:
     # ponytail: count-based guardrail only — a full-tree byte walk was slowest
     # exactly when the pool was large, the case the warning exists to catch.
@@ -589,12 +614,22 @@ def _create_persistent_worktree_or_record_failure(
                 )
             )
             sync_warnings = list(warnings)
-            if auto_include_dirty:
+            if auto_include_dirty or tracked_files or untracked_files:
+                # Explicit --include-dirty syncs the same files, so it gets the same
+                # count and paths, under its own code.
+                code = (
+                    "dirty_source_auto_included" if auto_include_dirty else "dirty_source_included"
+                )
                 sync_warnings.insert(
                     0,
-                    "dirty_source_auto_included: "
-                    f"synced {tracked_files} tracked-modified and {untracked_files} "
+                    f"{code}: synced {tracked_files} tracked-modified and {untracked_files} "
                     "untracked file(s).",
+                )
+                sync_warnings.insert(
+                    1,
+                    dirty_source_paths_warning(
+                        preflight.dirty_example_paths, automatic=auto_include_dirty
+                    ),
                 )
             registration.creation_context["includeDirtyWarnings"] = sync_warnings
             if sync_warnings:

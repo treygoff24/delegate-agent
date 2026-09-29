@@ -1354,6 +1354,61 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(len(reaped["reaped"]), 1)
             self.assertFalse(worktree.exists())
 
+    def test_reap_refuses_a_path_whose_own_registry_holds_nested_worktrees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            gone = Path(tmp) / "deleted-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
+                contents="work.txt",
+            )
+            # A run launched with --cwd <this path> registered its own worktree here.
+            _repo, repo_path = self._make_repo()
+            nested_wt = str(Path(tmp) / "wt" / "codex-nested")
+            self._seed_persistent_run(
+                repo_path, alias="codex-nested", harness="codex", execution_cwd=nested_wt
+            )
+            shutil.copytree(Path(repo_path) / ".delegate", worktree / ".delegate")
+            self._settle(worktree, worktree.parent)
+
+            refused = worktree_gc_api.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+                force=True,
+            )
+
+            self.assertEqual(refused["reaped"], [])
+            error = refused["errors"][0]
+            self.assertEqual(error["code"], "nested_worktrees_present")
+            self.assertEqual(error["nestedWorktrees"][0]["alias"], "codex-nested")
+            self.assertEqual(error["nestedRegistry"], str(worktree / ".delegate"))
+            self.assertTrue((worktree / ".delegate" / "index.json").exists())
+
+            # Once the nested worktree is recorded as removed, the reap goes through.
+            registry_api.set_worktree_status_locked(
+                worktree / ".delegate",
+                error["nestedWorktrees"][0]["runId"],
+                "removed",
+                removed_at=registry_api.utc_now_iso(),
+            )
+            self._settle(worktree, worktree.parent)
+            reaped = worktree_gc_api.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+                force=True,
+            )
+            self.assertEqual(len(reaped["reaped"]), 1, reaped)
+            self.assertFalse(worktree.exists())
+
     def test_reap_cli_invalid_path_returns_json_error_envelope(self):
         _repo, repo_path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

@@ -857,20 +857,39 @@ def _work_policy_note(
     return "\n\n".join(notes) if notes else None
 
 
-def _safe_dirty_tree_note(
+def _safe_dirty_changed_paths(
     resolved: ResolvedWorkspace,
     mode: str,
     isolation_context: IsolationContext | None,
-) -> str | None:
+) -> tuple[str, ...]:
+    """Paths a safe worktree-isolated run will mirror from the dirty source tree."""
     if mode != MODE_SAFE or resolved.kind != "git":
-        return None
+        return ()
     if isolation_context is None or isolation_context.effective_isolation != "worktree":
-        return None
+        return ()
     git_root = isolation_context.source_git_root
     if git_root is None or not safe_workspace.git_head_exists(git_root):
-        return None
+        return ()
     # ponytail: one bounded git status probe per safe review; cache if this ever shows up hot.
-    changed = safe_workspace.changed_files_vs_head(git_root)
+    return safe_workspace.changed_files_vs_head(git_root)
+
+
+def _safe_dirty_launcher_warning(changed: tuple[str, ...]) -> str | None:
+    """Tell the launcher what the child's copy was seeded with (envelope and dry run)."""
+    if not changed:
+        return None
+    shown = ", ".join(repr(path) for path in changed[:5])
+    more = len(changed) - 5
+    suffix = f", +{more} more" if more > 0 else ""
+    return (
+        f"dirty_source_mirrored: {len(changed)} uncommitted/untracked file(s) in the source "
+        f"workspace are mirrored into this run's isolated copy ({shown}{suffix}). "
+        "If another lane is still editing these paths, the child sees that in-progress "
+        "state; wait for the edit to finish and relaunch, or commit or stash first."
+    )
+
+
+def _safe_dirty_tree_note(changed: tuple[str, ...]) -> str | None:
     if not changed:
         return None
     shown = [f"`{path}`" for path in changed[:20]]
@@ -4021,7 +4040,11 @@ def _build_request_for_workspace(
         persona=persona_resolution,
     )
     warnings = (*warnings, *persona_warnings)
-    dirty_note = _safe_dirty_tree_note(resolved, mode, isolation_context)
+    dirty_changed = _safe_dirty_changed_paths(resolved, mode, isolation_context)
+    dirty_note = _safe_dirty_tree_note(dirty_changed)
+    dirty_warning = _safe_dirty_launcher_warning(dirty_changed)
+    if dirty_warning is not None:
+        warnings = (*warnings, dirty_warning)
     worktree_note = (
         PERSISTENT_WORKTREE_CONTEXT_NOTE
         if isolation_context is not None
