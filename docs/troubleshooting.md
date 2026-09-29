@@ -582,6 +582,36 @@ minute `current` reads `waiting on tool <name> for 13m`. Delegate only surfaces
 this; deciding that the call is hung, and running `delegate cancel <handle>`,
 is the coordinator's call.
 
+## A run went stale after its launch command was killed
+
+Symptom: `delegate runs` or `snapshot` shows `stale` with `staleReason: dead_pid`
+for a Run you never cancelled, right after the shell, wrapper, or harness task
+that launched it was killed or timed out.
+
+Cause: the launch command supervises the Run. It owns the child's stdout and
+stderr pipes and writes the Run's final state. Killing it, with SIGTERM or
+SIGKILL alike, does not kill the child, which runs in its own session, but no
+process is left to record the outcome. The Registry still says `running`; the
+child keeps working until it writes to its closed pipe or ends, and once its
+pid is gone the Run reads `stale`. Delegate has no detached launch mode, so a
+launcher that will be killed early loses the Run's result. When you start N
+parallel lanes, give each its own background shell (or harness background
+task) that stays alive until the lane finishes; do not chain them in one shell
+you later kill.
+
+Recovery:
+
+```bash
+delegate snapshot <handle>              # confirm staleReason and read recentEvents
+delegate cancel <handle>                # stops a live orphan, or seals a stale Run as cancelled
+delegate resume <handle> "continue"     # new Run from the original prompt plus the prior digest
+delegate followup <handle> "continue"   # resumable codex/claude Run: re-enter the native session
+```
+
+`cancel` is optional before `resume` or `followup`; both accept a stale Run.
+`delegate snapshot` and `delegate runs` list the `resume` command under
+`nextActions` for a stale Run (call Runs cannot be resumed).
+
 ## A succeeded Run's report says it is still waiting (`degraded`)
 
 A Run reads `succeeded` but its completion report ends with "Waiting on the full

@@ -201,7 +201,11 @@ def merge_snapshot_view(
     if isinstance(alias, str):
         view["snapshotCommand"] = run_registry.snapshot_command(alias, cwd=source_cwd)
         if effective_status == run_registry.STATUS_STALE:
-            view["nextActions"] = run_registry.stale_next_actions(alias, cwd=source_cwd)
+            view["nextActions"] = run_registry.stale_next_actions(
+                alias,
+                cwd=source_cwd,
+                mode=view.get("mode") if isinstance(view.get("mode"), str) else None,
+            )
         if completion_report is not None:
             completion_report["command"] = run_registry.run_output_command(
                 alias,
