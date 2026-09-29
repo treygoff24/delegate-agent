@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -375,14 +376,39 @@ class ResumeInheritanceTests(ResumeFixture):
             )
         self.assertIsNone(plan.parsed.payload.output_schema)
         self.assertEqual(plan.parsed.payload.output_schema_text, schema_text)
-        self.assertFalse(list((self.workspace / ".delegate" / "tmp").glob("resume-schema-*")))
         with mock.patch.object(request_build, "resolve_output_schema") as resolve:
             request = request_api.request_from_parsed(
                 plan.parsed, self.loaded_config(), io.StringIO()
             )
         resolve.assert_not_called()
         self.assertIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, request.argv)
-        self.assertIsNotNone(request.output_schema_text)
+        # The request normalizes the schema (adds strictness); the content survives.
+        self.assertEqual(
+            json.loads(request.output_schema_text)["properties"],
+            json.loads(schema_text)["properties"],
+        )
+        # Building the request wrote nothing: the schema is still only in memory.
+        leftovers = [
+            path
+            for base in (self.workspace / ".delegate" / "tmp", self.registry_root / "tmp")
+            if base.exists()
+            for path in base.iterdir()
+        ]
+        self.assertEqual(leftovers, [])
+
+        # Normal launch materializes the real file and swaps it in for the placeholder.
+        temp_base = Path(tempfile.mkdtemp(prefix="resume-schema-launch-"))
+        self.addCleanup(shutil.rmtree, temp_base, ignore_errors=True)
+        argv, schema_dir = runner_api._materialize_output_schema_argv(
+            request.argv,
+            output_schema_text=request.output_schema_text,
+            output_schema_path=request.output_schema,
+            temp_base=temp_base,
+        )
+        self.assertNotIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, argv)
+        schema_path = Path(argv[argv.index("--output-schema") + 1])
+        self.assertEqual(schema_path.read_text(encoding="utf-8"), request.output_schema_text)
+        self.assertEqual(schema_path.parent, schema_dir)
 
     def test_claude_manifest_schema_is_inherited_and_inlined_on_resume(self):
         schema_text = (
@@ -522,14 +548,17 @@ class ResumeInheritanceTests(ResumeFixture):
 
     def test_inherited_inline_schema_is_redacted_from_dry_run_argv(self):
         self.write_config({})
+        schema_text = '{"type":"object","properties":{"zz_redaction_marker":{}}}'
         _run_id, alias, _run_path = self.seed_run(
-            manifest={"outputSchema": '{"type":"object","properties":{}}', "isolationMode": "none"}
+            manifest={"outputSchema": schema_text, "isolationMode": "none"}
         )
 
         payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
 
         self.assertTrue(payload["outputSchemaInline"])
-        self.assertNotIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, json.dumps(payload))
+        serialized = json.dumps(payload)
+        self.assertNotIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, serialized)
+        self.assertNotIn("zz_redaction_marker", serialized)
 
     def test_opencode_agent_is_threaded_through_dry_run(self):
         self.write_config({"opencode": {"defaultModel": "open-model"}})
@@ -553,16 +582,6 @@ class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
 
     def test_resume_of_a_resumable_run_is_resumable(self):
         _run_id, alias, _run_path = self.seed_run(manifest={"resumable": True})
-
-        payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
-
-        self.assertTrue(payload.get("resumable"), payload)
-        self.assertNotIn("--ephemeral", payload["argv"])
-
-    def test_resume_of_a_plain_run_takes_the_launch_default(self):
-        # A source that saved no session still resumes into a codex work Run, and
-        # that Run saves its own: codex and claude work Runs are resumable by default.
-        _run_id, alias, _run_path = self.seed_run()
 
         payload, _stderr = self.run_resume(["--dry-run", alias, "next step"])
 

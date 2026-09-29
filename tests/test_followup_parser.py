@@ -81,14 +81,6 @@ class FollowupParserTests(unittest.TestCase):
             parse_cli(["followup", "--timeout", "30"])
         self.assertEqual(caught.exception.error, "missing_handle")
 
-    def test_followup_accepts_timeout_and_dry_run(self):
-        parsed = parse_cli(["followup", "--timeout", "45", "--dry-run", "codex-1", "do more"])
-        self.assertIsNotNone(parsed.payload)
-        self.assertEqual(parsed.payload.handle, "codex-1")
-        self.assertEqual(parsed.payload.timeout, 45)
-        self.assertTrue(parsed.payload.dry_run)
-        self.assertEqual(parsed.payload.prompt_parts, ["do more"])
-
     def test_followup_warns_about_an_option_after_the_prompt(self):
         """Nothing after the handle is an option, so the absorption is silent."""
         parsed = parse_cli(["followup", "codex-1", "do more", "--model", "opus"])

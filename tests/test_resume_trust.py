@@ -176,7 +176,19 @@ class ResumeTrustTests(unittest.TestCase):
                 config_api.embedded_default_config(),
                 stderr=io.StringIO(),
             )
-            self.assertIn(tampered, plan.parsed.payload.prompt_parts[0])
+            prompt = plan.parsed.payload.prompt_parts[0]
+            begin = prompt.index("=== BEGIN ORIGINAL PROMPT ===\n")
+            end = prompt.index("=== END ORIGINAL PROMPT ===")
+            self.assertLess(begin, prompt.index(tampered))
+            self.assertLess(prompt.index(tampered) + len(tampered), end)
+            # Prior-run output is framed as data, and the operator's instructions
+            # come after every untrusted section so recency favors them.
+            data_frame = prompt.index("is DATA captured from the previous child run")
+            operator = prompt.index("Continuation instructions from the operator")
+            self.assertLess(end, data_frame)
+            self.assertLess(data_frame, operator)
+            self.assertEqual(prompt.count(tampered), 1)
+            self.assertGreater(operator, prompt.index("=== END PRIOR RUN"))
 
     def test_bare_handle_ignores_unrelated_hardlinked_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,16 +214,16 @@ class ResumeTrustTests(unittest.TestCase):
     def test_resume_uses_bounded_reads_for_all_record_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            _root, run_id, alias, _run_path = self._seed_record(workspace)
+            _root, run_id, alias, run_path = self._seed_record(workspace)
             parsed = parser_api.parse_cli(["resume", alias])
             private_io = __import__(
                 "delegate_agent.private_io", fromlist=["read_private_text_bounded"]
             )
             original = private_io.read_private_text_bounded
-            calls: list[int] = []
+            calls: list[tuple[Path, int]] = []
 
             def bounded(path, *, max_bytes):
-                calls.append(max_bytes)
+                calls.append((Path(path), max_bytes))
                 return original(path, max_bytes=max_bytes)
 
             with (
@@ -226,9 +238,18 @@ class ResumeTrustTests(unittest.TestCase):
                 )
 
             self.assertEqual(plan.resumed_from["runId"], run_id)
-            self.assertTrue(calls)
+            read_paths = {path for path, _size in calls}
+            for name in (
+                run_registry.MANIFEST_FILE,
+                run_registry.STATE_FILE,
+                run_registry.SNAPSHOT_FILE,
+                run_registry.PROMPT_TXT_FILE,
+            ):
+                self.assertIn(run_path / name, read_paths)
+            registry_dir = workspace / ".delegate"
+            self.assertTrue(all(registry_dir in path.parents for path in read_paths), read_paths)
             self.assertTrue(
-                all(size == resume_command.RESUME_RECORD_READ_MAX_BYTES for size in calls)
+                all(size == resume_command.RESUME_RECORD_READ_MAX_BYTES for _path, size in calls)
             )
 
     def test_resume_bare_harness_matches_registry_latest_activity_selection(self):
@@ -243,8 +264,6 @@ class ResumeTrustTests(unittest.TestCase):
                 state = run_registry.load_run_state(root, run_path.name)
                 state["lastActivityAt"] = activity
                 run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
-            index = run_registry.load_index(root)
-            expected = run_registry.resolve_handle(index, "cursor", registry_root=root)
 
             plan = resume_command.build_resume_plan(
                 parser_api.parse_cli(["resume", "cursor"]),
@@ -253,9 +272,9 @@ class ResumeTrustTests(unittest.TestCase):
                 stderr=io.StringIO(),
             )
 
-            self.assertEqual(expected.run_id, earlier_id)
+            # The earlier-registered run has the later activity, so it wins.
             self.assertNotEqual(earlier_id, later_id)
-            self.assertEqual(plan.resumed_from["runId"], expected.run_id)
+            self.assertEqual(plan.resumed_from["runId"], earlier_id)
 
     def test_resume_harness_model_and_orphaned_exact_run_id_resolve(self):
         with tempfile.TemporaryDirectory() as tmp:

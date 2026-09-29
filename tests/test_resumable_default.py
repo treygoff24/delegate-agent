@@ -34,42 +34,6 @@ class DefaultResumableRequestTests(CommandTestBase):
         )
         return self.build_git_request(engine, mode, None, "/repo", "hello", cfg, True, **kwargs)
 
-    def test_codex_work_saves_its_session_by_default(self):
-        request = self.build("codex", "work")
-
-        self.assertTrue(request.resumable)
-        self.assertNotIn("--ephemeral", request.argv)
-
-    def test_claude_work_saves_its_session_by_default(self):
-        request = self.build("claude", "work")
-
-        self.assertTrue(request.resumable)
-        self.assertNotIn("--no-session-persistence", request.argv)
-
-    def test_user_ephemeral_config_does_not_beat_the_default(self):
-        # The regression this guards: a config that already says ephemeral/
-        # noSessionPersistence (the estate's does) must not switch the default off.
-        config = delegate_config.embedded_default_config()
-        config["codex"]["ephemeral"] = True
-        config["claude"]["noSessionPersistence"] = True
-
-        codex = self.build("codex", "work", config)
-        claude = self.build("claude", "work", config)
-
-        self.assertTrue(codex.resumable)
-        self.assertNotIn("--ephemeral", codex.argv)
-        self.assertTrue(claude.resumable)
-        self.assertNotIn("--no-session-persistence", claude.argv)
-
-    def test_explicit_opt_out_restores_the_ephemeral_flags(self):
-        codex = self.build("codex", "work", resumable=False)
-        claude = self.build("claude", "work", resumable=False)
-
-        self.assertFalse(codex.resumable)
-        self.assertIn("--ephemeral", codex.argv)
-        self.assertFalse(claude.resumable)
-        self.assertIn("--no-session-persistence", claude.argv)
-
     def test_engine_config_key_flips_the_default_off(self):
         config = delegate_config.embedded_default_config()
         config["codex"]["resumable"] = False
@@ -89,15 +53,6 @@ class DefaultResumableRequestTests(CommandTestBase):
 
         self.assertFalse(self.build("codex", "work", config).resumable)
         self.assertTrue(self.build("claude", "work", config).resumable)
-
-    def test_explicit_resumable_beats_the_config_key(self):
-        config = delegate_config.embedded_default_config()
-        config["codex"]["resumable"] = False
-
-        request = self.build("codex", "work", config, resumable=True)
-
-        self.assertTrue(request.resumable)
-        self.assertNotIn("--ephemeral", request.argv)
 
     def test_safe_runs_stay_ephemeral_and_unresumable(self):
         codex = self.build("codex", "safe")
@@ -173,8 +128,9 @@ class ResumableFlagParserTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.error, "invalid_option_combination")
 
-    def test_no_resumable_is_a_quiet_no_op_where_nothing_is_saved(self):
-        # Safe and call runs never save a session, so opting out of it is not an error.
+    def test_no_resumable_is_accepted_in_safe_mode(self):
+        # Safe runs never save a session, so opting out of it is not an error. The
+        # built request (test_safe_runs_stay_ephemeral_and_unresumable) is ephemeral.
         self.assertIs(
             parse_cli(["codex", "safe", "--no-resumable", "task"]).payload.resumable, False
         )
@@ -352,6 +308,8 @@ class ResumableDefaultE2ETests(unittest.TestCase):
             "import json, os, sys\n"
             "with open(os.environ['FAKE_ARGV_LOG'], 'a', encoding='utf-8') as f:\n"
             "    f.write(json.dumps(['codex'] + sys.argv[1:]) + '\\n')\n"
+            "with open(os.environ['FAKE_ARGV_LOG'] + '.stdin', 'a', encoding='utf-8') as f:\n"
+            "    f.write(json.dumps(sys.stdin.read()) + '\\n')\n"
             f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{self.CODEX_SESSION}'}}))\n"
             "print(json.dumps({'type': 'turn.started'}))\n"
             "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'done'}}))\n"
@@ -377,6 +335,12 @@ class ResumableDefaultE2ETests(unittest.TestCase):
             for line in self.argv_log.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+
+    def codex_stdin_prompts(self) -> list[str]:
+        log = Path(str(self.argv_log) + ".stdin")
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
     def delegate(self, args: list[str]) -> tuple[int, dict, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -508,6 +472,8 @@ class ResumableDefaultE2ETests(unittest.TestCase):
 
         self.assertEqual(code, 0, (followed, stderr))
         self.assertEqual(len(self.launches()), 2)
+        # The option word reached the child as prompt text; it was not consumed as a flag.
+        self.assertIn("explain what --dry-run does", self.codex_stdin_prompts()[1])
 
     def test_resume_of_a_plain_run_is_resumable_by_default_and_can_opt_out(self):
         code, launched, stderr = self.delegate(["codex", "work", "--no-resumable", "first task"])

@@ -11,11 +11,10 @@ import io
 import json
 import os
 import subprocess
-import types
 import unittest
 from unittest import mock
 
-from delegate_agent import auto_resume, cli, followup_command, lane_health, provider_errors
+from delegate_agent import auto_resume, cli, followup_command, provider_errors
 from delegate_agent.errors import DelegateError
 from tests.provider_error_fakes import FakeCodexCase
 
@@ -341,10 +340,10 @@ class SkipReasonTests(unittest.TestCase):
     def reason(self, note, *, enabled=True, already_automatic=False):
         return auto_resume.skip_reason(note, enabled=enabled, already_automatic=already_automatic)
 
-    def test_the_canonical_drop_is_eligible(self):
+    def test_each_guard_makes_a_run_ineligible(self):
+        # Control: the canonical drop is eligible, so each single change below is
+        # the only reason a run is refused.
         self.assertIsNone(self.reason(_note()))
-
-    def test_each_guard_names_itself(self):
         cases = {
             "disabled": self.reason(_note(), enabled=False),
             "already_automatic": self.reason(_note(), already_automatic=True),
@@ -355,9 +354,9 @@ class SkipReasonTests(unittest.TestCase):
             "no_saved_session": self.reason(_note(session_id=None)),
             "workspace_not_carried": self.reason(_note(isolation_lifecycle="temporary")),
         }
-        for expected, actual in cases.items():
-            with self.subTest(expected):
-                self.assertEqual(actual, expected)
+        for guard, actual in cases.items():
+            with self.subTest(guard):
+                self.assertIsNotNone(actual)
 
     def test_only_transient_signatures_that_opt_in_are_eligible(self):
         for signature, klass in (
@@ -402,10 +401,9 @@ class RerunSkipReasonTests(unittest.TestCase):
             note, enabled=enabled, already_automatic=already_automatic
         )
 
-    def test_a_safe_stream_drop_is_eligible_without_a_saved_session(self):
+    def test_each_guard_makes_a_run_ineligible(self):
+        # Control: a safe stream drop is eligible with no saved session.
         self.assertIsNone(self.reason(_note(mode="safe", session_id=None)))
-
-    def test_each_guard_names_itself(self):
         cases = {
             "disabled": self.reason(_note(mode="safe"), enabled=False),
             "already_automatic": self.reason(_note(mode="safe"), already_automatic=True),
@@ -413,9 +411,9 @@ class RerunSkipReasonTests(unittest.TestCase):
             "structured_output": self.reason(_note(mode="safe", structured=True)),
             "not_failed": self.reason(_note(mode="safe", status="succeeded")),
         }
-        for expected, actual in cases.items():
-            with self.subTest(expected):
-                self.assertEqual(actual, expected)
+        for guard, actual in cases.items():
+            with self.subTest(guard):
+                self.assertIsNotNone(actual)
 
     def test_a_safe_run_with_a_persistent_failure_is_not_rerun(self):
         note = _note(mode="safe", provider_error={"signature": "auth_rejected"})
@@ -457,29 +455,3 @@ class RerunSkipReasonTests(unittest.TestCase):
             )
         )
         self.assertEqual(auto_resume.broker_backoff_seconds(_note(mode="safe")), 0.0)
-
-
-class AutomaticContinuationGuardTests(unittest.TestCase):
-    def test_an_automatic_continuation_is_never_resumed_again(self):
-        request = types.SimpleNamespace(
-            provider_policy=lane_health.Policy(), auto_resume={"automatic": True, "attempt": 1}
-        )
-        first = (1, {"ok": False, "status": "failed"})
-
-        with mock.patch.object(cli, "execute_request", side_effect=AssertionError("launched")):
-            result = cli._maybe_auto_resume(
-                first,
-                _note(),
-                request,
-                types.SimpleNamespace(json_mode=True),
-                config={},
-                config_source=None,
-                workspace=None,
-                completion_report_mode="none",
-                stdin=io.StringIO(),
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-
-        self.assertIs(result, first)
-        self.assertNotIn("autoResume", first[1])

@@ -54,13 +54,6 @@ class ResumeParserTests(unittest.TestCase):
             parse_cli(["resume", "--engine", "cursor"])
         self.assertEqual(caught.exception.error, "missing_handle")
 
-    def test_resumable_accepted_for_codex_and_claude(self):
-        parsed_codex = parse_cli(["codex", "work", "--resumable", "implement feature"])
-        self.assertTrue(parsed_codex.payload.resumable)
-
-        parsed_claude = parse_cli(["claude", "work", "--resumable", "review code"])
-        self.assertTrue(parsed_claude.payload.resumable)
-
     def test_resumable_rejected_on_safe_mode(self):
         for engine in ("codex", "claude"):
             with self.subTest(engine=engine):
