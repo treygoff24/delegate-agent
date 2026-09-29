@@ -1237,8 +1237,8 @@ version, such as `opus-5.5`) or carries no model (`claude-`, an empty `[]`) is
 refused before launch (dry runs included) with `invalid_alias`, naming the
 closest valid values. The version-typo refusal is skipped when
 `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
-or `ANTHROPIC_BASE_URL` is set, because provider names follow the provider's
-rules. Any other name launches; one missing from a discovered catalog gets a
+or `ANTHROPIC_BASE_URL` is set in the launching environment or passed with
+`--env` / `--env-file`, because provider names follow the provider's rules. Any other name launches; one missing from a discovered catalog gets a
 warning.
 
 `--summary` takes no `<engine>` argument: it emits the compact alias-centered

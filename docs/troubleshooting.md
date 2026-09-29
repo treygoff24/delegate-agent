@@ -135,7 +135,8 @@ before the catalog), and provider names such as Bedrock ARNs, Foundry deployment
 names, and gateway strings; a name missing from a discovered catalog gets a
 catalog warning. The version-typo refusal is skipped entirely when
 `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
-or `ANTHROPIC_BASE_URL` is set in the launching environment. A target of a
+or `ANTHROPIC_BASE_URL` is set in the launching environment or passed with
+`--env` / `--env-file` (only their presence is read, never their values). A target of a
 configured `claude.models` alias is never refused, and neither is a followup or
 resume. The check applies to `claude` subcommand launches and
 `run --input-json`.

@@ -178,6 +178,68 @@ class ClaudeModelPreflightTests(CommandTestBase):
                 with self.subTest(model=model), self.assertRaises(DelegateError):
                     self._build(model)
 
+    def _dry_run_claude_work(self, *extra):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        return self.run_main(
+            [
+                "--json",
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "claude",
+                "work",
+                "--isolation",
+                "worktree",
+                "--model",
+                "opus-5.5",
+                *extra,
+                "hi",
+            ]
+        )
+
+    def test_a_version_typo_passes_when_the_provider_variable_comes_from_env(self):
+        code, stdout, _ = self._dry_run_claude_work("--env", "CLAUDE_CODE_USE_FOUNDRY=1")
+        self.assertEqual(code, 0, stdout)
+        code, stdout, _ = self._dry_run_claude_work("--env", "OTHER=1")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
+
+    def test_a_version_typo_passes_when_the_provider_variable_comes_from_env_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "provider.env"
+            env_file.write_text("ANTHROPIC_BASE_URL=https://gateway.example\n", encoding="utf-8")
+            code, stdout, _ = self._dry_run_claude_work("--env-file", str(env_file))
+            self.assertEqual(code, 0, stdout)
+            self.assertNotIn("gateway.example", stdout)
+            empty = Path(directory) / "empty.env"
+            empty.write_text("ANTHROPIC_BASE_URL=\n", encoding="utf-8")
+            code, stdout, _ = self._dry_run_claude_work("--env-file", str(empty))
+            self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
+
+    def test_a_missing_env_file_still_reports_its_own_error_for_a_valid_model(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        code, stdout, _ = self.run_main(
+            [
+                "--json",
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "claude",
+                "work",
+                "--isolation",
+                "worktree",
+                "--model",
+                "opus",
+                "--env-file",
+                "/nonexistent/x.env",
+                "hi",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertNotEqual(json.loads(stdout)["error"], "invalid_alias")
+
     def test_every_version_typo_shape_is_still_refused(self):
         for model in ("opus-5.5", "Opus 5.5", "sonnet5", "sonnet_5_5", "claude_opus_5", "haiku-v5"):
             with self.subTest(model=model), self.assertRaises(DelegateError) as caught:

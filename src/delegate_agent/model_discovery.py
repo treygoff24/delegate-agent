@@ -605,7 +605,7 @@ _CLAUDE_ALIASES = (*_CLAUDE_FAMILIES, "best", "opusplan", "default")
 _CLAUDE_ALIAS_TYPO_RE = re.compile(r"(?:claude[ _.])?(?:opus|sonnet|haiku|fable)[-_ .]?v?\d")
 # Set for Bedrock, Vertex, Foundry, or a gateway; model names then follow the
 # provider's rules, which Delegate cannot check.
-_CLAUDE_PROVIDER_ENV = (
+CLAUDE_PROVIDER_ENV = (
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
@@ -627,7 +627,7 @@ def claude_unknown_model_error(
     two shapes are refused. One is a selector that carries no model at all (a
     bare ``claude-`` or an empty ``[]``). The other is a family word followed by
     a version (``opus-5.5``, ``Sonnet 5``), and only when no provider or gateway
-    variable in ``_CLAUDE_PROVIDER_ENV`` is set. Everything else launches and
+    variable in ``CLAUDE_PROVIDER_ENV`` is set. Everything else launches and
     gets the advisory ``launch_model_absence_warning`` if the catalog lacks it.
     Returns the ``invalid_alias`` error (the code omp and droid use for an
     unknown selector) or None when the selector is acceptable.
@@ -652,7 +652,7 @@ def claude_unknown_model_error(
         if not _CLAUDE_ALIAS_TYPO_RE.match(lowered):
             return None
         environment = os.environ if env is None else env
-        if any(environment.get(name) for name in _CLAUDE_PROVIDER_ENV):
+        if any(environment.get(name) for name in CLAUDE_PROVIDER_ENV):
             return None
     families = [family for family in _CLAUDE_FAMILIES if family in lowered]
     suggestions: list[str] = []
@@ -679,7 +679,8 @@ def claude_unknown_model_error(
         + "; any well-formed claude-... id is also accepted."
         + " Provider model names (Bedrock, Vertex, Foundry, a gateway) pass through"
         " when CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX, CLAUDE_CODE_USE_FOUNDRY,"
-        " or ANTHROPIC_BASE_URL is set in the launching environment."
+        " or ANTHROPIC_BASE_URL is set in the launching environment or passed with --env or"
+        " --env-file (e.g. `--env CLAUDE_CODE_USE_FOUNDRY=1`)."
     )
     return DelegateError(
         "invalid_alias",
