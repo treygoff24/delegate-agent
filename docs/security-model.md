@@ -432,7 +432,8 @@ mode (safe has its own boundaries above).
 - Estate state: `~/.ai-profiles` and the installed Delegate runtime
   (`~/.local/bin/delegate` plus `~/.delegate/src`, `releases`, `bin` and
   `config*.json`). Run scratch, worktrees and caches under `~/.delegate` stay
-  writable.
+  writable. `~/.ai-profiles` is protected only from lanes that are not started
+  through an estate launcher (see below).
 - The code root (default `~/Code`, configurable), so a lane in one checkout
   cannot write into a sibling checkout.
 
@@ -443,6 +444,24 @@ directories, mail-push homes, the selected engine's home, and anything
 named by `--writable PATH` or `isolation.writeGuard.writable`. `TMPDIR`, `/tmp`
 and home caches such as `~/.cache` are not in the protected list and stay
 writable.
+
+**Estate launchers.** A lane whose command is an estate launcher (its program
+name starts with `estate-`, such as `estate-claude`, `estate-codex`, or
+`estate-omp`) gets the profiles root re-opened, recorded in the plan as
+"estate launcher writes profile state". The launcher runs inside the guard
+before the engine starts, and on every launch it picks an account, refreshes
+that account's token, and writes session, plugin, and lock state under the
+profiles root; with the root read-only the launcher itself fails (seen live
+under Seatbelt: `estate-claude` stopped on a `chmod` inside
+`~/.ai-profiles/personas`). The root is `ESTATE_AI_PROFILES_ROOT`, then
+`AI_PROFILES_ROOT`, then `~/.ai-profiles`, the order the launcher uses. So on
+the estate, where most engines start through a launcher, those lanes can write
+every profile's files, credentials included; the guard still protects the
+credential stores, the Delegate runtime, and the code root from them. Lanes
+started any other way (Devin, Kimi, OpenCode on the Mac today) keep
+`~/.ai-profiles` protected. A Codex lane whose own sandbox is on never gets the
+profiles root as a writable root, because the launcher runs outside that
+sandbox.
 
 The engine home is the one place the environment is read, and only the
 selected engine's own variable counts (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
