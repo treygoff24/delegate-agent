@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Mapping
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TextIO
@@ -599,19 +601,36 @@ def launch_model_absence_warning(
 
 _CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
 _CLAUDE_ALIASES = (*_CLAUDE_FAMILIES, "best", "opusplan", "default")
+# A family word followed by a version: the shape of a mistyped alias or id.
+_CLAUDE_ALIAS_TYPO_RE = re.compile(r"(?:claude[ _.])?(?:opus|sonnet|haiku|fable)[-_ .]?v?\d")
+# Set for Bedrock, Vertex, Foundry, or a gateway; model names then follow the
+# provider's rules, which Delegate cannot check.
+_CLAUDE_PROVIDER_ENV = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_BASE_URL",
+)
 
 
 def claude_unknown_model_error(
-    model: str | None, discovery: JsonObject | None
+    model: str | None,
+    discovery: JsonObject | None,
+    env: Mapping[str, str] | None = None,
 ) -> DelegateError | None:
-    """Refuse a typed Claude selector that is neither an alias, a catalog id, nor claude-...
+    """Refuse a typed Claude selector that is an alias typo, before launch.
 
     Claude rejects a selector like ``opus-5.5`` only after the workspace and
-    prompt were prepared, and a dry run cannot see that. A ``claude-...`` id the
-    catalog does not list stays allowed (new models ship before the catalog);
-    that case is the advisory ``launch_model_absence_warning``. Returns the
-    ``invalid_alias`` error (the code omp and droid use for an unknown selector)
-    or None when the selector is acceptable.
+    prompt were prepared, and a dry run cannot see that. The refusal is narrow on
+    purpose: provider launches (Bedrock ARNs, Vertex ids, Foundry deployment
+    names, gateway strings) take model names Delegate cannot enumerate, so only
+    two shapes are refused. One is a selector that carries no model at all (a
+    bare ``claude-`` or an empty ``[]``). The other is a family word followed by
+    a version (``opus-5.5``, ``Sonnet 5``), and only when no provider or gateway
+    variable in ``_CLAUDE_PROVIDER_ENV`` is set. Everything else launches and
+    gets the advisory ``launch_model_absence_warning`` if the catalog lacks it.
+    Returns the ``invalid_alias`` error (the code omp and droid use for an
+    unknown selector) or None when the selector is acceptable.
     """
     if not model:
         return None
@@ -626,8 +645,15 @@ def claude_unknown_model_error(
         or (lowered.startswith("claude-") and len(lowered) > len("claude-"))
         or base in catalog
     )
-    if well_formed and not model.endswith("[]"):
+    empty = lowered == "claude-" or model.endswith("[]")
+    if well_formed and not empty:
         return None
+    if not empty:
+        if not _CLAUDE_ALIAS_TYPO_RE.match(lowered):
+            return None
+        environment = os.environ if env is None else env
+        if any(environment.get(name) for name in _CLAUDE_PROVIDER_ENV):
+            return None
     families = [family for family in _CLAUDE_FAMILIES if family in lowered]
     suggestions: list[str] = []
     for family in families:
@@ -651,6 +677,9 @@ def claude_unknown_model_error(
             else ""
         )
         + "; any well-formed claude-... id is also accepted."
+        + " Provider model names (Bedrock, Vertex, Foundry, a gateway) pass through"
+        " when CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX, CLAUDE_CODE_USE_FOUNDRY,"
+        " or ANTHROPIC_BASE_URL is set in the launching environment."
     )
     return DelegateError(
         "invalid_alias",

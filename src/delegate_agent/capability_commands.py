@@ -302,7 +302,9 @@ def _refresh_payload(
     if result.get("futureSchemaCache") is True:
         payload["cacheWriteSkipped"] = harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
-    return redaction.scrub_public_projection(payload)
+    return redaction.scrub_public_projection(
+        harness_enabled.strip_disabled(payload, harness_enabled.disabled_harnesses(config))
+    )
 
 
 def emit(
