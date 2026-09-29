@@ -155,6 +155,28 @@ class SnapshotRenderingTests(SnapshotCommandTestBase):
         self.assertIn("cursor-1 detached_backlink", output)
         self.assertIn("/pool/cursor-1", output)
 
+    def test_runs_table_labels_time_since_activity_as_idle_not_age(self):
+        """The value is time since last activity, so the header must not say age."""
+        for extra, with_group in (({}, False), ({"group": "g1"}, True)):
+            with self.subTest(with_group=with_group):
+                stdout = io.StringIO()
+                self.rendering.render_runs_text(
+                    [
+                        {
+                            "alias": "a",
+                            "status": "running",
+                            "harness": "codex",
+                            "activityAt": "2020-01-01T00:00:00Z",
+                            **extra,
+                        }
+                    ],
+                    stdout,
+                    mode="running",
+                )
+                header = stdout.getvalue().splitlines()[1].split()
+                self.assertIn("idle", header)
+                self.assertNotIn("age", header)
+
 
 if __name__ == "__main__":
     unittest.main()
