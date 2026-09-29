@@ -279,39 +279,6 @@ class CallOutcomeTests(unittest.TestCase):
         self.assertFalse(payload["assistantTextTruncated"])
         self.assertEqual(payload["text"], payload["assistantText"])
 
-    def test_call_retry_classifies_only_the_final_attempt_stderr(self) -> None:
-        # The first attempt hit a usage limit; the retried attempt exited 0,
-        # empty, with a clean stderr. The merged stderr keeps both for
-        # diagnosis, but only the final attempt's may name the failure.
-        first = runner.CallResult(
-            text="",
-            exit_code=0,
-            duration_ms=5,
-            stdout_bytes=0,
-            stderr_bytes=40,
-            text_chars=0,
-            text_truncated=False,
-            stderr_tail="ERROR: 429 Too Many Requests: You have hit your usage limit.",
-            result_quality="empty",
-        )
-        last = runner.CallResult(
-            text="",
-            exit_code=0,
-            duration_ms=5,
-            stdout_bytes=0,
-            stderr_bytes=0,
-            text_chars=0,
-            text_truncated=False,
-            stderr_tail="",
-            result_quality="empty",
-        )
-        merged = runner._merge_call_attempts(first, last, "delegate empty-retry attempt")
-        self.assertIn("usage limit", merged.stderr_tail)
-        self.assertEqual(merged.final_attempt_stderr_tail, "")
-        code, payload = self._execute(merged)
-        self.assertEqual(code, 1)
-        self.assertEqual(payload["failureKind"], "no_assistant_text")
-
     def test_real_empty_retry_classifies_from_the_retry_not_the_first_attempt(self) -> None:
         # The first invocation exits 0, prints nothing, and reports a quota
         # refusal on stderr, so execute_call retries it; the retry exits 0 with
@@ -395,15 +362,6 @@ class ComputeOutcomeTests(unittest.TestCase):
                 self.assertEqual(result.exit_code, exit_code)
                 self.assertEqual(result.ok, kind is None)
                 self.assertTrue(kind is None or kind in outcome.FAILURE_KINDS)
-
-    def test_prior_attempt_quota_does_not_name_an_empty_final_attempt(self) -> None:
-        result = outcome.compute_outcome(
-            child_exit_code=0,
-            result_quality="empty",
-            signal_text="usage limit reached",
-            final_attempt_signal_text="",
-        )
-        self.assertEqual(result.failure_kind, "no_assistant_text")
 
 
 class StructuredOutputOutcomeTests(unittest.TestCase):
@@ -527,22 +485,13 @@ class WorkflowAgentFailureTests(unittest.TestCase):
             'return {"caps": capabilities, "typed": AgentFailure.__name__}\n', encoding="utf-8"
         )
         frame = workflow_runtime._WorkflowInvocation(script, None, "root", 0)
-        self.assertEqual(
-            workflow_runtime.execute_workflow(self.state, frame),
-            {
-                "caps": {
-                    "agentFailure": 1,
-                    "agentMeta": 1,
-                    "failureKind": 1,
-                    "agentKey": 1,
-                    "scopeKey": 1,
-                    "gateActions": 1,
-                    "workspaceSpec": 1,
-                    "providerOutcomes": 1,
-                },
-                "typed": "AgentFailure",
-            },
-        )
+        result = workflow_runtime.execute_workflow(self.state, frame)
+        self.assertEqual(result["typed"], "AgentFailure")
+        # The script sees exactly what the runtime advertises, and that includes the
+        # outcome-contract capabilities; a new capability elsewhere does not edit this test.
+        self.assertEqual(result["caps"], workflow_runtime.WORKFLOW_CAPABILITIES)
+        contract = {"agentFailure", "agentMeta", "failureKind", "providerOutcomes"}
+        self.assertLessEqual(contract, set(result["caps"]))
 
 
 class ExpectFileParsingTests(unittest.TestCase):

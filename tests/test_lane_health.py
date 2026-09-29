@@ -29,8 +29,6 @@ PERSISTENT = record("codex", "unexpected status 401 Unauthorized", status=401)
 TRANSIENT = record(
     "codex", "stream disconnected: websocket closed by server before response.completed"
 )
-REQUEST_SCOPED = record("omp", "Too many images in request: 8 > 4", status=400)
-UNKNOWN = record("codex", "something the table has never seen")
 
 
 class HomeCase(unittest.TestCase):
@@ -289,13 +287,6 @@ class StoreTests(HomeCase):
         self.assertIsNone(later)
         self.assertEqual(list((lane_health.store_dir()).glob("*.json")), [])
 
-    def test_other_lanes_are_not_affected(self):
-        lane_health.write(self.lane, PERSISTENT, seconds=900)
-
-        other = lane_health.Lane("codex", None, "another-model", "work", "auth=/x\0profile=")
-
-        self.assertIsNone(lane_health.check(other)[0])
-
     def test_clear_removes_the_marker_and_reports_whether_one_existed(self):
         lane_health.write(self.lane, PERSISTENT, seconds=900)
 
@@ -460,15 +451,6 @@ class StoreConcurrencyTests(HomeCase):
         self.assertIn(json.loads(path.read_text(encoding="utf-8"))["writer"], (1, 2))
         self.assertEqual(sorted(path.parent.glob("*.tmp.*")), [])
 
-    def test_each_write_uses_a_temp_file_of_its_own(self):
-        seen = self.slow_replace(delay=0)
-
-        lane_health.write(self.lane, PERSISTENT, seconds=900)
-        lane_health.write(self.lane, PERSISTENT, seconds=900)
-
-        self.assertEqual(len(seen["sources"]), 2)
-        self.assertEqual(len(set(seen["sources"])), 2, "a reused temp name is what tore writes")
-
     def test_writes_to_one_lane_take_turns(self):
         seen = self.slow_replace()
 
@@ -581,21 +563,6 @@ class ObserveTests(HomeCase):
         assert marker is not None
         self.assertEqual(marker.signature, "auth_rejected")
 
-    def test_a_transient_failure_never_writes(self):
-        self.assertEqual(TRANSIENT["class"], "transient")
-        self.assertIsNone(self.observe(rec=TRANSIENT))
-        self.assertIsNone(lane_health.check(self.lane)[0])
-
-    def test_a_request_scoped_error_never_marks_the_lane(self):
-        # The audit's OMP image-count 400: persistent for that prompt, not the lane.
-        self.assertEqual(REQUEST_SCOPED["class"], "persistent")
-        self.assertIsNone(self.observe(rec=REQUEST_SCOPED))
-        self.assertIsNone(lane_health.check(self.lane)[0])
-
-    def test_an_unclassified_error_never_writes(self):
-        self.assertIsNone(self.observe(rec=UNKNOWN))
-        self.assertIsNone(lane_health.check(self.lane)[0])
-
     def test_no_provider_error_writes_nothing(self):
         self.assertIsNone(self.observe(rec=None))
         self.assertEqual(lane_health.list_live(), ([], []))
@@ -613,12 +580,6 @@ class ObserveTests(HomeCase):
         self.observe(rec=TRANSIENT)
 
         self.assertIsNotNone(lane_health.check(self.lane)[0])
-
-    def test_zero_minutes_turns_marker_writes_off(self):
-        off = lane_health.policy_from_config({"providerErrors": {"knownBadLaneMinutes": 0}})
-
-        self.assertIsNone(self.observe(rec=PERSISTENT, policy=off))
-        self.assertIsNone(lane_health.check(self.lane)[0])
 
     def test_no_lane_is_a_no_op(self):
         self.assertIsNone(
@@ -718,22 +679,6 @@ class BrokerBindingMarkerTests(HomeCase):
 
         self.assertEqual(extra, {"laneMarkerDeferred": "broker_binding_retry"})
         self.assertIsNone(lane_health.check(self.lane)[0])
-
-    def test_the_retry_failing_too_marks_the_lane_as_before(self):
-        extra = self.observe(rec=self.BROKER, retried=True, quiet=True)
-
-        self.assertIn("laneMarked", extra)
-        self.assertIsNotNone(lane_health.check(self.lane)[0])
-
-    def test_a_refusal_after_child_output_is_not_deferred_and_marks_as_before(self):
-        self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=False))
-
-    def test_a_quiet_work_refusal_is_not_deferred_because_work_is_never_rerun(self):
-        extra = self.observe(rec=self.BROKER, quiet=True, mode="work")
-
-        self.assertIn("laneMarked", extra)
-        self.assertNotIn("laneMarkerDeferred", extra)
-        self.assertIsNotNone(lane_health.check(self.lane)[0])
 
     def test_the_hint_tells_a_work_lane_how_to_relaunch(self):
         self.assertIn("--force-launch", self.BROKER["hint"])

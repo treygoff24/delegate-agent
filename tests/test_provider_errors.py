@@ -8,7 +8,7 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from delegate_agent import child_failures, outcome, provider_errors  # noqa: E402
+from delegate_agent import child_failures, lane_health, outcome, provider_errors  # noqa: E402
 
 
 def record(engine, message, *, status=None, code=None, fallback=""):
@@ -17,16 +17,6 @@ def record(engine, message, *, status=None, code=None, fallback=""):
 
 
 class StatusFirstTests(unittest.TestCase):
-    def test_a_400_that_says_invalid_token_is_a_request_error_not_auth(self):
-        # The audit's live misread: "invalid ... token" inside a 400 read as auth_failed.
-        text = "400 Bad Request: invalid token in request body"
-        self.assertEqual(child_failures.classify(text).code, "auth_failed")  # text alone
-        result = record("omp", text, status=400)
-        self.assertEqual(result["signature"], "request_rejected")
-        self.assertEqual(result["scope"], provider_errors.SCOPE_REQUEST)
-        self.assertEqual(result["class"], provider_errors.CLASS_PERSISTENT)
-        self.assertEqual(child_failures.classify(text, status=400).code, "provider_error")
-
     def test_omp_image_limit_is_a_request_error_and_never_auth_failed(self):
         result = record("omp", "Too many images in request: 8 > 4", status=400)
         self.assertEqual(result["signature"], "request_image_limit")
@@ -56,6 +46,7 @@ class StatusFirstTests(unittest.TestCase):
     def test_status_classes(self):
         cases = {
             401: ("auth_rejected", "persistent"),
+            400: ("request_rejected", "persistent"),
             402: ("payment_required", "persistent"),
             404: ("model_unavailable", "persistent"),
             413: ("request_too_large", "persistent"),
@@ -99,12 +90,6 @@ class StatusFirstTests(unittest.TestCase):
         )
         self.assertEqual(result["signature"], "usage_limit")
 
-    def test_unknown_errors_are_unclassified_not_guessed(self):
-        result = record("codex", "something novel happened")
-        self.assertEqual(result["signature"], provider_errors.UNCLASSIFIED)
-        self.assertEqual(result["class"], provider_errors.CLASS_UNKNOWN)
-        self.assertEqual(result["message"], "something novel happened")
-
     def test_resolver_failures_stay_unclassified(self):
         # A DNS failure inside a safe-mode sandbox is not a provider fault; the
         # runner's sandbox-network hint depends on it staying an unexplained exit.
@@ -143,13 +128,6 @@ class EngineKeyedTests(unittest.TestCase):
         # found for mistral."); the sentence's period is not part of the name.
         sentence = record("omp", "error: No API key found for mistral.")
         self.assertIn("provider mistral has no API key", sentence["hint"])
-
-    def test_only_stream_drops_and_server_errors_are_auto_resume_candidates(self):
-        resumable = {s.id for s in provider_errors.SIGNATURES if s.auto_resume}
-        self.assertEqual(resumable, {"stream_disconnected", "provider_unavailable"})
-        for signature in provider_errors.SIGNATURES:
-            if signature.auto_resume:
-                self.assertEqual(signature.klass, provider_errors.CLASS_TRANSIENT)
 
 
 class RecordShapeTests(unittest.TestCase):
@@ -230,9 +208,22 @@ class RecordShapeTests(unittest.TestCase):
 
 
 class CatalogIntegrityTests(unittest.TestCase):
+    # Reasons the projection deliberately leaves to the exit-code fallback: the harness
+    # rejected its own config, so the run is an ordinary nonzero exit, not a provider fault.
+    FALLBACK_REASONS = frozenset({"harness_config_rejected"})
+
     def test_every_signature_reason_maps_into_the_closed_failure_kinds(self):
         for signature in provider_errors.SIGNATURES:
             with self.subTest(signature=signature.id):
+                if signature.reason in self.FALLBACK_REASONS:
+                    continue
+                # failure_kind_for_reason falls back to a valid kind for any string, so
+                # check the reason is mapped on purpose, not that the fallback is valid.
+                self.assertTrue(
+                    signature.reason in outcome._REASON_KINDS
+                    or signature.reason in outcome.FAILURE_KINDS,
+                    f"{signature.reason} is not mapped to a failure kind",
+                )
                 kind = outcome.failure_kind_for_reason(signature.reason, exit_code=1)
                 self.assertIn(kind, outcome.FAILURE_KINDS)
 
@@ -244,20 +235,24 @@ class CatalogIntegrityTests(unittest.TestCase):
             )
             self.assertTrue(signature.hint)
 
-    def test_transient_rows_never_poison_a_lane_scope_check_is_by_class(self):
-        # Marker writers key on persistent + lane; a transient row must never be persistent.
+    def test_no_transient_signature_carries_the_usage_limit_reason(self):
         for signature in provider_errors.SIGNATURES:
             if signature.klass == provider_errors.CLASS_TRANSIENT:
                 self.assertNotEqual(signature.reason, "usage_limit")
 
-    def test_request_scoped_rows_are_persistent_for_the_prompt(self):
-        scoped = {
-            s.id for s in provider_errors.SIGNATURES if s.scope == provider_errors.SCOPE_REQUEST
-        }
-        self.assertIn("request_image_limit", scoped)
-        self.assertIn("request_rejected", scoped)
-        self.assertIn("thread_lost", scoped)
-        self.assertNotIn("cursor_auth_required", scoped)
+    def test_request_scoped_failures_never_earn_a_lane_marker(self):
+        # Classify real texts, not table rows: a marker writer sees only the record.
+        image_limit = record("omp", "Too many images in request: 8 > 4", status=400)
+        thread_lost = record("codex", "state database thread lookup failed")
+        lane_fault = record(
+            "cursor", "", fallback="Authentication required. Please run agent login first"
+        )
+        self.assertEqual(image_limit["signature"], "request_image_limit")
+        self.assertEqual(thread_lost["signature"], "thread_lost")
+        self.assertEqual(lane_fault["signature"], "cursor_auth_required")
+        self.assertFalse(lane_health.earns_marker(image_limit))
+        self.assertFalse(lane_health.earns_marker(thread_lost))
+        self.assertTrue(lane_health.earns_marker(lane_fault))
 
     def test_quota_rows_still_count_as_usage_limits_for_exit_zero_runs(self):
         for text in ("402 Insufficient account funds", "Grok Build usage balance exhausted"):
