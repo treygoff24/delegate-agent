@@ -203,13 +203,13 @@ def degraded_warning(reason: str) -> str:
             "the child's final message announced its next step and stopped, so that step never "
             "ran (a report or deliverable it was about to write may not exist). Check the "
             "deliverable exists; if not, continue the Run with: "
-            'delegate resume <run> "Do the step you announced, then finish with a full report"'
+            'delegate resume <handle> "Do the step you announced, then finish with a full report"'
         )
     elif reason == DEGRADED_AWAITING_INPUT:
         detail = (
             "the child ended its turn awaiting approval or an answer nobody can give during a "
             "Run, and changed no files, so the job never started. Re-run or resume with the "
-            'approval stated: delegate resume <run> "Approved: carry out the task now, do not '
+            'approval stated: delegate resume <handle> "Approved: carry out the task now, do not '
             'ask for confirmation"'
         )
     else:

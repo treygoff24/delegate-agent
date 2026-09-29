@@ -1670,7 +1670,7 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
   so a report or deliverable it was about to write may not exist. Sign-offs ("Let
   me know if you want the docs updated"), offers ("I'll write it if you want
   one"), questions, past-tense summaries, and long or report-shaped messages never
-  match. Next command: check the deliverable, then `delegate resume <run> "Do the
+  match. Next command: check the deliverable, then `delegate resume <handle> "Do the
   step you announced, then finish with a full report"`. `--expect-file` still turns
   a missing deliverable into a failure; this reason covers Runs that named none.
 - `ended_awaiting_input`: a `work` Run's short final message says it is awaiting
@@ -1680,7 +1680,7 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
   no work summary the text alone decides). Nobody can answer during a Run, so the
   job never started. Never applies to `safe` or `call` Runs. This is separate from
   the requester exclusion above, which still applies to
-  `ended_waiting_on_background_work`. Next command: `delegate resume <run>
+  `ended_waiting_on_background_work`. Next command: `delegate resume <handle>
   "Approved: carry out the task now, do not ask for confirmation"`.
 
 Prevention for Claude work Runs (and followups of them): Delegate sets
