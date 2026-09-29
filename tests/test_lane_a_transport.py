@@ -140,6 +140,7 @@ class OmpStdinTransportTests(CommandTestBase):
         # run of dots (or slashes) took minutes. Run it in a child so a regression
         # fails on the timeout instead of hanging the suite.
         script = (
+            f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
             "from delegate_agent import argv_builders as a\n"
             "for body in ('.' * 1_000_000, '/' * 1_000_000, 'x/' * 500_000):\n"
             "    assert a.omp_image_path_warnings('omp', body) == (), body[:4]\n"
