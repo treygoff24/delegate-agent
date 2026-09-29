@@ -385,6 +385,21 @@ DELEGATE_SAFE_BACKEND=copy delegate codex safe "Review only. Do not edit."
 `--pass-through` is also refused under bwrap because it bypasses the tracked
 launcher that applies the boundary.
 
+## Python older than 3.11
+
+Delegate needs Python 3.11 or newer. `bin/delegate.py` and the `delegate_agent`
+package check the interpreter first and exit `2` with a message naming the
+version they found, instead of failing with an `ImportError` from inside the
+package. On macOS a bare `python3` can resolve to Xcode's 3.9 when Homebrew is
+not first on `PATH`.
+
+Run it with a newer interpreter (`python3.12 bin/delegate.py ...`). The
+profile-aware launcher shim (`bin/delegate-profile-shim`) picks a 3.11+
+interpreter itself: `python3`, then `python3.14` down to `python3.11`, then
+Homebrew's, then `/usr/local/bin/python3`. Set `DELEGATE_PYTHON=/path/to/python`
+to choose one explicitly; an override older than 3.11 is refused rather than
+bypassed. When none is found the shim exits `2`.
+
 ## Completion notification degraded
 
 `--notify` uses the optional `post` CLI after terminal run state is persisted.
@@ -399,6 +414,15 @@ Stable reasons are `post_not_found`, `post_launch_failed`, `post_timeout`,
 `post_failed`, and `notify_hook_failed`. Fix `post` availability or the target,
 then use `--notify` on a later launch or `resume`; Delegate does not retry a
 degraded send automatically.
+
+A `room:<name>` ping is a workspace-room send. `post` never delivers a
+room fan-out to the participant that sent it, and the sender is whichever
+participant `post` resolves for the launching session. So `--notify` naming your
+own room reaches the room's other participants but not the launching session
+itself; the send still succeeds. Only an explicit `post send --to
+participant:<id>` reaches the sender, and `--notify` has no such target. The argv
+Delegate builds is checked against the installed `post` by
+`tests/test_real_binary_contracts.py`.
 
 ## Persistent worktree run refused
 

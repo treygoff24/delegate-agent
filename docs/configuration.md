@@ -122,8 +122,12 @@ wrapped work-mode launch. Push remains opt-in; default mail never installs
 hooks. Claude receives launch-scoped settings and both adapters keep cursors
 and markers under `.delegate/mail`; Codex private homes are created under
 `.delegate/runs/<runId>/` and cleaned at terminal finalization or terminal
-launch failure. All other harnesses remain pull-only until their stop-hook
-output is verified and degrade with a recorded warning rather than guessing.
+launch failure. Codex turns its stop hooks on for the launch with
+`--enable hooks` (the same as `-c features.hooks=true`) and
+`--dangerously-bypass-hook-trust`; a bare `-c hooks=true` is rejected by Codex,
+where `hooks` is a table. All other harnesses remain pull-only until their
+stop-hook output is verified and degrade with a recorded warning rather than
+guessing.
 
 ## Discovery cache and precedence
 

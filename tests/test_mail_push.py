@@ -150,7 +150,9 @@ class MailPushTests(unittest.TestCase):
             codex_env,
         )
         self.assertIsNone(codex.warning)
-        self.assertIn("hooks=true", codex.argv)
+        self.assertIn("--enable", codex.argv)
+        self.assertEqual(codex.argv[codex.argv.index("--enable") + 1], "hooks")
+        self.assertNotIn("hooks=true", codex.argv)
         self.assertIn("--dangerously-bypass-hook-trust", codex.argv)
         self.assertEqual(codex_env["DELEGATE_MAIL_HOOK_HARNESS"], "codex")
         self.assertEqual(codex_env["CODEX_HOME"], codex.codex_home)
@@ -174,6 +176,24 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertIsNotNone(unverified.warning)
         self.assertEqual(codex_env, before)
+
+    def test_codex_hooks_feature_flag_is_not_duplicated_or_a_bare_boolean(self):
+        source = self.workspace / "source-codex-home"
+        source.mkdir()
+        argv = ["codex", "exec", "--enable", "hooks", "prompt"]
+        provision = mail.provision_mail_push(
+            "codex",
+            argv,
+            list(argv),
+            self.registry_root,
+            self.run_id,
+            {"CODEX_HOME": str(source)},
+        )
+        self.assertIsNone(provision.warning)
+        self.assertEqual(provision.argv.count("--enable"), 1)
+        self.assertNotIn("-c", provision.argv)
+        self.assertNotIn("hooks=true", provision.argv)
+        self.assertEqual(provision.argv[-1], "prompt")
 
     def test_hook_command_pins_dev_and_installed_launchers(self):
         nonce = "test-nonce"
