@@ -26,7 +26,9 @@ from delegate_agent.json_types import JsonObject
 
 NOTIFY_KINDS = ("room", "channel")
 _TARGET_RE = re.compile(r"^(room|channel):([A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
-_MESSAGE_ID_RE = re.compile(r"\b\d{8}-\d{6}-\d{6}-[0-9a-f]{6}\b")
+# post 0.9.0 ids: room sends print YYYYMMDD-HHMMSS-<6 hex>, channel sends add a
+# microsecond field (YYYYMMDD-HHMMSS-NNNNNN-<6 hex>).
+_MESSAGE_ID_RE = re.compile(r"\b\d{8}-\d{6}(?:-\d{6})?-[0-9a-f]{6}\b")
 NOTIFY_TIMEOUT_SEC = 10.0
 
 
@@ -136,9 +138,11 @@ def notify_argv(target: NotifyTarget, message: str) -> list[str]:
             "signal",
             "--subject",
             "delegate",
-            # A completion ping to the caller's own room is the doorbell case;
-            # post refuses from == to without this.
-            "--allow-self",
+            # No self-delivery flag: post 0.9.0 dropped `--allow-self` (it
+            # answers `unexpected argument`) and no longer refuses a send whose
+            # sender room equals the target. A workspace-room fan-out never
+            # includes the sending participant itself, so the ping reaches the
+            # room's other participants.
             "--body",
             message,
         ]

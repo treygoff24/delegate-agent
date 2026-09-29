@@ -33,6 +33,7 @@ class NotifyArgvTests(unittest.TestCase):
         room = notify.notify_argv(notify.parse_notify_target("room:r"), "m")
         self.assertEqual(room[:4], ["post", "send", "--to", "r"])
         self.assertIn("--body", room)
+        self.assertNotIn("--allow-self", room)
         channel = notify.notify_argv(notify.parse_notify_target("channel:c"), "m")
         self.assertEqual(channel[:5], ["post", "chat", "c", "--send", "--anyway"])
         self.assertEqual(channel[-2:], ["--body", "m"])
@@ -81,6 +82,21 @@ class SendNotificationTests(unittest.TestCase):
         self.assertEqual(
             outcome.payload(), {"target": "channel:c", "ok": False, "reason": "post_not_found"}
         )
+
+    def test_room_message_id_without_a_microsecond_field_is_captured(self) -> None:
+        path = _fake_post(
+            self.dir,
+            exit_code=0,
+            stdout="post: sent signal 20260928-235545-5fe25a room-x -> room-x",
+        )
+        outcome = notify.send_notification(
+            notify.parse_notify_target("room:room-x"),
+            "hello",
+            cwd=self.temp.name,
+            env={"PATH": path},
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.message_id, "20260928-235545-5fe25a")
 
     def test_success_captures_message_id_and_runs_from_cwd(self) -> None:
         path = _fake_post(
