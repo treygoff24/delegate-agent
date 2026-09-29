@@ -156,11 +156,53 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
 
     def test_worktree_pool_guardrail_survives_an_unreadable_pool_root(self):
         """An advisory count must never block a launch."""
-        with tempfile.TemporaryDirectory() as fake_home:
-            self.assertEqual(
-                worktree_execution_api._worktree_pool_count(Path(fake_home) / "never-created"),
-                0,
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            pool = Path(fake_home) / ".delegate" / "worktrees"
+            pool.mkdir(parents=True)
+            repo, _git_cd = self._make_git_repo_with_commit()
+            fake_bin = self.make_cursor_safe_fake_agent()
+            workspace = request_api.resolve_workspace(repo.name)
+            config = config_api.embedded_default_config()
+            request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
+            request = request_types.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
             )
+            real_scandir = os.scandir
+
+            def unreadable(path, *args, **kwargs):
+                if Path(path) == pool:
+                    raise PermissionError(13, "Permission denied", str(path))
+                return real_scandir(path, *args, **kwargs)
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+                ),
+                mock.patch.object(os, "scandir", unreadable),
+            ):
+                self.assertEqual(worktree_execution_api._worktree_pool_count(pool), 0)
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=False,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(code, 0)
 
     # -- Persistent worktree: cursor work runs in isolated worktree -----------
 
@@ -368,7 +410,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
-            fake_bin = self.make_fake_bin()
+            log_file = str(Path(fake_home) / "child-argv.log")
+            fake_bin = self._make_logging_fake_bin("droid", log_file)
             config = dict(config_api.embedded_default_config())
             config["droid"] = dict(config["droid"])
             config["droid"]["models"] = {"qwen": "real-model-id"}
@@ -403,11 +446,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 isolation_context=request.isolation_context,
             )
             with mock.patch.dict(
-                os.environ,
-                {
-                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
-                    "FAKE_ASSISTANT_RESULT": "1",
-                },
+                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
             ):
                 code, _ = self.delegate.execute_request(
                     request,
@@ -420,9 +459,16 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
+            # The child must run in the execution worktree, not the source.
+            logged = Path(log_file).read_text().split()
+            logged_cwd = logged[logged.index("--cwd") + 1]
+            worktree_root = Path(fake_home) / ".delegate" / "worktrees"
+            self.assertNotEqual(Path(logged_cwd).resolve(), Path(repo.name).resolve())
+            self.assertTrue(
+                Path(logged_cwd).resolve().is_relative_to(worktree_root.resolve()), logged_cwd
+            )
             # A clean completed worktree is retired automatically; its branch
             # remains as the durable artifact.
-            worktree_root = Path(fake_home) / ".delegate" / "worktrees"
             worktrees = list(worktree_root.glob("*/*"))
             self.assertFalse(worktrees)
             branches = subprocess.run(

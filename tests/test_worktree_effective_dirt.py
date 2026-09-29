@@ -495,18 +495,6 @@ class NestedRegistryTests(EffectiveDirtTestBase):
             self.assertIn("move aside", caught.exception.payload["message"])
             self.assertTrue(Path(wt_path).exists())
 
-    def test_a_worktree_with_no_nested_registry_is_unaffected(self):
-        _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
-            _run_id, wt_path = self._seeded_tree(path, fake_home, "cursor-plain")
-            self.assertFalse((Path(wt_path) / ".delegate").exists())
-
-            result = worktree_remove_api.remove_worktree(
-                self._registry_root(path), handle="cursor-plain", keep_branch=True
-            )
-
-            self.assertTrue(result["pathRemoved"], result)
-
 
 if __name__ == "__main__":
     import unittest

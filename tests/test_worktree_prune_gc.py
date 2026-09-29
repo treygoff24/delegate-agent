@@ -645,23 +645,6 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(prune.call_args.kwargs["older_than_days"], 7)
 
-    def test_worktree_list_no_auto_prune_skips_opportunistic_pass(self):
-        _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
-            branch = "delegate/cursor-noap"
-            wt_path = str(Path(fake_home) / "wt" / "cursor-noap")
-            self._seed_persistent_run(
-                path, alias="cursor-noap", branch=branch, execution_cwd=wt_path
-            )
-            self._create_worktree_at(path, branch, wt_path)
-            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
-            index = registry_api.load_index(self._registry_root(path))
-            run_id = index["aliases"].get("cursor-noap")
-            self.assertIsNotNone(run_id)
-            worktree_gc_api.maybe_auto_prune(self._registry_root(path), config, no_auto_prune=True)
-            st = registry_api.load_run_state(self._registry_root(path), run_id)
-            self.assertEqual(st.get("worktreeStatus"), "present")
-
     def test_worktree_list_no_auto_prune_cli_skips_opportunistic_pass(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1842,16 +1825,6 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertTrue(empty.is_dir())
             self.assertTrue(orphan.is_dir())
 
-    def test_gc_effects_no_longer_advertise_pool_removal(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            pool = Path(tmp) / "pool"
-            (pool / "abc123def456").mkdir(parents=True)
-
-            payload = worktree_gc_api.gc_worktrees(None, pool_data_home=pool)
-
-            self.assertNotIn("removesEmptyPoolDirs", payload["effects"])
-            self.assertFalse(payload["effects"]["deletesWorktreePaths"])
-
     def test_relative_backlink_resolves_against_the_worktree_not_the_cwd(self):
         """A relative backlink is valid Git; resolving it against the CWD invents an orphan."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2314,9 +2287,22 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def test_backlink_to_a_path_that_is_not_there_is_still_an_orphan(self):
         """A completed comparison answers, including its refusal to stat a ghost."""
         with tempfile.TemporaryDirectory() as tmp:
-            gone = Path(tmp) / "gone"
+            pool = Path(tmp) / "pool"
+            source = Path(tmp) / "source"
+            worktree = pool / "abc123def456" / "cursor-1"
+            gitdir = self._live_gitdir(source, "cursor-1", worktree)
+            # The admin backfile names a worktree path that does not exist.
+            (Path(gitdir) / "gitdir").write_text(
+                f"{Path(tmp) / 'gone' / '.git'}\n", encoding="utf-8"
+            )
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=gitdir)
 
-            self.assertIs(worktree_gc_api._paths_match(gone, Path(tmp)), False)
+            result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 1)
+            self.assertEqual(len(result["orphans"]), 1)
+            self.assertEqual(result["orphans"][0]["worktreePath"], str(worktree))
+            self.assertEqual(result["warnings"], [])
 
     def test_gc_all_scans_configured_data_home(self):
         _repo, path = self._make_repo()

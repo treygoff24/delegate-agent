@@ -104,75 +104,11 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 self.assertIn("message", snapshot_payload)
                 self.assertIn("plannedBranch", snapshot_payload)
                 self.assertIn("plannedExecutionCwd", snapshot_payload)
-            finally:
-                worktree_execution_api.create_persistent_worktree = original_create
-
-    def test_prelaunch_failure_snapshot_omits_unrealized_fields(self):
-        """Pre-launch failure snapshot omits executionCwd/worktreeStatus/worktreeCleanupCommands
-        so a failed git worktree add doesn't imply the worktree exists."""
-        with (
-            tempfile.TemporaryDirectory() as fake_home,
-            mock.patch.dict(os.environ, {"HOME": fake_home}),
-        ):
-            repo, _git_cd = self._make_git_repo_with_commit()
-            workspace = request_api.resolve_workspace(repo.name)
-            request = self._make_persistent_worktree_request(
-                "cursor",
-                "work",
-                repo.name,
-                config_api.embedded_default_config(),
-            )
-            fake_bin = self.make_fake_bin()
-            request = request_types.Request(
-                request.engine,
-                request.mode,
-                request.workspace,
-                request.prompt,
-                [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
-                request.model,
-                model_alias=request.model_alias,
-                dry_run=request.dry_run,
-                workspace_kind=request.workspace_kind,
-                isolation_context=request.isolation_context,
-            )
-            original_create = worktree_execution_api.create_persistent_worktree
-
-            def failing_create(*args, **kwargs):
-                raise worktree_execution_api.IsolationExecutionError(
-                    "worktree_create_failed", "Simulated worktree failure"
-                )
-
-            worktree_execution_api.create_persistent_worktree = failing_create
-            try:
-                with self.assertRaises(errors_api.DelegateError) as ctx:
-                    self.delegate.execute_request(
-                        request,
-                        json_mode=False,
-                        config=config_api.embedded_default_config(),
-                        pass_through=False,
-                        completion_report_mode="none",
-                        source_workspace=workspace,
-                        stdout=io.StringIO(),
-                        stderr=io.StringIO(),
-                    )
-                self.assertEqual(ctx.exception.error, "worktree_create_failed")
-
-                registry_root = Path(repo.name) / ".delegate"
-                runs_dir = registry_root / "runs"
-                run_dirs = list(runs_dir.glob("del_*"))
-                self.assertTrue(len(run_dirs) > 0)
-                run_id = run_dirs[0].name
-                snapshot = registry_api.load_run_snapshot(registry_root, run_id)
-
-                # Planned fields MUST be present (they carry the intent).
-                self.assertIn("plannedBranch", snapshot)
-                self.assertIn("plannedExecutionCwd", snapshot)
-
                 # Unrealized fields must NOT be present (worktree was never created).
-                self.assertNotIn("executionCwd", snapshot)
-                self.assertNotIn("worktreeStatus", snapshot)
-                self.assertNotIn("worktreeCleanupCommands", snapshot)
-                self.assertNotIn("branch", snapshot)
+                self.assertNotIn("executionCwd", snapshot_payload)
+                self.assertNotIn("worktreeStatus", snapshot_payload)
+                self.assertNotIn("worktreeCleanupCommands", snapshot_payload)
+                self.assertNotIn("branch", snapshot_payload)
             finally:
                 worktree_execution_api.create_persistent_worktree = original_create
 

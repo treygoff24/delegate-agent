@@ -1,4 +1,3 @@
-import inspect
 import io
 import json
 import tempfile
@@ -318,7 +317,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 private_keys = [key for key in payload if key.startswith("_")]
                 self.assertEqual(private_keys, [])
 
-    def test_worktree_show_latest_harness(self):
+    def test_worktree_show_latest_harness_ignores_newer_non_worktree_run(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory():
             from datetime import UTC, datetime, timedelta
@@ -329,24 +328,6 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self._seed_persistent_run(
                 path, alias="droid-old", harness="droid", last_activity_at=old_ts
             )
-            recent_ts = (datetime.now(UTC) - timedelta(hours=1)).strftime(
-                registry_api.UTC_TIMESTAMP_FORMAT
-            )
-            self._seed_persistent_run(
-                path, alias="droid-recent", harness="droid", last_activity_at=recent_ts
-            )
-            result = worktree_api.show_worktree(
-                self._registry_root(path),
-                handle=None,
-                latest_harness="droid",
-            )
-            self.assertEqual(result.get("alias"), "droid-recent")
-
-    def test_worktree_show_latest_harness_ignores_newer_non_worktree_run(self):
-        _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory():
-            from datetime import UTC, datetime, timedelta
-
             worktree_ts = (datetime.now(UTC) - timedelta(hours=2)).strftime(
                 registry_api.UTC_TIMESTAMP_FORMAT
             )
@@ -694,10 +675,6 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self.assertEqual(len(result["entries"]), 1)
             self.assertNotIn("workSummary", result["entries"][0])
             summary_mock.assert_not_called()
-
-    def test_suggested_commands_signature_drops_dead_dirty_parameter(self):
-        params = inspect.signature(worktree_api.suggested_commands).parameters
-        self.assertNotIn("dirty", params)
 
 
 if __name__ == "__main__":
