@@ -71,6 +71,11 @@ def unread_mail_extra(
     }
 
 
+def unread_mail_warning(unread: JsonObject, alias: str) -> str:
+    """The warning text ``unread_mail_extra`` attaches for this unread record."""
+    return _core.unread_mail_warning(unread, alias)
+
+
 def inherited_mail_push(
     manifest: JsonObject,
     *,

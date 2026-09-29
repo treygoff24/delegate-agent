@@ -452,8 +452,13 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.add_process_cleanup(proc)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
         self._send_coordinator_mail(alias, "abort the P4 restore")
-        code, _out, err = self.run_cli(["--json", "cancel", alias])
+        code, out, err = self.run_cli(["--json", "cancel", alias])
         self.assertEqual(code, 0, err)
+        # The cancel reply carries the record's unread-mail warning, not only its own.
+        self.assertTrue(
+            any("never read by it" in w for w in json.loads(out)["runs"][0].get("warnings") or []),
+            out,
+        )
         state = run_registry.load_run_state(self.registry_root, run_id)
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["unreadMail"]["count"], 1)
