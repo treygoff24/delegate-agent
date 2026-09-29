@@ -116,6 +116,12 @@ class GuardE2ETestCase(unittest.TestCase):
             DELEGATE_WRITE_GUARD=guard,
             GUARD_RESULT_DIR=str(self.results),
             GUARD_SIBLING=str(self.sibling),
+            # The fake HOME has no git config and a Linux host cannot guess an identity;
+            # without one a child's commit fails for that reason, not the one under test.
+            GIT_AUTHOR_NAME="Delegate Test",
+            GIT_AUTHOR_EMAIL="delegate-test@example.com",
+            GIT_COMMITTER_NAME="Delegate Test",
+            GIT_COMMITTER_EMAIL="delegate-test@example.com",
         )
         for name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"):
             env.pop(name, None)

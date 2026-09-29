@@ -63,6 +63,12 @@ class HomeTestCase(unittest.TestCase):
             (self.home / rel).mkdir(parents=True)
         (self.home / ".delegate" / "config.json").write_text("{}", encoding="utf-8")
         (self.home / ".delegate" / "config.local.json").write_text("{}", encoding="utf-8")
+        # A real profile home always holds its identity file.
+        for rel in (
+            ".ai-profiles/accounts/claude/work/work-d/.claude.json",
+            ".ai-profiles/accounts/claude/personal/.claude.json",
+        ):
+            (self.home / rel).write_text("{}", encoding="utf-8")
 
     def real(self, rel: str) -> str:
         return os.path.realpath(self.home / rel)
@@ -128,25 +134,108 @@ class PlanTests(HomeTestCase):
 
     def test_engine_home_is_reopened_inside_ai_profiles_and_siblings_stay_protected(self):
         engine_home = str(self.home / ".ai-profiles/accounts/claude/work/work-d")
-        plan = self.plan(run_roots=(Reopen(engine_home, "engine home"),))
+        plan = self.plan(home_candidates=(Reopen(engine_home, "engine home"),))
         mounts = plan.mounts()
         self.assertIn(("rw", self.real(".ai-profiles/accounts/claude/work/work-d")), mounts)
         self.assertNotIn(("rw", self.real(".ai-profiles/accounts/claude/personal")), mounts)
         self.assertIn(("ro", self.real(".ai-profiles")), mounts)
+        self.assertEqual(plan.refused, ())
 
-    def test_only_profile_directories_named_by_the_environment_are_reopened(self):
+    def test_a_candidate_that_contains_another_profile_home_is_refused(self):
+        # An environment variable naming a parent of several profiles would otherwise make
+        # every sibling profile writable through one reopen.
+        for rel, reason in (
+            (".ai-profiles", "itself a protected path"),
+            (".ai-profiles/accounts", "another profile home"),
+            (".ai-profiles/accounts/claude", "another profile home"),
+            (".ai-profiles/accounts/claude/work", "another profile home"),
+        ):
+            with self.subTest(candidate=rel):
+                plan = self.plan(home_candidates=(Reopen(str(self.home / rel), "engine home"),))
+                self.assertNotIn(("rw", self.real(rel)), plan.mounts())
+                self.assertNotIn(
+                    ("rw", self.real(".ai-profiles/accounts/claude/personal")), plan.mounts()
+                )
+                self.assertIn(("ro", self.real(".ai-profiles")), plan.mounts())
+                self.assertEqual([entry.path for entry in plan.refused], [self.real(rel)])
+                self.assertIn(reason, plan.refused[0].reason)
+                self.assertIn("engine home not reopened", plan.refused[0].reason)
+                self.assertEqual(plan.payload()["refused"][0]["path"], self.real(rel))
+
+    def test_a_leaf_profile_home_full_of_content_is_still_reopened(self):
+        # Skills, projects and plugins are content, not sibling profiles: an identity-looking
+        # file inside them must not make the real home unwritable.
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        for rel in (
+            "skills/s/.credentials.json",
+            "projects/p/.claude.json",
+            "plugins/x/y/.claude.json",
+        ):
+            (home / rel).parent.mkdir(parents=True)
+            (home / rel).write_text("{}", encoding="utf-8")
+        (home / "todos/t/auth.json").parent.mkdir(parents=True)
+        (home / "todos/t/auth.json").write_text("{}", encoding="utf-8")
+        (home / "ide/x").mkdir(parents=True)
+        (home / "ide/x/auth.json").write_text("{}", encoding="utf-8")  # no config.toml beside it
+        plan = self.plan(home_candidates=(Reopen(str(home), "engine home"),))
+        self.assertIn(("rw", self.real(".ai-profiles/accounts/claude/work/work-d")), plan.mounts())
+        self.assertEqual(plan.refused, ())
+
+    def test_a_codex_style_home_pair_counts_as_another_profile_home(self):
+        codex = self.home / ".ai-profiles/accounts/codex/personal"
+        codex.mkdir(parents=True)
+        (codex / "auth.json").write_text("{}", encoding="utf-8")
+        (codex / "config.toml").write_text("", encoding="utf-8")
+        plan = self.plan(
+            home_candidates=(Reopen(str(self.home / ".ai-profiles/accounts/codex"), "engine home"),)
+        )
+        self.assertEqual(len(plan.refused), 1)
+        self.assertIn(self.real(".ai-profiles/accounts/codex/personal"), plan.refused[0].reason)
+
+    def test_a_candidate_outside_every_protected_path_is_harmless(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        plan = self.plan(home_candidates=(Reopen(str(elsewhere), "engine home"),))
+        self.assertEqual(plan.refused, ())
+        self.assertNotIn(("ro", self.real("elsewhere")), plan.mounts())
+
+    def test_a_protected_path_nested_in_an_accepted_engine_home_stays_protected(self):
+        home = self.home / ".ai-profiles/accounts/claude/work/work-d"
+        (home / "secrets").mkdir()
+        plan = self.plan(
+            WriteGuardSettings(add=(str(home / "secrets"),)),
+            home_candidates=(Reopen(str(home), "engine home"),),
+        )
+        mounts = plan.mounts()
+        self.assertEqual(plan.refused, ())
+        self.assertLess(
+            mounts.index(("rw", self.real(".ai-profiles/accounts/claude/work/work-d"))),
+            mounts.index(("ro", self.real(".ai-profiles/accounts/claude/work/work-d/secrets"))),
+        )
+
+    def test_only_the_engines_own_home_variable_is_a_candidate(self):
         profile = self.home / ".ai-profiles/accounts/claude/work/work-d"
         env = {
             "CLAUDE_CONFIG_DIR": str(profile),
+            "CODEX_HOME": str(self.home / ".ai-profiles/accounts/claude/personal"),
             "GNUPGHOME": str(self.home / ".gnupg"),
             "PROFILES_ROOT": str(self.home / ".ai-profiles"),
-            "NOT_A_DIR": str(self.home / "missing"),
-            "RELATIVE": "accounts/claude",
-            "EMPTY": "",
+            "TOOL_STATE_DIR": str(self.home / ".ai-profiles/accounts/claude"),
         }
-        roots = launch.profile_home_roots(env, str(self.home))
-        self.assertEqual([root.path for root in roots], [os.path.realpath(profile)])
-        self.assertEqual(roots[0].reason, "profile home")
+        candidates = launch.engine_home_candidates("claude", env, str(self.home))
+        self.assertEqual([(c.path, c.reason) for c in candidates], [(str(profile), "engine home")])
+        # No variable Delegate knows for this engine: nothing, however many name a profile.
+        self.assertEqual(launch.engine_home_candidates("droid", env, str(self.home)), ())
+        facts = launch._facts(
+            cwd=str(self.home / "Code/repo"),
+            env={**env, "HOME": str(self.home)},
+            engine="droid",
+            registry_root=None,
+            run_roots=(),
+            common_dir=None,
+        )
+        self.assertEqual(facts.home_candidates, ())
+        self.assertEqual(facts.run_roots, ())
 
     def test_remove_drops_a_default_and_add_protects_an_extra_path(self):
         (self.home / "vault").mkdir()
@@ -183,6 +272,74 @@ class PlanTests(HomeTestCase):
         self.assertIn(
             {"path": self.real("Code/repo"), "reason": "execution root"}, payload["writable"]
         )
+
+    def test_pin_makes_an_unprotected_exec_root_its_own_mount(self):
+        # A worktree lane's checkout sits outside every protected path, so without a pin
+        # it is not a mount point and the lane could rename it away.
+        worktree = self.real(".delegate/worktrees/run-1")
+        plan = self.plan(exec_root=worktree)
+        self.assertNotIn(("rw", worktree), plan.mounts())
+        pinned = plan.mounts(pin=[worktree])
+        self.assertIn(("rw", worktree), pinned)
+        self.assertEqual(pinned.count(("rw", worktree)), 1)
+
+    def test_pin_comes_after_its_protected_parents_and_keeps_an_existing_mode(self):
+        repo = self.real("Code/repo")
+        plan = self.plan()
+        self.assertEqual(plan.mounts(pin=[repo]), plan.mounts())
+        self.assertLess(
+            plan.mounts(pin=[repo]).index(("ro", self.real("Code"))),
+            plan.mounts(pin=[repo]).index(("rw", repo)),
+        )
+        # A pinned path that is itself protected keeps its protection.
+        ssh = self.real(".ssh")
+        self.assertIn(("ro", ssh), plan.mounts(pin=[ssh]))
+        self.assertNotIn(("rw", ssh), plan.mounts(pin=[ssh]))
+
+    def test_pinning_the_filesystem_root_is_ignored(self):
+        plan = self.plan()
+        self.assertEqual(plan.mounts(pin=["/", ""]), plan.mounts())
+
+
+class OtherProfileHomeScanTests(unittest.TestCase):
+    """The bounded scan that says whether reopening a directory would open a sibling profile."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+
+    def home_at(self, rel: str) -> Path:
+        path = self.root / rel
+        path.mkdir(parents=True)
+        (path / ".claude.json").write_text("{}", encoding="utf-8")
+        return path
+
+    def test_a_home_three_levels_down_is_found_and_one_four_levels_down_is_not(self):
+        deep = self.home_at("near/a/b/home")
+        self.assertEqual(write_guard.other_profile_home_within(str(self.root / "near")), str(deep))
+        self.home_at("far/a/b/c/home")
+        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "far")))
+
+    def test_a_symlink_is_not_followed(self):
+        elsewhere = self.home_at("elsewhere/home")
+        (self.root / "scan").mkdir()
+        (self.root / "scan" / "link").symlink_to(elsewhere.parent)
+        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "scan")))
+
+    def test_a_huge_tree_stops_at_the_directory_cap_and_reports_nothing(self):
+        for index in range(6):
+            (self.root / "big" / f"d{index}").mkdir(parents=True)
+        self.home_at("big/a-first/home")
+        self.assertEqual(
+            write_guard.other_profile_home_within(str(self.root / "big")),
+            str(self.root / "big/a-first/home"),
+        )
+        with mock.patch.object(write_guard, "_HOME_SCAN_MAX_DIRS", 3):
+            self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "big")))
+
+    def test_a_missing_directory_reports_nothing(self):
+        self.assertIsNone(write_guard.other_profile_home_within(str(self.root / "absent")))
 
 
 class SettingsTests(unittest.TestCase):
@@ -428,6 +585,186 @@ class FallbackTests(HomeTestCase):
         self.assertEqual(result.record["backend"], "bwrap")
         self.assertEqual(result.argv[0], "/usr/bin/bwrap")
         self.assertEqual(result.argv[-len(argv) :], argv)
+
+
+class EngineHomeLaunchTests(HomeTestCase):
+    """What the launch seam reopens under ~/.ai-profiles, seen through the bwrap argv."""
+
+    def apply(self, env_extra, *, engine="claude"):
+        env = {"HOME": str(self.home), **env_extra}
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/bwrap"),
+            mock.patch.object(sandbox_bwrap, "preflight_plan"),
+        ):
+            return launch.apply_write_guard(
+                WriteGuardSettings(),
+                argv=["engine"],
+                cwd=str(self.home / "Code" / "repo"),
+                env=env,
+                engine=engine,
+            )
+
+    @staticmethod
+    def rw_binds(result):
+        argv = result.argv
+        return [argv[i + 1] for i, token in enumerate(argv) if token == "--bind"]
+
+    def test_the_selected_engine_home_is_reopened_and_an_ambient_parent_is_not(self):
+        result = self.apply(
+            {
+                "CLAUDE_CONFIG_DIR": str(self.home / ".ai-profiles/accounts/claude/work/work-d"),
+                "TOOL_STATE_DIR": str(self.home / ".ai-profiles/accounts/claude"),
+                "PROFILES_ROOT": str(self.home / ".ai-profiles"),
+                # A sibling leaf profile: it passes every check a candidate must pass, so
+                # only "not the engine's own variable" keeps it closed.
+                "OTHER_PROFILE_HOME": str(self.home / ".ai-profiles/accounts/claude/personal"),
+            }
+        )
+        binds = self.rw_binds(result)
+        self.assertIn(self.real(".ai-profiles/accounts/claude/work/work-d"), binds)
+        for rel in (
+            ".ai-profiles",
+            ".ai-profiles/accounts/claude",
+            ".ai-profiles/accounts/claude/personal",
+        ):
+            self.assertNotIn(self.real(rel), binds)
+        self.assertNotIn("refused", result.record)
+        self.assertIsNone(result.warning)
+
+    def test_a_refused_engine_home_is_reported_with_the_way_to_open_it(self):
+        parent = self.real(".ai-profiles/accounts/claude")
+        result = self.apply({"CLAUDE_CONFIG_DIR": parent})
+        self.assertNotIn(parent, self.rw_binds(result))
+        self.assertEqual([entry["path"] for entry in result.record["refused"]], [parent])
+        self.assertIn("another profile home", result.record["refused"][0]["reason"])
+        self.assertIn(parent, result.warning)
+        self.assertIn("isolation.writeGuard.writable", result.warning)
+        self.assertEqual(result.record["status"], "enforced")
+
+    def test_an_engine_with_no_home_variable_reopens_nothing_from_the_environment(self):
+        result = self.apply(
+            {"FACTORY_PROFILE_DIR": str(self.home / ".ai-profiles/accounts/claude/personal")},
+            engine="droid",
+        )
+        self.assertNotIn(self.real(".ai-profiles/accounts/claude/personal"), self.rw_binds(result))
+
+
+class BwrapLaunchShapeTests(HomeTestCase):
+    """The bwrap argv the launch seam builds, and what it does when a path will not bind."""
+
+    def apply(self, settings=None, *, cwd=None, preflight=None, env_extra=None, engine="cursor"):
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/bwrap"),
+            mock.patch.object(sandbox_bwrap, "preflight_plan", side_effect=preflight),
+        ):
+            return launch.apply_write_guard(
+                settings or WriteGuardSettings(),
+                argv=["engine"],
+                cwd=cwd or str(self.home / "Code" / "repo"),
+                env={"HOME": str(self.home), **(env_extra or {})},
+                engine=engine,
+            )
+
+    @staticmethod
+    def binds(result, flag):
+        argv = result.argv
+        return [argv[i + 1] for i, token in enumerate(argv) if token == flag]
+
+    def refusing(self, *bad_rel):
+        """A preflight that fails for any argv that names one of the given paths."""
+        bad = [self.real(rel) for rel in bad_rel]
+
+        def preflight(argv, **_kwargs):
+            if any(path in argv for path in bad):
+                raise error_types.DelegateError(
+                    "bwrap_launch_failed", "bwrap preflight failed: Can't bind mount"
+                )
+
+        return preflight
+
+    def test_a_worktree_exec_root_outside_every_protected_path_is_pinned(self):
+        worktree = self.real(".delegate/worktrees/run-1")
+        result = self.apply(cwd=worktree)
+        self.assertIn(worktree, self.binds(result, "--bind"))
+
+    def test_one_unbindable_path_is_dropped_and_the_rest_stay_guarded(self):
+        result = self.apply(preflight=self.refusing(".gnupg"))
+        gnupg = self.real(".gnupg")
+        self.assertNotIn(gnupg, self.binds(result, "--ro-bind"))
+        self.assertIn(self.real(".ssh"), self.binds(result, "--ro-bind"))
+        self.assertIn(self.real(".ai-profiles"), self.binds(result, "--ro-bind"))
+        self.assertEqual(result.argv[0], "/usr/bin/bwrap")
+        self.assertEqual(result.record["status"], "enforced")
+        self.assertEqual(
+            [(e["path"], e["mode"]) for e in result.record["unbound"]], [(gnupg, "ro")]
+        )
+        self.assertIn("Can't bind mount", result.record["unbound"][0]["reason"])
+        self.assertNotIn(gnupg, result.record["protected"])
+        self.assertIn(self.real(".ssh"), result.record["protected"])
+        self.assertIn(gnupg, result.warning)
+        self.assertIn("left unprotected", result.warning)
+
+    def test_an_unbindable_reopen_is_dropped_and_reported_as_not_reopened(self):
+        rel = ".ai-profiles/accounts/claude/work/work-d"
+        result = self.apply(
+            preflight=self.refusing(rel),
+            env_extra={"CLAUDE_CONFIG_DIR": str(self.home / rel)},
+            engine="claude",
+        )
+        self.assertNotIn(self.real(rel), self.binds(result, "--bind"))
+        self.assertEqual(result.record["unbound"][0]["mode"], "rw")
+        self.assertNotIn(self.real(rel), [e["path"] for e in result.record["writable"]])
+        self.assertIn("not reopened", result.warning)
+
+    def test_refuse_still_refuses_when_one_path_will_not_bind(self):
+        with self.assertRaises(error_types.DelegateError) as ctx:
+            self.apply(
+                WriteGuardSettings(on_unavailable="refuse"), preflight=self.refusing(".gnupg")
+            )
+        self.assertEqual(ctx.exception.error, "write_guard_unavailable")
+
+    def test_a_boundary_that_cannot_run_at_all_is_still_unavailable(self):
+        def preflight(argv, **_kwargs):
+            raise error_types.DelegateError("bwrap_launch_failed", "user namespaces disabled")
+
+        result = self.apply(preflight=preflight)
+        self.assertEqual(result.argv, ["engine"])
+        self.assertEqual(result.record["status"], "unavailable")
+        self.assertNotIn("unbound", result.record)
+
+    def test_a_plan_that_still_fails_after_dropping_is_unavailable(self):
+        gnupg = self.real(".gnupg")
+
+        def preflight(argv, **_kwargs):
+            if argv[-1] == "/bin/true":  # the baseline and the one-mount probes
+                if gnupg in argv:
+                    raise error_types.DelegateError("bwrap_launch_failed", "gnupg alone fails")
+                return
+            raise error_types.DelegateError("bwrap_launch_failed", "the full plan fails")
+
+        result = self.apply(preflight=preflight)
+        self.assertEqual(result.record["status"], "unavailable")
+        self.assertEqual(result.argv, ["engine"])
+
+    def test_unbindable_mounts_names_each_failing_mount_only(self):
+        def preflight(argv, **_kwargs):
+            if "/a" in argv:
+                raise error_types.DelegateError("bwrap_launch_failed", "nope: /a")
+
+        with mock.patch.object(sandbox_bwrap, "preflight_plan", side_effect=preflight):
+            failed = sandbox_bwrap.unbindable_mounts(
+                [("ro", "/a"), ("rw", "/b"), ("ro", "/c")], bwrap_path="bwrap"
+            )
+        self.assertEqual(failed, [("ro", "/a", "nope: /a")])
+
+    def test_unbindable_mounts_reports_nothing_when_the_empty_plan_fails_too(self):
+        failure = error_types.DelegateError("bwrap_launch_failed", "no user namespaces")
+        with mock.patch.object(sandbox_bwrap, "preflight_plan", side_effect=failure):
+            self.assertEqual(
+                sandbox_bwrap.unbindable_mounts([("ro", "/a")], bwrap_path="bwrap"), []
+            )
 
 
 class LaunchSeamGuardTests(HomeTestCase):
@@ -786,42 +1123,100 @@ class ForbidCommitHookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotEqual(self.head(), before)
 
+    @staticmethod
+    def codex_default_filter(env):
+        # Codex's default shell_environment_policy drops every variable whose name
+        # contains KEY, SECRET or TOKEN (case-insensitive) before a tool call runs.
+        # The patterns are in the Codex 0.157.1 binary; a live probe confirmed them.
+        return {
+            name: value
+            for name, value in env.items()
+            if not any(marker in name.upper() for marker in ("KEY", "SECRET", "TOKEN"))
+        }
+
+    def test_the_child_env_works_after_codex_default_name_filter(self):
+        # The regression this guards: an indexed GIT_CONFIG_COUNT/KEY_n/VALUE_n set lost
+        # its KEY_n under that filter, and git then failed EVERY command ("missing
+        # config key GIT_CONFIG_KEY_0"), status and add included.
+        env = self.codex_default_filter(self.env())
+        status = run_git(self.repo, "status", "--short", env=env, check=False)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertNotIn("missing config key", status.stderr)
+        hooks = run_git(self.repo, "config", "--get", "core.hooksPath", env=env)
+        self.assertEqual(hooks.stdout.strip(), str(self.hooks))
+        before = self.head()
+        (self.repo / "change.txt").write_text("x", encoding="utf-8")
+        self.assertEqual(
+            run_git(self.repo, "add", "change.txt", env=env, check=False).returncode, 0
+        )
+        result = run_git(self.repo, "commit", "-q", "-m", "child", env=env, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--forbid-commit", result.stderr)
+        self.assertEqual(self.head(), before)
+
+    def test_the_indexed_form_is_what_the_filter_breaks(self):
+        # Positive control for the filter test above: with a count set, its KEY_n dropped
+        # by the name filter and only the value left, git fails every command. This is
+        # the environment the previous implementation handed to Codex.
+        indexed = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": str(self.hooks),
+        }
+        env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
+            **self.codex_default_filter(indexed),
+        }
+        self.assertIn("GIT_CONFIG_COUNT", env)
+        self.assertNotIn("GIT_CONFIG_KEY_0", env)
+        status = run_git(self.repo, "status", "--short", env=env, check=False)
+        self.assertNotEqual(status.returncode, 0)
+        self.assertIn("missing config key", status.stderr)
+
+    def test_no_variable_the_hooks_need_has_a_secret_looking_name(self):
+        updates = write_guard.forbid_commit_env(str(self.hooks), {})
+        self.assertEqual(set(updates), {"GIT_CONFIG_PARAMETERS"})
+        self.assertEqual(updates, self.codex_default_filter(updates))
+
+    def test_a_repo_local_hooks_path_does_not_beat_the_injected_one(self):
+        # Why the parameters form and not a per-run GIT_CONFIG_GLOBAL file: a global
+        # file loses to the repository's own config (a repo that sets core.hooksPath
+        # for its own hook manager would silently re-enable commits).
+        run_git(self.repo, "config", "core.hooksPath", str(self.root / "repo-own-hooks"))
+        before = self.head()
+        result = self.commit(env=self.env())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--forbid-commit", result.stderr)
+        self.assertEqual(self.head(), before)
+
     def test_existing_git_config_env_is_preserved(self):
+        # Old form ('key=value') and new form ('key'='value') entries, plus the indexed
+        # variables, all survive untouched next to the injected hooks path.
         base = {
             **os.environ,
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "delegate.carried",
-            "GIT_CONFIG_VALUE_0": "Carried Over",
+            "GIT_CONFIG_KEY_0": "delegate.indexed",
+            "GIT_CONFIG_VALUE_0": "Indexed",
+            "GIT_CONFIG_PARAMETERS": "'delegate.old=Old Form' 'delegate.new'='New Form'",
         }
         env = write_guard.forbid_commit_env(str(self.hooks), base)
-        self.assertEqual(env["GIT_CONFIG_COUNT"], "2")
-        self.assertEqual(env["GIT_CONFIG_KEY_1"], "core.hooksPath")
-        self.assertNotIn("GIT_CONFIG_KEY_0", env)
+        self.assertEqual(set(env), {"GIT_CONFIG_PARAMETERS"})
         merged = {**base, **env}
-        name = run_git(self.repo, "config", "--get", "delegate.carried", env=merged).stdout.strip()
-        hooks = run_git(self.repo, "config", "--get", "core.hooksPath", env=merged).stdout.strip()
-        self.assertEqual(name, "Carried Over")
-        self.assertEqual(hooks, str(self.hooks))
-
-    def test_the_parameters_form_alone_still_refuses(self):
-        # Codex's default shell policy drops variables whose names contain KEY, so the
-        # indexed GIT_CONFIG_KEY_n form may never arrive; the parameters form must
-        # carry the setting by itself.
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
-        updates = write_guard.forbid_commit_env(str(self.hooks), env)
-        env["GIT_CONFIG_PARAMETERS"] = updates["GIT_CONFIG_PARAMETERS"]
-        before = self.head()
-        result = self.commit(env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.head(), before)
+        for key, expected in (
+            ("delegate.indexed", "Indexed"),
+            ("delegate.old", "Old Form"),
+            ("delegate.new", "New Form"),
+            ("core.hooksPath", str(self.hooks)),
+        ):
+            with self.subTest(key=key):
+                value = run_git(self.repo, "config", "--get", key, env=merged).stdout.strip()
+                self.assertEqual(value, expected)
 
     def test_a_path_with_a_quote_survives_the_parameters_form(self):
         odd = self.root / "it's hooks"
         write_guard.install_forbid_commit_hooks(odd)
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
-        env["GIT_CONFIG_PARAMETERS"] = write_guard.forbid_commit_env(str(odd), env)[
-            "GIT_CONFIG_PARAMETERS"
-        ]
+        env.update(write_guard.forbid_commit_env(str(odd), env))
         value = run_git(self.repo, "config", "--get", "core.hooksPath", env=env).stdout.strip()
         self.assertEqual(value, str(odd))
 
@@ -831,25 +1226,24 @@ class ForbidCommitHookTests(unittest.TestCase):
         out = self.root / "env.txt"
         script = self.root / "child.sh"
         script.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" '
-            f'> "{out}"\n',
+            f'#!/bin/sh\ngit -C "{self.repo}" config --get core.hooksPath > "{out}"\n',
             encoding="utf-8",
         )
         script.chmod(0o755)
-        process = runner._launch_tracked_process(
-            [str(script)],
-            str(self.repo),
-            stdin_text=None,
-            env_overrides={"GIT_CONFIG_COUNT": "0"},
-            run_path=run_path,
-            forbid_commit=True,
-        )
-        process.communicate(timeout=30)
-        count, key, value = out.read_text(encoding="utf-8").split("\n")[:3]
-        self.assertEqual(count, "1")
-        self.assertEqual(key, "core.hooksPath")
-        self.assertEqual(Path(value), run_path / write_guard.FORBID_COMMIT_HOOKS_DIRNAME)
-        self.assertTrue((Path(value) / "pre-commit").exists())
+        with mock.patch.dict(os.environ):
+            for name in [n for n in os.environ if n.startswith("GIT_CONFIG")]:
+                del os.environ[name]
+            process = runner._launch_tracked_process(
+                [str(script)],
+                str(self.repo),
+                stdin_text=None,
+                run_path=run_path,
+                forbid_commit=True,
+            )
+            process.communicate(timeout=30)
+        hooks_dir = run_path / write_guard.FORBID_COMMIT_HOOKS_DIRNAME
+        self.assertEqual(out.read_text(encoding="utf-8").strip(), str(hooks_dir))
+        self.assertTrue((hooks_dir / "pre-commit").exists())
 
     def test_launch_seam_without_forbid_commit_leaves_git_config_alone(self):
         run_path = self.root / "run"

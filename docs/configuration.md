@@ -854,9 +854,14 @@ protected list, the writable re-opens every run gets, and the backends.
   no wrap, no Codex `--add-dir` roots, no prompt note. The environment variable
   `DELEGATE_WRITE_GUARD` overrides it (`off`, `0`, `false`, `no` disable; `on`,
   `1`, `true`, `yes` enable).
-- `onUnavailable` (`warn` default, or `refuse`): what happens on Linux when
-  bubblewrap is missing or fails its preflight. `warn` launches unguarded and
-  records a warning; `refuse` fails the launch with `write_guard_unavailable`.
+- `onUnavailable` (`warn` default, or `refuse`): what happens when the backend
+  is missing or fails its preflight: bubblewrap on Linux, and `sandbox-exec` on
+  the Mac when `macosSeatbelt` is on (its probe run counts as the preflight).
+  `warn` launches unguarded and records a warning; `refuse` fails the launch
+  with `write_guard_unavailable`. On Linux with `warn`, a preflight that fails
+  because one path will not bind drops only that path, not the whole guard: the
+  manifest lists it under `unbound` and the run gets a warning. `refuse` never
+  retries.
 - `macosSeatbelt` (default `false`): opt in to the macOS Seatbelt guard for
   non-Codex engines. While it is `false` the Mac guard status is `off`, with no
   warning and no refusal. Codex is never wrapped; see the recipe below.
@@ -867,7 +872,11 @@ protected list, the writable re-opens every run gets, and the backends.
 - `remove`: default protected paths to drop.
 - `writable`: paths re-opened for every run. `delegate ... --writable PATH`
   re-opens an existing path for one run only and is CLI-only (there is no
-  `run --input-json` field).
+  `run --input-json` field). This is also how to open an engine's profile
+  directory when Delegate has no home variable for the engine, or when the
+  engine home was refused: only the selected engine's own home variable
+  re-opens anything by itself, and a home that contains another profile's home
+  is listed under `refused` in the manifest and stays read-only.
 - `homeCaches`: package-manager cache directories under HOME. Backends that
   protect a list leave them writable by construction; the Codex native sandbox
   does not, so its writable roots include the ones that exist.
