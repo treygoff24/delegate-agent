@@ -17,6 +17,7 @@ from typing import TextIO
 from delegate_agent import config as delegate_config
 from delegate_agent import (
     private_io,
+    registry_roster,
     rendering,
     run_registry,
     workflow_attempts,
@@ -432,9 +433,11 @@ def emit_run(
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
         if not root.exists():
-            raise DelegateError(
-                "workflow_not_found",
-                f"Workflow not found: {wf_id}. {_workflow_state_hint(workspace)}",
+            raise _workflow_not_found(
+                wf_id,
+                workspace,
+                "run --resume",
+                registry_roster.find_workflow(wf_id, exclude=workspace),
             )
         _require_current_workflow(registry.read_json(root / registry.STATUS_FILE) or {})
         if not command.dry_run:
@@ -1005,8 +1008,22 @@ def _workflow_state_hint(workspace: Path) -> str:
     )
 
 
+def _workflow_not_found(
+    wf_id: str, workspace: Path, action: str, matches: list[registry_roster.RosterMatch]
+) -> DelegateError:
+    """workflow_not_found that names the workspace a known Registry holds it in."""
+    where, next_actions = registry_roster.describe_matches(
+        wf_id, matches, command=f"workflow {action}"
+    )
+    return DelegateError(
+        "workflow_not_found",
+        f"Workflow not found: {wf_id}. {_workflow_state_hint(workspace)}{where}",
+        next_actions=next_actions or None,
+    )
+
+
 def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
-    root = _workflow_dir_for_command(command, workspace)
+    root = _workflow_dir_for_command(command, workspace, read_across_registries=True)
     payload = registry.read_json(root / registry.STATUS_FILE)
     if payload is None:
         raise DelegateError(
@@ -1016,6 +1033,9 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
     view = _status_view(root, payload)
     runtime_pin, runtime_notice = _status_runtime_pin(root.name, view.get("status"))
     view["runtimePin"] = runtime_pin
+    resolved_workspace = _resolved_elsewhere(root, workspace)
+    if resolved_workspace is not None:
+        view["resolvedWorkspace"] = resolved_workspace
     if command.json_mode:
         rendering.print_json(view, stdout)
     else:
@@ -1023,6 +1043,8 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
         print(f"journalPath: {view.get('journalPath')}", file=stdout)
         if runtime_notice is not None:
             print(runtime_notice, file=stdout)
+        if resolved_workspace is not None:
+            print(f"resolvedWorkspace: {resolved_workspace}", file=stdout)
         if view.get("status") == "stalled":
             print(
                 f"supervisor dead; resume with: workflow run --resume {view.get('wfId')}",
@@ -1065,7 +1087,7 @@ def _status_runtime_pin(wf_id: str, status: object) -> tuple[JsonObject, str | N
 
 
 def emit_events(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
-    root = _workflow_dir_for_command(command, workspace)
+    root = _workflow_dir_for_command(command, workspace, read_across_registries=True)
     events = [
         event
         for event in registry.iter_journal(root / registry.JOURNAL_FILE)
@@ -1081,7 +1103,7 @@ def emit_events(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
 
 
 def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
-    root = _workflow_dir_for_command(command, workspace)
+    root = _workflow_dir_for_command(command, workspace, read_across_registries=True)
     since = command.since
     collected: list[JsonObject] = []
     stalled = False
@@ -1153,6 +1175,7 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
 
 def emit_result(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
     root, wf_id, resolution_kind = _resolve_wait_or_result(command, workspace, require_result=True)
+    resolved_workspace = _resolved_elsewhere(root, workspace)
     payload = registry.read_json(root / registry.RESULT_FILE)
     if payload is None:
         raise DelegateError("workflow_result_missing", f"Workflow result not found: {wf_id}")
@@ -1179,6 +1202,8 @@ def emit_result(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
             }
             if resolution_kind is not None:
                 envelope["resolutionKind"] = resolution_kind
+            if resolved_workspace is not None:
+                envelope["resolvedWorkspace"] = resolved_workspace
             rendering.print_json(envelope, stdout)
         elif isinstance(value, str):
             print(value, file=stdout)
@@ -1190,6 +1215,8 @@ def emit_result(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
         if resolution_kind is not None:
             output["wfId"] = wf_id
             output["resolutionKind"] = resolution_kind
+        if resolved_workspace is not None:
+            output["resolvedWorkspace"] = resolved_workspace
         rendering.print_json(output, stdout)
     else:
         print(json.dumps(payload.get("result"), indent=2, sort_keys=True), file=stdout)
@@ -1220,6 +1247,9 @@ def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     if resolution_kind is not None:
         result["wfId"] = wf_id
         result["resolutionKind"] = resolution_kind
+    resolved_workspace = _resolved_elsewhere(root, workspace)
+    if resolved_workspace is not None:
+        result["resolvedWorkspace"] = resolved_workspace
     if command.json_mode:
         rendering.print_json(result, stdout)
     else:
@@ -1735,16 +1765,31 @@ def _script_path_for_command(command: WorkflowCommand) -> Path:
     return path
 
 
-def _workflow_dir_for_command(command: WorkflowCommand, workspace: Path) -> Path:
+def _workflow_dir_for_command(
+    command: WorkflowCommand, workspace: Path, *, read_across_registries: bool = False
+) -> Path:
+    """The workflow's directory in this workspace, or in the one other Registry that has it.
+
+    Only read-only actions pass ``read_across_registries``: a workflow id is
+    globally unique, so the one workspace on the roster that holds it is read
+    directly. Mutating actions fail with the exact ``--cwd`` command instead.
+    """
     if command.wf_id is None:
         raise DelegateError("missing_workflow", f"workflow {command.action} requires <wfId>.")
-    root = registry.workflow_dir(workspace, _validate_wf_id(command.wf_id))
+    wf_id = _validate_wf_id(command.wf_id)
+    root = registry.workflow_dir(workspace, wf_id)
     if not root.exists():
-        raise DelegateError(
-            "workflow_not_found",
-            f"Workflow not found: {command.wf_id}. {_workflow_state_hint(workspace)}",
-        )
+        matches = registry_roster.find_workflow(wf_id, exclude=workspace)
+        if read_across_registries and len(matches) == 1:
+            return registry.workflow_dir(matches[0].workspace, wf_id)
+        raise _workflow_not_found(wf_id, workspace, command.action, matches)
     return root
+
+
+def _resolved_elsewhere(root: Path, workspace: Path) -> str | None:
+    """The workspace a workflow was read from when that is not the current one."""
+    owner = root.parent.parent.parent
+    return None if owner == workspace else str(owner)
 
 
 def _resolve_wait_or_result(
@@ -1754,7 +1799,7 @@ def _resolve_wait_or_result(
     require_result: bool,
 ) -> tuple[Path, str, str | None]:
     if command.wf_id is not None:
-        root = _workflow_dir_for_command(command, workspace)
+        root = _workflow_dir_for_command(command, workspace, read_across_registries=True)
         return root, command.wf_id, None
     root = registry.latest_workflow_dir(
         workspace,

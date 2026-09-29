@@ -561,6 +561,75 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertIn(f"ran attached to {owner}", payload["message"])
             self.assertEqual(payload["nextActions"][0], f"delegate worktree show {owner}")
 
+    def _seed_manifest_only_run(self, repo_path: str, manifest_fields: dict) -> tuple[str, str]:
+        registry_root = self._registry_root(repo_path)
+        run_id, alias = registry_api.register_run(
+            registry_root, harness="cursor", metadata={"mode": "work"}
+        )
+        registry_api.write_json_atomic(
+            registry_api.run_directory(registry_root, run_id) / registry_api.MANIFEST_FILE,
+            {
+                "schema": registry_api.MANIFEST_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
+                "harness": "cursor",
+                "mode": "work",
+                **manifest_fields,
+            },
+        )
+        return run_id, alias
+
+    def test_followup_of_a_followup_points_at_the_run_that_owns_the_worktree(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            wt_path = str(Path(fake_home) / "wt" / "cursor-owner")
+            owner_id, owner = self._seed_persistent_run(
+                path, alias="cursor-4", branch="delegate/cursor-owner", execution_cwd=wt_path
+            )
+            first_id, first = self._seed_manifest_only_run(path, {"followupOf": owner_id})
+            _second_id, second = self._seed_manifest_only_run(path, {"followupOf": first_id})
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "show", second], home=fake_home
+            )
+
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "not_worktree_run")
+            self.assertIn(
+                f"It followed up {first}, which followed up {owner}, which owns the worktree",
+                payload["message"],
+            )
+            self.assertEqual(payload["nextActions"][0], f"delegate worktree show {owner}")
+
+    def test_a_followup_lineage_that_loops_back_does_not_hang_and_names_no_owner(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            first_id, first = self._seed_manifest_only_run(path, {})
+            second_id, second = self._seed_manifest_only_run(path, {"followupOf": first_id})
+            registry_api.write_json_atomic(
+                registry_api.run_directory(self._registry_root(path), first_id)
+                / registry_api.MANIFEST_FILE,
+                {
+                    "schema": registry_api.MANIFEST_SCHEMA,
+                    "runId": first_id,
+                    "alias": first,
+                    "harness": "cursor",
+                    "mode": "work",
+                    "followupOf": second_id,
+                },
+            )
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "show", second], home=fake_home
+            )
+
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "not_worktree_run")
+            self.assertNotIn("which owns the worktree", payload["message"])
+            self.assertEqual(payload["nextActions"], [f"delegate snapshot {second}"])
+
     def test_branch_collision_does_not_delete_preexisting_branch(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

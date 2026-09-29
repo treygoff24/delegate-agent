@@ -303,7 +303,7 @@ Controls local run recording.
 {
   "tracking": {
     "completionReport": {"defaultMode": "markdown"},
-    "retention": {"enabled": true, "rawLogDays": 7},
+    "retention": {"enabled": true, "rawLogDays": 7, "scratchDays": 3},
     "registryLockTimeoutSec": 120,
     "processGroupTerminationGraceSec": 3,
     "skillReviewPreamble": {"enabled": false}
@@ -314,6 +314,17 @@ Controls local run recording.
 - `completionReport.defaultMode`: `markdown` or `none`.
 - `retention.enabled`: whether raw logs are eligible for archive-only retention.
 - `retention.rawLogDays`: non-negative number of days before bulky raw logs may be archived.
+- `retention.scratchDays`: non-negative number of days after which a terminal
+  run's neutral scratch directory, scratch sidecars, and compact temp directory
+  are removed by the ambient retention pass (default `3`; `0` reclaims as soon as
+  a run is terminal). Run records are kept, running and stale runs are never
+  touched, and the run state records `scratchReclaimedAt` and
+  `scratchReclaimedBytes`. `delegate runs reclaim [--older-than DAYS] [--dry-run]`
+  does the same on demand. The ambient step stops after 20 seconds, including
+  inside one large tree, and resumes ten minutes later; `runs reclaim` has no
+  such limit. The ambient step only runs while `retention.enabled`
+  is true, and it is independent of `delegate runs prune`, which removes the
+  records themselves.
 - `processGroupTerminationGraceSec`: non-negative, finite number of seconds to
   wait after SIGTERM before escalating a child process group to SIGKILL. The
   default is `3` seconds; `0` escalates immediately.
@@ -339,7 +350,10 @@ Controls local run recording.
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,
 or cancellation; if another retention pass is already active, a concurrent
-ambient pass returns immediately.
+ambient pass returns immediately. The scratch reclamation step of a pass has a
+20-second budget; a pass that runs out of time leaves the rest, and implicit
+scratch reclamation then waits ten minutes before trying again (raw-log
+archival keeps its once-a-minute cadence).
 
 ### `cursor`
 
