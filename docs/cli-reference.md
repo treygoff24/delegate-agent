@@ -159,44 +159,44 @@ Tracked runs retain it only in the private
 ### Direct runtime commands
 
 ```bash
-delegate cursor safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate cursor work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate cursor safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate cursor work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 
-delegate droid safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate droid work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate droid call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 
-delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH | prompt...]
 
-delegate claude safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate claude work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate claude safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate claude work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH | prompt...]
 
-delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 
-delegate opencode safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate opencode work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
+delegate opencode safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate opencode work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH | prompt...]
 
-delegate pi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate pi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate pi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate pi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 
-delegate omp safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate omp work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate omp safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate omp work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 
-delegate kimi safe [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+delegate kimi safe [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate kimi work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH | prompt...]
 ```
 
-Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
+Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin; give exactly one (combining them fails with `ambiguous_prompt_source`). A relative `--prompt-file` resolves against the shell cwd first; if that file does not exist but one exists under `--cwd DIR`, that one is used and a warning says so. When neither exists the `prompt_file_not_found` error names both absolute paths tried. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
 Delegate resolves the prompt, Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi prompts are passed to
 the child runtime over stdin; Cursor Agent 2026.09.02-c22c1a3 and Oh My Pi 18.1.13 both consume a piped
 prompt in the verified non-interactive invocation. Droid and Grok prompts are written to a private temporary
@@ -318,7 +318,7 @@ starts. Gitignored files remain excluded, and external symlinks are blocked with
 the same protections used by safe-mode workspace sync. Automatic sync emits a
 `dirty_source_auto_included` warning with tracked-modified and untracked counts.
 `--include-dirty` remains an explicit launch flag and is a no-op when the source
-is already clean.
+is already clean. In safe mode it is also accepted as a no-op (safe already sees uncommitted files) with a warning; it is still refused for call mode and for work mode without `--isolation worktree`.
 JSON and text completion output report `includeDirty: true` / `syncedFiles`.
 `run --input-json` accepts the equivalent boolean field `includeDirty`.
 
@@ -366,8 +366,8 @@ unrelated diagnostics where no child env or profile cache selection occurs.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH | prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
@@ -394,8 +394,8 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate [--json] claude call [--read-only|--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate [--json] claude call [--read-only|--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH | prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -421,8 +421,8 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
@@ -448,8 +448,8 @@ filesystem surveys through its generic `exec` tool, which Delegate cannot allow
 without weakening the read-only boundary.
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH | prompt...]
 ```
 
 - `call --read-only` passes a Delegate-generated `--config` deny-list for
@@ -497,8 +497,8 @@ delegate --isolation worktree devin work "Implement the feature in a persistent 
 Wraps OpenCode's non-interactive `run` command.
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH | prompt...]
 ```
 
 - Safe mode reviews the current working tree in an isolated throwaway copy. It
@@ -563,8 +563,8 @@ delegate --isolation worktree opencode work "Implement the feature in a persiste
 Wraps Pi's headless print mode.
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] pi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] pi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 ```
 
 - Delegate launches `pi -p --no-session --mode json` and sends the resolved prompt over stdin.
@@ -588,8 +588,8 @@ delegate pi call --read-only --prompt-file rubric.md
 Wraps Oh My Pi's headless print mode.
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] omp {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] omp {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH | prompt...]
 ```
 
 - Delegate launches `omp -p --no-session --mode json` and sends the resolved prompt over stdin.
@@ -612,8 +612,8 @@ delegate omp call --read-only --prompt-file rubric.md
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
+delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH | prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
@@ -1805,11 +1805,16 @@ with `resultQuality=empty`, and emits an
 `empty_success_retry` warning. Tracked safe runs retain both attempts in their
 stdout/stderr logs.
 
+Delegate writes `.delegate/.gitignore` (`*`) when it creates the repo-local registry, in addition to the `.git/info/exclude` entry, so tools that honour `.gitignore` but not `info/exclude` skip run artifacts; an existing file is left alone.
+
+There is no `show` action under `delegate runs` (it only lists); the error names `delegate snapshot HANDLE`, `delegate run-output HANDLE`, and the completion report path.
+
 `delegate wait` blocks until every selected run reaches terminal state. Defaults:
 `--interval 3`, minimum interval `1`, and `--timeout 3600`. Exit codes are `0`
 when all runs succeeded, `1` when any run failed or was cancelled, and `124` on
 timeout. JSON uses schema `delegate.wait.v1` with `timedOut` and per-run merged
-snapshot/state envelopes. Effective status is used: a recorded running child
+snapshot/state envelopes (full snapshots, large for many runs; on timeout a warning
+names `--structural`, the compact per-run view). Effective status is used: a recorded running child
 whose pid is dead is reported as terminal failure with `staleReason: dead_pid`,
 not left to hang until timeout. Text mode prints one compact line when each run's
 status changes, then a final table; `--completion-report` appends each run's

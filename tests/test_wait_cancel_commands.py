@@ -226,6 +226,19 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(code, 124, err)
         self.assertTrue(json.loads(out)["timedOut"])
 
+    def test_wait_timeout_json_warns_and_names_structural_view(self):
+        _run_id, alias = self.write_run(status="running", pid=os.getpid())
+        code, out, err = self.run_cli(
+            ["--json", "wait", alias, "--timeout", "1", "--interval", "1"]
+        )
+        self.assertEqual(code, 124, err)
+        warnings = json.loads(out).get("warnings", [])
+        self.assertTrue(any("wait --structural " + alias in w for w in warnings), warnings)
+        code, out, err = self.run_cli(
+            ["--json", "wait", alias, "--timeout", "1", "--interval", "1", "--structural"]
+        )
+        self.assertFalse(any("timed out" in w for w in json.loads(out).get("warnings", [])))
+
     def test_wait_latest_selector(self):
         self.write_run(status="succeeded")
         _run_id, latest_alias = self.write_run(status="succeeded")
