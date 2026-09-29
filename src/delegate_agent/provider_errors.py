@@ -360,7 +360,9 @@ SIGNATURES: tuple[Signature, ...] = (
         summary="The provider behind this alias has no API key.",
         hint="The {engine} provider {provider} has no API key: set it or pick another alias.",
         engines=("omp", "pi", "opencode"),
-        patterns=_rx(r"\bNo API key found for (?P<provider>[A-Za-z0-9._/-]{1,64})"),
+        patterns=_rx(
+            r"\bNo API key found for (?P<provider>[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,62}[A-Za-z0-9])?)"
+        ),
     ),
     Signature(
         id="claude_login_required",
