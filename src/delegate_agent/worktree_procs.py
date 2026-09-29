@@ -6,10 +6,10 @@ whether anyone is working there) asks the operating system first. The scan is
 one pass over every process, never a recursive ``lsof +D`` walk of the tree:
 ``/proc/<pid>/cwd`` on Linux, ``lsof -d cwd`` elsewhere.
 
-It is best effort by design. Processes owned by another user may be invisible,
-and a machine with neither ``/proc`` nor ``lsof`` cannot be checked at all;
-``ProcessCwdScan.checked`` says which, so a caller can warn instead of
-pretending the scan came back empty.
+Other users' processes may be invisible, and a machine with neither ``/proc``
+nor ``lsof`` cannot be checked at all. ``ProcessCwdScan.checked`` is False when
+the scan could not run or could not read one of this user's own processes, so a
+caller can refuse instead of treating "nothing found" as "nobody there".
 """
 
 from __future__ import annotations
@@ -52,11 +52,15 @@ def _scan_proc(target: str) -> ProcessCwdScan | None:
         return None
     holders: list[ProcessHolder] = []
     unreadable = 0
+    other_users = 0
     for name in entries:
         try:
             cwd = os.readlink(PROC_ROOT / name / "cwd")
         except PermissionError:
-            unreadable += 1
+            if _owned_by_another_user(PROC_ROOT / name):
+                other_users += 1
+            else:
+                unreadable += 1
             continue
         except OSError:
             continue  # the process exited mid-scan, or is a kernel thread
@@ -68,12 +72,21 @@ def _scan_proc(target: str) -> ProcessCwdScan | None:
         except OSError:
             command = ""
         holders.append(ProcessHolder(int(name), command))
-    note = (
-        f"{unreadable} process(es) belong to other users and could not be inspected"
-        if unreadable
-        else None
-    )
-    return ProcessCwdScan(tuple(holders), True, note)
+    notes = []
+    if unreadable:
+        notes.append(f"{unreadable} process(es) of this user could not be inspected")
+    if other_users:
+        notes.append(f"{other_users} process(es) belong to other users and were not inspected")
+    # A process of this user that cannot be read leaves the answer open; other
+    # users' processes are outside what this check can ever see.
+    return ProcessCwdScan(tuple(holders), unreadable == 0, "; ".join(notes) or None)
+
+
+def _owned_by_another_user(path: Path) -> bool:
+    try:
+        return os.stat(path).st_uid != os.getuid()
+    except OSError:
+        return False
 
 
 def _parse_lsof_cwds(output: str) -> list[tuple[int, str, str]]:
@@ -114,8 +127,9 @@ def _scan_lsof(target: str) -> ProcessCwdScan:
     except (OSError, subprocess.SubprocessError) as exc:
         return ProcessCwdScan(checked=False, note=f"lsof failed: {exc}")
     # lsof exits 1 when some processes are unreadable but still prints the rest;
-    # only an empty answer means it produced nothing to trust.
-    if not result.stdout.strip():
+    # an empty answer, or an exit code it uses for real failures, means it
+    # produced nothing to trust.
+    if result.returncode not in (0, 1) or not result.stdout.strip():
         detail = result.stderr.strip() or f"exit {result.returncode}"
         return ProcessCwdScan(checked=False, note=f"lsof produced no output ({detail})")
     holders = [

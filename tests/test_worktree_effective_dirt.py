@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import config as config_api
 from delegate_agent import errors as errors_api
@@ -382,6 +383,125 @@ class NestedRegistryTests(EffectiveDirtTestBase):
 
             self.assertTrue(result["pathRemoved"], result)
             self.assertFalse(Path(wt_path).exists())
+
+    def _corrupt_nested_index(self, wt_path: str) -> None:
+        nested = registry_api.registry_root(Path(wt_path))
+        registry_api.index_path(nested).write_text("{ this is not json", encoding="utf-8")
+
+    def test_an_unreadable_nested_registry_blocks_removal_instead_of_passing(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            # The child finished, so a readable registry would allow removal; only
+            # the unreadable index is under test.
+            _run_id, wt_path = self._tree_with_child_run(
+                path, fake_home, "cursor-parent", child_status="succeeded"
+            )
+            self._corrupt_nested_index(wt_path)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--force"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, errors_api.EXIT_USAGE, out)
+            payload = json.loads(out)
+            self.assertEqual(payload["code"], "nested_registry_unreadable")
+            self.assertIn("--kill-live", payload["message"])
+            self.assertIn("could not be read", payload["message"])
+            self.assertTrue(Path(wt_path).exists())
+
+    def test_a_nested_registry_that_cannot_be_looked_up_blocks_removal(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._tree_with_child_run(
+                path, fake_home, "cursor-parent", child_status="succeeded"
+            )
+            index = str(registry_api.index_path(registry_api.registry_root(Path(wt_path))))
+            real_stat = os.stat
+
+            def stat(target, *args, **kwargs):
+                # The Registry is there but its directory denies access.
+                if os.fspath(target) == index:
+                    raise PermissionError(13, "Permission denied", index)
+                return real_stat(target, *args, **kwargs)
+
+            with (
+                mock.patch("os.stat", side_effect=stat),
+                self.assertRaises(worktree_mgmt.WorktreeManagementError) as raised,
+            ):
+                worktree_remove_api.remove_worktree(
+                    self._registry_root(path), handle="cursor-parent", keep_branch=True
+                )
+
+            self.assertEqual(raised.exception.code, "nested_registry_unreadable")
+            self.assertTrue(Path(wt_path).exists())
+
+    def test_a_running_nested_run_with_unreadable_state_still_blocks(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._tree_with_child_run(
+                path, fake_home, "cursor-parent", child_status="running"
+            )
+            nested = registry_api.registry_root(Path(wt_path))
+            (child_id,) = registry_api.load_index(nested)["runs"]
+            state_path = registry_api.run_directory(nested, child_id) / "state.json"
+            state_path.write_text("{ this is not json", encoding="utf-8")
+
+            with self.assertRaises(worktree_mgmt.WorktreeManagementError) as raised:
+                worktree_remove_api.remove_worktree(
+                    self._registry_root(path), handle="cursor-parent", keep_branch=True
+                )
+
+            self.assertEqual(raised.exception.code, "nested_registry_unreadable")
+            self.assertTrue(Path(wt_path).exists())
+
+    def test_prune_reports_an_unreadable_nested_registry_as_live_owner(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._tree_with_child_run(
+                path, fake_home, "cursor-parent", child_status="succeeded"
+            )
+            self._corrupt_nested_index(wt_path)
+
+            result = worktree_gc_api.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True
+            )
+
+            self.assertEqual(result["planned"], [])
+            (skipped,) = result["skipped"]
+            self.assertEqual(skipped["reason"], "nested_registry_unreadable")
+            self.assertIn("--kill-live", skipped["hint"])
+            self.assertIn("could not be read", skipped["hint"])
+
+    def test_kill_live_overrides_an_unreadable_nested_registry(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._tree_with_child_run(
+                path, fake_home, "cursor-parent", child_status="succeeded"
+            )
+            self._corrupt_nested_index(wt_path)
+
+            result = worktree_remove_api.remove_worktree(
+                self._registry_root(path),
+                handle="cursor-parent",
+                keep_branch=True,
+                kill_live=True,
+            )
+
+            self.assertTrue(result["pathRemoved"], result)
+            self.assertFalse(Path(wt_path).exists())
+
+    def test_a_worktree_with_no_nested_registry_is_unaffected(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _run_id, wt_path = self._seeded_tree(path, fake_home, "cursor-plain")
+            self.assertFalse((Path(wt_path) / ".delegate").exists())
+
+            result = worktree_remove_api.remove_worktree(
+                self._registry_root(path), handle="cursor-plain", keep_branch=True
+            )
+
+            self.assertTrue(result["pathRemoved"], result)
 
 
 if __name__ == "__main__":

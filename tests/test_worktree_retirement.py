@@ -503,6 +503,56 @@ class WorktreeRetirementTests(ExecutionTestBase):
         self.assertTrue(extra.get("worktreeRetired"))
         self.assertFalse(self._worktree_paths(fake_home.name))
 
+    def test_retirement_saves_the_ledger_files_it_discounts_and_records_where(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .beads\n"
+            'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
+            "printf 'papercut\\n' >> .papercuts.jsonl\n"
+            "printf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- ledger salvage fake\"}\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+
+        self.assertTrue(extra.get("worktreeRetired"), extra)
+        saved = Path(extra["worktreeSalvagePath"])
+        self.assertEqual(saved.parent.resolve(), (registry_root / "salvage").resolve())
+        self.assertEqual((saved / ".beads" / "interactions.jsonl").read_text(), '{"id":"int-1"}\n')
+        self.assertEqual((saved / ".papercuts.jsonl").read_text(), "papercut\n")
+        self.assertFalse(self._worktree_paths(fake_home.name))
+        state = registry_api.load_run_state(registry_root, run_id)
+        self.assertEqual(state["worktreeSalvagePath"], extra["worktreeSalvagePath"])
+
+    def test_retirement_keeps_the_worktree_when_its_ledger_cannot_be_saved(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'papercut\\n' >> .papercuts.jsonl\n"
+            "printf 'done\\n'\n"
+            'printf \'{"type":"result","result":"Status: completed\\\\n'
+            "- ledger nocopy fake\"}\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=agent
+        )
+        (registry_root / "salvage").write_text("in the way", encoding="utf-8")
+
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+
+        self.assertEqual(extra["worktreeRetained"], "cleanup_failed", extra)
+        self.assertEqual(extra["worktreeRetentionError"], "ledger_salvage_failed")
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
     def test_real_dirt_alongside_ledger_dirt_still_retains(self):
         agent = self._clean_agent()
         agent.write_text(

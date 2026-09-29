@@ -5,6 +5,7 @@ and branch deletion belong to this module."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from delegate_agent.worktree_records import (
     PersistentWorktreeRecord,
     _utc_now_iso,
 )
+from delegate_agent.worktree_salvage import LedgerSalvage, salvage_ledger_changes
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class RemoveWorktreeOptions:
     force_branch: bool
     keep_branch: bool
     kill_live: bool = False
+    ledger_globs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,8 +125,24 @@ def _remove_worktree_path(
     discard_uncommitted: bool,
     record: PersistentWorktreeRecord,
     alias: str,
-) -> None:
-    """Execute ``git worktree remove`` and raise on failure."""
+    salvage_root: Path | Callable[[], Path] | None = None,
+    ledger_globs: tuple[str, ...] = (),
+) -> LedgerSalvage | None:
+    """Save changed ledger files, then execute ``git worktree remove``; raise on failure.
+
+    Returns where the ledger files were saved (None when there was nothing to
+    save). A failed save raises before anything is removed.
+    """
+    salvage = (
+        salvage_ledger_changes(
+            execution_cwd=execution_cwd,
+            registry_root=salvage_root,
+            creation_context=record.get("creationContext"),
+            ignore_globs=ledger_globs,
+        )
+        if salvage_root is not None and ledger_globs
+        else None
+    )
     remove_args = ["worktree", "remove"]
     if discard_uncommitted:
         remove_args.append("--force")
@@ -149,6 +168,7 @@ def _remove_worktree_path(
                 retry_safe=True,
             )
         )
+    return salvage
 
 
 def remove_empty_pool_parent(execution_cwd: str) -> bool:
@@ -221,6 +241,7 @@ def _remove_payload(
     alias: str,
     discarded_paths: list[str] | None = None,
     warnings: list[str] | None = None,
+    salvage: LedgerSalvage | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "schema": SCHEMA_REMOVE,
@@ -240,6 +261,9 @@ def _remove_payload(
         payload["discardedDirtyPaths"] = discarded_paths
     if warnings:
         payload["warnings"] = warnings
+    if salvage is not None:
+        payload["salvagePath"] = salvage.path
+        payload["salvagedPaths"] = list(salvage.files)
     return payload
 
 
@@ -366,12 +390,14 @@ def _remove_present_worktree_path(
     *,
     options: RemoveWorktreeOptions,
 ) -> JsonObject:
-    _remove_worktree_path(
+    salvage = _remove_worktree_path(
         source_git_root=plan.source_git_root,
         execution_cwd=plan.execution_cwd,
         discard_uncommitted=options.discard_uncommitted,
         record=plan.record,
         alias=plan.alias,
+        salvage_root=registry_root,
+        ledger_globs=options.ledger_globs,
     )
     branch_result = _remove_branch_if_requested(
         source_git_root=plan.source_git_root,
@@ -407,6 +433,7 @@ def _remove_present_worktree_path(
         alias=plan.alias,
         discarded_paths=plan.discarded_paths,
         warnings=plan.warnings,
+        salvage=salvage,
     )
 
 
@@ -440,6 +467,9 @@ def remove_worktree(
         force_branch=force_branch,
         keep_branch=keep_branch,
         kill_live=kill_live,
+        ledger_globs=wm.DEFAULT_RETIREMENT_IGNORE_GLOBS
+        if retirement_ignore_globs is None
+        else retirement_ignore_globs,
     )
     with run_registry.registry_lock(registry_root):
         record = wm.resolve_record(registry_root, handle=handle, workspace=workspace)
