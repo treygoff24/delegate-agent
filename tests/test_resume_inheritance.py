@@ -511,7 +511,7 @@ class ResumeInheritanceTests(ResumeFixture):
     def test_inherited_inline_schema_is_redacted_from_dry_run_argv(self):
         self.write_config({})
         _run_id, alias, _run_path = self.seed_run(
-            manifest={"outputSchema": '{"type":"object"}', "isolationMode": "none"}
+            manifest={"outputSchema": '{"type":"object","properties":{}}', "isolationMode": "none"}
         )
 
         payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
