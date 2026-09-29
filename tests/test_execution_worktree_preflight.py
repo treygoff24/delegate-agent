@@ -303,10 +303,34 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             ),
             "auto",
         )
+        # Launch for real: the normalized isolation must reach the launch path,
+        # run the child in an isolated copy, and leave the source untouched.
+        fake_bin = self.make_cursor_safe_fake_agent()
+        stdout = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": fake_home,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            ),
+        ):
+            code = self.delegate.main(
+                ["--cwd", repo.name, "--json", "cursor", "safe", "--isolation", "none", "review"],
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload.get("isolatedWorkspace"))
+        self.assertNotEqual(Path(payload["executionCwd"]).resolve(), Path(payload["cwd"]).resolve())
         self.assertFalse(
             source_cursor_config.exists(),
             "Normalized --isolation none must not write source .cursor/cli.json",
         )
+        self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
 
     def test_safe_isolated_request_preserves_request_metadata(self):
         """Temporary safe isolation must not shift Request dataclass fields."""

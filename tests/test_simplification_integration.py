@@ -211,15 +211,23 @@ def test_no_completion_report_cannot_be_dropped_by_wait():
     ).payload.completion_report
 
 
-@pytest.mark.parametrize("user_line", ["?? user-work.md", "R  user-work.md -> .beads/user-work.md"])
-def test_retirement_never_hides_user_dirt_after_display_cap(tmp_path, monkeypatch, user_line):
+@pytest.mark.parametrize(
+    ("user_line", "user_path"),
+    [
+        ("?? user-work.md", "user-work.md"),
+        ("R  user-work.md -> .beads/user-work.md", ".beads/user-work.md"),
+    ],
+)
+def test_retirement_never_hides_user_dirt_after_display_cap(
+    tmp_path, monkeypatch, user_line, user_path
+):
     lines = [f"?? .beads/entry-{index:02d}" for index in range(50)] + [user_line]
     monkeypatch.setattr(worktree_mgmt, "porcelain_status", lambda _cwd: (lines, len(lines), []))
     dirty, paths, _warnings = worktree_mgmt._effective_dirty_for_retirement(
         {"executionCwd": str(tmp_path)}, "present", (".beads/**",)
     )
     assert dirty is True
-    assert len(paths) == 1
+    assert paths == [user_path]
 
 
 def test_empty_retirement_globs_still_discount_unchanged_seeds(tmp_path, monkeypatch):
@@ -252,7 +260,7 @@ def test_empty_retirement_globs_still_discount_unchanged_seeds(tmp_path, monkeyp
     )
 
 
-def test_retirement_force_never_discards_a_new_user_edit(tmp_path, monkeypatch):
+def test_remove_refuses_a_worktree_with_a_new_user_edit(tmp_path, monkeypatch):
     ctx = run_context(tmp_path)
     record = {
         "runId": ctx.run_id,

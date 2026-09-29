@@ -400,21 +400,6 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             branch_check = git("rev-parse", "--verify", branch, cwd=path, check=False)
             self.assertNotEqual(branch_check.returncode, 0)
 
-    def test_worktree_remove_noop_when_already_removed(self):
-        _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
-            self._seed_persistent_run(
-                path,
-                alias="cursor-4",
-                worktree_status="removed",
-            )
-            code, out, _err = self._run_cli(
-                ["--cwd", path, "--json", "worktree", "remove", "cursor-4"],
-                home=fake_home,
-            )
-            self.assertEqual(code, 0)
-            self.assertTrue(json.loads(out)["noop"])
-
     def test_worktree_remove_clean_repeat_is_noop(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
