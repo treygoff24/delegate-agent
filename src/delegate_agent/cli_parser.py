@@ -3373,6 +3373,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--discard-uncommitted": ("flag", "discard_uncommitted"),
         "--force-branch": ("flag", "force_branch"),
         "--force": ("flag", "force"),
+        "--kill-live": ("flag", "kill_live"),
         "--keep-branch": ("flag", "keep_branch"),
     },
     "prune": {
@@ -3385,6 +3386,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--discard-uncommitted": ("flag", "discard_uncommitted"),
         "--force-branch": ("flag", "force_branch"),
         "--force": ("flag", "force"),
+        "--kill-live": ("flag", "kill_live"),
     },
     "gc": {
         "--dry-run": ("flag", "dry_run"),
@@ -3399,6 +3401,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--dry-run": ("flag", "dry_run"),
         "--yes": ("flag", "yes"),
         "--force": ("flag", "force"),
+        "--kill-live": ("flag", "kill_live"),
         "--discard-uncommitted": ("flag", "discard_uncommitted"),
     },
 }

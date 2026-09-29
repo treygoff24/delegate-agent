@@ -13,6 +13,7 @@ from pathlib import Path
 
 from delegate_agent import run_registry, run_status, worktree_records, worktree_summary
 from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
+from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
     rev_parse_verify,
@@ -106,17 +107,27 @@ def inspect_worktree(
     record: PersistentWorktreeRecord,
     *,
     include_detached: bool = False,
-    force: bool = False,
+    kill_live: bool = False,
     check_merge: bool = True,
     retirement_ignore_globs: tuple[str, ...] | None = None,
 ) -> WorktreeInspection:
-    """Read worktree facts once; optional globs select effective retirement dirt."""
+    """Read worktree facts once, with one definition of "dirty".
+
+    Dirt is always effective dirt: launch-seeded files whose content still
+    matches the launch digest, and paths matching ``retirement_ignore_globs``
+    (default: the beads and papercuts ledgers), are not dirt. Completion
+    retirement, ``worktree prune`` and ``worktree remove`` all read it from
+    here, so a clean-but-synced worktree cannot pass one gate and fail another.
+    ``kill_live`` is the only way past a live owner run; ``--force`` is not.
+    """
 
     registry_status = record.get("registryWorktreeStatus")
     if registry_status == STATUS_REMOVED:
         return WorktreeInspection(record=record, status=STATUS_REMOVED)
-    owner_block = _owner_run_block_reason(registry_root, record)
-    if owner_block is not None and not force:
+    owner_block = _owner_run_block_reason(registry_root, record) or _nested_run_block_reason(
+        registry_root, record
+    )
+    if owner_block is not None and not kill_live:
         status = registry_status if registry_status in VALID_STATUSES else STATUS_UNKNOWN
         return WorktreeInspection(record=record, status=status, owner_block=owner_block)
     status, status_warnings = detect_worktree_status(record)
@@ -134,14 +145,13 @@ def inspect_worktree(
             owner_block=owner_block,
             attachments=attachments,
         )
-    if retirement_ignore_globs is not None:
-        dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
-            record,
-            status,
-            retirement_ignore_globs,
-        )
-    else:
-        dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
+    dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
+        record,
+        status,
+        DEFAULT_RETIREMENT_IGNORE_GLOBS
+        if retirement_ignore_globs is None
+        else retirement_ignore_globs,
+    )
     if check_merge:
         branch_merged, merge_warnings = merged_into_source(
             record, status, include_detached=include_detached
@@ -168,13 +178,13 @@ def evaluate_worktree_safety(
     discard_uncommitted: bool = False,
     force_branch: bool = False,
     keep_branch: bool = False,
-    force: bool = False,
+    kill_live: bool = False,
     require_merged: bool = False,
     allow_unmerged_clean_keep: bool = False,
 ) -> WorktreeSafetyDecision:
     """Apply shared predicates while leaving command-specific policy to callers."""
 
-    if inspection.owner_block is not None and not force:
+    if inspection.owner_block is not None and not kill_live:
         return WorktreeSafetyDecision(inspection.owner_block)
     if inspection.attachments:
         return WorktreeSafetyDecision("live_attachment")
@@ -233,10 +243,12 @@ def safety_error_payload(
             record=record,
             next_actions=[f"delegate wait {first}", f"delegate cancel {first}"],
         )
-    if reason in {"run_active", "run_not_terminal", "process_group_alive", "worktree_leased"}:
+    if reason in LIVE_OWNER_REASONS:
         return _error_payload(
             reason,
-            "Worktree owner is still active; wait for the run to finish before removing.",
+            f"{live_owner_subject(reason)}; wait for the run to finish before removing. "
+            "--force does not override a live run; only --kill-live does, and the run "
+            "loses its workspace.",
             record=record,
             next_actions=[f"delegate worktree show {alias}"],
         )
@@ -266,6 +278,34 @@ def safety_error_payload(
     return _error_payload(
         code, messages.get(reason, "Worktree safety check refused removal."), **kwargs
     )
+
+
+def live_owner_subject(reason: str) -> str:
+    """One clause saying why ``reason`` blocks, shared by the error and the skip hint."""
+
+    if reason == "nested_run_active":
+        return (
+            "A run launched from inside this worktree (registered in its own .delegate, "
+            "which removal would delete) is still running"
+        )
+    if reason == "nested_registry_unreadable":
+        return (
+            "This worktree's own .delegate Registry could not be read, so a run still "
+            "working inside it cannot be ruled out"
+        )
+    return "Worktree owner is still active"
+
+
+LIVE_OWNER_REASONS = frozenset(
+    {
+        "run_active",
+        "run_not_terminal",
+        "process_group_alive",
+        "worktree_leased",
+        "nested_run_active",
+        "nested_registry_unreadable",
+    }
+)
 
 
 def _process_group_alive(pgid: int) -> bool:
@@ -330,6 +370,50 @@ def _owner_run_block_reason(
     return None
 
 
+def _nested_run_block_reason(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+) -> str | None:
+    """Block removal while a run launched from inside the worktree may be running.
+
+    A run started with ``--cwd`` inside a delegate worktree registers in that
+    worktree's own ``.delegate``, so the owning Registry never sees it, and
+    removing the worktree deletes the Registry with the live run in it. A nested
+    Registry that exists but cannot be read (or holds a run whose state cannot
+    be read) leaves that question unanswered, and an unanswered question blocks
+    like a live run: ``nested_registry_unreadable``. Only ``--kill-live`` goes
+    past either.
+    """
+
+    execution = record.get("executionCwd")
+    if not isinstance(execution, str) or not execution:
+        return None
+    nested = run_registry.registry_root(Path(execution))
+    try:
+        os.stat(run_registry.index_path(nested))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return "nested_registry_unreadable"
+    try:
+        if nested.resolve() == registry_root.resolve():
+            return None
+        index = run_registry.load_index(nested)
+        rows, _total, _scoped, _ids = run_registry.list_run_summaries(
+            nested,
+            index,
+            limit=max(1, len(index["runs"])),
+        )
+    except (OSError, RuntimeError, ValueError, DelegateError):
+        return "nested_registry_unreadable"
+    statuses = {row.get("status") for row in rows}
+    if run_status.STATUS_RUNNING in statuses:
+        return "nested_run_active"
+    if run_status.STATUS_UNKNOWN in statuses:
+        return "nested_registry_unreadable"
+    return None
+
+
 def _retirement_ignore_globs(ctx: object) -> tuple[str, ...]:
     value = getattr(ctx, "retirement_ignore_globs", None)
     if isinstance(value, (tuple, list)):
@@ -382,10 +466,11 @@ def _effective_dirty_for_retirement(
     status: str,
     ignore_globs: tuple[str, ...] = (),
 ) -> tuple[bool | None, list[str], list[str]]:
-    """Check end-state dirt while discounting unchanged launch-seeded files.
+    """Effective dirt: what a lane changed, not what the launch seeded.
 
-    ``ignore_globs`` additionally discounts shared ledgers the harness itself
-    writes to (beads, papercuts); their dirt is bookkeeping, never lane work.
+    Unchanged launch-seeded files are discounted, and ``ignore_globs`` also
+    discounts shared ledgers the harness itself writes to (beads, papercuts);
+    their dirt is bookkeeping, never lane work.
     """
 
     execution_cwd = record.get("executionCwd")
@@ -460,7 +545,8 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
                         "autoPrune": {
                             "enabled": True,
                             "mergedOlderThanDays": auto_prune_days,
-                        }
+                        },
+                        "retirementIgnoreGlobs": list(ctx.retirement_ignore_globs),
                     }
                 },
             )
@@ -588,14 +674,17 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
     completion_extra["worktreeRetired"] = True
     completion_extra["worktreeStatus"] = STATUS_REMOVED
     completion_extra["worktreeBranchPreserved"] = True
-    _persist_completion_worktree_fields(
-        ctx,
-        {
-            "worktreeStatus": STATUS_REMOVED,
-            "worktreeRetired": True,
-            "worktreeBranchPreserved": True,
-        },
-    )
+    persisted: JsonObject = {
+        "worktreeStatus": STATUS_REMOVED,
+        "worktreeRetired": True,
+        "worktreeBranchPreserved": True,
+    }
+    salvage_path = result.get("salvagePath")
+    if isinstance(salvage_path, str):
+        # Changed ledger files were copied here before the worktree went away.
+        completion_extra["worktreeSalvagePath"] = salvage_path
+        persisted["worktreeSalvagePath"] = salvage_path
+    _persist_completion_worktree_fields(ctx, persisted)
     run_auto_prune()
 
 
@@ -1254,7 +1343,8 @@ def resolve_record(
                     f"{', '.join(suggestions) if suggestions else '(none)'}. "
                     "Handles resolve only in this workspace's Registry; pass --cwd SOURCE_REPO "
                     "for another one, or give the worktree's path instead. A worktree whose "
-                    "run record is gone is removed with: delegate worktree reap --path PATH."
+                    "run record is gone is removed with: delegate worktree reap --path PATH "
+                    "(it also needs --older-than DAYS and --yes, plus --force when Git still links the path)."
                 ),
                 next_actions=next_actions,
                 suggestions=suggestions,
@@ -1327,7 +1417,8 @@ def _record_for_path(
                 f"No persistent worktree run in this Registry uses {wanted}. Handles and paths "
                 "resolve only in this workspace's Registry; pass --cwd SOURCE_REPO for another "
                 "one. A worktree whose run record is gone is removed with: "
-                f"delegate worktree reap --path {wanted}."
+                f"delegate worktree reap --path {wanted} "
+                "(it also needs --older-than DAYS and --yes, plus --force when Git still links the path)."
             ),
             next_actions=["delegate worktree list", f"delegate worktree reap --path {wanted}"],
             list_command="delegate worktree list",

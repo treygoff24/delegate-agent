@@ -5,6 +5,7 @@ and branch deletion belong to this module."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from delegate_agent.worktree_records import (
     PersistentWorktreeRecord,
     _utc_now_iso,
 )
+from delegate_agent.worktree_salvage import LedgerSalvage, salvage_ledger_changes
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,8 @@ class RemoveWorktreeOptions:
     discard_uncommitted: bool
     force_branch: bool
     keep_branch: bool
-    force: bool = False
+    kill_live: bool = False
+    ledger_globs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,8 +125,24 @@ def _remove_worktree_path(
     discard_uncommitted: bool,
     record: PersistentWorktreeRecord,
     alias: str,
-) -> None:
-    """Execute ``git worktree remove`` and raise on failure."""
+    salvage_root: Path | Callable[[], Path] | None = None,
+    ledger_globs: tuple[str, ...] = (),
+) -> LedgerSalvage | None:
+    """Save changed ledger files, then execute ``git worktree remove``; raise on failure.
+
+    Returns where the ledger files were saved (None when there was nothing to
+    save). A failed save raises before anything is removed.
+    """
+    salvage = (
+        salvage_ledger_changes(
+            execution_cwd=execution_cwd,
+            registry_root=salvage_root,
+            creation_context=record.get("creationContext"),
+            ignore_globs=ledger_globs,
+        )
+        if salvage_root is not None and ledger_globs
+        else None
+    )
     remove_args = ["worktree", "remove"]
     if discard_uncommitted:
         remove_args.append("--force")
@@ -149,6 +168,7 @@ def _remove_worktree_path(
                 retry_safe=True,
             )
         )
+    return salvage
 
 
 def remove_empty_pool_parent(execution_cwd: str) -> bool:
@@ -221,6 +241,7 @@ def _remove_payload(
     alias: str,
     discarded_paths: list[str] | None = None,
     warnings: list[str] | None = None,
+    salvage: LedgerSalvage | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "schema": SCHEMA_REMOVE,
@@ -240,6 +261,11 @@ def _remove_payload(
         payload["discardedDirtyPaths"] = discarded_paths
     if warnings:
         payload["warnings"] = warnings
+    if salvage is not None:
+        payload["salvagePath"] = salvage.path
+        payload["salvagedPaths"] = list(salvage.files)
+        if salvage.removed:
+            payload["salvageRemovedPaths"] = list(salvage.removed)
     return payload
 
 
@@ -274,7 +300,7 @@ def _build_remove_worktree_plan(
         discard_uncommitted=options.discard_uncommitted,
         force_branch=options.force_branch,
         keep_branch=options.keep_branch,
-        force=options.force,
+        kill_live=options.kill_live,
         require_merged=True,
     )
     if decision.reason is not None:
@@ -366,12 +392,14 @@ def _remove_present_worktree_path(
     *,
     options: RemoveWorktreeOptions,
 ) -> JsonObject:
-    _remove_worktree_path(
+    salvage = _remove_worktree_path(
         source_git_root=plan.source_git_root,
         execution_cwd=plan.execution_cwd,
         discard_uncommitted=options.discard_uncommitted,
         record=plan.record,
         alias=plan.alias,
+        salvage_root=registry_root,
+        ledger_globs=options.ledger_globs,
     )
     branch_result = _remove_branch_if_requested(
         source_git_root=plan.source_git_root,
@@ -407,6 +435,7 @@ def _remove_present_worktree_path(
         alias=plan.alias,
         discarded_paths=plan.discarded_paths,
         warnings=plan.warnings,
+        salvage=salvage,
     )
 
 
@@ -418,10 +447,16 @@ def remove_worktree(
     force_branch: bool = False,
     keep_branch: bool = False,
     force: bool = False,
+    kill_live: bool = False,
     include_detached: bool = False,
     retirement_ignore_globs: tuple[str, ...] | None = None,
     workspace: Path | None = None,
 ) -> JsonObject:
+    """Remove one persistent worktree after the shared safety checks.
+
+    ``force`` is the shorthand for ``discard_uncommitted`` plus ``force_branch``.
+    It never overrides a live owner run; ``kill_live`` does, on its own.
+    """
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
         force_branch=force_branch,
@@ -433,7 +468,10 @@ def remove_worktree(
         discard_uncommitted=discard_uncommitted,
         force_branch=force_branch,
         keep_branch=keep_branch,
-        force=force,
+        kill_live=kill_live,
+        ledger_globs=wm.DEFAULT_RETIREMENT_IGNORE_GLOBS
+        if retirement_ignore_globs is None
+        else retirement_ignore_globs,
     )
     with run_registry.registry_lock(registry_root):
         record = wm.resolve_record(registry_root, handle=handle, workspace=workspace)
@@ -442,7 +480,7 @@ def remove_worktree(
             registry_root,
             record,
             include_detached=include_detached,
-            force=force,
+            kill_live=kill_live,
             check_merge=not keep_branch and not force_branch,
             retirement_ignore_globs=retirement_ignore_globs,
         )
@@ -457,10 +495,9 @@ def remove_worktree(
         if plan.status == STATUS_MISSING:
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
-        # Ignored/seeded dirt needs Git force only after locked policy validation.
-        physical_options = (
-            replace(options, discard_uncommitted=True)
-            if retirement_ignore_globs is not None
-            else options
+        # The policy above judged effective dirt, so what remains is dirt the
+        # policy discounts (seeded or ledger files). Git only removes a path
+        # holding any of it with its own force, which is now authorized.
+        return _remove_present_worktree_path(
+            registry_root, plan, options=replace(options, discard_uncommitted=True)
         )
-        return _remove_present_worktree_path(registry_root, plan, options=physical_options)
