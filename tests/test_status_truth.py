@@ -79,5 +79,149 @@ class StaleErrorCurrentTests(unittest.TestCase):
         self.assertEqual(acc.current, "thinking")
 
 
+def _pi_tool_start(call_id="c1", name="mcp__node_repl_js_add_node_module_dir", **args):
+    return json.dumps(
+        {"type": "tool_execution_start", "toolCallId": call_id, "toolName": name, "args": args}
+    )
+
+
+def _pi_tool_end(call_id="c1", name="mcp__node_repl_js_add_node_module_dir"):
+    return json.dumps(
+        {"type": "tool_execution_end", "toolCallId": call_id, "toolName": name, "result": {}}
+    )
+
+
+class PendingToolTests(unittest.TestCase):
+    def _watch(self):
+        from delegate_agent import stall_watchdog
+
+        return stall_watchdog.StallWatchdog(stall_seconds=480, harness="omp"), stall_watchdog
+
+    def _observe(self, watchdog, stall_watchdog, line, now):
+        acc = harness_events.StreamAccumulator(harness="omp")
+        acc.ingest_line(line)
+        watchdog.observe_line(
+            line, now=now, tool_events=stall_watchdog.tool_events_from(acc.events.last(5))
+        )
+
+    def test_oldest_pending_tool_names_the_call_and_its_age(self):
+        watchdog, sw = self._watch()
+        self.assertIsNone(watchdog.oldest_pending_tool(0.0))
+        self._observe(watchdog, sw, _pi_tool_start(), 10.0)
+        self._observe(watchdog, sw, _pi_tool_start("c2", "read"), 20.0)
+        detail = watchdog.oldest_pending_tool(790.0)
+        self.assertEqual(detail["name"], "mcp__node_repl_js_add_node_module_dir")
+        self.assertEqual(detail["seconds"], 780)
+        self._observe(watchdog, sw, _pi_tool_end(), 800.0)
+        self.assertEqual(watchdog.oldest_pending_tool(801.0)["name"], "read")
+        self._observe(watchdog, sw, _pi_tool_end("c2", "read"), 802.0)
+        self.assertIsNone(watchdog.oldest_pending_tool(803.0))
+
+    def test_a_pending_tool_still_never_stalls_the_run(self):
+        watchdog, sw = self._watch()
+        self._observe(watchdog, sw, _pi_tool_start(), 0.0)
+        self.assertIsNone(watchdog.stalled_for(100000.0))
+
+    def test_record_carries_pending_tool_and_waiting_current(self):
+        from delegate_agent import pending_tool, runner
+
+        acc = harness_events.StreamAccumulator(harness="omp")
+        acc.current = "mcp__x"
+        acc.pending_tool = {
+            "name": "mcp__x",
+            "seconds": 780,
+            "target": "token=sk-abcdefghijklmnop1234",
+        }
+        ctx = _ctx()
+        record = runner.build_run_record(ctx, status="running", accumulator=acc)
+        self.assertEqual(record["current"], "waiting on tool mcp__x for 13m")
+        self.assertEqual(record["pendingTool"]["name"], "mcp__x")
+        self.assertEqual(record["pendingTool"]["seconds"], 780)
+        self.assertIn("startedAt", record["pendingTool"])
+        self.assertNotIn("sk-abcdefghijklmnop1234", json.dumps(record))
+        acc.pending_tool = {"name": "mcp__x", "seconds": 5}
+        record = runner.build_run_record(ctx, status="running", accumulator=acc)
+        self.assertEqual(record["current"], "mcp__x")
+        self.assertEqual(record["pendingTool"]["seconds"], 5)
+        acc.pending_tool = {"name": "mcp__x", "seconds": 900}
+        record = runner.build_run_record(ctx, status="failed", accumulator=acc)
+        self.assertNotIn("pendingTool", record)
+        self.assertEqual(pending_tool.waiting_text("t", 3900), "waiting on tool t for 1h05m")
+
+    def test_live_run_publishes_pending_tool_to_state_and_snapshot(self):
+        import io
+        import sys
+        import tempfile
+        import threading
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from delegate_agent import pending_tool, run_registry, runner, snapshot_view
+
+        script = (
+            "import json,sys,time\n"
+            "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
+            "'toolName':'mcp__hung','args':{}}),flush=True)\n"
+            "time.sleep(2.0)\n"
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="omp")
+            ctx = _ctx(root=root, run_id=run_id, alias=alias, workspace=workspace)
+            seen: dict = {}
+
+            def poll():
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and "state" not in seen:
+                    state = run_registry.load_run_state(root, run_id) or {}
+                    if state.get("pendingTool") and "waiting on tool" in state.get("current", ""):
+                        seen["state"] = state
+                        seen["view"] = snapshot_view.merge_snapshot_view(
+                            root, run_id, None, redact=True
+                        )
+                    time.sleep(0.05)
+
+            thread = threading.Thread(target=poll)
+            thread.start()
+            with (
+                mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
+                mock.patch.object(pending_tool, "REFRESH_SECONDS", 0),
+            ):
+                runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            thread.join()
+        self.assertEqual(seen["state"]["pendingTool"]["name"], "mcp__hung")
+        self.assertEqual(seen["view"]["pendingTool"]["name"], "mcp__hung")
+        self.assertIn("mcp__hung", seen["view"]["current"])
+
+
+def _ctx(root=None, run_id="run-1", alias="a1", workspace="/tmp"):
+    from pathlib import Path
+
+    from delegate_agent import run_registry, runner
+
+    return runner.RunContext(
+        registry_root=root if root is not None else Path("/tmp/none"),
+        run_id=run_id,
+        alias=alias,
+        harness="omp",
+        engine="omp",
+        mode="work",
+        model=None,
+        source_cwd=workspace,
+        execution_cwd=workspace,
+        workspace_kind="directory",
+        isolated_workspace=False,
+        started_at=run_registry.utc_now_iso(),
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

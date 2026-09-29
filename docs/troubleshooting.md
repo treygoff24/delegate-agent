@@ -566,6 +566,17 @@ and the retest ran against a standalone Bun rather than the shipped binary, so
 treat the cause as unsettled and check `--print-logs` stderr before concluding
 the child is stuck.
 
+## A running Run sits on one tool call (`pendingTool`)
+
+The stall watchdog never fires while a tool call is in flight, because test
+suites and builds legitimately run long. A tool that hangs (for example an MCP
+call that never returns) therefore does not end the Run by itself. `delegate
+runs` and `delegate snapshot` show `pendingTool` for a live Run: the oldest
+pending call's `name`, optional `target`, `startedAt`, and `seconds`. After a
+minute `current` reads `waiting on tool <name> for 13m`. Delegate only surfaces
+this; deciding that the call is hung, and running `delegate cancel <handle>`,
+is the coordinator's call.
+
 ## A succeeded Run's report says it is still waiting (`degraded`)
 
 A Run reads `succeeded` but its completion report ends with "Waiting on the full

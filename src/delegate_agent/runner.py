@@ -37,6 +37,7 @@ from delegate_agent import (
     notify,
     outcome,
     outside_cwd_changes,
+    pending_tool,
     profiles,
     prompt_instructions,
     provider_errors,
@@ -960,6 +961,11 @@ def build_run_record(
         record.update(accumulator.stream_diagnostics())
         record["recentEvents"] = recent_events
         display_current = accumulator.current if current is None else current
+        if status == run_registry.STATUS_RUNNING and accumulator.pending_tool is not None:
+            pending = pending_tool.record_value(accumulator.pending_tool)
+            if pending is not None:
+                record["pendingTool"] = pending
+                display_current = pending_tool.current_for(pending) or display_current
         if display_current:
             record["current"] = redaction.redact_string(display_current)
         if accumulator.terminal_event is not None:
@@ -3088,6 +3094,7 @@ def _capture_tracked_process(
                         accumulator.events.last(accumulator.events.total - events_before)
                     ),
                 )
+                accumulator.pending_tool = watchdog.oldest_pending_tool(time.monotonic())
                 if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
                 elif accumulator.harness in {"pi", "omp"}:
@@ -3183,6 +3190,7 @@ def _capture_tracked_process(
         next_progress_at = time.monotonic() + initial_delay
         terminal_seen_at: float | None = None
         stall_detail: JsonObject | None = None
+        pending_refreshed_at = time.monotonic()
         while True:
             now = time.monotonic()
             if (
@@ -3328,6 +3336,18 @@ def _capture_tracked_process(
                     emit_progress = False
                 finally:
                     next_progress_at = time.monotonic() + interval
+            # A pending tool that emits nothing leaves no line to trigger a
+            # persist; refresh the record so `current` shows the growing wait.
+            pending = watchdog.oldest_pending_tool(now)
+            accumulator.pending_tool = pending
+            if (
+                pending is not None
+                and pending["seconds"] >= pending_tool.NOTICE_SECONDS
+                and now - pending_refreshed_at >= pending_tool.REFRESH_SECONDS
+            ):
+                pending_refreshed_at = now
+                progress_dirty = True
+                maybe_persist_running()
             wait_for = TRACKED_PROCESS_POLL_SEC
             if deadline is not None:
                 wait_for = min(wait_for, max(deadline - now, 0.01))

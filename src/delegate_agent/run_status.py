@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from delegate_agent import archived_logs, record_io, usage_record
+from delegate_agent import archived_logs, pending_tool, record_io, usage_record
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.terminal_states import COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, STALLED
@@ -327,6 +327,10 @@ def build_run_summary(
         summary["nextActions"] = stale_next_actions(handle, cwd=source_cwd)
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
+    if state and summary.get("effectiveStatus") == STATUS_RUNNING:
+        pending = pending_tool.read_view(state)
+        if pending is not None:
+            summary["pendingTool"] = pending
     if isinstance(alias, str):
         summary["snapshotCommand"] = record_io.snapshot_command(alias, cwd=source_cwd)
 

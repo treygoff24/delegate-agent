@@ -737,6 +737,9 @@ class StallWatchdog:
     _last_progress_at: float | None = field(default=None, repr=False)
     _recent_deltas: deque[str] = field(default_factory=deque, repr=False)
     _pending_tools: list[str] = field(default_factory=list, repr=False)
+    # Parallel to `_pending_tools`: (tool name, target, monotonic start) of each
+    # in-flight call, for `oldest_pending_tool`. Never consulted for stall logic.
+    _pending_meta: list[tuple[str, str | None, float]] = field(default_factory=list, repr=False)
     _last_progress_label: str | None = field(default=None, repr=False)
     _lines_seen: int = field(default=0, repr=False)
     _output_chars_since_tool: int = field(default=0, repr=False)
@@ -772,6 +775,21 @@ class StallWatchdog:
     def tools_in_flight(self) -> int:
         with self._lock:
             return len(self._pending_tools)
+
+    def oldest_pending_tool(self, now: float) -> JsonObject | None:
+        """The longest-running in-flight tool call, or None when none is pending.
+
+        Observation only: the watchdog never fires while a tool is pending, so a
+        hung call is otherwise invisible. `seconds` is how long it has run.
+        """
+        with self._lock:
+            if not self._pending_meta:
+                return None
+            name, target, started = self._pending_meta[0]
+        detail: JsonObject = {"name": name, "seconds": max(int(now - started), 0)}
+        if target:
+            detail["target"] = target
+        return detail
 
     def prime_probe(self) -> None:
         """Record the external progress baseline before the child can act."""
@@ -912,13 +930,24 @@ class StallWatchdog:
         self._record_outcomes_locked(tool_events)
         progressed = False
         had_pending = bool(self._pending_tools)
-        for key in signals.tools_started:
+        started_events = [event for event in tool_events if not event.completed]
+        for index, key in enumerate(signals.tools_started):
             self._pending_tools.append(key)
+            event = started_events[index] if index < len(started_events) else None
+            self._pending_meta.append(
+                (
+                    event.tool if event else signals.label or "tool",
+                    event.target if event else None,
+                    now,
+                )
+            )
             progressed = True
         for key in signals.tools_finished:
             if key in self._pending_tools:
+                del self._pending_meta[self._pending_tools.index(key)]
                 self._pending_tools.remove(key)
             elif self._pending_tools:
+                self._pending_meta.pop(0)
                 # A stream that does not correlate starts with finishes (or whose
                 # start we missed) must not leak an in-flight tool forever, which
                 # would disable the watchdog for the rest of the run.
