@@ -379,13 +379,19 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 A lane is one engine on one provider, model, and account (the Codex failover
 identity, the Claude config directory, or the auth profile). For every engine,
 the credentials the child will see also count: API keys and tokens in its
-environment, and broker, realm, account, or endpoint settings. Two launches on
+environment, broker, realm, account, or endpoint settings, and for OpenCode the
+provider keys, base URLs, and `Authorization` headers inside
+`OPENCODE_CONFIG_CONTENT` (not its per-run persona or permission content). An
+account label that looks like an email address is masked wherever the lane is
+shown or stored. Two launches on
 one model with different keys are different lanes, so a bad key never refuses a
 healthy account. Delegate folds these into the lane as a salted hash (the salt
 is `~/.delegate/state/lane-health.salt`, mode 0600); the key values are never
 stored or shown, and `doctor` and the refusal only show a short
 `[credential xxxxxxxx]` tag to tell such lanes apart. Rotating a key reads as a
-new lane, which costs at most one failed launch to re-learn. When a run fails
+new lane, which costs at most one failed launch to re-learn. A success clears
+the lane's marker even when the store's lock is stuck, so a lane that has just
+worked is never refused on its next launch. When a run fails
 with a persistent lane-scoped signature, Delegate records a marker for that lane
 under `~/.delegate/state/lane-health/` for `providerErrors.knownBadLaneMinutes`
 (default 15). Until it expires, another launch on the lane is refused in

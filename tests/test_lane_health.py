@@ -161,6 +161,41 @@ class LaneCredentialTests(HomeCase):
         self.assertEqual(a.key, self.derive(process={"OPENAI_API_KEY": SECRET_A}).key)
         self.assertNotEqual(a.key, self.derive().key, "no key at all is not the same lane")
 
+    def test_an_api_key_inside_the_opencode_config_is_part_of_the_lane(self):
+        def config(key, prompt="persona one", base_url="https://api.example/v1"):
+            return json.dumps(
+                {
+                    "provider": {"openai": {"options": {"apiKey": key, "baseURL": base_url}}},
+                    "agent": {"delegate": {"prompt": prompt}},
+                    "permission": {"edit": "allow" if prompt == "persona one" else "deny"},
+                }
+            )
+
+        def derive(content):
+            return self.derive(engine="opencode", env={"OPENCODE_CONFIG_CONTENT": content})
+
+        a = derive(config(SECRET_A))
+        self.assertNotEqual(a.key, derive(config(SECRET_B)).key)
+        self.assertNotEqual(a.key, derive(config(SECRET_A, base_url="https://b.example")).key)
+        # Per-run persona and permission content is not an account.
+        self.assertEqual(a.key, derive(config(SECRET_A, prompt="persona two")).key)
+        self.assertEqual(a.key, derive(config(SECRET_A)).key)
+        # An Authorization header counts too, and nothing secret reaches the label.
+        header = json.dumps(
+            {"provider": {"x": {"options": {"headers": {"Authorization": SECRET_A}}}}}
+        )
+        other = json.dumps(
+            {"provider": {"x": {"options": {"headers": {"Authorization": SECRET_B}}}}}
+        )
+        self.assertNotEqual(derive(header).key, derive(other).key)
+        self.assertNotIn(SECRET_A, json.dumps(a.public()) + a.label)
+
+    def test_unparseable_opencode_config_names_no_account(self):
+        a = self.derive(engine="opencode", env={"OPENCODE_CONFIG_CONTENT": "{not json"})
+        b = self.derive(engine="opencode", env={"OPENCODE_CONFIG_CONTENT": "{also not json"})
+        self.assertEqual(a.key, b.key)
+        self.assertIsNone(a.credentials)
+
     def test_the_broker_realm_or_socket_is_part_of_the_lane(self):
         base = self.derive(env={"OPENAI_API_KEY": SECRET_A})
         for extra in (
@@ -265,6 +300,34 @@ class StoreTests(HomeCase):
 
         self.assertTrue(lane_health.clear(self.lane))
         self.assertFalse(lane_health.clear(self.lane))
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_an_email_named_account_is_masked_where_it_is_shown_but_still_keys_the_lane(self):
+        alice = lane_health.Lane("omp", "openai", "openai/gpt-5", "alice@example.com")
+        bob = lane_health.Lane("omp", "openai", "openai/gpt-5", "bob@example.com")
+        self.assertNotEqual(alice.key, bob.key)
+        lane_health.write(alice, PERSISTENT, seconds=900)
+        (path,) = lane_health.store_dir().iterdir()
+        stored = path.read_text(encoding="utf-8")
+        self.assertNotIn("alice@example.com", stored)
+        self.assertIn(provider_errors.EMAIL_MASK, stored)
+        self.assertNotIn("alice@example.com", alice.label)
+        self.assertNotIn("alice@example.com", json.dumps(alice.public()))
+        self.assertIsNotNone(lane_health.check(alice)[0])
+        self.assertIsNone(lane_health.check(bob)[0])
+
+    def test_a_success_clears_the_marker_even_when_the_store_lock_is_stuck(self):
+        lane_health.write(self.lane, PERSISTENT, seconds=900)
+        lock_path = lane_health.store_dir().parent / "lane-health.lock"
+        holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, holder)
+        import fcntl
+
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        with mock.patch.object(lane_health, "_LOCK_TIMEOUT_SECONDS", 0.05):
+            self.assertEqual(
+                lane_health.observe(self.lane, self.policy, succeeded=True, record=None), "cleared"
+            )
         self.assertIsNone(lane_health.check(self.lane)[0])
 
     def test_files_are_private_and_writes_leave_no_temp_files(self):
