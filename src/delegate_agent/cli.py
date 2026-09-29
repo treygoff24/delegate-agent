@@ -1299,6 +1299,7 @@ def execute_request(
                         display_name=request.model_display_name,
                         continuity_mode=request.continuity_mode,
                     ),
+                    auth_profile=request.auth_profile,
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(

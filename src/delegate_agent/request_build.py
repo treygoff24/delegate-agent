@@ -1799,7 +1799,7 @@ def _build_normalized_launch(
             preserve_safe_workspace=not call and spec.structured_retry_workspace,
             continuity_mode=launch.continuity_mode,
             preflight_claude_model=(
-                spec.origin == "cli"
+                spec.origin in ("cli", "input-json")
                 and launch.resume_session_id is None
                 and not launch.replayed_from_manifest
             ),

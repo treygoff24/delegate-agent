@@ -166,29 +166,31 @@ class Signature:
     # throttle is not an account problem and must not steer credential rotation.
     failure_code: bool = True
 
-    def hint_for(self, engine: str | None, provider: str | None = None) -> str:
+    def hint_for(
+        self, engine: str | None, provider: str | None = None, *, profile: str | None = None
+    ) -> str:
         text = self.hints_by_engine.get(engine or "", self.hint)
         if self.realm_aware and engine == "cursor":
-            text = _cursor_realm_clause()
+            text = _cursor_realm_clause(profile)
         return text.replace("{engine}", engine or "harness").replace(
             "{provider}", provider or "that provider"
         )
 
 
-def _cursor_realm_clause() -> str:
+def _cursor_realm_clause(profile: str | None = None) -> str:
     """Name the auth realm this run used and the other one to try.
 
-    The realm comes from the environment the run inherited (AI_PROFILE, then
-    DELEGATE_PROFILE); when neither names work or personal the wording stays
-    generic rather than guessing.
+    ``profile`` is the run's resolved auth profile (--auth-profile, then the
+    environment, then the config default), which the caller already knows. The
+    inherited AI_PROFILE/DELEGATE_PROFILE environment is only the fallback for
+    a caller with no resolved profile; with neither the wording stays generic
+    rather than guessing.
     """
-    active = (os.environ.get("AI_PROFILE") or os.environ.get("DELEGATE_PROFILE") or "").strip()
-    other = {"work": "personal", "personal": "work"}.get(active)
-    if other is None:
-        other = "work"
-        used = "the realm this run used"
-    else:
-        used = f"the {active} realm this run used"
+    active = (
+        profile or os.environ.get("AI_PROFILE") or os.environ.get("DELEGATE_PROFILE") or ""
+    ).strip()
+    other = {"work": "personal", "personal": "work"}.get(active, "work")
+    used = f"the {active} realm this run used" if active else "the realm this run used"
     return (
         f"Cursor is not logged in for {used}; if your Cursor login lives in the {other} realm, "
         f"relaunch with --auth-profile {other} (and unset DELEGATE_CONFIG), otherwise run "
@@ -731,6 +733,7 @@ def provider_error_record(
     engine: str | None,
     raw: JsonObject | None,
     fallback_text: str = "",
+    profile: str | None = None,
 ) -> JsonObject | None:
     """The `providerError` object for a failed run, or None when the run said nothing.
 
@@ -774,7 +777,7 @@ def provider_error_record(
         signature=signature.id,
         **{"class": signature.klass},
         scope=signature.scope,
-        hint=signature.hint_for(engine, hit.provider),
+        hint=signature.hint_for(engine, hit.provider, profile=profile),
     )
     return record
 
