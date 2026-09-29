@@ -3689,6 +3689,7 @@ def _observe_lane_health(
         enabled=ctx.provider_policy.auto_resume,
         already_automatic=ctx.auto_resume is not None,
         no_child_output=no_child_output,
+        mode=ctx.mode,
     ):
         # One broker binding refusal is launch-slot contention; the automatic
         # retry decides whether the lane is really bad.

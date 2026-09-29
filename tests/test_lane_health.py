@@ -641,8 +641,10 @@ class RunnerObservationTests(HomeCase):
         fallback=None,
         retried=False,
         quiet=False,
+        mode="safe",
     ):
         ctx = types.SimpleNamespace(
+            mode=mode,
             auto_resume={"automatic": True} if retried else None,
             lane=self.lane,
             provider_policy=self.policy,
@@ -725,6 +727,17 @@ class BrokerBindingMarkerTests(HomeCase):
 
     def test_a_refusal_after_child_output_is_not_deferred_and_marks_as_before(self):
         self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=False))
+
+    def test_a_quiet_work_refusal_is_not_deferred_because_work_is_never_rerun(self):
+        extra = self.observe(rec=self.BROKER, quiet=True, mode="work")
+
+        self.assertIn("laneMarked", extra)
+        self.assertNotIn("laneMarkerDeferred", extra)
+        self.assertIsNotNone(lane_health.check(self.lane)[0])
+
+    def test_the_hint_tells_a_work_lane_how_to_relaunch(self):
+        self.assertIn("--force-launch", self.BROKER["hint"])
+        self.assertIn("contention", self.BROKER["hint"])
 
     def test_with_auto_resume_off_a_refusal_marks_immediately(self):
         self.policy = dataclasses.replace(self.policy, auto_resume=False)
