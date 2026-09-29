@@ -358,21 +358,28 @@ def deadline_fields(
 ) -> JsonObject:
     """``deadlineAt`` and ``remainingSeconds`` for a running Run with a timeout.
 
-    Derived from the Run's own recorded start and ``timeoutSeconds``, so it holds
-    for any tracked Run. Empty when either is missing or unreadable.
+    Read from the recorded ``deadlineAt``, else derived from the Run's own recorded
+    start and ``timeoutSeconds``, so it holds for any tracked Run. Empty when either is missing or unreadable.
     """
-    timeout = first_present(manifest, state, "timeoutSeconds")
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
-        return {}
-    started = record_io.parse_utc_timestamp(
-        first_string(
-            manifest.get("startedAt") if manifest else None,
-            state.get("startedAt") if state else None,
-        )
+    # Prefer the deadline the runner recorded when its timeout clock started
+    # (after workspace preparation); startedAt + timeout is the fallback for
+    # records without it and understates the time left by the preparation time.
+    deadline = record_io.parse_utc_timestamp(
+        first_string(state.get("deadlineAt") if state else None)
     )
-    if started is None:
-        return {}
-    deadline = started + timedelta(seconds=timeout)
+    if deadline is None:
+        timeout = first_present(manifest, state, "timeoutSeconds")
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            return {}
+        started = record_io.parse_utc_timestamp(
+            first_string(
+                manifest.get("startedAt") if manifest else None,
+                state.get("startedAt") if state else None,
+            )
+        )
+        if started is None:
+            return {}
+        deadline = started + timedelta(seconds=timeout)
     remaining = int((deadline - (now or datetime.now(UTC))).total_seconds())
     return {
         "deadlineAt": deadline.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),

@@ -124,6 +124,8 @@ def merge_snapshot_view(
         }
     view.setdefault("ok", True)
     view["runId"] = run_id
+    # The runner's recorded timeout deadline is `runs` data; snapshot omits it.
+    view.pop("deadlineAt", None)
     alias = first_string(
         state.get("alias") if state else None,
         view.get("alias"),

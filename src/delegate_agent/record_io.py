@@ -159,7 +159,10 @@ def merge_terminal_record(
     current: JsonObject | None,
     pending: JsonObject,
 ) -> JsonObject:
-    return strip_live_pending_tool(dict(_merge_terminal_record(current, pending)))
+    merged = strip_live_pending_tool(dict(_merge_terminal_record(current, pending)))
+    # The timeout deadline describes a live run, like pendingTool does.
+    merged.pop("deadlineAt", None)
+    return merged
 
 
 def _merge_terminal_record(
