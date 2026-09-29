@@ -44,7 +44,7 @@ MODEL_METADATA_KEYS: MetadataKeyGroup = (
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
 
 RESUME_METADATA_KEYS: MetadataKeyGroup = ("resumedFrom", "worktreeAttachment")
-FOLLOWUP_METADATA_KEYS: MetadataKeyGroup = ("followupOf",)
+FOLLOWUP_METADATA_KEYS: MetadataKeyGroup = ("followupOf", "autoResume")
 INITIATOR_METADATA_KEYS: MetadataKeyGroup = ("initiatorRoot",)
 PERSONA_METADATA_KEYS: MetadataKeyGroup = (
     "personaName",

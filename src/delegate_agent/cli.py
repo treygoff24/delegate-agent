@@ -16,9 +16,12 @@ from delegate_agent import (
     VERSION,
     account_binding,
     argv_utils,
+    auth_health,
+    auto_resume,
     command_errors,
     command_help,
     harness_discovery,
+    lane_health,
     personas,
     profile_guard,
     profiles,
@@ -460,6 +463,133 @@ def _apply_stall_watchdog_policy(request: Request, config: JsonObject) -> Reques
     if stall_seconds == request.stall_seconds:
         return request
     return dc_replace(request, stall_seconds=stall_seconds)
+
+
+def _apply_provider_policy(request: Request, config: JsonObject, *, force_launch: bool) -> Request:
+    """Attach the launch's lane and provider-error policy (known-bad refusal, auto-resume)."""
+    lane = lane_health.derive_lane(
+        engine=request.engine,
+        model=request.model,
+        auth_profile=request.auth_profile,
+        env=request.env_overrides,
+        codex_identity=request.codex_failover_identity,
+    )
+    policy = lane_health.policy_from_config(config, force_launch=force_launch)
+    return dc_replace(request, lane=lane, provider_policy=policy)
+
+
+def _maybe_auto_resume(
+    first: tuple[int, JsonObject | None],
+    note: auto_resume.RunNote,
+    request: Request,
+    global_options: _request_models.GlobalOptions,
+    *,
+    config: JsonObject,
+    config_source: str | None,
+    workspace: _request_models.ResolvedWorkspace,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> tuple[int, JsonObject | None]:
+    """After a transient provider drop, continue the run's saved session exactly once.
+
+    Returns the continuation's result, or ``first`` unchanged when the run is not
+    eligible (auto_resume.skip_reason) or the continuation could not be launched.
+    Launches like ``delegate followup``: same session, new run linked by
+    ``followupOf``. This never recurses; a drop in the continuation is final.
+    """
+    from delegate_agent import request_build
+
+    if (
+        auto_resume.skip_reason(
+            note,
+            enabled=request.provider_policy.auto_resume,
+            already_automatic=request.auto_resume is not None,
+        )
+        is not None
+    ):
+        return first
+
+    def keep_first(reason: str) -> tuple[int, JsonObject | None]:
+        exit_code, payload = first
+        if payload is not None:
+            payload["autoResume"] = auto_resume.skipped_annotation(note, reason)
+        elif not global_options.json_mode:
+            print(f"notice: automatic resume of {note.alias} skipped: {reason}", file=stderr)
+        return exit_code, payload
+
+    try:
+        plan = _followup_command.build_followup_plan(
+            _request_models.ParsedCommand(
+                note.engine,
+                global_options=global_options,
+                payload=_request_models.FollowupOptions(
+                    handle=note.run_id, prompt_parts=[auto_resume.CONTINUATION_PROMPT]
+                ),
+            ),
+            workspace,
+            config,
+            stderr=stderr,
+        )
+        resumed = request_build.request_from_parsed(
+            plan.parsed, config, stdin, stderr, workspace=workspace
+        )
+        resumed = _followup_command.apply_followup_to_request(resumed, plan)
+        resumed = _apply_stall_watchdog_policy(resumed, config)
+        resumed = _apply_provider_policy(resumed, config, force_launch=False)
+        annotation = auto_resume.annotation(note)
+        resumed = dc_replace(resumed, auto_resume=annotation)
+        if not global_options.json_mode:
+            signature = (note.provider_error or {}).get("signature")
+            print(
+                f"notice: {note.alias} lost its provider connection ({signature}); resuming "
+                "its saved session once automatically.",
+                file=stderr,
+            )
+        exit_code, payload = execute_request(
+            resumed,
+            global_options.json_mode,
+            config=config,
+            config_source=config_source,
+            pass_through=False,
+            completion_report_mode=request_build.resolve_completion_report_mode(
+                plan.parsed, config
+            ),
+            source_workspace=workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except Exception as exc:
+        # Best effort: the first run's result must survive a failed resume. A
+        # DelegateError or CommandError carries a stable code; anything else is
+        # named by type so the reason is never lost.
+        code = getattr(exc, "error", type(exc).__name__)
+        return keep_first(f"{code}: {getattr(exc, 'message', None) or exc}")
+    if payload is not None:
+        payload["autoResume"] = annotation
+    return exit_code, payload
+
+
+def _enforce_lane_health(request: Request) -> Request:
+    """Refuse a launch on a known-bad lane before anything spawns.
+
+    Raises the ``lane_known_bad`` refusal unless ``--force-launch`` was given; a
+    forced launch (and an unreadable marker) is recorded as a request warning.
+    """
+    lane, policy = request.lane, request.provider_policy
+    if lane is None or not policy.markers_enabled:
+        return request
+    marker, warnings = lane_health.check(lane)
+    if marker is not None and not policy.force_launch:
+        raise lane_health.refusal(marker, lane)
+    if marker is not None:
+        warnings.append(
+            f"{lane_health.FORCE_LAUNCH_FLAG}: launching on lane {lane.label}, marked known-bad "
+            f"({marker.signature}); a success clears the marker."
+        )
+    if not warnings:
+        return request
+    return dc_replace(request, warnings=(*request.warnings, *warnings))
 
 
 def _binary_config_key(engine: str | None) -> str | None:
@@ -1027,6 +1157,7 @@ def execute_request(
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_execution
 
+    request = _enforce_lane_health(request)
     _set_child_root_env(request, source_workspace)
     initiator_root = _apply_initiator_root(request)
     profiles.strip_mail_identity(request.env_overrides)
@@ -1181,6 +1312,14 @@ def execute_request(
             status = call_outcome.status
             exit_code = call_outcome.exit_code
             empty_failure = call_outcome.failure_kind == _outcome.FAILURE_NO_ASSISTANT_TEXT
+            # Only a call whose child exited and reported a provider error can mark
+            # the lane; a timeout or a bad output never reaches provider_error.
+            lane_health.observe(
+                request.lane,
+                request.provider_policy,
+                succeeded=call_outcome.ok,
+                record=result.provider_error,
+            )
             if json_mode:
                 payload: JsonObject = {
                     "ok": call_outcome.ok,
@@ -1288,6 +1427,8 @@ def execute_request(
                         else:
                             payload["message"] = "Child command failed."
                     payload["stderrTail"] = result.stderr_tail
+                    if result.provider_error is not None:
+                        payload["providerError"] = result.provider_error
                 call_response = (exit_code, payload)
                 return call_response
             emitted_warnings: set[str] = set()
@@ -1757,6 +1898,7 @@ def main(
             if action in command_help.WORKFLOW_ACTION_KINDS:
                 error_command = f"workflow {action}"
         global_options = parsed.global_options
+        parsed_force_launch = global_options.force_launch
         workspace_origin = _workspace_origin(parsed, global_options)
         workspace: _request_models.ResolvedWorkspace | None = None
         json_mode = global_options.json_mode
@@ -1780,10 +1922,13 @@ def main(
                 stderr=stderr,
             )
         if parsed.subcommand == "doctor":
+            known_bad_lanes, lane_warnings = lane_health.live_public()
             return _workflow_pinning.emit_doctor(
                 stdout=stdout,
                 json_mode=global_options.json_mode,
-                extra_warnings=_doctor_config_warnings(global_options),
+                extra_warnings=(*_doctor_config_warnings(global_options), *lane_warnings),
+                known_bad_lanes=known_bad_lanes,
+                auth_health=auth_health.load(),
             )
         if parsed.subcommand == "promote":
             return emit_promote_command(parsed, stdout)
@@ -1988,6 +2133,7 @@ def main(
         if followup_plan is not None:
             request = _followup_command.apply_followup_to_request(request, followup_plan)
         request = _apply_stall_watchdog_policy(request, config)
+        request = _apply_provider_policy(request, config, force_launch=parsed_force_launch)
         if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
             raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
         if (
@@ -2040,17 +2186,31 @@ def main(
                     "(delegate instruction wrapping suppressed).",
                     file=stderr,
                 )
-        exit_code, payload = execute_request(
-            request,
-            global_options.json_mode,
-            config=config,
-            config_source=source,
-            pass_through=global_options.pass_through,
-            completion_report_mode=completion_report_mode,
-            source_workspace=workspace,
-            stdout=stdout,
-            stderr=stderr,
-        )
+        with auto_resume.watching() as finished_runs:
+            exit_code, payload = execute_request(
+                request,
+                global_options.json_mode,
+                config=config,
+                config_source=source,
+                pass_through=global_options.pass_through,
+                completion_report_mode=completion_report_mode,
+                source_workspace=workspace,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if finished_runs and not global_options.pass_through:
+            exit_code, payload = _maybe_auto_resume(
+                (exit_code, payload),
+                finished_runs[-1],
+                request,
+                global_options,
+                config=config,
+                config_source=source,
+                workspace=workspace,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
         if global_options.json_mode and payload is not None:
             delegate_rendering.print_json(payload, stdout)
         return exit_code

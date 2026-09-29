@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
-from delegate_agent import profiles, stall_watchdog
+from delegate_agent import lane_health, profiles, stall_watchdog
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
@@ -24,6 +24,8 @@ DEFAULT_CONTINUITY_MODE = "fungible"
 @dataclass
 class GlobalOptions:
     json_mode: bool = False
+    # --force-launch: launch even when the lane is marked known-bad.
+    force_launch: bool = False
     cwd: str | None = None
     pass_through: bool = False
     completion_report: str | None = None
@@ -350,6 +352,13 @@ class Request:
     workspace_base: str | None = None
     workspace_env: dict[str, str] | None = None
     workspace_setup: str | None = None
+    # The lane this launch runs on and the provider-error policy that governs it
+    # (known-bad refusal, automatic resume). Applied after the request is built.
+    lane: lane_health.Lane | None = None
+    provider_policy: lane_health.Policy = field(default_factory=lane_health.Policy)
+    # Set only on the one continuation Delegate launches by itself after a
+    # transient provider drop (auto_resume.annotation); recorded on the run.
+    auto_resume: JsonObject | None = None
 
 
 @dataclass(frozen=True)

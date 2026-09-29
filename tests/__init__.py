@@ -104,6 +104,11 @@ os.environ.pop("TMPDIR", None)
 os.environ.pop("TMP", None)
 os.environ.pop("TEMP", None)
 tempfile.tempdir = None
+# `capabilities refresh` runs the configured auth probes (`estate-cursor status`,
+# `estate-omp usage`) when they are on PATH. On a developer machine they are, and
+# they reach real accounts; the suite must never depend on them. Tests of the
+# probes themselves clear this switch and supply their own scripts.
+os.environ["DELEGATE_AUTH_PROBES"] = "off"
 
 # Stashed for the rare test that must run a real credentialed binary (the
 # live omp write-probe): everything credential-bearing lives under the real
@@ -177,6 +182,23 @@ PRODUCTION_COMPACT_TEMP_ROOT = _PRODUCTION_TEMP_ROOT / (
 _COMPACT_TEMP_TOKEN_RE = re.compile(rf"[0-9a-f]{{{_run_scratch.COMPACT_TEMP_TOKEN_CHARS}}}\Z")
 
 _run_scratch.PERSISTENT_TEMP_ROOT = _TEST_VAR_TMP
+
+# Known-bad lane markers live under the (process-wide, redirected) home, so one
+# in-process test's persistent provider failure would refuse a later test's launch
+# on the same lane. Wipe the store before every test case runs, under either runner.
+import unittest as _unittest  # noqa: E402
+
+from delegate_agent import lane_health as _lane_health  # noqa: E402
+
+_ORIGINAL_TESTCASE_RUN = _unittest.TestCase.run
+
+
+def _run_with_clean_lane_health(self, result=None):
+    shutil.rmtree(_lane_health.store_dir(), ignore_errors=True)
+    return _ORIGINAL_TESTCASE_RUN(self, result)
+
+
+_unittest.TestCase.run = _run_with_clean_lane_health
 
 
 def compact_temp_names() -> set[str]:

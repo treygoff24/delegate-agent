@@ -48,6 +48,12 @@ FAILURE_CANCELLED = "cancelled"
 # A declared workspace setup command (--setup) failed in the fresh worktree;
 # no child was launched. Deterministic, so never retried as transient.
 FAILURE_WORKSPACE_SETUP = "workspace_setup"
+# A launch refused before anything spawned because its lane is marked known-bad
+# (lane_health); the marker's signature and expiry ride on the refusal.
+FAILURE_LANE_KNOWN_BAD = "lane_known_bad"
+# A workflow call that never launched: its stage had already stopped launching on
+# the lane after the stage's first results all failed with one persistent signature.
+FAILURE_PROVIDER_EXHAUSTED = "provider_exhausted"
 
 FAILURE_KINDS = frozenset(
     {
@@ -69,6 +75,8 @@ FAILURE_KINDS = frozenset(
         FAILURE_TIMEOUT,
         FAILURE_CANCELLED,
         FAILURE_WORKSPACE_SETUP,
+        FAILURE_LANE_KNOWN_BAD,
+        FAILURE_PROVIDER_EXHAUSTED,
     }
 )
 
@@ -79,6 +87,7 @@ _REASON_KINDS: dict[str, str] = {
     "usage_limit_preflight": FAILURE_PROVIDER_QUOTA,
     "auth_failed": FAILURE_PROVIDER_AUTH,
     "binding_not_active": FAILURE_PROVIDER_AUTH,
+    "broker_rejected": FAILURE_PROVIDER_AUTH,
     "provider_error": FAILURE_PROVIDER_ERROR,
     "provider_refusal": FAILURE_PROVIDER_REFUSAL,
     "provider_max_turns": FAILURE_PROVIDER_MAX_TURNS,
@@ -104,6 +113,8 @@ _REASON_KINDS: dict[str, str] = {
     "harness_cancelled": FAILURE_CANCELLED,
     "cancelled": FAILURE_CANCELLED,
     "workspace_setup_failed": FAILURE_WORKSPACE_SETUP,
+    "lane_known_bad": FAILURE_LANE_KNOWN_BAD,
+    "provider_exhausted": FAILURE_PROVIDER_EXHAUSTED,
 }
 
 NO_ASSISTANT_TEXT_WITH_CHANGES_WARNING = (

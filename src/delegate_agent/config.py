@@ -228,6 +228,22 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     "mail": {
         "enabled": True,
     },
+    "providerErrors": {
+        # Minutes a lane stays refused after a persistent, lane-scoped provider
+        # failure (bad key, exhausted quota, retired model). 0 turns markers off.
+        "knownBadLaneMinutes": 15,
+        # One automatic resume after a transient stream drop on a saved session.
+        "autoResume": True,
+        # A workflow stage stops launching cells on a lane after this many
+        # results in a row share one persistent signature. 0 turns it off.
+        "stageStopAfter": 3,
+        # Read-only health commands `capabilities refresh` runs to record auth
+        # health per engine. Absent commands record `unknown`; null disables one.
+        "authProbes": {
+            "cursor": ["estate-cursor", "status"],
+            "omp": ["estate-omp", "usage"],
+        },
+    },
 }
 
 
@@ -645,6 +661,60 @@ def _validate_mail_section(mail: JsonValue) -> None:
     enabled = mail.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("invalid_mail_config", "mail.enabled must be a boolean.")
+
+
+def _validate_provider_errors_section(section: JsonValue) -> None:
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError("invalid_provider_errors_config", "providerErrors must be an object.")
+    unknown = set(section) - {"knownBadLaneMinutes", "autoResume", "stageStopAfter", "authProbes"}
+    if unknown:
+        raise ConfigError(
+            "invalid_provider_errors_config",
+            f"providerErrors has unknown keys: {', '.join(sorted(unknown))}.",
+        )
+    probes = section.get("authProbes")
+    if probes is not None:
+        if not isinstance(probes, dict) or set(probes) - {"cursor", "omp"}:
+            raise ConfigError(
+                "invalid_provider_errors_config",
+                "providerErrors.authProbes must be an object with only cursor and omp keys.",
+            )
+        for engine, argv in probes.items():
+            if argv is not None and not (
+                isinstance(argv, list)
+                and argv
+                and all(isinstance(part, str) and part for part in argv)
+            ):
+                raise ConfigError(
+                    "invalid_provider_errors_config",
+                    f"providerErrors.authProbes.{engine} must be a non-empty list of strings "
+                    "or null to disable the probe.",
+                )
+    minutes = section.get("knownBadLaneMinutes")
+    if minutes is not None and (
+        isinstance(minutes, bool)
+        or not isinstance(minutes, (int, float))
+        or not math.isfinite(minutes)
+        or minutes < 0
+    ):
+        raise ConfigError(
+            "invalid_provider_errors_config",
+            "providerErrors.knownBadLaneMinutes must be a non-negative number of minutes "
+            "(0 turns known-bad lane markers off).",
+        )
+    if "autoResume" in section and not isinstance(section["autoResume"], bool):
+        raise ConfigError(
+            "invalid_provider_errors_config", "providerErrors.autoResume must be a boolean."
+        )
+    stop_after = section.get("stageStopAfter")
+    if stop_after is not None and not is_non_negative_int(stop_after):
+        raise ConfigError(
+            "invalid_provider_errors_config",
+            "providerErrors.stageStopAfter must be a non-negative integer "
+            "(0 turns the workflow stage stop off).",
+        )
 
 
 def _validate_workflows_section(workflows: JsonValue) -> None:
@@ -1742,6 +1812,7 @@ def validate_config(config: JsonObject) -> None:
         )
     _validate_personas_section(config.get("personas"))
     _validate_mail_section(config.get("mail"))
+    _validate_provider_errors_section(config.get("providerErrors"))
 
 
 def skill_review_preamble_enabled(config: JsonObject) -> bool:
