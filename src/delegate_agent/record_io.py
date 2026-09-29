@@ -141,7 +141,28 @@ def pending_finalize_wal_exists(registry_root: Path, run_id: str) -> bool:
     return (run_directory(registry_root, run_id) / FINALIZE_WAL_FILE).exists()
 
 
+def strip_live_pending_tool(record: JsonObject) -> JsonObject:
+    """Drop the running-only `pendingTool` and its "waiting on tool" `current`.
+
+    A terminal record describes a finished run; a cancellation merge copies the
+    running record over it, and the tool it was waiting on is not pending now.
+    """
+    if record.pop("pendingTool", None) is None:
+        return record
+    current = record.get("current")
+    if isinstance(current, str) and current.startswith("waiting on tool "):
+        record.pop("current")
+    return record
+
+
 def merge_terminal_record(
+    current: JsonObject | None,
+    pending: JsonObject,
+) -> JsonObject:
+    return strip_live_pending_tool(dict(_merge_terminal_record(current, pending)))
+
+
+def _merge_terminal_record(
     current: JsonObject | None,
     pending: JsonObject,
 ) -> JsonObject:

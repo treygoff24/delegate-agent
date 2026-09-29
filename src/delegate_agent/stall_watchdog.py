@@ -104,6 +104,8 @@ RUNAWAY_OUTPUT_CHARS_DEFAULT = 400_000
 # tool completing in between, before the run is stopped. A model retrying the
 # same broken command a few times is normal; this many is a loop.
 REPEATED_TOOL_FAILURE_LIMIT = 5
+# In-flight tool calls tracked at once; a stream that never closes its calls is capped.
+PENDING_TOOL_LIMIT = 256
 
 STALL_REASON_IDLE = "idle"
 STALL_REASON_RUNAWAY_OUTPUT = "runaway_output"
@@ -740,6 +742,9 @@ class StallWatchdog:
     # Parallel to `_pending_tools`: (tool name, target, monotonic start) of each
     # in-flight call, for `oldest_pending_tool`. Never consulted for stall logic.
     _pending_meta: list[tuple[str, str | None, float]] = field(default_factory=list, repr=False)
+    # Bumped whenever the set of pending tools changes, so a poller can tell that
+    # the oldest pending call changed or cleared without diffing its details.
+    _pending_generation: int = field(default=0, repr=False)
     _last_progress_label: str | None = field(default=None, repr=False)
     _lines_seen: int = field(default=0, repr=False)
     _output_chars_since_tool: int = field(default=0, repr=False)
@@ -775,6 +780,12 @@ class StallWatchdog:
     def tools_in_flight(self) -> int:
         with self._lock:
             return len(self._pending_tools)
+
+    @property
+    def pending_generation(self) -> int:
+        """Changes whenever a tool call starts or finishes."""
+        with self._lock:
+            return self._pending_generation
 
     def oldest_pending_tool(self, now: float) -> JsonObject | None:
         """The longest-running in-flight tool call, or None when none is pending.
@@ -821,7 +832,10 @@ class StallWatchdog:
         accumulator derived from this same line; they carry the tool name,
         target, and outcome the raw line classification cannot see.
         """
-        if not self.enabled or not line.strip():
+        # Tool bookkeeping runs even when stall enforcement is off
+        # (`--stall-minutes 0`): `oldest_pending_tool` is observation, and
+        # `stalled_for`/`confirm_stall` still return None while disabled.
+        if not line.strip():
             return
         signals = classify_line(line, harness=self.harness)
         with self._lock:
@@ -930,10 +944,17 @@ class StallWatchdog:
         self._record_outcomes_locked(tool_events)
         progressed = False
         had_pending = bool(self._pending_tools)
+        if signals.tools_started or signals.tools_finished:
+            self._pending_generation += 1
         started_events = [event for event in tool_events if not event.completed]
         for index, key in enumerate(signals.tools_started):
             self._pending_tools.append(key)
             event = started_events[index] if index < len(started_events) else None
+            if len(self._pending_tools) > PENDING_TOOL_LIMIT:
+                # A stream that never finishes its calls must not grow this
+                # without bound; the oldest is the one already least trusted.
+                del self._pending_tools[0]
+                del self._pending_meta[0]
             self._pending_meta.append(
                 (
                     event.tool if event else signals.label or "tool",

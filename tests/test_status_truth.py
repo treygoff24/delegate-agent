@@ -117,6 +117,88 @@ class PendingToolTests(unittest.TestCase):
         self._observe(watchdog, sw, _pi_tool_end("c2", "read"), 802.0)
         self.assertIsNone(watchdog.oldest_pending_tool(803.0))
 
+    def test_pending_tool_is_tracked_with_stall_detection_disabled(self):
+        from delegate_agent import stall_watchdog as sw
+
+        watchdog = sw.StallWatchdog(stall_seconds=0, harness="omp")
+        self._observe(watchdog, sw, _pi_tool_start(), 5.0)
+        self.assertEqual(watchdog.oldest_pending_tool(65.0)["seconds"], 60)
+        self.assertIsNone(watchdog.stalled_for(100000.0))
+        self.assertIsNone(watchdog.confirm_stall(100000.0))
+        self._observe(watchdog, sw, _pi_tool_end(), 70.0)
+        self.assertIsNone(watchdog.oldest_pending_tool(71.0))
+
+    def test_pending_tool_bookkeeping_is_bounded(self):
+        watchdog, sw = self._watch()
+        for index in range(sw.PENDING_TOOL_LIMIT + 40):
+            self._observe(watchdog, sw, _pi_tool_start(f"c{index}", f"t{index}"), float(index))
+        self.assertEqual(watchdog.tools_in_flight, sw.PENDING_TOOL_LIMIT)
+        self.assertEqual(watchdog.oldest_pending_tool(1000.0)["name"], "t40")
+
+    def test_pending_generation_moves_on_start_and_finish(self):
+        watchdog, sw = self._watch()
+        first = watchdog.pending_generation
+        self._observe(watchdog, sw, _pi_tool_start(), 1.0)
+        second = watchdog.pending_generation
+        self._observe(watchdog, sw, _pi_tool_end(), 2.0)
+        self.assertLess(first, second)
+        self.assertLess(second, watchdog.pending_generation)
+
+    def test_a_tool_that_finishes_quietly_stops_being_shown_as_pending(self):
+        import io
+        import sys
+        import tempfile
+        import threading
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from delegate_agent import pending_tool, run_registry, runner
+
+        script = (
+            "import json,time\n"
+            "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
+            "'toolName':'mcp__brief','args':{}}),flush=True)\n"
+            "time.sleep(0.3)\n"
+            "print(json.dumps({'type':'tool_execution_end','toolCallId':'c1',"
+            "'toolName':'mcp__brief','result':{}}),flush=True)\n"
+            "time.sleep(2.5)\n"
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = run_registry.register_run(root, harness="omp")
+            ctx = _ctx(root=root, run_id=run_id, alias=alias, workspace=workspace)
+            seen = {"pending": False, "cleared": False}
+
+            def poll():
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not seen["cleared"]:
+                    state = run_registry.load_run_state(root, run_id) or {}
+                    if state.get("status") == "running":
+                        if state.get("pendingTool"):
+                            seen["pending"] = True
+                        elif seen["pending"]:
+                            seen["cleared"] = True
+                    time.sleep(0.05)
+
+            thread = threading.Thread(target=poll)
+            thread.start()
+            with (
+                mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
+                mock.patch.object(pending_tool, "REFRESH_SECONDS", 1000),
+            ):
+                runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            thread.join()
+        self.assertTrue(seen["pending"])
+        self.assertTrue(seen["cleared"], "pendingTool stayed on the running record")
+
     def test_a_pending_tool_still_never_stalls_the_run(self):
         watchdog, sw = self._watch()
         self._observe(watchdog, sw, _pi_tool_start(), 0.0)
