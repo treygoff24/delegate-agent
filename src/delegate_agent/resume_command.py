@@ -1,8 +1,8 @@
 """`delegate resume`: relaunch a terminal Run as a new Run.
 
 The continuation is synthesized plain text (original prompt + prior-run output
-digest + operator instructions), so cross-engine resume is legal and children
-stay ephemeral — no native harness session state is involved. The new Run then
+digest + operator instructions), so cross-engine resume is legal and never
+needs the source's native harness session. The new Run then
 flows through the completely normal launch path (instruction wrapping, safe
 prefixes, isolation, registration), which is what makes the resumed Run's own
 ``prompt.txt`` the synthesized continuation and chains legal.
@@ -869,13 +869,22 @@ def build_resume_plan(
                     "structured output schema."
                 )
 
-    # A source that opted into native sessions keeps that opt-in, so the resumed
-    # Run records its own session and `delegate followup <new alias>` works. A
-    # cross-engine resume to an engine without native sessions cannot keep it.
-    resumable = (
-        manifest.get("resumable") is True and mode == MODE_WORK and engine in {"codex", "claude"}
-    )
-    if manifest.get("resumable") is True and not resumable:
+    # A source that saved a native session keeps that, so the resumed Run records
+    # its own session and `delegate followup <new alias>` works. A cross-engine
+    # resume to an engine without native sessions cannot keep it. Any other
+    # source falls through to the launch default (None): codex and claude work
+    # Runs save their native session unless `--no-resumable` (or the engine's
+    # `resumable: false` config key) opts out.
+    source_resumable = manifest.get("resumable") is True
+    native_target = mode == MODE_WORK and engine in {"codex", "claude"}
+    resumable: bool | None
+    if opts.no_resumable:
+        resumable = False
+    elif source_resumable and native_target:
+        resumable = True
+    else:
+        resumable = None
+    if source_resumable and not native_target and not opts.no_resumable:
         notes.append(
             f"resumable dropped: {engine} {mode} runs do not support --resumable; "
             "native followup requires a codex or claude work run, so "

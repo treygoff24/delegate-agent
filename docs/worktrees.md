@@ -158,6 +158,19 @@ and `setup` are creation-only and are not re-run. A run that failed in setup is
 resumable on those terms: `resume` attaches to the kept worktree without
 re-running setup.
 
+### Resumable runs keep their worktree
+
+A succeeded Codex or Claude work Run that used a persistent worktree keeps it
+when the Run is resumable (`worktreeRetained: "resumable_session"`), even if the
+end-state is clean, so `followup` and `resume` can re-enter the same tree. Codex
+and Claude work Runs are resumable by default, so a fan-out of them leaves one
+retained worktree per succeeded Run until you clean up (`worktree prune
+--merged`, `worktree gc`, or `worktree remove`). Launch with `--no-resumable`
+(or set `codex.resumable` / `claude.resumable` to `false`) when a Run's worktree
+should retire itself and no native `followup` will be needed. Workflow `agent()`
+children stay non-resumable unless the call passes `resumable=True`, so
+workflow fan-outs are unaffected.
+
 ### Resume attachment
 
 To continue a terminal Run that used a persistent worktree, use the Run handle

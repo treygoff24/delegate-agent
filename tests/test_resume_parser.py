@@ -16,6 +16,9 @@ class ResumeParserTests(unittest.TestCase):
                 "--reasoning-effort",
                 "high",
                 "run-1",
+                # A real resume option after the handle is refused; `--` marks
+                # what follows as literal prompt text.
+                "--",
                 "--model",
                 "literal prompt part",
                 "--fast",

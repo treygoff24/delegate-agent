@@ -128,20 +128,44 @@ def is_usage_limit(text: str) -> bool:
     return bool(text.strip()) and _matches_usage_limit(text)
 
 
-def classify_followup_session_failure(text: str, engine: str) -> ChildFailure | None:
-    """Normalize a native-session lookup failure for ``delegate followup``."""
+def _retry_advice(source: str | None) -> str:
+    if source is None:
+        return "Retry."
+    return (
+        f"Retry the followup, or carry its report into a new Run with `delegate resume {source}`."
+    )
+
+
+def classify_followup_session_failure(
+    text: str, engine: str, *, source: str | None = None
+) -> ChildFailure | None:
+    """Normalize a native-session lookup failure for a Run that resumed a session.
+
+    Only a Run whose source recorded a native session can reach a lookup failure
+    (`followup` refuses one that did not before launching), so the message never
+    tells the caller to relaunch with `--resumable`: the session was saved, and the
+    launch could not find it. The usual cause is that the estate launcher's account
+    autoselect landed on a different account than the one holding the session, so
+    the message says so. ``source`` is the handle to offer to `delegate resume`.
+    """
     if not text.strip():
         return None
     if engine == "codex" and any(pattern.search(text) for pattern in _THREAD_LOSS_PATTERNS):
         return ChildFailure(
             "session_expired",
-            "The native Codex session is no longer available; relaunch with --resumable.",
+            "Codex could not find this Run's native session (thread lookup failed). The session "
+            "was saved, so this launch probably used a different CODEX_HOME or account than "
+            "the one holding it (a launcher may have switched accounts), or the session was "
+            f"pruned. {_retry_advice(source)}",
         )
     if engine == "claude" and any(
         pattern.search(text) for pattern in _CLAUDE_SESSION_LOSS_PATTERNS
     ):
         return ChildFailure(
             "session_expired",
-            "The native Claude session is no longer available; relaunch with --resumable.",
+            'Claude could not find this Run\'s native session ("No conversation found"). The '
+            "session was saved, so this launch probably ran under a different account than the "
+            "one holding it: the estate launcher's usage autoselect may have switched "
+            f"accounts on --resume. {_retry_advice(source)}",
         )
     return None

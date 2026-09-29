@@ -109,11 +109,13 @@ class FollowupParserTests(unittest.TestCase):
         self.assertEqual(negative_number.payload.warnings, ())
 
     def test_resume_warns_about_an_option_after_the_prompt(self):
-        parsed = parse_cli(["resume", "codex-1", "keep going", "--model", "opus"])
+        # `--read-only` is not a resume option, so the parser cannot call it a mistake
+        # and only warns; a real resume option here (`--model`) is refused outright.
+        parsed = parse_cli(["resume", "codex-1", "keep going", "--read-only", "opus"])
 
-        self.assertEqual(parsed.payload.extra_parts, ["keep going", "--model", "opus"])
+        self.assertEqual(parsed.payload.extra_parts, ["keep going", "--read-only", "opus"])
         warnings = tuple(parsed.payload.warnings)
-        self.assertTrue(any("--model" in warning for warning in warnings), warnings)
+        self.assertTrue(any("--read-only" in warning for warning in warnings), warnings)
 
     def test_resume_and_followup_with_no_trailing_text_carry_no_warnings(self):
         """The bare form never reaches the tail branch, so the field must be preset."""
