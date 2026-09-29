@@ -3564,8 +3564,8 @@ def _omp_catalog_absence_warning(
     omp resolves --model by exact provider/modelId, then exact bare id, then a
     provider-scoped fuzzy and substring pass, so a stale exact-form selector does
     not fail — it can land on a different concrete model. A provider/model
-    selector is pinned by default so a swap to another provider fails the run;
-    this warning names the stale selector itself. The operator's alias is never
+    selector the caller typed is pinned by default so a swap to another provider
+    fails the run; this warning names the stale selector itself. The operator's alias is never
     rewritten and a provider/model selector is never refused for absence: an
     empty or missing catalog is absence of evidence, not evidence of absence.
     """
@@ -3603,11 +3603,14 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         selection_warnings = model_discovery.omp_unverifiable_selection_warning(
             selection, omp.get("models"), build.discovery
         )
-    # An explicit provider/model id is pinned unless the caller named a mode: the
-    # operator chose that provider, so omp's retry chain must not move the run to
-    # another one. A named mode (fungible, panel) is the opt-in to failover.
-    pinned_by_default = build.continuity_mode is None and model_discovery.is_provider_qualified(
-        model
+    # A provider/model id the caller typed is pinned unless they named a mode: they
+    # chose that provider, so omp's retry chain must not move the run to another
+    # one. A named mode (fungible, panel) is the opt-in to failover. An alias (a key
+    # of omp.models) and omp.defaultModel stay fungible even when their targets
+    # carry a provider, because aliases are how the fleet gets multi-subscription
+    # failover; naming `pinned` on an alias still pins it.
+    pinned_by_default = build.continuity_mode is None and model_discovery.is_explicit_provider_id(
+        selection, omp.get("models")
     )
     no_model_fallback = build.continuity_mode == "pinned" or pinned_by_default
     if model is not None:

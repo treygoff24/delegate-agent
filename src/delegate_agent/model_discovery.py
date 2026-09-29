@@ -327,6 +327,20 @@ def is_provider_qualified(selector: str | None) -> bool:
     return bool(separator and provider and model_id)
 
 
+def is_explicit_provider_id(selection: str | None, aliases: object) -> bool:
+    """Is an omp selection a ``provider/model`` id the caller typed, not an alias?
+
+    A key of ``omp.models`` is a Delegate alias even when its target names a
+    provider, and it wins over the raw-id reading exactly as it does when the
+    model is resolved. Aliases and ``omp.defaultModel`` carry the fleet's
+    multi-subscription failover, so only a typed id counts as an operator's
+    choice of one provider.
+    """
+    if not is_provider_qualified(selection):
+        return False
+    return not (isinstance(aliases, dict) and selection in aliases)
+
+
 def _is_bare_omp_selection(selection: str, aliases: object) -> bool:
     """A selection that is neither a Delegate alias nor a provider-qualified id."""
     if not selection or is_provider_qualified(selection):

@@ -700,9 +700,13 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
 - `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
-- An explicit `provider/model-id` selector (from `--model`, an alias target, or
-  `defaultModel`) is pinned by default: the run behaves as `--continuity-mode
-  pinned`. Delegate launches OMP with a private `--config` overlay that sets
+- A `provider/model-id` you type yourself (`--model`, input-JSON `model`, or a
+  literal `agent(model=...)` in a workflow) is pinned by default: the run behaves
+  as `--continuity-mode pinned`. A delegate alias (a key of `omp.models`) and
+  `defaultModel` stay `fungible` even though their targets name a provider, so
+  aliases keep multi-subscription failover; the run still records and warns
+  about which provider answered, and `--continuity-mode pinned` on an alias pins
+  it. Delegate launches a pinned OMP run with a private `--config` overlay that sets
   `retry.modelFallback` and `retry.usageAwareFallback` to `false`, so OMP's own
   retry chains (`retry.fallbackChains`) cannot move the run to another model or
   provider. Retrying the same model is unaffected. The overlay beats your

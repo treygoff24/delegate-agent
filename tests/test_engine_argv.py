@@ -3088,14 +3088,13 @@ class EngineArgvTests(CommandTestBase):
                 "openai-codex/gpt-5.6-sol",
                 "--thinking",
                 "xhigh",
-                # An explicit provider/model id is pinned by default, so the
-                # launch carries the overlay that disables OMP's retry failover.
-                "--config",
-                "<delegate-devin-agent-config>",
             ],
         )
         self.assertEqual(request.stdin_text, "implement")
-        self.assertEqual(request.continuity_mode, "pinned")
+        # An alias carries multi-subscription failover even though its target
+        # names a provider, so it launches without the no-failover overlay.
+        self.assertEqual(request.continuity_mode, "fungible")
+        self.assertIsNone(request.agent_config_text)
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
         self.assertEqual(request.reasoning_capability_source, "harness-compatibility")

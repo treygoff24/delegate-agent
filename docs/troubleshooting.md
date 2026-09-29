@@ -141,10 +141,11 @@ delegate capabilities refresh
 
 `Pinned model continuity refused a substitution: requested opencode-go/glm-5.3,
 but omp tried to serve fireworks/glm-5p3` means the run named an explicit
-provider and OMP moved it to another one anyway. A `provider/model` selector is
-pinned by default and launches with OMP's own retry failover switched off, so
-this is rare; when it happens the run is stopped and its output is not the
-requested model's. To allow failover on purpose, rerun with
+provider and OMP moved it to another one anyway. A `provider/model` you typed
+yourself is pinned by default and launches with OMP's own retry failover
+switched off, so this is rare; an alias or `defaultModel` is not pinned unless
+you named `--continuity-mode pinned`. When it happens the run is stopped and its
+output is not the requested model's. To allow failover on purpose, rerun with
 `--continuity-mode fungible`; the record then carries a `model_substitution`
 warning naming the provider that answered.
 

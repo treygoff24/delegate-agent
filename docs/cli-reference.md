@@ -104,9 +104,10 @@ prompts. Input JSON uses `persona` (string or null) and `allowRepoPersona`
 (boolean).
 
 `--continuity-mode pinned|fungible|panel` is a shared launch option (default
-`fungible`; the exception is `omp` with an explicit `provider/model` selector,
+`fungible`; the exception is `omp` with a `provider/model` you typed yourself,
 which is `pinned` unless you name a mode, and is launched with OMP's retry
-failover switched off; see [`omp`](configuration.md#omp)). A pinned run is
+failover switched off; an alias or `omp.defaultModel` stays `fungible` unless
+you name `pinned`; see [`omp`](configuration.md#omp)). A pinned run is
 paused with a typed terminal when the harness
 reports a served model that does not match the request or switches model
 mid-session. For OMP the served provider counts: the failure message names the
