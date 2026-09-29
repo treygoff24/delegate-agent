@@ -471,6 +471,26 @@ temporary worktree (its files are gone), or any other error class. Set
 unresumable unless the call passes `resumable=True`, so this applies to them
 only then.
 
+## A finished Run never read the coordinator's mail (`unreadMail`)
+
+Symptom: a Run's envelope, `snapshot`, or `wait` shows `unreadMail` and a
+warning like "2 mail messages were delivered to this run and never read by it".
+Mail is pull-based (push only on Claude/Codex with `--mail-push`, at stop
+points), so a lane that never ran `delegate mail inbox` finished without seeing
+your correction. Treat its work as not having incorporated that mail.
+
+- The warning lists up to three messages (id, sender, subject); `unreadMail.count`
+  is the full count. `delegate mail status <id>` shows delivery.
+- If the mail changes the work, send it again as a followup:
+  `delegate followup <alias> "<the correction>"`. Followup and resume inherit
+  `--mail-push` from the source Run; `--no-mail-push` drops it.
+- For corrections a running lane must not miss, launch with `--mail-push` or put
+  the requirement in the launch prompt; the mail suffix already asks lanes to
+  check their inbox before final verification or commit.
+- `mailInbox` on the launch envelope names the host and mail root. A lane on
+  another machine mails that machine's coordinator inbox, which a local
+  `delegate mail inbox` does not show; read it on that host.
+
 ## Long foreground run looks silent
 
 Tracked launches buffer child output so Delegate can return a bounded final

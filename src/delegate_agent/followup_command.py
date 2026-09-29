@@ -454,6 +454,14 @@ def build_followup_plan(
         if isolation_mode in ("auto", "none", "worktree"):
             isolation = isolation_mode
 
+    from delegate_agent import mail as delegate_mail
+
+    mail_push, mail_push_note = delegate_mail.inherited_mail_push(
+        manifest, engine=source_engine, mode=mode, config=config, explicit=opts.mail_push
+    )
+    if mail_push_note is not None:
+        notes.append(mail_push_note)
+
     launch = LaunchOptions(
         engine=source_engine,
         mode=mode,
@@ -468,6 +476,7 @@ def build_followup_plan(
         model=model,
         resumable=True,
         resume_session_id=session_id,
+        mail_push=mail_push,
         continuity_mode=continuity_mode,
         warnings=opts.warnings,
         workspace_env=workspace_env,

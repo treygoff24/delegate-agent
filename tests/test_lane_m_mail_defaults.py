@@ -180,7 +180,7 @@ class MailDefaultTests(CommandTestBase):
                 user_prompt = "user content\n\n" + mail.MAIL_PROMPT_SUFFIX
                 commands = [["codex", "work", "--mail-push", user_prompt]]
                 if isolation == "worktree":
-                    commands.append(["resume", "codex-1", "--mail-push"])
+                    commands.append(["resume", "--mail-push", "codex-1", "continue"])
                 for command in commands:
                     with self.subTest(command=command[0]):
                         code, stdout, stderr = self.run_main(

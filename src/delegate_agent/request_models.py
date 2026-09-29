@@ -119,7 +119,9 @@ class ResumeOptions:
     persona: str | None = None
     no_persona: bool = False
     allow_repo_persona: bool = False
-    mail_push: bool = False
+    # True/False are explicit (--mail-push / --no-mail-push); None inherits the
+    # source Run's mail push.
+    mail_push: bool | None = None
     # --no-resumable: do not save the resumed Run's native session even where
     # codex/claude work Runs would by default.
     no_resumable: bool = False
@@ -135,6 +137,9 @@ class FollowupOptions:
     prompt_file: str | None = None
     timeout: int | None = None
     dry_run: bool = False
+    # True/False are explicit (--mail-push / --no-mail-push); None inherits the
+    # source Run's mail push.
+    mail_push: bool | None = None
     warnings: tuple[str, ...] = ()
 
 
