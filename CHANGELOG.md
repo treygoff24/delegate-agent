@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A live Run shows the tool call it is waiting on.** While a tool call is in
+  flight, `runs` and `snapshot` carry `pendingTool` (`name`, optional
+  `target`, `startedAt`, `seconds`; the oldest pending call, redacted like
+  `current`), and after a minute `current` reads `waiting on tool <name> for
+  13m`. It is refreshed whenever the pending set changes, tracked even with
+  `--stall-minutes 0`, and dropped from terminal records. The stall watchdog
+  still never fires while a tool is pending: a hung tool is surfaced, not
+  killed.
+- A followup or session resume whose child exits non-zero within 15 seconds
+  with no stdout or stderr stays `child_failed`, but the message says the
+  saved native session probably could not be loaded and `nextActions` offers
+  `delegate resume <handle>`.
 - **Early-stop detection.** A succeeded Run whose last sentence announces a
   next step ("Now let me write my report.") carries `degraded:
   ended_announcing_next_step`, and a work Run that parks on an approval
@@ -393,6 +405,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- A Run's `current` no longer keeps showing a provider error after the
+  harness has moved on. Pi and OMP show `retrying after provider error
+  (429)` while they retry and then the new activity; a Codex `turn.started`
+  or OpenCode `step_start` after an error replaces it the same way.
+- `--notify` channel pings work against post 0.9.0, which removed `--anyway`
+  from its help. The notifier sends without it and retries once with
+  `--anyway` only when post refuses the send as `crossed_send`.
+- The setup-command output tail recorded for a worktree Run can no longer
+  reconstruct a secret passed through `--env`/`--env-file`: recorded values
+  and their fragments are masked, generic redaction runs between masking
+  passes, and the whole pass repeats until nothing changes (a tail that never
+  settles is replaced by the mask).
+- The Cursor model-family warning names the selector the operator typed and
+  the routed selector actually passed to Cursor.
+- Every harness caps its map of tool calls still waiting on a result at 256
+  entries (Claude, Kimi, Grok, and Cursor kept them all), and a completion
+  report status line may end in a semicolon (`Status: completed;`).
 - `worktree remove` of a parent no longer orphans worktrees of Runs launched
   inside it: clean, merged nested worktrees are removed first, and dirty or
   unmerged ones refuse with `nested_worktrees_block_remove` and a per-nested
