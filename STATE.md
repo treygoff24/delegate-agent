@@ -15,7 +15,6 @@ Updated: 2026-09-29 (overnight friction work and the Linux reap fix installed on
 - Full gate is ~20 min on one core; Trey (2026-09-29) asked for targeted tests while iterating and one full run at the end. Speed-up task: `dlg-8e3`.
 - Live Mac config change awaiting Trey's "install" word: `policy.harness.codex.work.bypassApprovalsAndSandbox: false`, optionally `isolation.writeGuard.macosSeatbelt: true`. Codex under Seatbelt with its own sandbox bypassed is not live-tested.
 - The write guard re-opens `~/.ai-profiles` for lanes started through an `estate-*` launcher; `~/.ssh`, the installed runtime, and `~/Code` stay protected. Known limits: `docs/security-model.md`.
-- `dlg-ptm` (Claude preflight on non-object workflow schema roots) is another session's work.
 - Deferred items are beads (`bd ready`). The estate launcher and `bin/delegate-profile-shim` still disagree on `DELEGATE_CONFIG` versus `--auth-profile` (a linux-devbox change).
 
 ## Earlier records
