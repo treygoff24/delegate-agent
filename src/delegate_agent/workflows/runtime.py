@@ -376,8 +376,13 @@ def _session_missing_relaunch_refusal(
     if any(attempt.work_changed for attempt in attempts):
         return "work_changed_session_missing"
     summaries = [attempt.work_summary for attempt in attempts if attempt.work_summary is not None]
-    if mode == MODE_WORK and (prior_child is None or prior_child.work_summary is None):
-        return "work_state_unverified"
+    if mode == MODE_WORK:
+        # Both attempts ran in the tree the fresh child would inherit, so each
+        # must account for it; a missing summary on either is not evidence.
+        if prior_child is None or len(summaries) != len(attempts):
+            return "work_state_unverified"
+        if not all(summary.get("noChanges") is True for summary in summaries):
+            return "work_state_unverified"
     if not all(_work_inspection_verified(summary) for summary in summaries):
         return "work_state_unverified"
     return None
