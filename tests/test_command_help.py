@@ -296,7 +296,7 @@ class PsHelpContractTests(unittest.TestCase):
         payload = command_help.command_help_payload(spec)
 
         self.assertIn("--structural", text)
-        self.assertIn("[--structural]", payload["usage"][0])
+        self.assertIn("[--structural|--summary]", payload["usage"][0])
         self.assertIn("--structural", {option["flag"] for option in payload["options"]})
 
 
@@ -308,7 +308,7 @@ class PureCallHelpIntegrationTests(unittest.TestCase):
         code = cli.main(["claude", "--help"], stdout=stdout, stderr=io.StringIO())
         self.assertEqual(code, 0)
         help_text = stdout.getvalue()
-        self.assertIn("[--pure] [--timeout SECONDS]", help_text)
+        self.assertIn("[--read-only|--pure] [--timeout SECONDS]", help_text)
         self.assertIn("--output-schema FILE", help_text)
 
         for engine in ("cursor", "opencode", "codex"):
