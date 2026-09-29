@@ -200,6 +200,45 @@ class ReclaimScratchTests(ScratchReclaimTestCase):
         )
         self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
 
+    def manifest_of(self, run_id: str) -> dict:
+        path = run_registry.run_directory(self.registry_root, run_id) / "manifest.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_sidecar_only_leftover_is_reclaimed_though_the_manifest_records_no_paths(
+        self,
+    ) -> None:
+        run_id = self.make_run(scratch=False, sidecar=True, size=40)
+        manifest = self.manifest_of(run_id)
+        self.assertNotIn("scratchPath", manifest)
+        self.assertNotIn("tempPath", manifest)
+        scratch = self.scratch_path(run_id)
+        sidecar = scratch.parent / f"{run_id}{run_scratch.SIDECAR_SEPARATOR}home"
+        self.assertTrue(sidecar.exists())
+
+        result = self.reclaim()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([item["runId"] for item in result["reclaimed"]], [run_id])
+        self.assertEqual(result["totalBytes"], 40)
+        self.assertFalse(sidecar.exists())
+        self.assertIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
+
+    def test_owned_paths_are_reclaimed_even_when_the_manifest_records_no_pointer(self) -> None:
+        run_id = self.make_run(sidecar=True, compact=True, record_pointers=False, size=10)
+        manifest = self.manifest_of(run_id)
+        self.assertNotIn("scratchPath", manifest)
+        self.assertNotIn("tempPath", manifest)
+        scratch = self.scratch_path(run_id)
+        sidecar = scratch.parent / f"{run_id}{run_scratch.SIDECAR_SEPARATOR}home"
+        compact = run_scratch.expected_compact_temp_path(self.registry_root, run_id)
+
+        result = self.reclaim()
+
+        self.assertEqual([item["runId"] for item in result["reclaimed"]], [run_id])
+        self.assertEqual(result["totalBytes"], 30)
+        for path in (scratch, sidecar, compact):
+            self.assertFalse(path.exists(), path)
+
     def test_a_second_pass_finds_nothing_left_to_do(self) -> None:
         run_id = self.make_run()
         self.reclaim()
@@ -523,6 +562,291 @@ class RunsReclaimCommandTests(ScratchReclaimTestCase):
         payload = json.loads(out)
         self.assertIn(retention.SCRATCH_RECLAIMED_AT_KEY, payload)
         self.assertIn(retention.SCRATCH_RECLAIMED_BYTES_KEY, payload)
+
+    def write_persisted_snapshot(self, run_id: str) -> None:
+        """A finished run leaves snapshot.json behind, written before any reclaim."""
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        state = self.state_of(run_id)
+        run_registry.write_json_atomic(
+            run_path / "snapshot.json",
+            {
+                "schema": run_registry.SNAPSHOT_SCHEMA,
+                "ok": True,
+                "alias": state["alias"],
+                "runId": run_id,
+                "harness": "codex",
+                "status": "succeeded",
+                "startedAt": state["finishedAt"],
+                "assistantText": "done",
+                "assistantTextChars": 4,
+                "assistantTextTruncated": False,
+                "recentEvents": [],
+                "warnings": [],
+            },
+        )
+
+    def test_a_persisted_snapshot_still_shows_the_reclaim_markers_in_json(self) -> None:
+        run_id = self.make_run(age_days=10, size=64)
+        self.write_persisted_snapshot(run_id)
+        self.reclaim()
+
+        code, out, err = self.run_cli("--json", "snapshot", run_id)
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["assistantText"], "done")
+        self.assertEqual(payload[retention.SCRATCH_RECLAIMED_BYTES_KEY], 64)
+        self.assertEqual(
+            payload[retention.SCRATCH_RECLAIMED_AT_KEY],
+            self.state_of(run_id)[retention.SCRATCH_RECLAIMED_AT_KEY],
+        )
+
+    def test_a_persisted_snapshot_still_shows_the_reclaim_markers_in_text(self) -> None:
+        run_id = self.make_run(age_days=10, size=3 * 1024 * 1024)
+        self.write_persisted_snapshot(run_id)
+        self.reclaim()
+
+        code, out, err = self.run_cli("snapshot", run_id)
+
+        self.assertEqual(code, 0, err)
+        stamp = self.state_of(run_id)[retention.SCRATCH_RECLAIMED_AT_KEY]
+        self.assertIn(f"scratch reclaimed: {stamp} (3.0 MiB)", out)
+
+    def test_an_unreclaimed_run_shows_no_reclaim_line(self) -> None:
+        run_id = self.make_run(age_days=1)
+        self.write_persisted_snapshot(run_id)
+
+        code, out, err = self.run_cli("snapshot", run_id)
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("scratch reclaimed", out)
+        code, out, err = self.run_cli("--json", "snapshot", run_id)
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, json.loads(out))
+
+
+class TreeClock:
+    """Reads as the number of files removed from ``tree`` so far.
+
+    A budget of N seconds then means "stop after N files are gone", whatever
+    the machine's speed, and it is measured on the real tree.
+    """
+
+    def __init__(self, tree: Path, total: int) -> None:
+        self.tree = tree
+        self.total = total
+
+    def __call__(self) -> float:
+        remaining = sum(len(files) for _root, _dirs, files in os.walk(self.tree))
+        return float(self.total - remaining)
+
+
+class Ticker:
+    """A clock that advances one second every time it is read."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        return float(self.reads)
+
+
+class BudgetedRemovalTests(ScratchReclaimTestCase):
+    FILE_SIZE = 10
+    BUDGET = 20
+
+    def big_run(self, **kwargs) -> tuple[str, Path, int]:
+        """A run whose scratch holds 61 same-sized files in 7 directories."""
+        kwargs.setdefault("size", self.FILE_SIZE)
+        run_id = self.make_run(**kwargs)
+        scratch = self.scratch_path(run_id)
+        for index in range(6):
+            folder = scratch / f"dir{index}"
+            folder.mkdir()
+            for leaf in range(10):
+                (folder / f"f{leaf}.bin").write_bytes(b"q" * self.FILE_SIZE)
+        return run_id, scratch, 61
+
+    def count_files(self, tree: Path) -> int:
+        return sum(len(files) for _root, _dirs, files in os.walk(tree))
+
+    def config(self) -> dict:
+        return {"tracking": {"retention": {"enabled": True, "rawLogDays": 7}}}
+
+    def reclaim_ambiently(self, clock, budget: float | None = None) -> dict:
+        with mock.patch.object(retention, "_monotonic", clock):
+            return retention._reclaim_scratch_locked(
+                self.registry_root,
+                older_than_days=3,
+                dry_run=False,
+                now=self.now,
+                budget_seconds=float(self.BUDGET) if budget is None else budget,
+            )
+
+    def test_listing_a_wide_directory_stops_at_the_deadline(self) -> None:
+        folder = self.base / "wide"
+        folder.mkdir()
+        for index in range(30):
+            (folder / f"f{index}").write_bytes(b"x")
+        fd = os.open(folder, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+
+        with self.assertRaises(run_scratch.ScratchBudgetExceeded):
+            run_scratch._list_directory(fd, run_scratch.Deadline(5, clock=Ticker()))
+
+        self.assertEqual(len(run_scratch._list_directory(fd, None)), 30)
+
+    def test_a_spent_budget_starts_no_further_run(self) -> None:
+        first = self.make_run(size=self.FILE_SIZE)
+        second = self.make_run(size=self.FILE_SIZE)
+        bucket = self.scratch_path(first).parent
+
+        # One file is the whole budget, and the first run's removal spends it.
+        result = self.reclaim_ambiently(TreeClock(bucket, 2), budget=1.0)
+
+        self.assertTrue(result["budgetExhausted"])
+        self.assertEqual(len(result["planned"]), 1)
+        self.assertEqual(len(result["reclaimed"]), 1)
+        self.assertEqual(result["skipped"], [])
+        left = [run_id for run_id in (first, second) if self.scratch_path(run_id).exists()]
+        self.assertEqual(len(left), 1)
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(left[0]))
+
+    def test_removal_stops_at_the_deadline_and_the_next_call_finishes(self) -> None:
+        _run_id, scratch, total = self.big_run()
+        clock = TreeClock(scratch, total)
+
+        progress = run_scratch.remove_targets(
+            [scratch], deadline=run_scratch.Deadline(self.BUDGET, clock=clock)
+        )
+
+        self.assertFalse(progress.complete)
+        self.assertEqual(progress.freed_bytes, self.BUDGET * self.FILE_SIZE)
+        self.assertEqual(self.count_files(scratch), total - self.BUDGET)
+
+        finished = run_scratch.remove_targets([scratch])
+
+        self.assertTrue(finished.complete)
+        self.assertEqual(finished.freed_bytes, (total - self.BUDGET) * self.FILE_SIZE)
+        self.assertFalse(scratch.exists())
+
+    def test_the_ownership_scan_stops_at_the_deadline(self) -> None:
+        _run_id, scratch, _total = self.big_run()
+        clock = Ticker()
+
+        # 67 entries to inspect against a budget of 10 reads.
+        with self.assertRaises(run_scratch.ScratchBudgetExceeded):
+            run_scratch._scan_for_foreign_owner(scratch, run_scratch.Deadline(10, clock=clock))
+
+        self.assertLessEqual(clock.reads, 10 + 2)
+        run_scratch._scan_for_foreign_owner(scratch, None)
+
+    def test_a_tree_the_checks_alone_outlast_the_budget_is_left_untouched(self) -> None:
+        _run_id, scratch, total = self.big_run()
+
+        progress = run_scratch.remove_targets(
+            [scratch], deadline=run_scratch.Deadline(10, clock=Ticker())
+        )
+
+        self.assertFalse(progress.complete)
+        self.assertEqual(progress.freed_bytes, 0)
+        self.assertEqual(self.count_files(scratch), total)
+
+    def test_later_targets_wait_when_the_first_uses_up_the_budget(self) -> None:
+        run_id, scratch, total = self.big_run(sidecar=True)
+        sidecar = scratch.parent / f"{run_id}{run_scratch.SIDECAR_SEPARATOR}home"
+        targets = run_scratch.owned_targets(self.registry_root, run_id)
+        self.assertEqual(targets, [scratch, sidecar])
+        clock = TreeClock(scratch, total)
+
+        progress = run_scratch.remove_targets(
+            targets, deadline=run_scratch.Deadline(self.BUDGET, clock=clock)
+        )
+
+        self.assertFalse(progress.complete)
+        self.assertTrue((sidecar / "engine.cfg").exists())
+
+    def test_a_directory_swapped_for_a_symlink_mid_removal_is_refused_not_followed(self) -> None:
+        run_id = self.make_run()
+        scratch = self.scratch_path(run_id)
+        (scratch / "sub").mkdir()
+        (scratch / "sub" / "inner.bin").write_bytes(b"i")
+        outside = self.base / "outside-target"
+        outside.mkdir()
+        (outside / "precious.txt").write_bytes(b"p" * 50)
+        real_list = run_scratch._list_directory
+        swapped: list[bool] = []
+
+        def swap_after_first_listing(fd, deadline):
+            items = real_list(fd, deadline)
+            if not swapped:
+                swapped.append(True)
+                (scratch / "sub").rename(scratch / "sub-moved")
+                (scratch / "sub").symlink_to(outside, target_is_directory=True)
+            return items
+
+        with (
+            mock.patch.object(run_scratch, "_list_directory", swap_after_first_listing),
+            self.assertRaises(OSError),
+        ):
+            run_scratch.remove_targets([scratch])
+
+        self.assertTrue(swapped)
+        self.assertEqual((outside / "precious.txt").read_bytes(), b"p" * 50)
+        self.assertTrue(scratch.exists())
+
+    def test_a_cut_short_reclaim_leaves_the_run_unmarked_and_counts_what_it_freed(self) -> None:
+        run_id, scratch, total = self.big_run(sidecar=True)
+        sidecar = scratch.parent / f"{run_id}{run_scratch.SIDECAR_SEPARATOR}home"
+
+        result = self.reclaim_ambiently(TreeClock(scratch, total))
+
+        self.assertTrue(result["budgetExhausted"])
+        self.assertEqual(result["reclaimed"], [])
+        self.assertEqual(
+            [(item["runId"], item["reason"]) for item in result["skipped"]],
+            [(run_id, "budget_exhausted")],
+        )
+        self.assertEqual(result["skipped"][0]["freedBytes"], self.BUDGET * self.FILE_SIZE)
+        self.assertEqual(result["totalBytes"], self.BUDGET * self.FILE_SIZE)
+        self.assertEqual(self.count_files(scratch), total - self.BUDGET)
+        self.assertTrue(sidecar.exists())
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
+
+    def test_the_pass_after_a_cut_short_one_finishes_the_tree_and_marks_it(self) -> None:
+        run_id, scratch, total = self.big_run(age_days=40, sidecar=True)
+        sidecar = scratch.parent / f"{run_id}{run_scratch.SIDECAR_SEPARATOR}home"
+        with mock.patch.object(retention, "_monotonic", TreeClock(scratch, total)):
+            first = retention.run_retention_pass(self.registry_root, self.config(), now=self.now)
+
+        self.assertEqual(first["scratchReclaimed"], 0)
+        self.assertEqual(self.count_files(scratch), total - self.BUDGET)
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
+
+        # The cut-short pass did not start the cadence window, so this runs now.
+        second = retention.run_retention_pass(self.registry_root, self.config(), now=self.now)
+
+        self.assertEqual(second["scratchReclaimed"], 1)
+        self.assertFalse(scratch.exists())
+        self.assertFalse(sidecar.exists())
+        state = self.state_of(run_id)
+        self.assertIn(retention.SCRATCH_RECLAIMED_AT_KEY, state)
+        # The marker's byte count is what the finishing pass freed: the rest of
+        # the scratch and the sidecar.
+        self.assertEqual(
+            state[retention.SCRATCH_RECLAIMED_BYTES_KEY],
+            (total - self.BUDGET) * self.FILE_SIZE + self.FILE_SIZE,
+        )
+
+    def test_the_explicit_command_is_not_budgeted(self) -> None:
+        _run_id, scratch, _total = self.big_run()
+
+        with mock.patch.object(retention, "_monotonic", Ticker()):
+            result = self.reclaim()
+
+        self.assertFalse(result["budgetExhausted"])
+        self.assertEqual(len(result["reclaimed"]), 1)
+        self.assertFalse(scratch.exists())
 
 
 if __name__ == "__main__":

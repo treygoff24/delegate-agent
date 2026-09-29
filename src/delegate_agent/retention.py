@@ -25,10 +25,16 @@ SCRATCH_RECLAIMED_AT_KEY = "scratchReclaimedAt"
 SCRATCH_RECLAIMED_BYTES_KEY = "scratchReclaimedBytes"
 RUNS_RECLAIM_SCHEMA = "delegate.runs-reclaim.v1"
 # The implicit pass runs inside launches and read commands. Deleting a run's
-# scratch can take minutes when a test filled it, so the implicit pass stops
-# starting new reclaims once it has spent this long and the next pass carries on.
+# scratch can take minutes when a test filled it, so the implicit pass spends at
+# most this long: the budget is checked between runs and again for every entry
+# the removal walks, so one large tree cannot overrun it. A run whose removal was
+# cut short keeps no marker and the next pass carries on where it stopped.
 # `delegate runs reclaim` has no such budget.
 SCRATCH_RECLAIM_BUDGET_SECONDS = 20.0
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _retention_completed_at(index: JsonObject) -> datetime | None:
@@ -341,10 +347,15 @@ def _reclaim_scratch_locked(
     age. Removal reuses ``run_scratch``'s owned-path and ownership checks, and
     the run record itself stays; only the neutral scratch, its sidecars, and the
     compact child temp go. Records are never rewritten in a dry run.
+
+    With ``budget_seconds`` the removal itself stops when the budget runs out:
+    the run stays unmarked, ``budgetExhausted`` is set, and what was freed is
+    counted, so a later pass finishes the tree. Without a budget it runs to the
+    end. A dry run only sums sizes and is not bounded by the budget's walk.
     """
     moment = now or datetime.now(UTC)
     cutoff = moment - timedelta(days=older_than_days)
-    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
+    deadline = run_scratch.Deadline(budget_seconds, clock=_monotonic)
     payload = empty_reclaim_payload(older_than_days=older_than_days, dry_run=dry_run)
     planned: list[JsonObject] = payload["planned"]  # type: ignore[assignment]
     reclaimed: list[JsonObject] = payload["reclaimed"]  # type: ignore[assignment]
@@ -373,7 +384,7 @@ def _reclaim_scratch_locked(
                 skipped.append({**ref, "reason": "already_reclaimed"})
                 continue
             manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
-            if manifest is None or not ("scratchPath" in manifest or "tempPath" in manifest):
+            if manifest is None:
                 skipped.append({**ref, "reason": "no_scratch"})
                 continue
             activity = run_registry.activity_datetime(state, manifest, run_id)
@@ -383,28 +394,45 @@ def _reclaim_scratch_locked(
             if activity >= cutoff:
                 skipped.append({**ref, "reason": "not_yet_old_enough"})
                 continue
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline.expired():
                 payload["budgetExhausted"] = True
                 break
             ref["activityAt"] = run_registry.activity_timestamp(state, manifest, run_id)
             run_scratch.verify_recorded_paths(registry_root, run_id, manifest, action="reclaim")
             targets = run_scratch.owned_targets(registry_root, run_id)
-            size = sum(run_scratch.tree_bytes(target) for target in targets)
-            ref["scratchBytes"] = size
             ref["paths"] = [str(target) for target in targets]
             if not targets:
+                if "scratchPath" not in manifest and "tempPath" not in manifest:
+                    # Nothing recorded and nothing left at the owned paths.
+                    skipped.append({**ref, "reason": "no_scratch"})
+                    continue
                 if not dry_run:
                     _mark_scratch_reclaimed(registry_root, run_id, reclaimed_bytes=0, moment=moment)
+                ref["scratchBytes"] = 0
                 skipped.append({**ref, "reason": "nothing_to_reclaim"})
                 continue
-            planned.append(ref)
             if dry_run:
+                size = sum(run_scratch.tree_bytes(target) for target in targets)
+                ref["scratchBytes"] = size
+                planned.append(ref)
                 total_bytes += size
                 continue
-            run_scratch.remove_targets(targets)
-            _mark_scratch_reclaimed(registry_root, run_id, reclaimed_bytes=size, moment=moment)
+            planned.append(ref)
+            progress = run_scratch.remove_targets(targets, deadline=deadline)
+            total_bytes += progress.freed_bytes
+            if not progress.complete:
+                # Cut short by the budget: no marker, so the next pass finds the
+                # rest. What was freed is real and is counted.
+                payload["budgetExhausted"] = True
+                skipped.append(
+                    {**ref, "reason": "budget_exhausted", "freedBytes": progress.freed_bytes}
+                )
+                break
+            ref["scratchBytes"] = progress.freed_bytes
+            _mark_scratch_reclaimed(
+                registry_root, run_id, reclaimed_bytes=progress.freed_bytes, moment=moment
+            )
             reclaimed.append(ref)
-            total_bytes += size
         except (OSError, ValueError) as exc:
             errors.append(
                 {

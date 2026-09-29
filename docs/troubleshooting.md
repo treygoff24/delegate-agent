@@ -571,8 +571,12 @@ Running and stale runs are never touched, and the run record stays; `snapshot`
 shows `scratchReclaimedAt` and `scratchReclaimedBytes`. A run listed under
 `errors` was refused because its recorded path no longer matches the owned path
 or an entry is owned by another user; the scratch is left in place for you to
-inspect. The ambient pass is skipped when `tracking.retention.enabled` is
-`false`; `delegate runs reclaim` still works.
+inspect. A run listed as `budget_exhausted` (with `budgetExhausted: true`) was
+large enough to run into the ambient pass's 20-second budget; part of its scratch
+is already gone, it is not marked yet, and the next workspace command finishes it
+(or run `delegate runs reclaim`, which has no time limit). The ambient pass is
+skipped when `tracking.retention.enabled` is `false`; `delegate runs reclaim`
+still works.
 
 ## Worktree cleanup refused
 

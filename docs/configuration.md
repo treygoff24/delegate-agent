@@ -315,7 +315,9 @@ Controls local run recording.
   a run is terminal). Run records are kept, running and stale runs are never
   touched, and the run state records `scratchReclaimedAt` and
   `scratchReclaimedBytes`. `delegate runs reclaim [--older-than DAYS] [--dry-run]`
-  does the same on demand. The ambient step only runs while `retention.enabled`
+  does the same on demand. The ambient step stops after 20 seconds, including
+  inside one large tree, and the next pass finishes it; `runs reclaim` has no
+  such limit. The ambient step only runs while `retention.enabled`
   is true, and it is independent of `delegate runs prune`, which removes the
   records themselves.
 - `processGroupTerminationGraceSec`: non-negative, finite number of seconds to
