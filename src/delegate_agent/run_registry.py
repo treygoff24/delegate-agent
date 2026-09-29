@@ -62,6 +62,7 @@ from delegate_agent.record_io import (  # noqa: F401  # existing registry API
     run_output_command,
     runs_dir,
     snapshot_command,
+    strip_live_pending_tool,
     timestamp_from_run_id,
     validate_finalize_wal,
 )
@@ -483,6 +484,8 @@ def terminal_selection_state(
 
 def publish_terminal_record_locked(registry_root: Path, run_id: str, record: JsonObject) -> None:
     run_path = run_directory(registry_root, run_id)
+    # A terminal record has no pending tool, however the record was assembled.
+    record = strip_live_pending_tool(dict(record))
     write_run_state(run_path, record)
     try:
         update_terminal_selection_locked(registry_root, run_id, record)

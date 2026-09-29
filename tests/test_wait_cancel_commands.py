@@ -448,6 +448,44 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
 
+    def test_cancelled_run_drops_the_live_pending_tool(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(proc)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=os.getpgid(proc.pid))
+        state_path = (
+            run_registry.run_directory(self.registry_root, run_id) / run_registry.STATE_FILE
+        )
+        state = json.loads(state_path.read_text())
+        state["pendingTool"] = {
+            "name": "mcp__hung",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "seconds": 9,
+        }
+        state["current"] = "waiting on tool mcp__hung for 13m"
+        state_path.write_text(json.dumps(state))
+        code, _out, err = self.run_cli(["--json", "cancel", alias])
+        self.assertEqual(code, 0, err)
+        proc.wait(timeout=5)
+        final = json.loads(state_path.read_text())
+        self.assertEqual(final["status"], "cancelled")
+        self.assertNotIn("pendingTool", final)
+        self.assertNotIn("current", final)
+
+    def test_terminal_merge_over_a_cancelled_record_drops_pending_tool(self):
+        current = {
+            "status": "cancelled",
+            "cancelRequested": True,
+            "pendingTool": {"name": "t", "seconds": 1},
+            "current": "waiting on tool t for 5m",
+        }
+        merged = run_registry.merge_terminal_record(current, {"status": "failed"})
+        self.assertEqual(merged["status"], "cancelled")
+        self.assertNotIn("pendingTool", merged)
+        self.assertNotIn("current", merged)
+
     def _send_coordinator_mail(self, alias: str, subject: str) -> None:
         from delegate_agent import mail
 

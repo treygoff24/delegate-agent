@@ -3191,6 +3191,7 @@ def _capture_tracked_process(
         terminal_seen_at: float | None = None
         stall_detail: JsonObject | None = None
         pending_refreshed_at = time.monotonic()
+        pending_published_generation = watchdog.pending_generation
         while True:
             now = time.monotonic()
             if (
@@ -3338,9 +3339,19 @@ def _capture_tracked_process(
                     next_progress_at = time.monotonic() + interval
             # A pending tool that emits nothing leaves no line to trigger a
             # persist; refresh the record so `current` shows the growing wait.
+            pending_generation = watchdog.pending_generation
             pending = watchdog.oldest_pending_tool(now)
             accumulator.pending_tool = pending
-            if (
+            if pending_generation != pending_published_generation:
+                # The oldest pending call changed or cleared while the child said
+                # nothing more: publish that now, or a finished tool stays shown
+                # as pending until the next event.
+                progress_dirty = True
+                maybe_persist_running()
+                if not progress_dirty:
+                    pending_published_generation = pending_generation
+                    pending_refreshed_at = now
+            elif (
                 pending is not None
                 and pending["seconds"] >= pending_tool.NOTICE_SECONDS
                 and now - pending_refreshed_at >= pending_tool.REFRESH_SECONDS
