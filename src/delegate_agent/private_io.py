@@ -92,7 +92,10 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
     deadline = time.monotonic() + _PRIVATE_READ_REPLACED_RETRY_SECONDS
     while True:
         try:
-            fd = open_private_file(path, os.O_RDONLY)
+            # O_NONBLOCK: opening a FIFO (or device) planted where a record belongs
+            # must not block; fstat below refuses it as not_regular. Regular-file
+            # reads are unaffected by the flag.
+            fd = open_private_file(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         except FileNotFoundError:
             raise BoundedReadError("not_found", f"record file not found: {path}") from None
         except OSError as exc:

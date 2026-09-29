@@ -8,11 +8,12 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import mail, rendering, run_registry, runner, wait_cancel_commands
+from delegate_agent import mail, private_io, rendering, run_registry, runner, wait_cancel_commands
 from delegate_agent.mail_core import MAIL_PROMPT_SUFFIX
 from tests.tracked_capture_helpers import make_context, read_report
 
@@ -119,6 +120,44 @@ class UnreadMailDamageTests(UnreadMailBase):
         self.assertIn("damaged or unreadable", extra["warnings"][0])
         self.assertIn("never read by it", extra["warnings"][0])
 
+    def _finishes(self, fn):
+        result: dict = {}
+
+        def call():
+            try:
+                result["value"] = fn()
+            except Exception as exc:  # surfaced below
+                result["error"] = exc
+
+        worker = threading.Thread(target=call, daemon=True)
+        worker.start()
+        worker.join(10)
+        self.assertFalse(worker.is_alive(), "blocked opening a FIFO")
+        return result
+
+    def test_a_fifo_named_like_mail_never_blocks_the_scan(self):
+        # The scan runs under the registry lock during cancel and finalize.
+        good = self.send("the real correction")
+        inbox = self.root / "mail" / "boxes" / self.ctx.run_id / "inbox"
+        os.mkfifo(inbox / "20260101-000000-fifo00.mail")
+        result = self._finishes(
+            lambda: mail.unread_mail_extra(
+                self.root, self.ctx.run_id, self.ctx.alias, mail_push=False
+            )
+        )
+        record = result["value"]["unreadMail"]
+        self.assertEqual(record["count"], 1)
+        self.assertEqual(record["messages"][0]["msgId"], good)
+        self.assertEqual(record["unreadable"], 1)
+
+    def test_the_bounded_record_reader_refuses_a_fifo_without_blocking(self):
+        fifo = self.root / "planted.json"
+        os.mkfifo(fifo)
+        result = self._finishes(lambda: private_io.read_private_text_bounded(fifo, max_bytes=1024))
+        error = result.get("error")
+        self.assertIsInstance(error, private_io.BoundedReadError)
+        self.assertEqual(error.reason, "not_regular")
+
     def test_only_a_malformed_file_is_still_visible(self):
         self.send("placeholder")
         inbox = self.root / "mail" / "boxes" / self.ctx.run_id / "inbox"
@@ -142,6 +181,35 @@ class UnreadMailFinalizationTests(UnreadMailBase):
             )
         self.assertIn("never read by it", read_report(self.ctx))
         self.assertIn("the P4 restore always refuses", read_report(self.ctx))
+
+    def test_mail_landing_after_the_first_scan_is_in_the_record_and_report(self):
+        # mail send delivers under the registry lock while the run reads as
+        # running; one landing after the runner's first scan must not be dropped.
+        self.send("first correction")
+        real = runner._record_unread_mail
+
+        def scan_then_deliver(ctx, extra):
+            warning = real(ctx, extra)
+            # The child has exited, so a send is normally refused as stale; a
+            # recorded pid that reads as alive (pid reuse) is the way through.
+            state_path = run_registry.run_directory(self.root, ctx.run_id) / run_registry.STATE_FILE
+            state = run_registry.load_run_state(self.root, ctx.run_id)
+            run_registry.write_json_atomic(state_path, {**state, "pid": os.getpid()})
+            self.send("second correction")
+            run_registry.write_json_atomic(state_path, state)
+            return warning
+
+        with mock.patch.object(runner, "_record_unread_mail", scan_then_deliver):
+            _code, payload = self.run_child()
+        state = run_registry.load_run_state(self.root, self.ctx.run_id)
+        for record in (state, payload):
+            self.assertEqual(record["unreadMail"]["count"], 2)
+            unread_warnings = [w for w in record["warnings"] if "never read by it" in w]
+            self.assertEqual(len(unread_warnings), 1, record["warnings"])
+            self.assertIn("2 mail messages were delivered", unread_warnings[0])
+        report = read_report(self.ctx)
+        self.assertIn("2 mail messages were delivered", report)
+        self.assertNotIn("1 mail message was delivered", report)
 
     def test_run_with_no_unread_mail_has_no_unread_field(self):
         _code, payload = self.run_child()

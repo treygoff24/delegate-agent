@@ -205,6 +205,16 @@ def _wait_state(registry_root: Path, run_id: str) -> JsonObject:
     return result
 
 
+def _with_record_warnings(payload: JsonObject, warnings: list[str]) -> list[str]:
+    """The terminal record's own warnings (unread mail, for one) plus this cancel's."""
+    recorded = payload.get("warnings")
+    merged = [w for w in recorded if isinstance(w, str)] if isinstance(recorded, list) else []
+    for warning in warnings:
+        if warning not in merged:
+            merged.append(warning)
+    return merged
+
+
 def _terminal_payload(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
     payload = _merged_view(registry_root, target.run_id, target)
     wait_state = _wait_state(registry_root, target.run_id)
@@ -1002,7 +1012,7 @@ def _urgent_cancel_without_lock(registry_root: Path, target: run_registry.RunTar
     if not recorded:
         warnings.append(URGENT_CANCEL_UNRECORDED_WARNING)
     payload = _terminal_payload(registry_root, target)
-    payload["warnings"] = warnings
+    payload["warnings"] = _with_record_warnings(payload, warnings)
     payload["registryLockBypassed"] = True
     if signal_refusal is not None:
         payload["signalRefusal"] = signal_refusal
@@ -1246,7 +1256,7 @@ def _cancel_target_under_lock(registry_root: Path, target: run_registry.RunTarge
 
         payload = _terminal_payload(registry_root, target)
         if warnings:
-            payload["warnings"] = warnings
+            payload["warnings"] = _with_record_warnings(payload, warnings)
         if signal_refusal is not None:
             payload["signalRefusal"] = signal_refusal
         return payload

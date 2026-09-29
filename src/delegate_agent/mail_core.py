@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import time
 from collections.abc import Mapping
@@ -977,6 +978,15 @@ def unread_mail_for_run(
         return {"count": 0, "unreadable": 1, "messages": []}
     for path in paths:
         if path.is_symlink():
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                # A FIFO or device named *.mail must never be opened here: this
+                # scan runs under the registry lock during cancel and finalize.
+                unreadable += 1
+                continue
+        except OSError:
+            unreadable += 1
             continue
         try:
             envelope, _body = _envelope_from_message(path)
