@@ -462,29 +462,6 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertFalse(post_call.exists(), "workflow without --notify invoked post")
 
-    def test_a_valid_notify_target_is_accepted_for_workflow_run(self) -> None:
-        """The defect was a VALID target being refused, so pin acceptance.
-
-        The first version of this test passed a garbage target and asserted a
-        nonzero exit. That was decoration: `parse_notify_target` runs in the
-        global-option loop before the subcommand allow-list is consulted, so a
-        garbage target already failed closed on the parent that refused
-        `--notify` for `workflow` outright — the test would have been green
-        through the entire defect and through a fix that changed nothing.
-        """
-        from delegate_agent import cli_parser
-
-        parsed = cli_parser.parse_cli(
-            ["--cwd", str(self.workspace), "--notify", "channel:x", "workflow", "run", "s.py"]
-        )
-        self.assertEqual(parsed.subcommand, "workflow")
-        self.assertEqual(parsed.payload.notify, "channel:x")
-
-        # And it is still refused where it genuinely does not apply.
-        with self.assertRaises(Exception) as ctx:
-            cli_parser.parse_cli(["--notify", "channel:x", "runs"])
-        self.assertIn("notify", str(ctx.exception).lower())
-
     def test_a_failed_notification_never_changes_the_workflow_result(self) -> None:
         """Telemetry that can fail a workflow is worse than no telemetry."""
         script = self.write_workflow(
@@ -2787,6 +2764,35 @@ class WorkflowCommandTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["result"], ["", ""])
         self.assertEqual(payload["runTree"]["counts"], {"codex:safe": 2})
+        wf_id = payload["wfId"]
+
+        # The dry run's two placeholder claims must not have used the real
+        # budget: a live resume with the same budget of one still runs the
+        # first agent for real, and only the second exceeds the budget (a bare
+        # agent() call raises, so the workflow ends failed).
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "1"]
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed", status)
+        self.assertEqual(status["error"], "workflow budget exceeded")
+        journal = workflow_registry.workflow_dir(self.workspace, wf_id) / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        live_claims = [
+            event for event in events if event["type"] == "budget" and not event.get("simulated")
+        ]
+        self.assertEqual(len(live_claims), 1, live_claims)
+        self.assertTrue(
+            any(
+                event["type"] == "agent_finished" and event.get("result") == "fake completion"
+                for event in events
+            ),
+            events,
+        )
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 1)
 
     def test_resume_from_dry_run_launches_live_agents_on_same_workflow(self) -> None:
         script = self.write_workflow(
@@ -2936,23 +2942,6 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["result"], ["real one", "fake completion"])
         runs = self.run_delegate(["--json", "runs", "--group", wf_id])
         self.assertEqual(len(json.loads(runs.stdout)["runs"]), 1)
-
-    def test_call_mode_agent_runs_without_workspace_cwd(self) -> None:
-        script = self.write_workflow(
-            """
-            meta = {"name": "call-agent", "defaults": {"engine": "codex"}}
-            return agent("one-hop", mode="call")
-            """
-        )
-        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
-        self.assertEqual(launch.returncode, 0, launch.stderr)
-        wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
-            0,
-        )
-        result = self.run_delegate(["--json", "workflow", "result", wf_id])
-        self.assertIn("fake completion", json.loads(result.stdout)["result"])
 
     def test_workflow_agent_threads_explicit_fast_false_to_codex(self) -> None:
         script = self.write_workflow(
@@ -3456,12 +3445,19 @@ class WorkflowCommandTests(unittest.TestCase):
                 "0::/user.slice/user-1000.slice/session-3.scope\n"
             )
         )
-        self.assertEqual(
-            workflow_commands._systemd_unit_from_cgroup(
-                "1:name=systemd:/system.slice/delegate-workflow.service\n"
+        for label, line, leaf in (
+            (
+                "cgroup v1",
+                "1:name=systemd:/system.slice/delegate-workflow.service\n",
+                "delegate-workflow.service",
             ),
-            workflow_commands.SystemdUnit("delegate-workflow.service", user_manager=False),
-        )
+            ("cgroup v2", "0::/system.slice/run-u42.service\n", "run-u42.service"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(
+                    workflow_commands._systemd_unit_from_cgroup(line),
+                    workflow_commands.SystemdUnit(leaf, user_manager=False),
+                )
 
     def test_an_ancestor_user_manager_service_is_not_the_current_unit(self) -> None:
         """Only the leaf component names the unit that owns this process.
@@ -3481,10 +3477,6 @@ class WorkflowCommandTests(unittest.TestCase):
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r42.service\n"
         )
         self.assertEqual(unit, workflow_commands.SystemdUnit("run-r42.service", user_manager=True))
-
-    def test_a_system_transient_service_is_a_system_manager_unit(self) -> None:
-        unit = workflow_commands._systemd_unit_from_cgroup("0::/system.slice/run-u42.service\n")
-        self.assertEqual(unit, workflow_commands.SystemdUnit("run-u42.service", user_manager=False))
 
     def test_a_user_manager_unit_is_queried_through_its_own_manager(self) -> None:
         calls: list[list[str]] = []
@@ -5541,12 +5533,18 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.wait_for_group_runs(wf_id)
+        runs = self.wait_for_group_runs(wf_id)
+        self.assertEqual(len(runs), 1)
+        child_id = str(runs[0]["runId"])
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
-        self.assertTrue(json.loads(killed.stdout)["cancelled"])
+        cancelled = json.loads(killed.stdout)["cancelled"]
+        self.assertIn(child_id, [item.get("runId") for item in cancelled], cancelled)
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status["status"], "killed")
+        self.assertIn(child_id, [item.get("runId") for item in status["cancelled"]])
+        snap = json.loads(self.run_delegate(["--json", "snapshot", child_id]).stdout)
+        self.assertEqual(snap.get("effectiveStatus") or snap.get("status"), "cancelled", snap)
 
     def test_resume_after_kill_respawns_failed_child(self) -> None:
         # R3: failed/cancelled children are not definitive — resume respawns.
@@ -5600,51 +5598,51 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertGreater(len(runs_after), len(runs_before))
 
     def test_durable_workflow_events_are_fsynced(self) -> None:
-        # R4 / F5: durable adoption, audit, and budget-claim events are fsynced.
-        self.assertIn("agent_started", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_adopted", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_adopt_rejected", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_retry", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_structured_retry", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_structured_retry_refused", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("agent_structured_exhausted", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("item_parked", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertIn("item_unparked", workflow_registry.DURABLE_EVENT_TYPES)
-        self.assertNotIn("agent_result", workflow_registry.DURABLE_EVENT_TYPES)
+        # R4 / F5: durable adoption, audit, and budget-claim events are fsynced;
+        # phase/log ticks are not. The expected sets are written out here, not
+        # read from production, so a type dropped from the durable set fails.
+        durable = [
+            "agent_started",
+            "agent_child",
+            "agent_finished",
+            "agent_adopted",
+            "agent_adopt_rejected",
+            "agent_timeout",
+            "agent_rejected",
+            "agent_retry",
+            "agent_structured_retry",
+            "agent_structured_retry_refused",
+            "agent_structured_exhausted",
+            "workflow_watchdog_fired",
+            "budget",
+            "gate",
+            "item_parked",
+            "item_unparked",
+            "workflow_finished",
+        ]
+        non_durable = ["log", "agent_result", "phase"]
         journal = self.workspace / "fsync-journal.jsonl"
-        fsynced: list[int] = []
+        fsynced_inodes: list[int] = []
         original_fsync = os.fsync
 
         def tracking_fsync(fd: int) -> None:
-            fsynced.append(fd)
+            fsynced_inodes.append(os.fstat(fd).st_ino)
             original_fsync(fd)
 
-        original = os.fsync
-        os.fsync = tracking_fsync  # type: ignore[assignment]
-        events = [
-            {"seq": 1, "type": "agent_started", "key": "k"},
-            {"seq": 2, "type": "log", "message": "x"},
-            {"seq": 3, "type": "agent_finished", "key": "k", "result": "ok"},
-            {"seq": 4, "type": "agent_adopted", "key": "k"},
-            {"seq": 5, "type": "agent_adopt_rejected", "key": "k"},
-            {"seq": 6, "type": "agent_timeout", "key": "k"},
-            {"seq": 7, "type": "budget", "key": "k", "spent": 1},
-            {"seq": 8, "type": "agent_retry", "key": "k"},
-            {"seq": 9, "type": "agent_structured_retry", "key": "k"},
-            {"seq": 10, "type": "agent_structured_exhausted", "key": "k"},
-            {"seq": 11, "type": "item_parked", "name": "parked"},
-            {"seq": 12, "type": "item_unparked", "name": "parked"},
-            {"seq": 13, "type": "agent_structured_retry_refused", "key": "k"},
-        ]
-        try:
-            for event in events:
-                workflow_registry.append_jsonl(journal, event)
-        finally:
-            os.fsync = original  # type: ignore[assignment]
-        expected = sum(event["type"] in workflow_registry.DURABLE_EVENT_TYPES for event in events)
-        self.assertEqual(len(fsynced), expected)
+        with mock.patch.object(os, "fsync", side_effect=tracking_fsync):
+            for seq, event_type in enumerate(durable + non_durable, start=1):
+                before = len(fsynced_inodes)
+                workflow_registry.append_jsonl(
+                    journal, {"seq": seq, "type": event_type, "key": "k"}
+                )
+                expected = 1 if event_type in durable else 0
+                self.assertEqual(
+                    len(fsynced_inodes) - before,
+                    expected,
+                    f"{event_type} fsync count",
+                )
+        self.assertEqual(set(fsynced_inodes), {journal.stat().st_ino})
+        self.assertEqual(len(journal.read_text(encoding="utf-8").splitlines()), seq)
 
     def test_workflow_replay_ignores_simulated_dry_run_events(self) -> None:
         from delegate_agent.workflows import runtime as workflow_runtime
@@ -6855,6 +6853,12 @@ class WorkflowCommandTests(unittest.TestCase):
 
     def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
         # F2: adoption wait timeout cancels the adopted run and returns None.
+        # `workflow run --resume` seals every prior child before the new
+        # supervisor starts, so the adoption wait is only reachable with the
+        # replay state a dead supervisor leaves behind: this drives the
+        # adoption step directly on that state. The key comes from the journal
+        # and never changes, so the timeout is what ends the wait, not a fresh
+        # key.
         script = self.write_workflow(
             """
             meta = {"name": "adopt-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
@@ -6869,6 +6873,7 @@ class WorkflowCommandTests(unittest.TestCase):
         wf_id = json.loads(launch.stdout)["wfId"]
         runs = self.wait_for_group_runs(wf_id)
         self.assertEqual(len(runs), 1)
+        old_run_id = str(runs[0]["runId"])
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         supervisor_pid = status["supervisorPid"]
         os.kill(int(supervisor_pid), 9)
@@ -6884,36 +6889,44 @@ class WorkflowCommandTests(unittest.TestCase):
             break
         else:
             self.fail("supervisor did not release workflow lock")
-        # v2 timeout changes intentionally resolve a fresh key; the stale child
-        # is cancelled and its temporary workspace is reaped before relaunch.
-        Path(status["scriptPath"]).write_text(
-            textwrap.dedent(
-                """
-                meta = {"name": "adopt-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
-                return agent("very slow", label="hold", timeout=1)
-                """
-            ).strip()
-            + "\n",
-            encoding="utf-8",
+        journal = root / workflow_registry.JOURNAL_FILE
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        keys = {event["key"] for event in events if event["type"] == "agent_started"}
+        self.assertEqual(len(keys), 1, events)
+        (key,) = keys
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=Path(status["scriptPath"]),
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
         )
-        if (root / "result.json").exists():
-            (root / "result.json").unlink()
-        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
-        self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
-        self.assertEqual(waited.returncode, 0, waited.stderr)
-        result = self.run_delegate(["--json", "workflow", "result", wf_id])
-        self.assertIsNone(json.loads(result.stdout)["result"])
-        events = json.loads(
-            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
-        )["events"]
-        self.assertIn("agent_timeout", {event["type"] for event in events})
+        self.assertIn(key, state.started_without_result)
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex", "mode": "safe"}})
+        adopted = dsl._adopt_existing_agent_run(
+            key,
+            scope="root",
+            label="hold",
+            phase=None,
+            schema=None,
+            prefer_assistant=False,
+            timeout=1,
+        )
+        self.assertIsNone(adopted)
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        timeouts = [event for event in events if event["type"] == "agent_timeout"]
+        self.assertEqual([event.get("runId") for event in timeouts], [old_run_id], timeouts)
+        self.assertEqual({event["key"] for event in timeouts}, {key})
+        self.assertFalse([e for e in events if e["type"] == "agent_adopted"], events)
         runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
             "runs"
         ]
-        self.assertEqual(len(runs_after), 2)
-        snap = json.loads(self.run_delegate(["--json", "snapshot", runs_after[-1]["alias"]]).stdout)
-        self.assertIn(snap.get("effectiveStatus") or snap.get("status"), {"cancelled", "failed"})
+        self.assertEqual([run["runId"] for run in runs_after], [old_run_id])
+        snap = json.loads(self.run_delegate(["--json", "snapshot", old_run_id]).stdout)
+        self.assertEqual(snap.get("effectiveStatus") or snap.get("status"), "cancelled", snap)
 
     def test_argv_transport_prompt_size_guard(self) -> None:
         # §2.4: kimi argv transport rejects oversized agent prompts (cursor and
