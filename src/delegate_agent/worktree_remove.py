@@ -11,6 +11,7 @@ from pathlib import Path
 
 from delegate_agent import isolation, run_registry
 from delegate_agent import worktree_mgmt as wm
+from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
@@ -439,6 +440,132 @@ def _remove_present_worktree_path(
     )
 
 
+def _nested_worktree_targets(
+    parent_record: PersistentWorktreeRecord,
+    registry_root: Path,
+) -> list[tuple[Path, PersistentWorktreeRecord]]:
+    """Live worktree records that runs launched with ``--cwd <this worktree>`` registered.
+
+    Such a run registers in the worktree's own ``.delegate``, so the owning
+    Registry never lists its worktree; removing the parent would orphan it.
+    """
+    execution = parent_record.get("executionCwd")
+    if not isinstance(execution, str) or not execution:
+        return []
+    nested_root = run_registry.registry_root(Path(execution))
+    try:
+        if not run_registry.index_path(nested_root).exists():
+            return []
+        if nested_root.resolve() == registry_root.resolve():
+            return []
+        records = wm.load_persistent_records(nested_root)
+    except (OSError, RuntimeError, ValueError, DelegateError):
+        return []
+    return [
+        (nested_root, record)
+        for record in records
+        if record.get("registryWorktreeStatus") != STATUS_REMOVED
+    ]
+
+
+def _nested_worktree_blockers(
+    parent_record: PersistentWorktreeRecord,
+    registry_root: Path,
+    *,
+    options: RemoveWorktreeOptions,
+    ledger_globs: tuple[str, ...],
+) -> list[JsonObject]:
+    """One entry per nested worktree that a plain remove of it would refuse."""
+    blockers: list[JsonObject] = []
+    parent_cwd = str(parent_record.get("executionCwd") or "")
+    for nested_root, record in _nested_worktree_targets(parent_record, registry_root):
+        blockers.extend(
+            _nested_worktree_blockers(
+                record, nested_root, options=options, ledger_globs=ledger_globs
+            )
+        )
+        inspection = wm.inspect_worktree(
+            nested_root,
+            record,
+            kill_live=options.kill_live,
+            check_merge=not options.keep_branch and not options.force_branch,
+            retirement_ignore_globs=ledger_globs,
+        )
+        if inspection.status == STATUS_REMOVED:
+            continue
+        decision = wm.evaluate_worktree_safety(
+            inspection,
+            discard_uncommitted=options.discard_uncommitted,
+            force_branch=options.force_branch,
+            keep_branch=options.keep_branch,
+            kill_live=options.kill_live,
+            require_merged=True,
+        )
+        if decision.reason is None:
+            continue
+        alias = str(record.get("alias") or record.get("runId"))
+        execution = record.get("executionCwd")
+        flag = {
+            "dirty": " --discard-uncommitted",
+            "dirty_check_failed": " --discard-uncommitted",
+            "unmerged_branch": " --keep-branch",
+            "merge_check_failed": " --keep-branch",
+        }.get(decision.reason, "")
+        blockers.append(
+            {
+                "alias": alias,
+                "runId": record.get("runId"),
+                "executionCwd": execution,
+                "branch": record.get("branch"),
+                "reason": "dirty_worktree" if decision.reason == "dirty" else decision.reason,
+                "command": f"delegate --cwd {parent_cwd} worktree remove {alias}{flag}",
+            }
+        )
+    return blockers
+
+
+def _remove_nested_worktrees(
+    parent_record: PersistentWorktreeRecord,
+    registry_root: Path,
+    *,
+    options: RemoveWorktreeOptions,
+) -> list[JsonObject]:
+    """Remove finished nested runs' worktrees first; refuse, naming each, if any is unsafe."""
+    blockers = _nested_worktree_blockers(
+        parent_record, registry_root, options=options, ledger_globs=options.ledger_globs
+    )
+    alias = str(parent_record.get("alias") or parent_record.get("runId"))
+    if blockers:
+        listing = "; ".join(
+            f"{b['alias']} ({b['reason']}) at {b['executionCwd']}" for b in blockers
+        )
+        payload = wm._error_payload(
+            "nested_worktrees_block_remove",
+            f"{alias} has {len(blockers)} nested worktree(s) from runs launched with --cwd "
+            f"inside it: {listing}. Removing {alias} would orphan them (only raw git could "
+            "clean them up). Remove each nested worktree first with its `command`, or "
+            "re-run this remove with the same discard flags to take them along.",
+            record=parent_record,
+            next_actions=[str(b["command"]) for b in blockers],
+        )
+        payload["nestedWorktrees"] = blockers
+        raise wm.WorktreeManagementError(payload)
+    removed: list[JsonObject] = []
+    for nested_root, record in _nested_worktree_targets(parent_record, registry_root):
+        removed.append(
+            remove_worktree(
+                nested_root,
+                handle=str(record.get("runId")),
+                discard_uncommitted=options.discard_uncommitted,
+                force_branch=options.force_branch,
+                keep_branch=options.keep_branch,
+                kill_live=options.kill_live,
+                retirement_ignore_globs=options.ledger_globs,
+            )
+        )
+    return removed
+
+
 def remove_worktree(
     registry_root: Path,
     *,
@@ -495,9 +622,22 @@ def remove_worktree(
         if plan.status == STATUS_MISSING:
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
+        nested_removed = _remove_nested_worktrees(record, registry_root, options=options)
         # The policy above judged effective dirt, so what remains is dirt the
         # policy discounts (seeded or ledger files). Git only removes a path
         # holding any of it with its own force, which is now authorized.
-        return _remove_present_worktree_path(
+        payload = _remove_present_worktree_path(
             registry_root, plan, options=replace(options, discard_uncommitted=True)
         )
+        if nested_removed:
+            payload["nestedRemoved"] = [
+                {
+                    "alias": item.get("alias"),
+                    "runId": item.get("runId"),
+                    "executionCwd": item.get("executionCwd"),
+                    "pathRemoved": item.get("pathRemoved"),
+                    "ok": item.get("ok"),
+                }
+                for item in nested_removed
+            ]
+        return payload

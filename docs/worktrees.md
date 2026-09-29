@@ -32,7 +32,11 @@ delegate --isolation worktree kimi work "Implement the scoped change and report 
 Dirty source checkouts automatically seed the new persistent worktree with
 uncommitted tracked edits and untracked non-ignored files. Delegate emits a
 `dirty_source_auto_included` warning with both counts. `--include-dirty` remains
-available as an explicit request and is a no-op when the source is clean:
+available as an explicit request and is a no-op when the source is clean. Safe
+runs with worktree isolation (reviews) also mirror the dirty source into their
+copy; the launcher gets a `dirty_source_mirrored` warning (envelope `warnings`
+and the dry-run output) with the file count and up to five paths, so a review
+launched while another lane is mid-edit is visible:
 
 ```bash
 delegate --isolation worktree cursor work --include-dirty "Implement using my local edits."
@@ -416,10 +420,17 @@ prune also look inside the worktree itself: a `running` run in its own
 A nested registry that exists but cannot be read, or holds a run whose state
 cannot be told, blocks removal as `nested_registry_unreadable` (same override):
 an unreadable answer is not a "no". A worktree with no nested registry is
-unaffected. The check protects a live child only. That registry is inside the worktree, so once the
-child finishes, removing the parent deletes the child's run record along with
-it; the branch and its commits are what survive. Read or `snapshot` a nested
-run's result with `--cwd <worktree>` before removing its parent.
+unaffected. Once a nested run has finished, `worktree remove` of the parent
+also removes that run's worktree first, under the same rules as a normal
+remove (`nestedRemoved` in the result lists them). If a nested worktree is
+dirty, unmerged or otherwise refused, the parent is left alone and the error
+`nested_worktrees_block_remove` names each one in `nestedWorktrees` with its
+`reason` and the exact `delegate --cwd <parent worktree> worktree remove
+<alias> [flags]` command in `nextActions`; re-running the parent's remove with
+`--discard-uncommitted`/`--force` takes clean-enough nested ones along. The
+nested run's record lives in the parent's `.delegate/` and goes away with it,
+so read or `snapshot` a nested run's result with `--cwd <worktree>` before
+removing its parent.
 
 ## Reap old pooled paths
 

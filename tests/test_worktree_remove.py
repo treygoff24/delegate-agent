@@ -305,6 +305,9 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(payload["code"], "no_matching_worktrees")
             self.assertEqual(payload["group"], "nope")
             self.assertEqual(payload["matched"], 0)
+            self.assertEqual(payload["registryRoot"], str(self._registry_root(path)))
+            self.assertIn("delegate worktree list", payload["nextActions"])
+            self.assertIn("Registry", payload["message"])
             # The unrelated run is untouched.
             self.assertTrue(Path(other_wt).exists())
 
@@ -1062,6 +1065,78 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(total, 1)
             self.assertEqual(warnings, [])
             self.assertIn("scratch.txt", paths[0])
+
+    def _seed_parent_with_nested(self, fake_home: str, *, nested_dirty: bool):
+        _repo, path = self._make_repo()
+        parent_branch = "delegate/cursor-parent"
+        parent_wt = str(Path(fake_home) / "wt" / "cursor-parent")
+        self._seed_persistent_run(
+            path, alias="cursor-parent", branch=parent_branch, execution_cwd=parent_wt
+        )
+        self._create_worktree_at(path, parent_branch, parent_wt)
+        # A run launched with --cwd <parent worktree> registers in the parent
+        # worktree's own Registry, and its worktree is cut from the parent.
+        nested_branch = "delegate/codex-nested"
+        nested_wt = str(Path(fake_home) / "wt" / "codex-nested")
+        self._seed_persistent_run(
+            parent_wt,
+            alias="codex-nested",
+            harness="codex",
+            branch=nested_branch,
+            execution_cwd=nested_wt,
+        )
+        self._create_worktree_at(
+            parent_wt, nested_branch, nested_wt, dirty_file="scratch.txt" if nested_dirty else None
+        )
+        return path, parent_wt, nested_wt
+
+    def test_remove_parent_also_removes_clean_finished_nested_worktree(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, nested_wt = self._seed_parent_with_nested(
+                fake_home, nested_dirty=False
+            )
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                home=fake_home,
+            )
+
+            payload = json.loads(out)
+            self.assertEqual(code, 0, out)
+            self.assertFalse(Path(parent_wt).exists())
+            self.assertFalse(Path(nested_wt).exists())
+            self.assertEqual([item["alias"] for item in payload["nestedRemoved"]], ["codex-nested"])
+            listed = git("worktree", "list", "--porcelain", cwd=path).stdout
+            self.assertNotIn("codex-nested", listed)
+
+    def test_remove_parent_refuses_when_nested_worktree_is_dirty(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            path, parent_wt, nested_wt = self._seed_parent_with_nested(fake_home, nested_dirty=True)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent"],
+                home=fake_home,
+            )
+
+            payload = json.loads(out)
+            self.assertEqual(code, errors_api.EXIT_USAGE)
+            self.assertEqual(payload["code"], "nested_worktrees_block_remove")
+            self.assertEqual(payload["nestedWorktrees"][0]["alias"], "codex-nested")
+            self.assertEqual(payload["nestedWorktrees"][0]["reason"], "dirty_worktree")
+            self.assertIn(
+                f"delegate --cwd {parent_wt} worktree remove codex-nested --discard-uncommitted",
+                payload["nextActions"],
+            )
+            self.assertTrue(Path(parent_wt).exists())
+            self.assertTrue(Path(nested_wt).exists())
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-parent", "--force"],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(Path(parent_wt).exists())
+            self.assertFalse(Path(nested_wt).exists())
 
 
 if __name__ == "__main__":
