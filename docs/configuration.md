@@ -316,7 +316,7 @@ Controls local run recording.
   touched, and the run state records `scratchReclaimedAt` and
   `scratchReclaimedBytes`. `delegate runs reclaim [--older-than DAYS] [--dry-run]`
   does the same on demand. The ambient step stops after 20 seconds, including
-  inside one large tree, and the next pass finishes it; `runs reclaim` has no
+  inside one large tree, and resumes ten minutes later; `runs reclaim` has no
   such limit. The ambient step only runs while `retention.enabled`
   is true, and it is independent of `delegate runs prune`, which removes the
   records themselves.
@@ -346,8 +346,9 @@ Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,
 or cancellation; if another retention pass is already active, a concurrent
 ambient pass returns immediately. The scratch reclamation step of a pass has a
-20-second budget; a pass that runs out of time leaves the rest for the next one
-and does not start the once-a-minute cadence window.
+20-second budget; a pass that runs out of time leaves the rest, and implicit
+scratch reclamation then waits ten minutes before trying again (raw-log
+archival keeps its once-a-minute cadence).
 
 ### `cursor`
 
