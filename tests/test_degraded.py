@@ -351,6 +351,111 @@ class AssessTests(unittest.TestCase):
                 self.assertIn("succeeded", warning)
 
 
+ANNOUNCING_FINALS = {
+    "write_report": "Now let me write my report.",
+    "write_report_after_reading": (
+        "I have read all 40 files and the review is complete in my head. Now let me write my report."
+    ),
+    "run_tests": "Next, I'll run the tests.",
+    "apply_fix": "Let me apply the fix now.",
+    "curly": "Okay, I\u2019ll now write the summary.",
+    "going_to": "The diff looks right. I'm going to run the full suite.",
+    "lets": "Let's create the file.",
+    "then": "Then I will commit the change.",
+}
+FINISHED_SHORT_ENDINGS = {
+    "let_me_know_docs": "Done. Tests pass (42/42). Let me know if you want the docs updated.",
+    "let_me_know_else": "Fixed the parser bug in parser.py. Let me know if anything else is needed.",
+    "let_me_know_bare": "All three files are updated. Let me know.",
+    "past_summary": "I wrote the report to reports/review.md and ran the suite: 42 passed.",
+    "leave_rest": "Fixed the import. I'll leave the rest to you.",
+    "recommend": "Reviewed the diff; no issues. Next, I'd recommend running the tests.",
+    "offer_if": "Patch applied and verified. I'll write the changelog entry if you want one.",
+    "offer_when": "Fix is in. I'll run the gate when you say so.",
+    "question": "The fix is in and green. Shall I write the docs now?",
+    "next_steps_list": "Done with the fix. Next steps: run the docs build, then release.",
+    "plain_done": "All done.",
+    "now_passes": "Fixed the bug. Now the suite passes.",
+    "report_shaped": "## Summary\n\n- Fixed parser\n- Added tests\n\nNow let me write my report.",
+    "long": "x. " * 300 + "Now let me write my report.",
+}
+AWAITING_FINALS = {
+    "atlasos": "Awaiting approval of the bounded implementation design",
+    "terra": "Awaiting approval for the bounded implementation design.",
+    "your_approval": "I've drafted the plan. Waiting for your approval before I implement it.",
+    "confirm_proceed": "The design is ready. Please confirm to proceed with the changes.",
+    "should_i": "I have a plan for the fix. Should I proceed?",
+    "pending": "Plan written; pending approval to begin the implementation.",
+}
+NOT_AWAITING_FINALS = {
+    "work_done": "Implemented the fix and tests pass. Awaiting your review of the diff.",
+    "no_gate_word": "Nothing found. Awaiting your decision on next steps.",
+    "negated": "I am not waiting for approval; I am going ahead with the implementation.",
+    "long": "Fixed parser.py. " * 60 + "Awaiting approval for the implementation.",
+}
+
+
+class AnnouncingNextStepTests(unittest.TestCase):
+    def test_each_announced_next_step_is_flagged(self):
+        for name, text in ANNOUNCING_FINALS.items():
+            with self.subTest(name):
+                self.assertIsNotNone(degraded.announcing_next_step(text), text)
+
+    def test_the_last_sentence_is_the_evidence(self):
+        clause = degraded.announcing_next_step(ANNOUNCING_FINALS["write_report_after_reading"])
+        self.assertEqual(clause, "Now let me write my report.")
+
+    def test_finished_short_reports_and_sign_offs_are_not_flagged(self):
+        for name, text in FINISHED_SHORT_ENDINGS.items():
+            with self.subTest(name):
+                self.assertIsNone(degraded.announcing_next_step(text), text)
+
+    def test_only_the_last_sentence_counts(self):
+        self.assertIsNone(degraded.announcing_next_step("Let me run it. It passed: 12/12."))
+
+    def test_assess_reports_the_reason_with_evidence_and_a_resume_command(self):
+        result = degraded.assess("Now let me write my report.")
+        self.assertEqual(result.reason, "ended_announcing_next_step")
+        self.assertIn("Now let me write my report.", result.evidence[0])
+        self.assertIn("delegate resume", result.warning())
+        self.assertIn("degraded=ended_announcing_next_step:", result.warning())
+
+    def test_assess_keeps_the_waiting_reason_ahead_of_the_announcement(self):
+        result = degraded.assess("Waiting on the gate. Now let me write my report.")
+        self.assertEqual(result.reason, degraded.DEGRADED_ENDED_WAITING)
+
+
+class AwaitingInputTests(unittest.TestCase):
+    def test_each_parked_message_is_flagged_in_work_mode_with_no_changes(self):
+        for name, text in AWAITING_FINALS.items():
+            with self.subTest(name):
+                self.assertIsNotNone(degraded.awaiting_input(text), text)
+                result = degraded.assess(text, mode="work", files_changed=False)
+                self.assertEqual(result.reason, "ended_awaiting_input")
+                self.assertIn('delegate resume <run> "Approved', result.warning())
+
+    def test_unknown_change_state_falls_back_to_the_text_signal(self):
+        result = degraded.assess(AWAITING_FINALS["atlasos"], mode="work", files_changed=None)
+        self.assertEqual(result.reason, degraded.DEGRADED_AWAITING_INPUT)
+
+    def test_a_run_that_changed_files_is_not_parked(self):
+        for text in AWAITING_FINALS.values():
+            self.assertIsNone(degraded.assess(text, mode="work", files_changed=True), text)
+
+    def test_only_work_mode_can_be_awaiting_input(self):
+        for mode in ("safe", "call", None):
+            self.assertIsNone(degraded.assess(AWAITING_FINALS["atlasos"], mode=mode), mode)
+
+    def test_reports_that_hand_over_finished_work_or_deny_the_wait_are_not_flagged(self):
+        for name, text in NOT_AWAITING_FINALS.items():
+            with self.subTest(name):
+                self.assertIsNone(degraded.assess(text, mode="work", files_changed=False), text)
+
+    def test_the_existing_requester_exclusion_still_holds_for_the_waiting_reason(self):
+        self.assertIsNone(degraded.waiting_on_unfinished_work(AWAITING_FINALS["atlasos"]))
+        self.assertIsNone(degraded.waiting_on_unfinished_work(AWAITING_FINALS["your_approval"]))
+
+
 def _tasks_changed(*descriptions):
     return {
         "type": "system",

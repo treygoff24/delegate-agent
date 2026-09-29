@@ -3950,6 +3950,12 @@ def _finalize_tracked_run(
         degraded_verdict = degraded.assess(
             None if ctx.structured_output else child_report_text,
             background_tasks=final_accumulator.background_tasks_at_result or (),
+            mode=ctx.mode,
+            files_changed=(
+                outcome.work_summary_shows_changes(merged_extra.get("workSummary"))
+                if isinstance(merged_extra.get("workSummary"), dict)
+                else None
+            ),
         )
         if degraded_verdict is not None:
             merged_extra.update(degraded_verdict.extra())

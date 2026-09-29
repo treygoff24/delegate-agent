@@ -324,6 +324,28 @@ class DegradedDetectionTests(DegradedRunsBase):
         payload = self.launch("work", "do the round")
         self.assertNotIn("degraded", payload)
 
+    def test_work_run_ending_on_an_announced_step_is_degraded(self):
+        final = "I have read every file. Now let me write my report."
+        self.script([system_event("init"), assistant_text(final), result_event(final)])
+        payload = self.launch("work", "review the code")
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIs(payload["degraded"], True)
+        self.assertEqual(payload["degradedReason"], "ended_announcing_next_step")
+
+    def test_work_run_parked_on_approval_with_no_changes_is_degraded(self):
+        final = "Awaiting approval of the bounded implementation design"
+        self.script([system_event("init"), assistant_text(final), result_event(final)])
+        payload = self.launch("work", "implement the design")
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIs(payload["degraded"], True)
+        self.assertEqual(payload["degradedReason"], "ended_awaiting_input")
+
+    def test_safe_run_asking_for_approval_is_not_degraded(self):
+        final = "Awaiting approval of the bounded implementation design"
+        self.script([system_event("init"), assistant_text(final), result_event(final)])
+        payload = self.launch("safe", "review the design")
+        self.assertNotIn("degraded", payload)
+
     def test_a_failed_run_is_not_marked_degraded(self):
         # Degraded means "succeeded, but ended mid-job". A failed run is just failed.
         self.script(
@@ -578,6 +600,24 @@ class TurnEndClauseTests(unittest.TestCase):
                 with self.subTest(engine=engine, mode=mode):
                     framed = self.frame(engine=engine, mode=mode)
                     self.assertEqual(framed.count(prompt_instructions.TURN_END_INSTRUCTION), 1)
+
+    def test_work_prompt_says_nobody_can_approve_and_safe_prompt_does_not(self):
+        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi"):
+            with self.subTest(engine=engine):
+                work = self.frame(engine=engine, mode="work")
+                self.assertIn("Nobody can answer a question or approve a step", work)
+                self.assertIn("as the approval to carry it out", work)
+                self.assertIn("plan, a review, or a read-only answer", work)
+                self.assertIn("says exactly what blocks you", work)
+                self.assertEqual(work.count(prompt_instructions.WORK_NO_APPROVAL_INSTRUCTION), 1)
+                safe = self.frame(engine=engine, mode="safe")
+                self.assertNotIn("approve a step", safe)
+        self.assertNotIn("approve a step", self.frame(mode="call"))
+        self.assertNotIn("approve a step", self.frame(mode=""))
+
+    def test_reframing_a_work_prompt_does_not_repeat_the_approval_sentence(self):
+        once = self.frame(mode="work")
+        self.assertEqual(self.frame(prompt=once, mode="work"), once)
 
     def test_the_clause_is_two_sentences_and_says_what_matters(self):
         body = prompt_instructions.TURN_END_INSTRUCTION.split("\n\n", 1)[1].strip()

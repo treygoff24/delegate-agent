@@ -1663,6 +1663,25 @@ Nothing fails a Run or a workflow step on its own; the caller decides.
   and the message did not read as waiting. This catches a finished-looking report
   that abandoned a task. Only Claude emits the event; an older Claude Code that
   does not gets the text check only.
+- `ended_announcing_next_step`: the child's final message is short (under 400
+  characters), not shaped like a finished report, and its last sentence announces
+  an action it was about to take ("Now let me write my report.", "Next, I'll run
+  the tests.", "Let me apply the fix now."). The turn ended before the action ran,
+  so a report or deliverable it was about to write may not exist. Sign-offs ("Let
+  me know if you want the docs updated"), offers ("I'll write it if you want
+  one"), questions, past-tense summaries, and long or report-shaped messages never
+  match. Next command: check the deliverable, then `delegate resume <run> "Do the
+  step you announced, then finish with a full report"`. `--expect-file` still turns
+  a missing deliverable into a failure; this reason covers Runs that named none.
+- `ended_awaiting_input`: a `work` Run's short final message says it is awaiting
+  approval, confirmation, a decision, or an answer before it will implement,
+  design, or change anything ("Awaiting approval of the bounded implementation
+  design"), and the Run changed no files (from its work summary; when the Run has
+  no work summary the text alone decides). Nobody can answer during a Run, so the
+  job never started. Never applies to `safe` or `call` Runs. This is separate from
+  the requester exclusion above, which still applies to
+  `ended_waiting_on_background_work`. Next command: `delegate resume <run>
+  "Approved: carry out the task now, do not ask for confirmation"`.
 
 Prevention for Claude work Runs (and followups of them): Delegate sets
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment, which removes
@@ -1679,6 +1698,12 @@ overridden the same way, with a `workspace env NAME ignored` warning. Every fram
 rule, just before the completion-report requirement, that ending the turn ends the
 Run and that long jobs must run in the foreground and finish before the final
 message. Verbatim slash pass-through prompts are not rewritten and do not get it.
+`work` prompts (not `safe`) add a further two sentences to that rule: nobody can answer a
+question or approve a step during a Run, so treat the task in the prompt as the
+approval to carry it out unless the prompt itself asks only for a plan, a review, or
+a read-only answer; if the child truly cannot continue it must end with a final
+report saying exactly what blocks it. This keeps a skill that gates implementation
+behind human approval from parking a Run.
 
 Call-mode JSON and tracked envelopes share `assistantText`,
 `assistantTextChars`, and `assistantTextTruncated`. Call mode's `text`,
