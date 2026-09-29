@@ -269,13 +269,57 @@ def _sidecar_paths(scratch_plan: ScratchPlan, run_id: str) -> list[Path]:
     return sorted(entry for entry in scratch_plan.bucket.iterdir() if entry.name.startswith(prefix))
 
 
-def remove_owned(registry_root: Path, run_id: str) -> None:
-    """Remove the deterministic scratch, sidecars, and compact temp of this run.
+def verify_recorded_paths(
+    registry_root: Path,
+    run_id: str,
+    manifest: dict | None,
+    *,
+    action: str = "prune",
+) -> None:
+    """Refuse when a manifest's recorded scratch or temp path is not the owned one.
 
-    The compact child temp is removed from exactly here, alongside the run
-    scratch: whatever retains the scratch (a non-pruned run, a failed prune)
-    retains it too, and a run whose scratch was never allocated has no compact
-    temp to find.
+    Removal only ever touches the deterministic paths derived from registry
+    identity and run id, never record bytes. A recorded path that no longer
+    matches is conflicting metadata: refuse rather than delete a directory the
+    record no longer claims. A manifest without either key carries no pointer
+    and passes, because a run that never allocated scratch can still have left
+    a sidecar.
+    """
+    if manifest is None:
+        return
+    if "scratchPath" in manifest:
+        recorded = manifest.get("scratchPath")
+        if not isinstance(recorded, str) or not recorded:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: invalid recorded scratch path"
+            )
+        expected = expected_path(registry_root, run_id)
+        recorded_path = Path(os.path.abspath(recorded))
+        if recorded_path != expected:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: recorded scratch path {recorded_path} "
+                f"does not match current owned path {expected}"
+            )
+    if "tempPath" in manifest:
+        recorded_temp = manifest.get("tempPath")
+        if not isinstance(recorded_temp, str) or not recorded_temp:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: invalid recorded temp path"
+            )
+        expected_temp = expected_compact_temp_path(registry_root, run_id)
+        if Path(os.path.abspath(recorded_temp)) != expected_temp:
+            raise ScratchSafetyError(
+                f"refusing to {action} run {run_id}: recorded temp path {recorded_temp} "
+                f"does not match current owned path {expected_temp}"
+            )
+
+
+def owned_targets(registry_root: Path, run_id: str) -> list[Path]:
+    """Existing scratch, sidecars, and compact temp of this run, safety-checked.
+
+    Only the deterministic paths are considered. The shared roots must be real
+    owner-only directories we own; a hostile or foreign root raises rather than
+    being routed around.
     """
     scratch_plan = plan(registry_root, run_id)
     targets: list[Path] = []
@@ -290,6 +334,33 @@ def remove_owned(registry_root: Path, run_id: str) -> None:
     if _path_exists(compact_plan.path):
         _ensure_compact_temp_roots(compact_plan)
         targets.append(compact_plan.path)
+    return targets
+
+
+def tree_bytes(path: Path) -> int:
+    """Apparent size of the regular files under ``path``; symlinks are never followed."""
+    total = 0
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(info.st_mode):
+                        total += info.st_size
+        except OSError:
+            continue
+    return total
+
+
+def remove_targets(targets: list[Path]) -> None:
+    """Remove ``owned_targets`` results, refusing foreign-owned entries."""
     if not targets:
         return
     if not shutil.rmtree.avoids_symlink_attacks:
@@ -304,3 +375,14 @@ def remove_owned(registry_root: Path, run_id: str) -> None:
                 if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
                     raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry}")
         shutil.rmtree(target)
+
+
+def remove_owned(registry_root: Path, run_id: str) -> None:
+    """Remove the deterministic scratch, sidecars, and compact temp of this run.
+
+    The compact child temp is removed from exactly here, alongside the run
+    scratch: whatever retains the scratch (a non-pruned run, a failed prune)
+    retains it too, and a run whose scratch was never allocated has no compact
+    temp to find.
+    """
+    remove_targets(owned_targets(registry_root, run_id))

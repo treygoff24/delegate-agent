@@ -653,6 +653,32 @@ def render_runs_prune_text(payload: JsonObject, stdout: TextIO) -> None:
                     print(f"  - {label} {detail}", file=stdout)
 
 
+def _format_mib(size: object) -> str:
+    value = size if isinstance(size, int) and not isinstance(size, bool) else 0
+    return f"{value / (1 << 20):.1f} MiB"
+
+
+def render_runs_reclaim_text(payload: JsonObject, stdout: TextIO) -> None:
+    print(f"older than: {payload.get('olderThanDays', '?')} days", file=stdout)
+    if payload.get("dryRun") is True:
+        print("dry run: scratch and run records unchanged", file=stdout)
+    if payload.get("budgetExhausted") is True:
+        print("stopped early: time budget spent; run again to continue", file=stdout)
+    for section in ("planned", "reclaimed", "skipped", "errors"):
+        items = payload.get(section)
+        count = len(items) if isinstance(items, list) else 0
+        print(f"{section}: {count}", file=stdout)
+        if isinstance(items, list):
+            for item in items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("alias") or item.get("runId") or "?"
+                size = f" {_format_mib(item['scratchBytes'])}" if "scratchBytes" in item else ""
+                detail = item.get("reason") or item.get("code") or item.get("message") or ""
+                print(f"  - {label}{size} {detail}".rstrip(), file=stdout)
+    print(f"total: {_format_mib(payload.get('totalBytes'))}", file=stdout)
+
+
 def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
     print(f"reconciled: {payload.get('reconciled', 0)}", file=stdout)
     if payload.get("dryRun") is True:

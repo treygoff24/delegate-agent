@@ -520,6 +520,20 @@ python3 bin/delegate.py workflow kill wf_0123abcdef45
 python3 bin/delegate.py workflow save review.py --name review-changes
 ```
 
+A workflow lives in the workspace that launched it. Asking for a `<wfId>` from
+another directory used to be a dead end; now the id is looked up on the roster
+of workspaces Delegate has launched in (`~/.delegate/registries.json`). The
+read-only actions (`status`, `events`, `watch`, `wait`, `result`) read a
+workflow found in exactly one other workspace directly, and `status`, `wait`,
+and `result` say so with `resolvedWorkspace`; the next actions `status` suggests
+already carry the right `--cwd`. `approve`, `reject`, `kill`, and
+`run --resume` change state, so they never follow: they fail with
+`workflow_not_found`, name the workspace, and print the exact
+`delegate --cwd <workspace> workflow <action> <wfId>` to run. An id found in
+several workspaces is listed rather than guessed. Child runs are ordinary runs
+of the workflow's workspace, so the run-level lookup rules in the CLI reference
+apply to them.
+
 `workflow run --env NAME=VALUE` and `--env-file PATH` (both repeatable, launch
 only) record a workflow-level env in the workflow directory's private
 `workspace-env.json`. Every `agent()` child of every attempt receives it

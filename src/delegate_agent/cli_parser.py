@@ -2468,10 +2468,12 @@ def parse_runs(
     # front-ends (ps) do not report errors against flags nobody entered.
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
-        topic = "runs prune" if rest and rest[0] == "prune" else "runs"
+        topic = f"runs {rest[0]}" if rest and rest[0] in {"prune", "reclaim"} else "runs"
         return help_command(json_mode, topic)
     if rest and rest[0] == "prune":
         return parse_runs_prune(rest[1:], json_mode, cwd)
+    if rest and rest[0] == "reclaim":
+        return parse_runs_reclaim(rest[1:], json_mode, cwd)
     active = False
     recent = False
     running = False
@@ -2636,6 +2638,39 @@ def parse_runs_prune(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         payload=inspection_commands.RunsCommand(
             action="prune",
+            older_than_days=older_than_days,
+            dry_run=dry_run,
+            json_mode=json_mode,
+        ),
+    )
+
+
+def parse_runs_reclaim(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    from delegate_agent import inspection_commands
+
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "runs reclaim")
+    older_than_days = None
+    dry_run = False
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token == "--older-than":
+            value = _require_option_value(rest, i, token)
+            older_than_days = parse_non_negative_int(value, option="runs reclaim --older-than")
+            i += 2
+            continue
+        if token == "--dry-run":
+            dry_run = True
+            i += 1
+            continue
+        raise DelegateError("unknown_option", f"runs reclaim does not support option: {token}")
+    return ParsedCommand(
+        "runs",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        payload=inspection_commands.RunsCommand(
+            action="reclaim",
             older_than_days=older_than_days,
             dry_run=dry_run,
             json_mode=json_mode,

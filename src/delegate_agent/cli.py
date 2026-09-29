@@ -1897,7 +1897,7 @@ def main(
             pruning_runs = (
                 parsed.subcommand == "runs"
                 and parsed.payload is not None
-                and parsed.payload.action == "prune"
+                and parsed.payload.action in {"prune", "reclaim"}
             )
             if existing_registry is not None and not pruning_runs:
                 maybe_run_retention_pass(existing_registry, config)
@@ -1907,7 +1907,7 @@ def main(
             )
         if parsed.subcommand in {"runs", "ps"}:
             return _inspection_commands.emit_runs(
-                parsed.payload, workspace_path=workspace.path, stdout=stdout
+                parsed.payload, workspace_path=workspace.path, stdout=stdout, config=config
             )
         if parsed.subcommand == "run-output":
             return _run_output_commands.emit(

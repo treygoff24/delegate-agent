@@ -181,6 +181,18 @@ from the current registry and selected neutral root, then performs owner-checked
 no-follow removal. A changed `HOME`, moved registry, symlink, foreign owner, or
 live run therefore preserves both scratch and its sole registry pointer.
 
+Scratch is also reclaimed before the record is pruned: `delegate runs reclaim`
+and the ambient retention pass remove the scratch, sidecars, and compact temp of
+a terminal run older than `tracking.retention.scratchDays`. That path reuses the
+same recorded-path equality check and the same owner-checked, no-follow removal
+(shared code in `run_scratch`), so it cannot delete anything pruning would
+refuse. It never considers a running or stale run, and the size walk used for
+`--dry-run` does not follow symlinks. The cross-workspace roster
+(`~/.delegate/registries.json`, `0600`, bounded) is advisory and is only read
+to find a workspace's `index.json`; nothing acts on a workspace's registry
+unless the command is rerun with `--cwd` for it, except the read-only `snapshot`,
+`run-output`, and workflow read actions.
+
 Internally, bwrap uses a typed `SandboxPlan` with immutable `Mask` and `Bind`
 tuples. Invalid entries are refused instead of silently dropped while decoding
 a dictionary. Live path checks, workspace-intersection checks, mount order,

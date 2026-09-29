@@ -4,8 +4,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, redaction, run_registry, run_status, snapshot_view
+from delegate_agent import (
+    command_errors,
+    redaction,
+    run_registry,
+    run_status,
+    snapshot_view,
+)
 from delegate_agent import rendering as delegate_rendering
+from delegate_agent import retention as delegate_retention
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
 from delegate_agent.json_types import JsonObject
@@ -129,9 +136,15 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
         registry_root,
         handle=command.handle,
         latest_harness=command.latest_harness,
+        command="snapshot",
+        read_across_registries=True,
     )
     if isinstance(target, run_registry.RunTargetLookupError):
-        raise InspectionError(target.error, target.message)
+        error = InspectionError(target.error, target.message)
+        error.next_actions = list(target.next_actions) or None
+        raise error
+    if target.registry_root is not None:
+        registry_root = target.registry_root
     run_id = target.run_id
     snapshot = run_registry.load_run_snapshot(registry_root, run_id)
     if snapshot is None:
@@ -151,8 +164,48 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
     return 0
 
 
-def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> int:
+def _emit_runs_reclaim(
+    command: RunsCommand,
+    registry_root: Path | None,
+    *,
+    config: JsonObject | None,
+    stdout: TextIO,
+) -> int:
+    """Reclaim scratch of finished runs now; ``--dry-run`` lists sizes and removes nothing."""
+    older_than_days = (
+        command.older_than_days
+        if command.older_than_days is not None
+        else delegate_retention.scratch_retention_days(config or {})
+    )
+    payload = (
+        delegate_retention.reclaim_scratch(
+            registry_root, older_than_days=older_than_days, dry_run=command.dry_run
+        )
+        if registry_root is not None
+        else delegate_retention.empty_reclaim_payload(
+            older_than_days=older_than_days, dry_run=command.dry_run
+        )
+    )
+    if command.json_mode:
+        delegate_rendering.print_json(payload, stdout)
+    else:
+        delegate_rendering.render_runs_reclaim_text(payload, stdout)
+    if payload.get("ok") is False:
+        exit_code = payload.get("exitCode")
+        return exit_code if isinstance(exit_code, int) else 1
+    return 0
+
+
+def emit_runs(
+    command: RunsCommand,
+    *,
+    workspace_path: str,
+    stdout: TextIO,
+    config: JsonObject | None = None,
+) -> int:
     registry_root = run_registry.registry_root_if_exists(Path(workspace_path))
+    if command.action == "reclaim":
+        return _emit_runs_reclaim(command, registry_root, config=config, stdout=stdout)
     if command.action == "prune":
         older_than_days = (
             command.older_than_days

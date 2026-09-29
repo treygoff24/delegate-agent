@@ -1366,6 +1366,29 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_tracking_config")
         self.assertIn("rawLogDays", ctx.exception.message)
 
+    def test_tracking_retention_scratch_days_defaults_to_three_and_accepts_zero(self):
+        config_mod = load_config_module()
+        self.assertEqual(config_mod.DEFAULT_CONFIG["tracking"]["retention"]["scratchDays"], 3)
+        config_mod.validate_config(
+            config_mod.deep_merge(
+                config_mod.DEFAULT_CONFIG,
+                {"tracking": {"retention": {"scratchDays": 0}}},
+            )
+        )
+
+    def test_tracking_retention_scratch_days_rejects_bool_negative_and_text(self):
+        config_mod = load_config_module()
+        for bad in (True, -1, "3"):
+            with self.subTest(value=bad), self.assertRaises(config_mod.ConfigError) as ctx:
+                config_mod.validate_config(
+                    config_mod.deep_merge(
+                        config_mod.DEFAULT_CONFIG,
+                        {"tracking": {"retention": {"scratchDays": bad}}},
+                    )
+                )
+            self.assertEqual(ctx.exception.error, "invalid_tracking_config")
+            self.assertIn("scratchDays", ctx.exception.message)
+
     def test_tracking_process_group_grace_resolves_and_accepts_zero(self):
         config_mod = load_config_module()
         config = config_mod.deep_merge(

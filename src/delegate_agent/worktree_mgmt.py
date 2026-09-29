@@ -1246,6 +1246,9 @@ def resolve_record(
             if suggestions
             else ["delegate worktree list", "delegate worktree reap --path PATH"]
         )
+        where, elsewhere_actions = run_registry.handle_elsewhere_hint(
+            registry_root, handle, "worktree show"
+        )
         raise WorktreeManagementError(
             _error_payload(
                 "unknown_handle",
@@ -1255,8 +1258,9 @@ def resolve_record(
                     "Handles resolve only in this workspace's Registry; pass --cwd SOURCE_REPO "
                     "for another one, or give the worktree's path instead. A worktree whose "
                     "run record is gone is removed with: delegate worktree reap --path PATH."
+                    + where
                 ),
-                next_actions=next_actions,
+                next_actions=[*elsewhere_actions, *next_actions],
                 suggestions=suggestions,
                 suggestion_scope="worktrees",
                 list_command="delegate worktree list",
@@ -1335,13 +1339,17 @@ def _record_for_path(
     )
 
 
-def _worktree_owner_of(
+# A lineage this long is a cycle or a corrupt record, not a real chain of followups.
+_LINEAGE_MAX_DEPTH = 16
+
+
+def _lineage_parents(
     registry_root: Path, index: JsonObject, run_id: str
-) -> tuple[str, str] | None:
-    """The run whose worktree this run used: attachment, resume, or followup parent."""
+) -> list[tuple[str, str, str]]:
+    """(handle, relation, run id) of each run this one attached to, resumed, or followed up."""
     manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
     if not isinstance(manifest, dict):
-        return None
+        return []
     candidates: list[tuple[object, str]] = []
     attachment = manifest.get("worktreeAttachment")
     if isinstance(attachment, dict):
@@ -1356,15 +1364,46 @@ def _worktree_owner_of(
         candidates.append(
             (run_registry.alias_for_run(index, followup_of) or followup_of, "followed up")
         )
+    parents: list[tuple[str, str, str]] = []
     for handle, relation in candidates:
         if not isinstance(handle, str) or not handle:
             continue
         parent = run_registry.resolve_handle(index, handle)
         if parent.run_id is None or parent.run_id == run_id:
             continue
-        entry = index.get("runs", {}).get(parent.run_id)
-        if _record_for_run(registry_root, parent.run_id, entry if isinstance(entry, dict) else {}):
-            return handle, relation
+        parents.append((handle, relation, parent.run_id))
+    return parents
+
+
+def _worktree_owner_of(
+    registry_root: Path, index: JsonObject, run_id: str
+) -> tuple[str, str] | None:
+    """The run whose worktree this run used: attachment, resume, or followup parent.
+
+    A followup of a followup (or a resume of a followup) never owned the
+    worktree itself, so the lineage is followed upward until a run that does.
+    The returned relation spells the whole chain ("followed up codex-5, which
+    followed up"), so the message reads "It <relation> <owner>, which owns the
+    worktree".
+    """
+    seen: set[str] = set()
+    current = run_id
+    prefix = ""
+    for _depth in range(_LINEAGE_MAX_DEPTH):
+        seen.add(current)
+        parents = [
+            parent
+            for parent in _lineage_parents(registry_root, index, current)
+            if parent[2] not in seen
+        ]
+        for handle, relation, parent_id in parents:
+            entry = index.get("runs", {}).get(parent_id)
+            if _record_for_run(registry_root, parent_id, entry if isinstance(entry, dict) else {}):
+                return handle, f"{prefix}{relation}"
+        if not parents:
+            return None
+        handle, relation, current = parents[0]
+        prefix += f"{relation} {handle}, which "
     return None
 
 

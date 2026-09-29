@@ -109,7 +109,9 @@ class RetentionTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(outcome["result"]["scanned"], 1)
         self.assertLess(time.monotonic() - started, 0.5)
-        self.assertEqual(concurrent, {"scanned": 0, "archived": 0, "skipped": 0})
+        self.assertEqual(
+            concurrent, {"scanned": 0, "archived": 0, "skipped": 0, "scratchReclaimed": 0}
+        )
 
     def test_run_prune_waits_for_active_retention(self):
         run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
@@ -581,7 +583,7 @@ class RetentionTests(unittest.TestCase):
         second = self.retention.run_retention_pass(self.registry_root, config)
 
         self.assertEqual(first["scanned"], 1)
-        self.assertEqual(second, {"scanned": 0, "archived": 0, "skipped": 0})
+        self.assertEqual(second, {"scanned": 0, "archived": 0, "skipped": 0, "scratchReclaimed": 0})
 
     def test_retention_retries_a_young_terminal_after_the_time_cadence(self):
         run_id, alias = self.registry.register_run(self.registry_root, harness="cursor")
@@ -618,7 +620,9 @@ class RetentionTests(unittest.TestCase):
         )
 
         self.assertEqual(first["archived"], 0)
-        self.assertEqual(immediate, {"scanned": 0, "archived": 0, "skipped": 0})
+        self.assertEqual(
+            immediate, {"scanned": 0, "archived": 0, "skipped": 0, "scratchReclaimed": 0}
+        )
         self.assertEqual(later["archived"], 1)
 
     def test_old_completed_run_archives_raw_logs(self):
@@ -766,7 +770,7 @@ class RetentionTests(unittest.TestCase):
             now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
         )
 
-        self.assertEqual(result, {"scanned": 2, "archived": 0, "skipped": 2})
+        self.assertEqual(result, {"scanned": 2, "archived": 0, "skipped": 2, "scratchReclaimed": 0})
         self.assertTrue((state_corrupt_path / "stdout.log").exists())
         self.assertTrue((manifest_corrupt_path / "stdout.log").exists())
 
@@ -785,7 +789,7 @@ class RetentionTests(unittest.TestCase):
                 now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
             )
 
-        self.assertEqual(result, {"scanned": 3, "archived": 1, "skipped": 2})
+        self.assertEqual(result, {"scanned": 3, "archived": 1, "skipped": 2, "scratchReclaimed": 0})
 
     def test_archive_refuses_changed_source_identity(self):
         run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")

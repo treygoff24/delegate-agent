@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
-from delegate_agent import run_registry
+from delegate_agent import registry_roster, run_registry
 from delegate_agent.json_types import JsonObject
 from delegate_agent.workflows import WORKFLOW_KEY_VERSION, WORKFLOW_SCHEMA
 
@@ -78,6 +78,8 @@ def workflow_dir(workspace: Path, wf_id: str) -> Path:
 def ensure_workflow_dir(workspace: Path, wf_id: str) -> Path:
     root = workflow_dir(workspace, wf_id)
     run_registry.ensure_private_dir(root)
+    # A workspace with workflows but no runs still has to be findable from another.
+    registry_roster.note_workspace(workspace)
     return root
 
 

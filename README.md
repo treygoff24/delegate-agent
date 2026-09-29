@@ -323,6 +323,7 @@ delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
 delegate resume <alias-or-runId> "Continue from the previous result and run the tests."
 delegate runs prune --dry-run # preview GC of terminal run records older than 30 days
+delegate runs reclaim --dry-run # preview scratch that finished runs (older than 3 days) can give back
 ```
 
 Aliases are always numbered (`codex-1`, `cursor-2`); a **bare harness name

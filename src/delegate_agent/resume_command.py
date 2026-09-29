@@ -310,11 +310,13 @@ def _resolve_resume_target(registry_root: Path, handle: str) -> tuple[str, str]:
     alias = resolved.alias
     if not isinstance(run_id, str) or not isinstance(alias, str):
         suggestions = ", ".join(run_registry.suggest_handles(index, handle)) or "(none)"
+        where, next_actions = run_registry.handle_elsewhere_hint(registry_root, handle, "resume")
         raise DelegateError(
             "unknown_handle",
             f"Unknown run handle: {handle}. Suggestions: {suggestions}. "
             "Runs are recorded per-workspace under <workspace>/.delegate; "
-            "if this run was launched elsewhere, pass --cwd <that workspace>.",
+            "if this run was launched elsewhere, pass --cwd <that workspace>." + where,
+            next_actions=next_actions or None,
         )
     if handle == run_id:
         return run_id, alias
@@ -615,10 +617,14 @@ def build_resume_plan(
         )
     registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
     if registry_root is None:
+        where, next_actions = run_registry.handle_elsewhere_hint(
+            run_registry.registry_root(Path(workspace.path)), opts.handle, "resume"
+        )
         raise DelegateError(
             "unknown_handle",
             f"No delegate run registry exists in {workspace.path}; nothing to resume. "
-            "Pass --cwd for the workspace where the run was launched.",
+            "Pass --cwd for the workspace where the run was launched." + where,
+            next_actions=next_actions or None,
         )
     run_id, alias = _resolve_resume_target(registry_root, opts.handle)
     run_path = run_registry.run_directory(registry_root, run_id)
