@@ -217,6 +217,23 @@ class ClaudeModelPreflightTests(CommandTestBase):
             code, stdout, _ = self._dry_run_claude_work("--env-file", str(empty))
             self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
 
+    def test_the_env_file_is_read_once_for_the_preflight_and_the_launch(self):
+        from delegate_agent import workspace_spec
+
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "provider.env"
+            env_file.write_text("CLAUDE_CODE_USE_BEDROCK=1\n", encoding="utf-8")
+            real = workspace_spec.read_env_file
+            with mock.patch.object(workspace_spec, "read_env_file", side_effect=real) as reader:
+                code, stdout, _ = self._dry_run_claude_work("--env-file", str(env_file))
+            self.assertEqual(code, 0, stdout)
+            self.assertEqual(reader.call_count, 1)
+
+    def test_a_typo_with_an_unreadable_env_file_still_reports_the_typo_first(self):
+        code, stdout, _ = self._dry_run_claude_work("--env-file", "/nonexistent/x.env")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stdout)["error"], "invalid_alias")
+
     def test_a_missing_env_file_still_reports_its_own_error_for_a_valid_model(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
