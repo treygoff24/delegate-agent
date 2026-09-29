@@ -293,7 +293,9 @@ class CrossRegistryWorkflowTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         payload = json.loads(out)
         self.assertEqual(payload["error"], "workflow_not_found")
-        self.assertIn(str(self.owner), payload["message"])
+        expected = f"delegate --cwd {self.owner} workflow run --resume {self.WF_ID}"
+        self.assertIn(expected, payload["message"])
+        self.assertEqual(payload["nextActions"], [expected])
 
     def test_an_unknown_workflow_id_keeps_the_plain_error(self) -> None:
         code, out, _err = self.run_cli(self.elsewhere, "workflow", "status", "wf_ffffffffffff")

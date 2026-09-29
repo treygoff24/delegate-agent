@@ -1010,28 +1010,6 @@ class CodexProfileOverlayDoctorTests(unittest.TestCase):
                     profiles.codex_profile_overlay_warning(section, self._resolution())
                 )
 
-    def test_doctor_reports_the_warning_it_is_handed(self):
-        warning = profiles.codex_profile_overlay_warning(
-            {"codex": {"profile": "delegate"}}, self._resolution()
-        )
-        assert warning is not None
-
-        report = workflow_pinning.doctor(home=Path(self.temp.name), extra_warnings=(warning,))
-        stream = io.StringIO()
-        workflow_pinning.emit_doctor(
-            home=Path(self.temp.name), stdout=stream, extra_warnings=(warning,)
-        )
-
-        self.assertIn(warning, report["warnings"])
-        self.assertIn("delegate.config.toml", stream.getvalue())
-
-    def test_doctor_without_the_warning_does_not_mention_a_profile(self):
-        report = workflow_pinning.doctor(home=Path(self.temp.name))
-
-        self.assertNotIn(
-            "codex.profile", " ".join(str(item) for item in report.get("warnings", []))
-        )
-
     def test_delegate_doctor_surfaces_a_missing_overlay_end_to_end(self):
         """The whole path: config on disk, `delegate doctor`, warning in JSON."""
         from delegate_agent import cli
@@ -1063,6 +1041,12 @@ class CodexProfileOverlayDoctorTests(unittest.TestCase):
         ]
         self.assertEqual(len(missing), 1, missing)
         self.assertIn("delegate.config.toml", missing[0])
+
+        text_out = io.StringIO()
+        with mock.patch.dict(os.environ, env):
+            code = cli.main(["doctor"], stdout=text_out, stderr=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertIn("delegate.config.toml", text_out.getvalue())
 
         (self.codex_home / "delegate.config.toml").write_text("[a]\n", encoding="utf-8")
         out = io.StringIO()
