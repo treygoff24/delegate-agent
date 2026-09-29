@@ -11,6 +11,12 @@ module does not recognise records ``unknown``. Unknown is never a failure and
 never refuses a launch; only a probe that clearly reports a signed-out account or
 an exhausted quota window says otherwise. The raw probe output is never stored
 (it can carry an account name).
+
+OMP reports quota per provider and account, so its health is recorded per lane
+(``lanes``: ``"<provider>/account <N>"`` to a status). One exhausted provider does
+not make OMP as a whole ``limit_reached``: the engine reads ``partial`` when some
+lanes are exhausted and others are not, and lanes the report does not describe
+stay ``unknown``.
 """
 
 from __future__ import annotations
@@ -35,6 +41,8 @@ PROBE_TIMEOUT_SECONDS = 15
 STATUS_OK = "ok"
 STATUS_LOGGED_OUT = "logged_out"
 STATUS_LIMIT_REACHED = "limit_reached"
+# Some lanes of the engine are exhausted and others are not.
+STATUS_PARTIAL = "partial"
 STATUS_UNKNOWN = "unknown"
 
 # Engines whose probe output this module knows how to read.
@@ -45,6 +53,12 @@ DEFAULT_PROBES: dict[str, list[str]] = {
 }
 
 _PERCENT_USED = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*used")
+# "Opencode Go — 2 accounts": an unindented provider line. The name must be plain
+# words: text that could carry an account name (an address) is not a provider.
+_PROVIDER_HEADER = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9 ._/+-]{0,62}?)\s+[\u2014\u2013-]\s+\d+\s+accounts?\s*$"
+)
+_ACCOUNT_LINE = re.compile(r"^\s+\S?\s*account\s+(?P<number>\d{1,4})\b", re.IGNORECASE)
 _SIGNED_OUT = ("not logged in", "not authenticated", "login required", "logged out")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -90,13 +104,65 @@ def classify(engine: str, exit_code: int, text: str) -> str:
             return STATUS_OK
         return STATUS_UNKNOWN
     if engine == "omp":
-        if exit_code != 0:
-            return STATUS_UNKNOWN
-        percents = [float(value) for value in _PERCENT_USED.findall(lowered)]
-        if not percents:
-            return STATUS_UNKNOWN
-        return STATUS_LIMIT_REACHED if max(percents) >= 100.0 else STATUS_OK
+        return overall_status(classify_lanes(engine, exit_code, text))
     return STATUS_UNKNOWN
+
+
+def classify_lanes(engine: str, exit_code: int, text: str) -> dict[str, str]:
+    """Per-lane health from a probe that reports several lanes; empty when it does not.
+
+    OMP's usage report is grouped by provider and account
+    (``Provider - N accounts`` / ``account K`` / quota-window lines). Each
+    provider/account is a lane of its own, keyed ``"<provider>/account <K>"``:
+    ``limit_reached`` when one of its windows is at 100%, ``ok`` when every window
+    it reports is below, ``unknown`` when it reports none. Windows that no
+    recognised provider/account line introduces are attributed to nothing, so an
+    unfamiliar report shape yields no lanes rather than a guess.
+    """
+    if engine != "omp" or exit_code != 0:
+        return {}
+    lanes: dict[str, list[float]] = {}
+    provider: str | None = None
+    lane: str | None = None
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            # An unindented line opens a provider block or is title/footer text; either
+            # way the previous provider's accounts and windows end here.
+            header = _PROVIDER_HEADER.match(line)
+            provider = header.group("name").strip() if header is not None else None
+            lane = None
+            continue
+        if provider is None:
+            continue
+        account = _ACCOUNT_LINE.match(line)
+        if account is not None:
+            lane = f"{provider}/account {account.group('number')}"
+            lanes.setdefault(lane, [])
+            continue
+        if lane is not None:
+            lanes[lane].extend(float(value) for value in _PERCENT_USED.findall(line.lower()))
+    return {name: _lane_status(percents) for name, percents in lanes.items()}
+
+
+def _lane_status(percents: list[float]) -> str:
+    if not percents:
+        return STATUS_UNKNOWN
+    return STATUS_LIMIT_REACHED if max(percents) >= 100.0 else STATUS_OK
+
+
+def overall_status(lanes: Mapping[str, str]) -> str:
+    """One engine-level word for its lanes: no lane's exhaustion speaks for the others.
+
+    ``limit_reached`` only when every lane is exhausted, ``partial`` when some are
+    and some are not, ``ok`` when none is exhausted and at least one reports
+    healthy, and ``unknown`` when no lane says anything.
+    """
+    statuses = set(lanes.values())
+    if not statuses or statuses == {STATUS_UNKNOWN}:
+        return STATUS_UNKNOWN
+    if STATUS_LIMIT_REACHED not in statuses:
+        return STATUS_OK
+    return STATUS_LIMIT_REACHED if statuses == {STATUS_LIMIT_REACHED} else STATUS_PARTIAL
 
 
 def _iso(epoch: float) -> str:
@@ -140,6 +206,10 @@ def probe_engine(
         return record
     output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     record["status"] = classify(engine, completed.returncode, output)
+    lanes = classify_lanes(engine, completed.returncode, output)
+    if lanes:
+        # Provider/account names only; the raw output (which can name accounts) is dropped.
+        record["lanes"] = dict(lanes)
     if record["status"] == STATUS_UNKNOWN:
         record["reason"] = "probe_output_unrecognized"
     return record
@@ -213,6 +283,13 @@ def describe(record: Mapping[str, object]) -> str:
     """One line for text output: `cursor: ok (estate-cursor status, checked ...)`."""
     line = f"{record.get('engine')}: {record.get('status')}"
     detail = [str(part) for part in (record.get("probe"), record.get("checkedAt")) if part]
+    lanes = record.get("lanes")
+    if isinstance(lanes, dict):
+        limited = sorted(
+            str(name) for name, status in lanes.items() if status == STATUS_LIMIT_REACHED
+        )
+        if limited:
+            detail.append(f"{STATUS_LIMIT_REACHED}: {', '.join(limited)}")
     if record.get("reason"):
         detail.append(str(record["reason"]))
     return f"{line} ({', '.join(detail)})" if detail else line

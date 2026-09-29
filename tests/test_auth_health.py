@@ -25,6 +25,19 @@ OMP_OK = (
     "      ● Monthly limit  ███  50.0% used · resets in 21d14h\n"
 )
 OMP_FULL = OMP_OK.replace("50.0% used", "100.0% used")
+# Two providers in one report: the first is exhausted, the second is untouched.
+OMP_ONE_EXHAUSTED = (
+    "Usage · fetched 1ms ago\n\n"
+    "Opencode Go — 1 account\n"
+    "  ● account 1 · plan: OpenCode Go\n"
+    "      ● 5 Hour limit   ░░░  100.0% used · resets in 4h59m\n"
+    "      ● Monthly limit  ███  50.0% used · resets in 21d14h\n"
+    "  capacity: 5h → 1.00/1 account used (no quota left)\n\n"
+    "Zed Plus — 1 account\n"
+    "  ● account 1 · plan: Plus\n"
+    "      ● 5 Hour limit   ░░░  0.0% used · resets in 4h59m\n"
+    "  capacity: 5h → 0.00/1 account used (all quota left)\n"
+)
 
 
 class HomeCase(unittest.TestCase):
@@ -56,6 +69,64 @@ class ClassifyTests(unittest.TestCase):
     def test_omp_reads_quota_windows(self):
         self.assertEqual(auth_health.classify("omp", 0, OMP_OK), "ok")
         self.assertEqual(auth_health.classify("omp", 0, OMP_FULL), "limit_reached")
+
+    def test_omp_health_is_per_provider_and_account_not_omp_wide(self):
+        lanes = auth_health.classify_lanes("omp", 0, OMP_ONE_EXHAUSTED)
+
+        self.assertEqual(
+            lanes,
+            {"Opencode Go/account 1": "limit_reached", "Zed Plus/account 1": "ok"},
+        )
+        # One exhausted provider must not read as an OMP-wide outage.
+        self.assertEqual(auth_health.classify("omp", 0, OMP_ONE_EXHAUSTED), "partial")
+
+    def test_omp_reports_limit_reached_only_when_every_lane_is_exhausted(self):
+        every = OMP_ONE_EXHAUSTED.replace("0.0% used", "100.0% used")
+
+        self.assertEqual(auth_health.classify("omp", 0, every), "limit_reached")
+        self.assertEqual(
+            set(auth_health.classify_lanes("omp", 0, every).values()), {"limit_reached"}
+        )
+
+    def test_one_exhausted_account_of_several_leaves_its_siblings_healthy(self):
+        text = (
+            "Usage · fetched 1ms ago\n\nOpencode Go — 2 accounts\n"
+            "  ● account 1 · plan: OpenCode Go\n"
+            "      ● 5 Hour limit   ░░░  100.0% used · resets in 1h\n"
+            "  ● account 2 · plan: OpenCode Go\n"
+            "      ● 5 Hour limit   ░░░  12.5% used · resets in 1h\n"
+        )
+
+        self.assertEqual(
+            auth_health.classify_lanes("omp", 0, text),
+            {"Opencode Go/account 1": "limit_reached", "Opencode Go/account 2": "ok"},
+        )
+
+    def test_a_lane_the_report_does_not_describe_is_unknown_never_ok_or_limited(self):
+        for text in (
+            # Windows with no provider header to attribute them to.
+            "5 Hour limit   ░░░  100.0% used · resets in 4h59m\n",
+            # A header that could be carrying an account name is not a provider.
+            "alice@example.com — 1 account\n  ● account 1\n      ● 5 Hour limit  100.0% used\n",
+            # A provider with an account but no readable window.
+            "Zed Plus — 1 account\n  ● account 1 · plan: Plus\n      ● limit  unavailable\n",
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn(
+                    "limit_reached", auth_health.classify_lanes("omp", 0, text).values()
+                )
+                self.assertNotIn("ok", auth_health.classify_lanes("omp", 0, text).values())
+                self.assertEqual(auth_health.classify("omp", 0, text), "unknown")
+
+    def test_an_unrecognised_header_ends_the_previous_providers_block(self):
+        text = (
+            "Zed Plus — 1 account\n  ● account 1 · plan: Plus\n"
+            "      ● 5 Hour limit   ░░░  0.0% used · resets in 4h59m\n"
+            "alice@example.com — 1 account\n  ● account 1\n"
+            "      ● 5 Hour limit   ░░░  100.0% used · resets in 1h\n"
+        )
+
+        self.assertEqual(auth_health.classify_lanes("omp", 0, text), {"Zed Plus/account 1": "ok"})
 
     def test_anything_unrecognised_is_unknown_never_a_failure(self):
         for engine, code, text in (
@@ -102,6 +173,18 @@ class ProbeTests(HomeCase):
 
         self.assertEqual(record["status"], "ok")
         self.assertNotIn("someone@example.com", json.dumps(record))
+
+    def test_an_omp_probe_records_each_lane_and_stores_no_account_names(self):
+        text = OMP_ONE_EXHAUSTED.replace("plan: Plus", "plan: Plus · alice@example.com")
+        record = auth_health.probe_engine("omp", [self.script("estate-omp", text), "usage"])
+
+        self.assertEqual(record["status"], "partial")
+        self.assertEqual(
+            record["lanes"],
+            {"Opencode Go/account 1": "limit_reached", "Zed Plus/account 1": "ok"},
+        )
+        self.assertNotIn("alice@example.com", json.dumps(record))
+        self.assertIn("Opencode Go/account 1", auth_health.describe(record))
 
     def test_a_signed_out_probe_that_exits_nonzero_is_logged_out(self):
         argv = [self.script("estate-cursor", CURSOR_OUT, code=1), "status"]

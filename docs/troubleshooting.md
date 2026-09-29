@@ -377,7 +377,15 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 ### Known-bad lanes
 
 A lane is one engine on one provider, model, and account (the Codex failover
-identity, the Claude config directory, or the auth profile). When a run fails
+identity, the Claude config directory, or the auth profile). For every engine,
+the credentials the child will see also count: API keys and tokens in its
+environment, and broker, realm, account, or endpoint settings. Two launches on
+one model with different keys are different lanes, so a bad key never refuses a
+healthy account. Delegate folds these into the lane as a salted hash (the salt
+is `~/.delegate/state/lane-health.salt`, mode 0600); the key values are never
+stored or shown, and `doctor` and the refusal only show a short
+`[credential xxxxxxxx]` tag to tell such lanes apart. Rotating a key reads as a
+new lane, which costs at most one failed launch to re-learn. When a run fails
 with a persistent lane-scoped signature, Delegate records a marker for that lane
 under `~/.delegate/state/lane-health/` for `providerErrors.knownBadLaneMinutes`
 (default 15). Until it expires, another launch on the lane is refused in
@@ -401,6 +409,8 @@ accounts instead of refusing.
   success clears the marker, another persistent failure renews it.
 - `providerErrors.knownBadLaneMinutes: 0` turns the markers off. A corrupt marker
   file is removed with a warning and the lane is treated as healthy.
+- Provider messages saved in a marker and shown in the envelope have credentials
+  redacted and email addresses masked (`[email]`) before they are stored.
 
 Workflows have their own stop on top of this: see
 [workflows](delegate-workflows.md) for `provider_exhausted` and

@@ -49,6 +49,8 @@ if step == "ok":
     raise SystemExit(0)
 if step == "auth401":
     fail("unexpected status 401 Unauthorized: Missing bearer or basic authentication in header")
+if step == "email401":
+    fail("unexpected status 401 Unauthorized: the token for alice@example.com was rejected")
 if step == "ws_drop":
     fail("stream disconnected before completion: websocket closed by server before response.completed")
 if step == "image_limit":
@@ -82,6 +84,17 @@ if step == "ok":
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "claude done"}]}})
     emit({"type": "result", "subtype": "success", "is_error": False, "result": "claude done"})
     raise SystemExit(0)
+if step == "auth401":
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401,
+            "result": "Invalid API key - please run /login",
+        }
+    )
+    raise SystemExit(1)
 if step == "overloaded":
     emit(
         {
@@ -124,6 +137,8 @@ class FakeCodexCase(unittest.TestCase):
         self.claude_state_dir = self.root / "fake-claude-state"
         self.claude_plan_path = self.root / "claude-plan.json"
         self.config: dict = {"codex": {"binary": "codex"}, "claude": {"binary": "claude"}}
+        # Extra variables for the next CLI launch (e.g. which API key this launch carries).
+        self.extra_env: dict[str, str] = {}
         self.set_plan("ok")
         self.set_claude_plan("ok")
 
@@ -153,6 +168,7 @@ class FakeCodexCase(unittest.TestCase):
             FAKE_CLAUDE_STATE=str(self.claude_state_dir),
             FAKE_CLAUDE_PLAN=str(self.claude_plan_path),
         )
+        env.update(self.extra_env)
         return env
 
     def cli(self, *args: str) -> subprocess.CompletedProcess[str]:

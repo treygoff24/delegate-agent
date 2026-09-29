@@ -2343,9 +2343,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "refresh <engine> probes only the named harnesses; other harnesses keep their last-known-good records.",
             "refresh also records per-engine auth health from the read-only probes named in "
             "providerErrors.authProbes (default: `estate-cursor status` for cursor, "
-            "`estate-omp usage` for omp) as authHealth: ok, logged_out, limit_reached, or "
-            "unknown. A missing, slow, or unrecognised probe records unknown, never a failure; "
-            "`delegate doctor` shows the last reading.",
+            "`estate-omp usage` for omp) as authHealth: ok, logged_out, limit_reached, "
+            "partial (omp: some provider accounts are at their limit, others are not; per-lane "
+            "detail is under lanes), or unknown. A missing, slow, or unrecognised probe records "
+            "unknown, never a failure; `delegate doctor` shows the last reading.",
             "The legacy workspace reasoning cache remains a lower-precedence read-only compatibility source.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),

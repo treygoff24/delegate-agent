@@ -1190,7 +1190,12 @@ its JSON, and in `~/.delegate/state/auth-health.json` for `delegate doctor`. It
 runs the read-only probes named in `providerErrors.authProbes` (by default
 `estate-cursor status` for `cursor` and `estate-omp usage` for `omp`) and reads
 only what they clearly say: `ok`, `logged_out` (Cursor reports it is not signed
-in), or `limit_reached` (an OMP quota window is at 100%). A probe that is
+in), or `limit_reached` (an OMP quota window is at 100%). OMP reports quota per
+provider and account, so its reading also carries `lanes` (`<provider>/account
+<N>` to `ok`, `limit_reached`, or `unknown`) and one exhausted provider does not
+mark the rest: the engine reads `limit_reached` only when every lane is
+exhausted, `partial` when some are, and `unknown` for lanes the report does
+not describe. A probe that is
 missing, slow, exits non-zero without a recognisable message, or prints
 something unexpected records `unknown` with a `reason`; unknown is never a
 failure and never refuses a launch. The probe's raw output is not stored. A
