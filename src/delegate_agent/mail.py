@@ -45,6 +45,66 @@ def __getattr__(name: str) -> object:
     return getattr(_core, name)
 
 
+def unread_mail_extra(
+    registry_root: Path, run_id: str, alias: str, *, mail_push: bool
+) -> JsonObject:
+    """Terminal-run fields for mail delivered to a run that never read it.
+
+    Empty when nothing is unread. With push on, messages a stop hook already
+    injected count as seen. Never raises: finalization must not fail on mail.
+    """
+    seen = 0
+    if mail_push:
+        try:
+            seen = _push.pushed_through_seq(registry_root, run_id)
+        except Exception:
+            seen = 0
+    try:
+        unread = _core.unread_mail_for_run(registry_root, run_id, seen_through_seq=seen)
+    except Exception:
+        return {}
+    if unread is None:
+        return {}
+    return {
+        "unreadMail": unread,
+        "warnings": [_core.unread_mail_warning(unread, alias)],
+    }
+
+
+def inherited_mail_push(
+    manifest: JsonObject,
+    *,
+    engine: str,
+    mode: str,
+    config: JsonObject,
+    explicit: bool | None,
+) -> tuple[bool, str | None]:
+    """Decide mail push for a followup/resume launch, and say why when inherited.
+
+    An explicit ``--mail-push`` or ``--no-mail-push`` wins. Otherwise a source
+    Run that had push keeps it, unless this launch cannot support it (mail off,
+    not work mode, or an engine without a verified adapter); then the launch
+    proceeds on pull mail and the note says how to get push back.
+    """
+    if explicit is not None:
+        return explicit, None
+    if manifest.get("mailPush") is not True:
+        return False, None
+    if mode != "work":
+        return False, None
+    if not delegate_config.mail_enabled(config):
+        return False, (
+            "source run used --mail-push but mail is disabled in this configuration; "
+            "continuing on pull mail. Set mail.enabled=true and pass --mail-push to restore it."
+        )
+    if _push.mail_push_adapter(engine) != "verified":
+        return False, (
+            f"source run used --mail-push but {engine} has no verified push adapter; "
+            "continuing on pull mail (`delegate mail inbox`)."
+        )
+    return True, "inherited --mail-push from the source run; pass --no-mail-push to drop it."
+
+
 def launch_enabled(mode: str, config: JsonObject) -> bool:
     return mode == "work" and delegate_config.mail_enabled(config)
 
@@ -103,6 +163,7 @@ class MailLaunchPreparation:
     display_argv: list[str] | None
     provision: MailPushProvision | None
     request_warnings: tuple[str, ...]
+    mail_inbox: JsonObject | None = None
 
     def context_updates(
         self,
@@ -110,10 +171,14 @@ class MailLaunchPreparation:
         fallback_env_overrides: dict[str, str] | None,
         warnings: tuple[str, ...],
     ) -> dict[str, object]:
+        inbox: dict[str, object] = (
+            {"mail_inbox": self.mail_inbox} if self.mail_inbox is not None else {}
+        )
         if self.provision is None:
-            return {}
+            return inbox
         provision = self.provision
         return {
+            **inbox,
             "env_overrides": env_overrides,
             "fallback_env_overrides": mail_push_fallback_env_overrides(
                 provision,
@@ -171,7 +236,13 @@ def prepare_work_mail_launch(
             warnings = (*warnings, provision.warning)
             print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
         argv, display_argv = provision.argv, provision.display_argv
-    return MailLaunchPreparation(argv, display_argv, provision, warnings)
+    return MailLaunchPreparation(
+        argv,
+        display_argv,
+        provision,
+        warnings,
+        mail_inbox=_core.inbox_location(registry_root, run_id),
+    )
 
 
 def send(

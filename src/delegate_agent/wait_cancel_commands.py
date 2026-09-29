@@ -75,6 +75,7 @@ WAIT_STRUCTURAL_KEYS = (
     "resultQuality",
     "degraded",
     "degradedReason",
+    "unreadMail",
     "failureKind",
     "failureReason",
     "staleReason",
@@ -262,6 +263,14 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         quality = str(run.get("resultQuality") or "")[:16]
         failure = str(run.get("failureReason") or run.get("staleReason") or "")[:40]
         print(f"{alias:<12} {status:<10} {quality:<16} {failure}", file=stdout)
+        unread = run.get("unreadMail")
+        if isinstance(unread, dict) and unread.get("count"):
+            print(
+                f"  unread mail: {unread.get('count')} delivered message(s) never read by this "
+                "run; see warnings in `delegate snapshot` and send the correction with "
+                "`delegate followup` if it changes the work",
+                file=stdout,
+            )
         flags = degraded.degraded_fields(run)
         if flags:
             print(

@@ -897,6 +897,14 @@ def build_resume_plan(
             "continue the resumed run with delegate resume, not followup."
         )
 
+    from delegate_agent import mail as delegate_mail
+
+    mail_push, mail_push_note = delegate_mail.inherited_mail_push(
+        manifest, engine=engine, mode=mode, config=config, explicit=opts.mail_push
+    )
+    if mail_push_note is not None:
+        notes.append(mail_push_note)
+
     continuation = build_continuation(
         alias=alias,
         run_id=run_id,
@@ -931,7 +939,7 @@ def build_resume_plan(
         persona_record_source=persona_record_source,
         persona_record_digest=persona_record_digest,
         persona_record_path=persona_record_path,
-        mail_push=opts.mail_push,
+        mail_push=mail_push,
         continuity_mode=continuity_mode,
         resumable=resumable,
         warnings=opts.warnings,

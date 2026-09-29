@@ -317,6 +317,17 @@ _MAIL_PUSH_OPTION = OptionSpec(
     None,
     "Enable opt-in stop-hook mail push (requires mail.enabled=true; unverified harnesses degrade to pull).",
 )
+_INHERITED_MAIL_PUSH_OPTION = OptionSpec(
+    "--mail-push",
+    None,
+    "Force stop-hook mail push on (requires mail.enabled=true). Already inherited from a "
+    "source Run that had it, when this launch supports it.",
+)
+_NO_MAIL_PUSH_OPTION = OptionSpec(
+    "--no-mail-push",
+    None,
+    "Do not inherit mail push from the source Run; the new Run uses pull mail only.",
+)
 _RESUMABLE_OPTION = OptionSpec(
     "--resumable",
     None,
@@ -986,6 +997,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Codex and Claude work only: do not save the resumed Run's native session.",
             ),
+            _INHERITED_MAIL_PUSH_OPTION,
+            _NO_MAIL_PUSH_OPTION,
             *PERSONA_OPTIONS,
             OptionSpec(
                 "--dry-run", None, "Show the resolved continuation launch without executing."
@@ -1052,6 +1065,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--prompt-file", "PATH", "Read followup prompt text from a file or - for stdin."
             ),
+            _INHERITED_MAIL_PUSH_OPTION,
+            _NO_MAIL_PUSH_OPTION,
             OptionSpec("--dry-run", None, "Show the resolved followup launch without executing."),
         ),
         examples=(
@@ -1063,7 +1078,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Re-enters the completed child's harness-native session (Codex exec resume, Claude Code --resume), "
             "preserving full conversation context. For cross-engine or plain-text prompt continuation, use `delegate resume`.",
             "The followup run inherits engine, mode, model, continuity mode, effort, timeout, group, and "
-            "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
+            "commit policy from the source Run's manifest (work mode only), plus mail push when the source had it. "
+            "Overrides are limited to --timeout and --mail-push/--no-mail-push.",
             "The source run must have saved its native session (recorded as harnessSessionId). "
             "Codex and Claude work Runs do by default; a Run launched with --no-resumable, or a "
             "workflow agent() call without resumable=True, did not, and followup refuses it "
