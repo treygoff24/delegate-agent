@@ -308,8 +308,14 @@ worktree. If a copy fails, nothing is removed and the command reports
 and `reap`) carries `salvagePath` and `salvagedPaths`, the text output prints a
 `saved N changed ledger file(s) to ...` line, and completion retirement records
 `worktreeSalvagePath` on the run. Launch-seeded files that still match their
-digest are not copied (the source checkout holds those bytes), and deleted
-ledger files have no content to copy. The copy is also made with
+digest are not copied (the source checkout holds those bytes). Every
+discounted change, including deleted ledger files and the old name of a
+renamed one, is also listed in a `MANIFEST.tsv` (status, path, old path) in the
+same directory, so a deletion is recorded even though there is nothing to copy;
+the JSON names those paths in `salvageRemovedPaths`. If Git cannot report the
+worktree's status at this point, the removal is refused
+(`ledger_salvage_failed`) rather than treated as having no ledger changes. The
+copy is also made with
 `--discard-uncommitted`. Nothing in Delegate deletes a salvage directory:
 `worktree prune`, `runs prune`, and retention only remove run directories and
 worktrees, so clear old ones by hand. A source-gone `reap` deletes the path
@@ -443,7 +449,8 @@ re-run under the locks immediately before removal:
   with the process ids and command names), unless `--kill-live` is passed. The
   check is one pass over every process (`/proc` on Linux, `lsof -d cwd` on
   macOS), never a recursive `lsof +D`. If the scan cannot run (neither is
-  available, or `lsof` fails or prints nothing) or cannot read one of your own
+  available, or `lsof` fails, prints nothing, or exits 1 without naming a
+  process inside the path) or cannot read one of your own
   processes, the entry is refused as `process_scan_unavailable`: finding
   nothing is not the same as looking. `--kill-live` removes it anyway. Other
   users' processes are invisible to any such scan; they are noted in a warning

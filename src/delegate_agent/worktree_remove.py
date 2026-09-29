@@ -264,6 +264,8 @@ def _remove_payload(
     if salvage is not None:
         payload["salvagePath"] = salvage.path
         payload["salvagedPaths"] = list(salvage.files)
+        if salvage.removed:
+            payload["salvageRemovedPaths"] = list(salvage.removed)
     return payload
 
 
