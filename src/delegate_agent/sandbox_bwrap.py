@@ -24,7 +24,7 @@ import os
 import shutil
 import subprocess  # nosec B404 - Delegate launches a fixed bwrap probe argv with shell=False.
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -90,6 +90,11 @@ def _engine_home_path(engine: str, env: Mapping[str, str], home: str) -> str | N
     # operator error and should fail loudly rather than be silently dropped.
     candidate = os.path.join(home, default_dir)
     return candidate if os.path.isdir(candidate) else None
+
+
+def engine_home(engine: str, env: Mapping[str, str], home: str) -> str | None:
+    """The selected engine's home directory for this child env, if it has one."""
+    return _engine_home_path(engine, env, home)
 
 
 class Mask(NamedTuple):
@@ -446,6 +451,48 @@ def build_bwrap_argv(
     argv.extend(("--chdir", workspace))
     argv.append("--")
     argv.extend(engine_argv)
+    return argv
+
+
+def build_work_guard_argv(
+    *,
+    mounts: Sequence[tuple[str, str]],
+    engine_argv: list[str],
+    cwd: str,
+    bwrap_path: str = BWRAP_BINARY,
+) -> list[str]:
+    """Build the bwrap prefix of the work write guard. Pure: no filesystem access.
+
+    Work mode keeps the host filesystem as it is: ``/`` is bound writable, then
+    each ``(mode, path)`` in ``mounts`` is bind-mounted over itself, read-only
+    for a protected path and writable for a re-open inside one. ``mounts``
+    arrives ordered parents-first (``write_guard.GuardPlan.mounts``), and bwrap
+    applies mounts in argv order, so a child always overrides its parent.
+
+    ``--dev-bind`` (not ``--bind``) keeps device nodes usable: a plain ``--bind``
+    would remount ``/dev`` with ``nodev``. Namespaces and lifetime flags match
+    the safe boundary. The kernel refuses ``rmdir`` and ``rename`` of a mount
+    point, so ``rm -rf`` and ``mv`` of a protected root fail with ``EBUSY``.
+    """
+    argv: list[str] = [
+        bwrap_path,
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--die-with-parent",
+        "--new-session",
+        "--dev-bind",
+        "/",
+        "/",
+    ]
+    for mode, path in mounts:
+        if mode not in BIND_MODES or not os.path.isabs(path) or "\0" in path:
+            raise DelegateError(
+                "invalid_bwrap_plan", "Write guard mount must be an absolute path with ro/rw mode."
+            )
+        argv.extend(("--ro-bind" if mode == "ro" else "--bind", path, path))
+    argv.extend(("--chdir", cwd, "--", *engine_argv))
     return argv
 
 
