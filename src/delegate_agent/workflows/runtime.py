@@ -853,7 +853,7 @@ def _signal_after_completion_extra(state: WorkflowState) -> JsonObject:
 
 
 class _SignalRelay:
-    """Carry SIGTERM/SIGHUP from the signal handler into ordinary thread context.
+    """Carry SIGTERM/SIGHUP/SIGINT from the signal handler into ordinary thread context.
 
     A Python signal handler runs between bytecodes on the main thread and must
     not take locks: journal_lock may be held by a worker that is itself
@@ -868,7 +868,12 @@ class _SignalRelay:
     never re-raised.
     """
 
-    _SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+    # SIGINT is relayed like the others: left to the interpreter it raises
+    # KeyboardInterrupt in the main thread, and the generic failure branch that
+    # catches it writes `failed` without cancelling the children, so they run on
+    # unowned until the next resume seals them. New signals go at the end; the
+    # start() rollback tests depend on the install order.
+    _SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
     _DRAIN_MARKER = 0xF0  # never a signal number
     _STOP_MARKER = 0x00
 
