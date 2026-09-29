@@ -768,6 +768,10 @@ def effective_prompt(
             if mode == MODE_WORK
             else prompt_instructions.TURN_END_INSTRUCTION
         )
+    elif mode == MODE_WORK and prompt_instructions.WORK_NO_APPROVAL_INSTRUCTION not in prompt:
+        # A prompt framed earlier in another mode (safe) already has the turn-end
+        # rule but not the work-only approval sentences.
+        segments.append(prompt_instructions.WORK_NO_APPROVAL_INSTRUCTION)
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         segments.append(delegate_runner.COMPLETION_REPORT_SUFFIX.strip())
     if mail_suffix is not None:

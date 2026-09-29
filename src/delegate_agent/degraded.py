@@ -289,7 +289,7 @@ _ANNOUNCE = re.compile(
 )
 # A conditional or handed-off action is an offer, not an announcement.
 _ANNOUNCE_HEDGE = re.compile(
-    r"\b(?:if|unless|when|whenever|once|should|otherwise|in case|want|need me|you)\b",
+    r"\b(?:if|unless|when|whenever|once|should|otherwise|in case|want|need me)\b",
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -324,6 +324,9 @@ _GATED_JOB = re.compile(
     r"execut\w+|begin|start|approach|patch\w*|refactor\w*|migrat\w+)\b",
     re.IGNORECASE,
 )
+# "The plan is complete." then "Awaiting approval of the implementation": a plan-only
+# task that finished its deliverable is a report, not a parked Run.
+_DELIVERED = re.compile(r"\b(?:complete[d]?|done|delivered|attached|finished)\b", re.IGNORECASE)
 _ASKS_TO_PROCEED = re.compile(
     r"\b(?:should|shall)\s+i\s+(?:proceed|go\s+ahead|implement|apply|continue)\b[^.!]*\?\W*$"
     r"|\bdo\s+you\s+want\s+me\s+to\s+(?:proceed|go\s+ahead|implement|apply)\b[^.!]*\?\W*$"
@@ -344,8 +347,13 @@ def awaiting_input(text: str | None) -> str | None:
         for match in pattern.finditer(own):
             if _NEGATION.search(own[max(0, match.start() - 40) : match.start()]):
                 continue
-            if pattern is _AWAITING_INPUT and not _GATED_JOB.search(own):
-                continue
+            if pattern is _AWAITING_INPUT:
+                # The approval must gate unfinished work, and the message must not
+                # say the requested deliverable is already complete.
+                sentence = _clause_text(own, match.start(), match.end())
+                rest = own.replace(sentence, " ")
+                if not _GATED_JOB.search(sentence) or _DELIVERED.search(rest):
+                    continue
             return _clause(stripped, match.start(), match.end())
     return None
 

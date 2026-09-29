@@ -619,6 +619,14 @@ class TurnEndClauseTests(unittest.TestCase):
         once = self.frame(mode="work")
         self.assertEqual(self.frame(prompt=once, mode="work"), once)
 
+    def test_a_safe_framed_prompt_reframed_as_work_gains_the_approval_sentences(self):
+        safe = self.frame(mode="safe")
+        self.assertNotIn(prompt_instructions.WORK_NO_APPROVAL_INSTRUCTION, safe)
+        work = self.frame(prompt=safe, mode="work")
+        self.assertEqual(work.count(prompt_instructions.WORK_NO_APPROVAL_INSTRUCTION), 1)
+        self.assertEqual(work.count(prompt_instructions.TURN_END_INSTRUCTION), 1)
+        self.assertEqual(self.frame(prompt=work, mode="work"), work)
+
     def test_the_clause_is_two_sentences_and_says_what_matters(self):
         body = prompt_instructions.TURN_END_INSTRUCTION.split("\n\n", 1)[1].strip()
         self.assertEqual(len(re.findall(r"[.!?](?:\s|$)", body)), 2, body)
