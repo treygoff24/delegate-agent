@@ -1990,7 +1990,13 @@ def _workspace_provider_env(
     """
     if resolved is None or launch.engine != "claude" or resolved.error is not None:
         return {}
-    return {name: "1" for name in model_discovery.CLAUDE_PROVIDER_ENV if resolved.env.get(name)}
+    # An empty value is kept as "" so it overrides a set launching-environment
+    # value, as it does for the child; a set value becomes a presence marker.
+    return {
+        name: "1" if resolved.env[name] else ""
+        for name in model_discovery.CLAUDE_PROVIDER_ENV
+        if name in resolved.env
+    }
 
 
 def _apply_workspace_spec(
