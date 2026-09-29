@@ -192,6 +192,10 @@ UNHANDLED_EVENT_TYPE_CHARS = 64
 PI_PENDING_TOOL_LIMIT = 256
 
 
+def _omitted_marker(omitted: int) -> str:
+    return f"\n\n… [{omitted} chars omitted] …\n\n"
+
+
 def bound_assistant_text(text: str) -> str:
     """Keep the head and tail of over-long assistant text, naming what was cut."""
     if len(text) <= ASSISTANT_TEXT_LIMIT:
@@ -199,7 +203,48 @@ def bound_assistant_text(text: str) -> str:
     omitted = len(text) - ASSISTANT_TEXT_HEAD - ASSISTANT_TEXT_TAIL
     head = text[:ASSISTANT_TEXT_HEAD]
     tail = text[-ASSISTANT_TEXT_TAIL:]
-    return f"{head}\n\n… [{omitted} chars omitted] …\n\n{tail}"
+    return f"{head}{_omitted_marker(omitted)}{tail}"
+
+
+class _RollingText:
+    """Text built piece by piece that holds only what ``bound_assistant_text`` keeps.
+
+    ``text()`` returns exactly ``bound_assistant_text`` of everything appended so
+    far, but memory stays at the head, a tail buffer trimmed whenever it passes
+    twice its budget, and a length counter, however long the run goes. Devin
+    delivers its whole answer as plain lines with no message boundaries, so its
+    running block had no other bound; the full stream is in ``stdout.log``.
+    """
+
+    __slots__ = ("head", "tail", "total")
+
+    def __init__(self) -> None:
+        self.head = ""
+        self.tail = ""
+        self.total = 0
+
+    def append(self, piece: str) -> None:
+        self.total += len(piece)
+        room = ASSISTANT_TEXT_HEAD - len(self.head)
+        if room > 0:
+            self.head += piece[:room]
+            piece = piece[room:]
+        if piece:
+            self.tail += piece
+            if len(self.tail) > 2 * ASSISTANT_TEXT_TAIL:
+                self.tail = self.tail[-ASSISTANT_TEXT_TAIL:]
+
+    def omitted(self) -> int:
+        """Characters ``text()`` leaves out of the middle; 0 while within budget."""
+        if self.total <= ASSISTANT_TEXT_LIMIT:
+            return 0
+        return self.total - ASSISTANT_TEXT_HEAD - ASSISTANT_TEXT_TAIL
+
+    def text(self) -> str:
+        omitted = self.omitted()
+        if not omitted:
+            return self.head + self.tail
+        return f"{self.head}{_omitted_marker(omitted)}{self.tail[-ASSISTANT_TEXT_TAIL:]}"
 
 
 def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
@@ -726,6 +771,11 @@ class StreamAccumulator:
     _codex_completion_candidate: str | None = field(default=None, repr=False)
     _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
     _last_substantive_assistant_text: str | None = field(default=None, repr=False)
+    # Devin's running answer block and the chunk string last published from it.
+    # `assistant_chunks[-1]` is only the block's own text while it is that exact
+    # object; anything else appended since makes the block stale.
+    _devin_block: _RollingText | None = field(default=None, repr=False)
+    _devin_block_chunk: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
     _grok_sealed_response: str = field(default="", repr=False)
@@ -1398,19 +1448,46 @@ class StreamAccumulator:
         # chunk (joined by "\n") instead of appending a new chunk each line,
         # which would otherwise get "\n\n"-joined into blank-line-separated
         # paragraphs in assistant_text.
+        #
+        # The block is a `_RollingText`, not a string rebuilt on every line: with
+        # the output cap off a long run would otherwise copy and keep the whole
+        # answer in memory. The published chunk is the block's bounded form (head
+        # plus tail, the same budget `bound_assistant_text` applies), so the
+        # excerpt kept for recovery, the report and the stall watchdog's tail
+        # read stays bounded while `stdout.log` keeps the full stream.
         stripped = text.strip()
         if not stripped:
             return
-        if self.assistant_chunks:
-            self.assistant_chunks[-1] = f"{self.assistant_chunks[-1]}\n{stripped}"
+        chunks = self.assistant_chunks
+        block = self._devin_block
+        if block is None or not chunks or chunks[-1] is not self._devin_block_chunk:
+            block = self._devin_block = _RollingText()
+            if chunks:
+                block.append(chunks[-1])
+        block.append(f"\n{stripped}" if block.total else stripped)
+        merged = block.text()
+        if chunks:
+            chunks[-1] = merged
         else:
-            self.assistant_chunks.append(stripped)
+            chunks.append(merged)
+        self._devin_block_chunk = merged
         self._invalidate_assistant_text_cache()
         self.current = _current_from_text(stripped)
-        merged = self.assistant_chunks[-1]
         self._last_recoverable_assistant_text = merged
-        if is_substantive_assistant_text(merged):
+        # A block past the budget is substantive by construction: its bounded
+        # form is longer than 200 characters and holds line breaks, which
+        # `is_substantive_assistant_text` accepts before any housekeeping check.
+        # Skipping the pattern scan keeps a per-line cost of one bounded copy.
+        if block.omitted() or is_substantive_assistant_text(merged):
             self._last_substantive_assistant_text = merged
+
+    def _devin_block_omitted_chars(self) -> int:
+        """Characters the running Devin block already left out of its published chunk."""
+        block = self._devin_block
+        chunks = self.assistant_chunks
+        if block is None or not chunks or chunks[-1] is not self._devin_block_chunk:
+            return 0
+        return block.omitted()
 
     def _record_successful_completion_text(self, text: str) -> None:
         self._record_assistant_text(text, completion=True)
@@ -1595,13 +1672,15 @@ class StreamAccumulator:
 
     def _reset_opencode_step_text_state(self) -> None:
         # OpenCode emits one assistant turn per step. Mid-step prose from a
-        # tool-calling step must not pollute the published assistant surface or
-        # recovery fields once the next step begins.
+        # tool-calling step must not pollute the published assistant surface
+        # once the next step begins. The last-recoverable and last-substantive
+        # fields are deliberately kept: they are what a failed run quotes as
+        # partial output, and a later step that only errors or times out must
+        # not erase an answer an earlier step already produced (pi and omp keep
+        # theirs across turns for the same reason).
         self._opencode_step_text_chunks = []
         self.assistant_chunks = []
         self.completion_text = None
-        self._last_recoverable_assistant_text = None
-        self._last_substantive_assistant_text = None
         self._invalidate_assistant_text_cache()
 
     def _ingest_opencode_event(self, payload: JsonObject, event_type: str) -> None:
@@ -2012,6 +2091,22 @@ class StreamAccumulator:
 
     def bounded_assistant_text(self) -> tuple[str, JsonObject]:
         text = self.assistant_text
+        already_omitted = self._devin_block_omitted_chars()
+        if already_omitted:
+            # The Devin block was bounded as it grew and carries its own
+            # "omitted" marker. Bounding the joined text again would replace that
+            # marker with a count of the marker's own length, so report the
+            # original size and pass the text through.
+            marker_chars = len(_omitted_marker(already_omitted))
+            if len(text) <= ASSISTANT_TEXT_LIMIT + marker_chars:
+                meta = {
+                    "assistantText": text,
+                    "assistantTextChars": len(text) - marker_chars + already_omitted,
+                    "assistantTextTruncated": True,
+                    "assistantTextLimitChars": ASSISTANT_TEXT_LIMIT,
+                    "assistantTextOmittedMiddleChars": already_omitted,
+                }
+                return text, meta
         if len(text) <= ASSISTANT_TEXT_LIMIT:
             meta = {
                 "assistantText": text,

@@ -5278,9 +5278,15 @@ def _bounded_call_communicate(
         _terminate_call_process(process, grace_seconds=process_group_grace_seconds)
     _join_io_threads()
     # A short-lived leader can exit before its drains observe the final overflow.
+    # The drains are joined, so the buffers are complete: hand them up exactly as
+    # the timeout and live-overflow branches above do, or a child that finishes
+    # fast and loudly loses the draft it wrote.
     if overflow.is_set():
         stream = overflow_stream[0] or "stdout"
-        raise RunnerLaunchError(f"call_{stream}_overflow", overflow_message[0], 1)
+        failure = RunnerLaunchError(f"call_{stream}_overflow", overflow_message[0], 1)
+        failure.partial_stdout = stdout_buf.getvalue()
+        failure.partial_stderr = stderr_buf.getvalue()
+        raise failure
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
 
