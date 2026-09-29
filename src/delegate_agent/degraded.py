@@ -347,13 +347,15 @@ def awaiting_input(text: str | None) -> str | None:
         for match in pattern.finditer(own):
             if _NEGATION.search(own[max(0, match.start() - 40) : match.start()]):
                 continue
-            if pattern is _AWAITING_INPUT:
-                # The approval must gate unfinished work, and the message must not
-                # say the requested deliverable is already complete.
-                sentence = _clause_text(own, match.start(), match.end())
-                rest = own.replace(sentence, " ")
-                if not _GATED_JOB.search(sentence) or _DELIVERED.search(rest):
-                    continue
+            # The message must not say the requested deliverable is already complete:
+            # "The plan is complete. Should I proceed?" is a finished plan-only Run.
+            sentence = _clause_text(own, match.start(), match.end())
+            rest = own.replace(sentence, " ")
+            if _DELIVERED.search(rest):
+                continue
+            # An "awaiting approval" clause must also gate unfinished work.
+            if pattern is _AWAITING_INPUT and not _GATED_JOB.search(sentence):
+                continue
             return _clause(stripped, match.start(), match.end())
     return None
 
