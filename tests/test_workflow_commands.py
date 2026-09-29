@@ -3298,6 +3298,44 @@ class WorkflowCommandTests(unittest.TestCase):
         self._wait_for_pid_exit(supervisor_pid)
         self.assertFalse(workflow_registry.supervisor_alive(root))
 
+    def test_supervisor_records_sigint_and_seals_children(self) -> None:
+        """SIGINT is relayed like SIGTERM: journalled, children cancelled, no orphans.
+
+        Left to the interpreter it raised KeyboardInterrupt in the main
+        thread, whose failure branch wrote `failed` without cancelling the
+        child, so the child ran on unowned until a later resume sealed it.
+        """
+        script = self.write_workflow(
+            """
+            meta = {"name": "interrupted", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("hold")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        (child,) = self._wait_for_live_child(wf_id)
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        supervisor_pid = status["supervisorPid"]
+
+        os.kill(supervisor_pid, signal.SIGINT)
+        final = self._wait_for_workflow_status(root, "failed")
+        self.assertEqual(final["signal"], "SIGINT")
+        self.assertEqual(final["error"], "supervisor received SIGINT")
+        self.assertEqual(final["watchdogReason"], "signal:SIGINT")
+        self.assertEqual([item["runId"] for item in final["cancelled"]], [child["runId"]])
+        (signalled,) = self._journal_events(root, "supervisor_signalled")
+        self.assertEqual(signalled["signal"], "SIGINT")
+        cancelled = self._wait_for_child_status(wf_id, child["runId"], "cancelled")
+        self.assertNotIn("staleReason", cancelled)
+        self._wait_for_pid_exit(supervisor_pid)
+        self.assertFalse(workflow_registry.supervisor_alive(root))
+
     def test_resume_hides_prior_terminal_status_and_result_before_supervisor_finishes(
         self,
     ) -> None:
@@ -3918,6 +3956,31 @@ class WorkflowCommandTests(unittest.TestCase):
             self.assertTrue(relay.stop())
         self.assertFalse(relay._thread.is_alive())
 
+    def test_signal_relay_takes_sigint_and_gives_the_handler_back(self) -> None:
+        """A real SIGINT is relayed, not raised as KeyboardInterrupt, and stop() restores it.
+
+        The guards run before the signal is sent: with no relay handler in
+        place, a real SIGINT would interrupt this test process itself.
+        """
+        state = self._relay_state()
+        watchdog = workflow_runtime._SupervisorWatchdog(state, interval_seconds=60)
+        relay = workflow_runtime._SignalRelay(state, watchdog)
+        before = signal.getsignal(signal.SIGINT)
+        relay.start()
+        self.assertTrue(relay._started, "relay must arm in the test's main thread")
+        try:
+            self.assertIsNot(signal.getsignal(signal.SIGINT), before)
+            self.assertIsNot(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(relay.drain())
+            self.assertEqual(state.signal_received, "SIGINT")
+            self.assertTrue(state.cancel_event.is_set())
+            self.assertEqual(watchdog.reason, "signal:SIGINT")
+            self.assertEqual(self._signalled_events(state.root), ["SIGINT"])
+        finally:
+            self.assertTrue(relay.stop())
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
     def test_signal_relay_drain_is_not_answered_by_a_stale_acknowledgement(self) -> None:
         """A marker left over from a timed-out drain cannot satisfy a later drain.
 
@@ -4140,6 +4203,7 @@ class WorkflowCommandTests(unittest.TestCase):
             return None
 
         term_before = signal.getsignal(signal.SIGTERM)
+        int_before = signal.getsignal(signal.SIGINT)
         hup_before = signal.signal(signal.SIGHUP, hup_handler)
         wake_read, wake_write = os.pipe()
         os.set_blocking(wake_write, False)
@@ -4183,6 +4247,7 @@ class WorkflowCommandTests(unittest.TestCase):
                 self.assertEqual((relay._read_fd, relay._write_fd), (-1, -1))
                 self.assertEqual(relay._previous_handlers, {})
                 self.assertIs(signal.getsignal(signal.SIGTERM), term_before)
+                self.assertIs(signal.getsignal(signal.SIGINT), int_before)
                 self.assertIs(signal.getsignal(signal.SIGHUP), hup_handler)
                 self.assertEqual(
                     signal.set_wakeup_fd(-1), expected_wakeup, "wakeup fd was not put back"

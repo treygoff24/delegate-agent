@@ -1023,7 +1023,10 @@ Resumption requires the current workflow format: version-2 structural keys and
 a runtime pin supporting version-1 attempt configuration. Pinless workflows and
 older formats are rejected before child launch; start a new workflow rather
 than migrating old state. Synchronous dry runs use command configuration and
-do not establish an operational snapshot for a live attempt.
+do not establish an operational snapshot for a live attempt. A resume keeps the
+pinned runtime; `workflow resume --repin` moves the pin onto the live runtime
+first, and the attempt snapshot is then bound to the new runtime digest (see
+[Pinned runtime and `--repin`](delegate-workflows.md#pinned-runtime-and---repin)).
 
 #### Workflow defaults
 

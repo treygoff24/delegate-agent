@@ -37,9 +37,10 @@ Canonical terms — use these in code, docs, and prompts rather than synonyms:
   tagged `--group <wfId>` so the standard run commands apply to it.
 - **Replay**: returning a journaled result for a structural key instantly on
   resume instead of re-running the child.
-- **Adoption**: on resume, recognizing a child run that already exists in the
+- **Adoption**: on resume, recognizing a child run that already finished in the
   run registry for a started-without-result key and taking its outcome instead
-  of respawning a duplicate.
+  of respawning a duplicate. A resume cancels children that were still running
+  (see [Gates and resume](#gates-and-resume)); it does not adopt them.
 - **Gate**: a human checkpoint — the supervisor stops admitting new agents,
   drains in-flight ones to the journal, records a `gate` event, and exits with
   status `paused` until `workflow approve` (or `run --resume`) relaunches it.
@@ -76,7 +77,7 @@ drift from that tuple.
 
 - `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False, on_failure="none", key=None, base=None, env=None, setup=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`. Workflow children stay non-resumable unless the call passes `resumable=True`, even though standalone Codex and Claude work Runs are resumable by default: a fan-out would otherwise retain every child's native session file and worktree. `on_failure="typed"` makes an exhausted structured call return a falsy `AgentFailure` instead of `None` (see below). `key="..."` gives the call a stable replay identity (see [Stable step keys](#stable-step-keys)). `base=`, `env=` (a dict of names to strings), and `setup=` pass a [workspace spec](worktrees.md#workspace-spec-base-env-setup) to a `mode="work"`, `isolation="worktree"` child; other lanes raise `ValueError`. They join the call's replay identity with env values reduced to a digest. A structured retry that re-enters the first attempt's worktree carries `env` only.
 - `agent_meta(key_or_label=None)` returns the latest agent attempt's child outcome (`runId`, `ok`, `status`, `failureKind`, `failureReason`, `servedModel`, `servedProvider`), or, with no argument, that of the most recent `agent()` call on the calling thread.
-- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to, and that pin cannot change across a resume (a runtime that no longer matches the pin is refused as `pin_collision` rather than re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run.
+- `capabilities` maps feature names to versions (`agentFailure`, `agentMeta`, `failureKind`, `agentKey`, `scopeKey`, `gateActions`, `workspaceSpec`); a script tests membership before relying on a newer feature, for example `key="impl" if capabilities.get("agentKey") else None`. `capabilities` describes the runtime the run was pinned to. A plain resume keeps that pin (a runtime that no longer matches the pin is refused as `pin_collision` rather than silently re-pinned), so a script's keyed/unkeyed choice stays stable for the whole run. `workflow resume --repin` is the one way to move the pin (see [Pinned runtime and `--repin`](#pinned-runtime-and---repin)); the capabilities map then describes the live runtime, so a script that branches on it can take a different branch after a repin.
 - `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ..., key=None)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item; a key refusal propagates to the script instead (see [Stable step keys](#stable-step-keys)).
 - `parallel([lambda: ...], key=None)` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints and key refusals propagate to the supervisor.
@@ -143,6 +144,14 @@ lifetime and replays the same way on resume.
 Unkeyed calls keep their positional keys exactly, so existing journals replay
 unchanged.
 
+`workflow check` warns about the mixed case: a script that gives some `agent()`,
+`parallel()`, `pipeline()`, or `workflow()` calls a `key=` and leaves others
+positional gets one `keying warning` per primitive, with the source lines of
+the unkeyed calls. Those calls still replay by position and prompt, so the
+shifting-position problem described above applies to them. A script that keys
+nothing is left alone, and a call that passes `**kwargs` is assumed to carry
+its key there.
+
 ### Concurrent calls and stale children
 
 Positional scopes and counters are per thread. Two calls from plain Python
@@ -157,8 +166,9 @@ treated as stale, whatever its scope: `agent_started` carries the supervisor's
 Only current-format workflows can resume: version-2 structural keys, a runtime
 pin, and version-1 attempt configuration are required. Older or pinless workflow
 records are rejected before child launch. Start a new workflow instead of
-reusing old state. New workflows still replay completed children, adopt running
-children, and preserve result-bound approvals across resume.
+reusing old state. New workflows replay completed children, relaunch work whose
+child was still running when the supervisor died, and preserve result-bound
+approvals across resume.
 
 A supervisor is detached, so it pauses, fails, or finishes with nobody watching.
 Pass `--notify room:<name>` or `--notify channel:<name>` to `workflow run` and it
@@ -209,8 +219,91 @@ the replay relaunches it instead of failing the thunk with "already terminal
 the resume fails with `workflow_children_unsealed` naming the group, and the
 operator decides what those survivors are.
 
-The supervisor handles `SIGTERM` and `SIGHUP` the way it handles a stall
-watchdog fire. The signal handler only records the signal; a relay thread fed
+Resume does not adopt a child that is still running: it cancels it and the
+replay relaunches that step from the start. Letting a resume wait on a live
+orphan and take its result instead is deferred work, not current behavior, and
+an earlier version of these docs that said resume adopts running children was
+wrong. Adoption covers a child that already finished (or that this supervisor
+lifetime is itself still launching), not one that a previous supervisor left
+running.
+
+### Pinned runtime and `--repin`
+
+A workflow pins the delegate runtime code it was launched with, and every
+resume runs on that pin, so a fix shipped after the launch does not reach the
+workflow. `workflow resume` and `workflow status` therefore say so plainly. When
+the pinned runtime differs from the live one, both print a notice that names the
+pinned runtime (digest, delegate version, and the date it was pinned) beside the
+live runtime (digest, version, and the date it was promoted when the live
+runtime came from a promotion). JSON mode carries the same facts as
+`runtimePin` (`differs`, `pinned`, `live`; on a resume the notice text is also
+in `warnings`). `status` prints no notice for a finished (`succeeded` or
+`dry_run`) workflow, and reports `runtimePin.checked: false` with the reason
+when the pin cannot be read, rather than failing. Nothing changes unless you
+ask:
+
+```bash
+python3 bin/delegate.py workflow resume wf_0123abcdef45           # keeps the pin, prints the notice
+python3 bin/delegate.py workflow resume wf_0123abcdef45 --repin   # moves the workflow onto the live runtime
+python3 bin/delegate.py workflow approve wf_0123abcdef45 --repin  # same, when releasing a gate
+```
+
+`--repin` is opt-in and applies only to a resume (`workflow resume`,
+`workflow run --resume`, `workflow approve`); on a new run or with `--dry-run`
+it is refused as `invalid_option_combination`. What it changes and what it
+keeps:
+
+- It snapshots the live runtime into the content-addressed pin store, rewrites
+  the pin's `runtime` section, and moves the old runtime into `runtimeHistory`
+  with `pinnedAt` and `supersededAt`. The rest of the pin (the frozen script,
+  arguments, config and profile digests, and workflow environment) is left
+  exactly as it was, so personas and configuration stay frozen too.
+- The journal is untouched apart from one added `runtime_repinned` event
+  (`fromDigest`, `fromVersion`, `fromPinnedAt`, `toDigest`, `toVersion`), written
+  after `attempt_config` and as late as the resuming command can write: once the
+  supervisor starts it owns the journal. If the launch then fails, the old pin
+  is put back and a `runtime_repin_rolled_back` event (`reason`,
+  `abandonedDigest`, `restoredDigest`) follows it, so the journal never ends
+  claiming a move that did not stay. Step keys are not recomputed: settled steps replay
+  as before. The existing key-version check still applies, so a workflow saved
+  under a different structural key version is refused for that reason with or
+  without `--repin`. A change to how keys are derived must bump
+  `WORKFLOW_KEY_VERSION`; `tests/test_workflow_key_stability.py` fails first if
+  one is changed without it.
+- The identity check still runs against the pin before anything moves
+  (`workflow_identity.validate`): a workflow whose credential namespace or
+  profile no longer matches what it was launched under is refused as
+  `workflow_profile_drift`, as on any resume.
+- The new pin is written beside the old one as `pin.json.staged`, loaded back
+  and validated there, and only then renamed over `pin.json`, so a replacement
+  that does not validate never becomes the pin. Before the rename the old pin is
+  copied to `pin.json.pre-repin`. The supervisor started on the new pin deletes
+  it, durably, before it runs any step; a supervisor that cannot delete it
+  fails without running anything. If the resume fails first, the backup's
+  bytes are restored over `pin.json`. A backup still on disk therefore always
+  means nothing ran on the new runtime: the next resume (not a `--dry-run`)
+  puts the old pin back under the workflow lock and, when the journal still
+  says the workflow moved, adds `runtime_repin_rolled_back` with
+  `reason: interrupted`. A failed `--repin` therefore leaves the workflow as it
+  was. Until that recovery runs, `workflow status` reads the pin on disk, which
+  is the new one.
+- If the pinned runtime already equals the live one, `--repin` changes nothing
+  and says so.
+
+`--repin` is refused, with the reason, in these cases: a child of the workflow
+is still running (`repin_children_running`, naming the run ids and pids; stop
+it with `workflow kill` or wait for it, because a resume would cancel it and
+the runtime would change underneath it in the same command). A child that has
+not published its pid yet counts as running while its launcher is alive or,
+with no launcher on record, for five minutes after its last activity; another resume
+holds the workflow lock (`workflow_locked`); the existing pin cannot be
+verified (a pin from before the runtime files were recorded fails to load, and
+so cannot be resumed either); or the identity check above fails.
+
+The supervisor handles `SIGTERM`, `SIGHUP`, and `SIGINT` the way it handles a
+stall watchdog fire. (`SIGINT` used to reach the interpreter's default, which
+raised `KeyboardInterrupt` and marked the workflow failed without cancelling its
+children; it is relayed now like the others.) The signal handler only records the signal; a relay thread fed
 by the process's wakeup pipe journals `supervisor_signalled` with the signal
 name and pid and sets the cancel event, so nothing in the handler ever waits on
 a lock. Admission closes, in-flight children are cancelled, structured-retry
