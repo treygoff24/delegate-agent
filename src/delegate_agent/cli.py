@@ -1207,6 +1207,12 @@ def execute_request(
                     "durationMs": result.duration_ms,
                 }
                 run_metadata.add_model_payload_fields(payload, request)
+                if result.served_model is not None:
+                    # The requested/resolved fields above name the request; these
+                    # name what the child's stream said answered.
+                    payload["servedModel"] = result.served_model
+                    if result.served_provider is not None:
+                        payload["servedProvider"] = result.served_provider
                 if request.warnings:
                     payload["warnings"] = list(request.warnings)
                 if result.warnings:
