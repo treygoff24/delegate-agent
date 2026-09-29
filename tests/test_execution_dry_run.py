@@ -213,7 +213,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
         self.assertIn("not a Git repo", ctx.exception.message)
 
-    def test_git_forbid_commit_without_worktree_names_fix(self):
+    def test_git_forbid_commit_with_isolation_none_dry_runs_in_place(self):
         with tempfile.TemporaryDirectory() as repo_dir:
             subprocess.run(
                 ["git", "-C", repo_dir, "init"],
@@ -221,24 +221,28 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            with self.assertRaises(errors_api.DelegateError) as ctx:
-                parser_api.parse_cli(
-                    [
-                        "--cwd",
-                        repo_dir,
-                        "--isolation",
-                        "none",
-                        "--json",
-                        "dry-run",
-                        "cursor",
-                        "work",
-                        "--forbid-commit",
-                        "fix",
-                    ]
-                )
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("Corrected command:", ctx.exception.message)
-        self.assertIn("--isolation worktree", ctx.exception.message)
+            parsed = parser_api.parse_cli(
+                [
+                    "--cwd",
+                    repo_dir,
+                    "--isolation",
+                    "none",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "work",
+                    "--forbid-commit",
+                    "fix",
+                ]
+            )
+            request = request_api.request_from_parsed(
+                parsed, config_api.embedded_default_config(), io.StringIO("")
+            )
+            payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["commitPolicy"], {"forbidCommit": True})
+        self.assertEqual(payload["effectiveIsolation"], "none")
+        # The in-place run is told about the policy the way a worktree run is.
+        self.assertIn("--forbid-commit", request.prompt)
 
     def test_codex_reasoning_without_model_uses_harness_default(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -940,18 +940,23 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         path.chmod(0o755)
         return bin_dir
 
-    def _make_commit_fake_bin(self, name="agent"):
-        """Make a fake binary that creates a commit in its current working directory."""
+    def _make_commit_fake_bin(self, name="agent", bypass_commit_hooks=False):
+        """Make a fake binary that creates a commit in its current working directory.
+
+        Under --forbid-commit, git itself refuses a plain commit (run-owned hooks), so
+        a test of the post-exit commit check needs a child that sidesteps the hooks.
+        """
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         bin_dir = Path(temp.name)
         path = bin_dir / name
+        commit = "git -c core.hooksPath=/dev/null commit" if bypass_commit_hooks else "git commit"
         path.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf 'committed\\n' > committed-by-agent.txt\n"
             "git add committed-by-agent.txt\n"
-            "git commit -m 'agent commit' >/dev/null\n"
+            f"{commit} -m 'agent commit' >/dev/null\n"
             # A cursor `result` event with genuine assistant text, so the
             # run's resultQuality is `ok` rather than the empty-output
             # failure the outcome contract now gives an exit-0 child with no
@@ -1230,7 +1235,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             mock.patch.dict(os.environ, {"HOME": fake_home}),
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
-            fake_bin = self._make_commit_fake_bin()
+            fake_bin = self._make_commit_fake_bin(bypass_commit_hooks=True)
             workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "cursor",
@@ -1283,6 +1288,57 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(payload["commitPolicy"]["commitsCreatedCount"], 1)
             self.assertEqual(payload["childExitCode"], 0)
             self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+
+    def test_forbid_commit_makes_a_plain_git_commit_fail_inside_the_child(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            fake_bin = self._make_commit_fake_bin()
+            workspace = request_api.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "cursor",
+                "work",
+                repo.name,
+                config_api.embedded_default_config(),
+            )
+            request = request_types.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "hello"],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+                forbid_commit=True,
+            )
+            with mock.patch.dict(
+                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config_api.embedded_default_config(),
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            # The hook refused the commit, so the child (set -e) failed and no commit
+            # exists: the failure is the child's, not a commit-policy violation.
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"], "child_failed")
+            self.assertNotEqual(payload["exitCode"], 0)
+            self.assertIn("--forbid-commit", str(payload["stderrTail"]))
+            summary = payload["workSummary"]
+            self.assertEqual(summary["commitsCreatedCount"], 0)
+            self.assertEqual(summary["headCommit"], summary["baseCommit"])
 
     def test_forbid_commit_fails_closed_when_commit_inspection_unverified(self):
         with (

@@ -58,16 +58,6 @@ CLI_REFERENCE = ROOT / "docs" / "cli-reference.md"
 # entry must still be rejected (an accepted entry is stale) and must still be
 # produced by some line (a vanished entry is stale).
 REJECTED_BY_DESIGN: dict[str, str] = {
-    "delegate --isolation none devin work --forbid-commit": (
-        "--forbid-commit needs a persistent worktree, so it cannot follow an explicit "
-        "--isolation none. A synopsis of independent brackets cannot say so; the "
-        "cli-reference prose does, and the parser refuses on purpose. Devin is the only "
-        "engine whose synopsis is work-only, so it is the only one where the pair is "
-        "generated (the same conflict for the other engines needs three options at once)."
-    ),
-    "delegate --isolation none dry-run devin work --forbid-commit": (
-        "The same --isolation none / --forbid-commit conflict, through dry-run."
-    ),
     "delegate followup x fix it --dry-run": (
         "The cli-reference shows it as the example of a followup option inside the prompt "
         "text, which is refused (option_after_handle) so a stray --dry-run cannot start a "

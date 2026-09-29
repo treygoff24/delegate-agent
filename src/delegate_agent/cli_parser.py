@@ -1296,22 +1296,6 @@ def parse_modeless_engine(
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
         forbid_commit_implied_isolation = True
-    if forbid_commit and mode == "work" and isolation == "none":
-        corrected = corrected_command_suffix(
-            [
-                "--isolation",
-                "worktree",
-                *(["dry-run"] if dry_run else []),
-                engine,
-                mode,
-                "--forbid-commit",
-                *(prompt_parts or []),
-            ]
-        )
-        raise DelegateError(
-            "invalid_option_combination",
-            f"--forbid-commit cannot be combined with --isolation none.{corrected}",
-        )
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -1337,6 +1321,7 @@ def parse_modeless_engine(
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             expect_files=expect_files,
+            writable=tail.writable,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -1455,22 +1440,6 @@ def parse_droid(
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
         forbid_commit_implied_isolation = True
-    if forbid_commit and mode == "work" and isolation == "none":
-        droid_tokens = ["droid", mode]
-        corrected = corrected_command_suffix(
-            [
-                "--isolation",
-                "worktree",
-                *(["dry-run"] if dry_run else []),
-                *droid_tokens,
-                "--forbid-commit",
-                *(prompt_parts or []),
-            ]
-        )
-        raise DelegateError(
-            "invalid_option_combination",
-            f"--forbid-commit cannot be combined with --isolation none.{corrected}",
-        )
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -1496,6 +1465,7 @@ def parse_droid(
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             expect_files=expect_files,
+            writable=tail_result.writable,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -2049,6 +2019,7 @@ def parse_prompt_tail(
     progress_intent: str | None = None
     forbid_commit = False
     expect_files: list[str] = []
+    writable: list[str] = []
     include_dirty = False
     mail_push = False
     read_only = False
@@ -2321,6 +2292,12 @@ def parse_prompt_tail(
             expect_files.append(rest[i + 1])
             i += 2
             continue
+        if token == "--writable":
+            if i + 1 >= len(rest) or not rest[i + 1].strip():
+                raise DelegateError("missing_writable_path", "--writable requires a path.")
+            writable.append(rest[i + 1])
+            i += 2
+            continue
         if token == "--forbid-commit":
             if forbid_commit:
                 raise DelegateError(
@@ -2486,6 +2463,7 @@ def parse_prompt_tail(
         tuple(workspace_env_files),
         workspace_setup,
         stall_minutes,
+        tuple(writable),
     )
 
 

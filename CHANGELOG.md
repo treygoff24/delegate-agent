@@ -1005,6 +1005,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inode, so a write through it changes the protected file; and a protected
   path that is itself a symlink is protected at its target while the link
   stays replaceable.
+- A lane started through an estate launcher (`estate-claude`, `estate-codex`,
+  `estate-omp`, any program named `estate-*`) gets the profiles root
+  (`ESTATE_AI_PROFILES_ROOT`, then `AI_PROFILES_ROOT`, then `~/.ai-profiles`)
+  re-opened, recorded as "estate launcher writes profile state". The launcher
+  picks an account, refreshes its token, and writes session, plugin, and lock
+  state there on every launch, so protecting it stopped `estate-claude` before
+  Claude started. Those lanes can therefore write every profile's files; lanes
+  started any other way keep `~/.ai-profiles` protected, and a Codex lane with
+  its own sandbox on never gets it as a writable root.
 
 ## [0.31.0] - 2026-09-14
 

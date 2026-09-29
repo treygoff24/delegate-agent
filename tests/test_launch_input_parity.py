@@ -540,13 +540,6 @@ class LaunchInputParityTests(unittest.TestCase):
             ("safe", ("--resumable",), {"resumable": True}, (), "invalid_option_combination"),
             (
                 "work",
-                ("--forbid-commit",),
-                {"forbidCommit": True},
-                ("--isolation", "none"),
-                "invalid_option_combination",
-            ),
-            (
-                "work",
                 ("--include-dirty",),
                 {"includeDirty": True},
                 ("--isolation", "none"),

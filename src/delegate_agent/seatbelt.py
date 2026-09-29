@@ -1,11 +1,11 @@
-"""macOS Seatbelt boundary for Codex pure calls."""
+"""macOS Seatbelt boundaries: Codex pure calls and the work write guard."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from delegate_agent.errors import DelegateError
@@ -115,6 +115,65 @@ def _runtime_directories(binary: str, env: Mapping[str, str] | None = None) -> l
             allows.append(_RuntimeAllow(_validate_profile_path(absolute), "literal"))
 
     return allows
+
+
+def canonical_path(path: str) -> str:
+    """The on-disk spelling of ``path`` for a Seatbelt rule.
+
+    Seatbelt matches the case the filesystem reports, and APFS is usually
+    case-insensitive: a rule spelled ``~/code`` would silently fail to protect
+    ``~/Code``. ``F_GETPATH`` returns the canonical spelling; anything that
+    cannot be opened falls back to the resolved path.
+    """
+    real = os.path.realpath(os.path.expanduser(path))
+    if sys.platform != "darwin":
+        return real
+    try:
+        import fcntl
+
+        fd = os.open(real, os.O_RDONLY)
+    except (ImportError, OSError):
+        return real
+    try:
+        reported = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+    except (AttributeError, OSError):
+        return real
+    finally:
+        os.close(fd)
+    text = os.fsdecode(reported.split(b"\0", 1)[0])
+    return text if text.startswith("/") else real
+
+
+def build_work_guard_profile(
+    mounts: Sequence[tuple[str, str]],
+    *,
+    no_unlink: Sequence[str] = (),
+) -> str:
+    """Return the work write-guard profile: allow everything, then protect paths.
+
+    ``mounts`` is the ordered ``(mode, path)`` list of ``write_guard.GuardPlan``:
+    ``ro`` becomes a ``file-write*`` deny and ``rw`` a re-allow. Seatbelt gives
+    the last matching rule precedence, and the list arrives parents-first, so a
+    re-open inside a protected path wins (probed on this platform: a later
+    ``allow`` overrides an earlier ``deny``). Reads, network and process
+    control are untouched. ``no_unlink`` paths additionally refuse unlink and
+    rename of the path itself, which is what stops a lane moving its own
+    checkout to the Trash.
+    """
+    lines = ["(version 1)", "(allow default)"]
+    for mode, path in mounts:
+        verb = "deny" if mode == "ro" else "allow"
+        target = _validate_profile_path(canonical_path(path))
+        lines.append(f'({verb} file-write* (subpath "{_seatbelt_string(target)}"))')
+    for path in no_unlink:
+        target = _validate_profile_path(canonical_path(path))
+        lines.append(f'(deny file-write-unlink (literal "{_seatbelt_string(target)}"))')
+    return "\n".join(lines) + "\n"
+
+
+def work_guard_argv(profile: str, engine_argv: Sequence[str]) -> list[str]:
+    """Prefix ``engine_argv`` with an inline-profile ``sandbox-exec``."""
+    return ["sandbox-exec", "-p", profile, *engine_argv]
 
 
 def build_codex_pure_profile(

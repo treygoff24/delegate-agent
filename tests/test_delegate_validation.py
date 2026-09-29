@@ -1649,8 +1649,9 @@ class ValidationTests(unittest.TestCase):
             " ".join(request.warnings),
         )
 
-    def test_input_json_forbid_commit_with_explicit_none_errors(self):
-        """run --input-json with forbidCommit: true and isolation: 'none' errors."""
+    def test_input_json_forbid_commit_with_explicit_none_is_allowed(self):
+        """run --input-json with forbidCommit: true and isolation: 'none' builds an in-place
+        run that still carries the commit policy, with no implied-worktree note."""
         delegate = load_delegate()
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
@@ -1673,10 +1674,10 @@ class ValidationTests(unittest.TestCase):
             global_options=request_types.GlobalOptions(json_mode=True),
             payload=request_types.RunJsonOptions(str(task)),
         )
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            request_api.request_from_input_json(parsed, droid_test_config(delegate))
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("none", ctx.exception.message.lower())
+        request = request_api.request_from_input_json(parsed, droid_test_config(delegate))
+        self.assertTrue(request.forbid_commit)
+        self.assertNotEqual(request.isolation_context.isolation_lifecycle, "persistent")
+        self.assertNotIn("implies --isolation worktree", " ".join(request.warnings))
 
 
 class WorktreeStalenessWarningTests(unittest.TestCase):
@@ -1791,23 +1792,31 @@ class DryRunHintScopeTests(unittest.TestCase):
             parser_api.parse_cli(argv)
         return ctx.exception.message
 
+    # The forbid-commit-with-`--isolation none` refusal used to be the launch error
+    # that carried a corrected command; it is gone (the flag now works in every
+    # isolation mode). The launch-error case uses the prompt-file ordering error,
+    # and the dry-run cases call the suffix builder those errors share, with a
+    # dry-run argv, so the scoping rule keeps a test at the function it lives in.
+
     def test_a_launch_error_names_dry_run(self):
-        message = self._message(["--isolation", "none", "codex", "work", "--forbid-commit", "fix"])
+        message = self._message(["codex", "work", "fix", "--prompt-file", "task.md"])
+        self.assertIn("Corrected command:", message)
         self.assertIn("dry-run", message)
         self.assertIn("Validate without launching", message)
 
-    def test_a_dry_run_error_does_not_tell_you_to_dry_run(self):
-        message = self._message(
-            ["--isolation", "none", "dry-run", "codex", "work", "--forbid-commit", "fix"]
+    def test_a_dry_run_correction_does_not_tell_you_to_dry_run(self):
+        suffix = parser_api.corrected_command_suffix(
+            ["--isolation", "worktree", "dry-run", "codex", "work", "--forbid-commit", "fix"]
         )
-        self.assertNotIn("prefix it with", message)
+        self.assertIn("Corrected command:", suffix)
+        self.assertNotIn("Validate without launching", suffix)
 
     def test_a_dry_run_correction_stays_a_dry_run(self):
         """The correction must not silently convert a validation into a launch."""
-        message = self._message(
-            ["--isolation", "none", "dry-run", "codex", "work", "--forbid-commit", "fix"]
+        suffix = parser_api.corrected_command_suffix(
+            ["--isolation", "worktree", "dry-run", "codex", "work", "--forbid-commit", "fix"]
         )
-        corrected = message.split("Corrected command: ", 1)[1].split(". ", 1)[0].removesuffix(".")
+        corrected = suffix.split("Corrected command: ", 1)[1].split(". ", 1)[0].removesuffix(".")
         self.assertIn(" dry-run ", f" {corrected} ")
         argv = corrected.split()
         self.assertEqual(argv[0], "delegate")

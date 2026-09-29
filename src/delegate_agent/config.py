@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Final
 
-from delegate_agent import reasoning, redaction, stall_watchdog, wsl
+from delegate_agent import reasoning, redaction, stall_watchdog, write_guard, wsl
 from delegate_agent.constants import KNOWN_ENGINES, VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
@@ -517,6 +517,10 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
                     f"isolation.bwrapBinds[{index}] must be an object with a non-empty "
                     f"string path and mode one of: {', '.join(VALID_BWRAP_BIND_MODES)}.",
                 )
+    if "writeGuard" in isolation:
+        problem = write_guard.validate_config_section(isolation["writeGuard"])
+        if problem is not None:
+            raise ConfigError("invalid_isolation_config", problem)
 
 
 def _validate_required_non_negative_int(

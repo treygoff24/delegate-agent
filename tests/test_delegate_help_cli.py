@@ -642,14 +642,15 @@ class ErgonomicsParserTests(HelpCliTestBase):
         self.assertEqual(parsed.global_options.isolation, "worktree")
         self.assertTrue(parsed.payload.forbid_commit_implied_isolation)
 
-    def test_forbid_commit_with_explicit_none_errors_with_corrected_command(self):
-        with self.assertRaises(error_types.DelegateError) as ctx:
-            parser_api.parse_cli(
-                ["--isolation", "none", "cursor", "work", "--forbid-commit", "do it"]
-            )
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("Corrected command:", ctx.exception.message)
-        self.assertIn("--isolation worktree", ctx.exception.message)
+    def test_forbid_commit_with_explicit_none_is_allowed(self):
+        # The commit hooks and the post-exit check work in every isolation mode, so
+        # the caller's explicit choice of an in-place run stands.
+        parsed = parser_api.parse_cli(
+            ["--isolation", "none", "cursor", "work", "--forbid-commit", "do it"]
+        )
+        self.assertEqual(parsed.global_options.isolation, "none")
+        self.assertTrue(parsed.payload.forbid_commit)
+        self.assertFalse(parsed.payload.forbid_commit_implied_isolation)
 
 
 class KimiHelpTests(HelpCliTestBase):

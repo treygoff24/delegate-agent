@@ -28,6 +28,7 @@ from delegate_agent import (
     reasoning,
     redaction,
     run_metadata,
+    write_guard_launch,
     wsl,
 )
 from delegate_agent import (
@@ -303,6 +304,20 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["stallMinutes"] = request.stall_seconds / 60
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
+    if request.write_guard is not None:
+        planned_root = (
+            request.isolation_context.planned_execution_cwd
+            if request.isolation_context is not None
+            else None
+        )
+        payload["writeGuard"] = write_guard_launch.preview_payload(
+            request.write_guard,
+            engine=request.engine,
+            argv=request.argv,
+            exec_root=planned_root or request.launch_cwd or request.workspace,
+            registry_root=None,
+            git_cwd=request.workspace,
+        )
     if request.include_dirty:
         payload["includeDirty"] = True
     if request.group is not None:
