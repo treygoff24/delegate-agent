@@ -6,7 +6,14 @@ accepts any argv, which is how two dead flags shipped: mail push injected
 passed ``--allow-self`` (Post 0.9.0 rejects it at argument parsing). A fake
 cannot tell the argv Delegate emits from the argv the tool accepts, so these
 tests run the installed binaries in modes that neither spend nor send outside a
-throwaway store, and skip cleanly when a binary is absent (CI, fresh clones).
+throwaway store.
+
+Skip policy: a class skips only when its binary is not on PATH (CI, fresh
+clones) or when ``DELEGATE_SKIP_REAL_BINARY_CONTRACTS`` is set to turn the
+contract tests off on purpose; both skips say why. A binary that IS on PATH but
+will not run (``--version`` fails or times out, the throwaway store cannot be
+set up) is a broken integration, so it FAILS the class with the captured
+output instead of skipping past it.
 
 Codex is checked in two layers because Codex parses in two layers:
 
@@ -25,12 +32,14 @@ nowhere else.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import argv_builders, mail, notify, run_registry, run_status
 from delegate_agent import config as delegate_config
@@ -39,7 +48,8 @@ from tests import ORIGINAL_HOME
 _OVERRIDE_FLAGS = frozenset({"-c", "--config", "--enable", "--disable"})
 _TIMEOUT_SEC = 60
 _BOGUS_FLAG = "--delegate-contract-bogus-flag"
-_UNAVAILABLE = "installed binary is not runnable in this environment"
+_OPT_OUT_ENV = "DELEGATE_SKIP_REAL_BINARY_CONTRACTS"
+_FALSEY = frozenset({"", "0", "false", "no", "off"})
 
 
 def _tool_env(extra: dict[str, str]) -> dict[str, str]:
@@ -67,6 +77,61 @@ def _run(argv: list[str], *, env: dict[str, str], cwd: str | None = None):
     )
 
 
+def _text(value: object) -> str:
+    """Captured output as text; ``TimeoutExpired`` carries bytes or ``None``."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def _require_binary(name: str) -> str:
+    """The installed ``name``'s path, or a skip that says why there is none.
+
+    This is the only place the contract tests skip: the operator turned them
+    off, or the binary is not installed. Anything else about an installed
+    binary is a failure for the caller to raise.
+    """
+    if os.environ.get(_OPT_OUT_ENV, "").strip().lower() not in _FALSEY:
+        raise unittest.SkipTest(
+            f"{_OPT_OUT_ENV} is set: real-{name} contract tests are deliberately off on this host"
+        )
+    path = shutil.which(name)
+    if path is None:
+        raise unittest.SkipTest(f"{name} is not installed (not found on PATH)")
+    return path
+
+
+def _run_required(argv: list[str], *, env: dict[str, str], cwd: str | None = None):
+    """Run ``argv`` and fail with everything it printed unless it exits 0.
+
+    The binary was found on PATH, so a non-zero exit, a timeout or an exec
+    error means the installed tool is broken here. Reporting that as a skip
+    would let a broken integration pass unnoticed.
+    """
+    label = " ".join(argv)
+    try:
+        result = _run(argv, env=env, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"`{label}` timed out after {_TIMEOUT_SEC}s; the installed binary is on PATH but "
+            f"does not respond.\nstdout: {_text(exc.stdout).strip()}\n"
+            f"stderr: {_text(exc.stderr).strip()}"
+        ) from None
+    except OSError as exc:
+        raise AssertionError(
+            f"`{label}` could not be executed ({exc}); the binary is on PATH but is not runnable."
+        ) from None
+    if result.returncode != 0:
+        raise AssertionError(
+            f"`{label}` exited {result.returncode}; the installed binary is on PATH but is not "
+            f"working, so the contract cannot be checked.\nstdout: {result.stdout.strip()}\n"
+            f"stderr: {result.stderr.strip()}"
+        )
+    return result
+
+
 def _override_args(argv: list[str]) -> list[str]:
     """The ``-c``/``--enable``/``--disable`` pairs of ``argv``, in order."""
     pairs: list[str] = []
@@ -76,22 +141,16 @@ def _override_args(argv: list[str]) -> list[str]:
     return pairs
 
 
-@unittest.skipUnless(shutil.which("codex"), "codex is not installed")
 class CodexArgvContractTests(unittest.TestCase):
     """The exact argv Delegate builds for Codex is accepted by the real Codex."""
 
     @classmethod
     def setUpClass(cls) -> None:
+        cls.binary = _require_binary("codex")
         cls._codex_home = tempfile.mkdtemp(prefix="delegate-codex-contract-")
         cls.addClassCleanup(shutil.rmtree, cls._codex_home, ignore_errors=True)
-        cls.binary = str(shutil.which("codex"))
         cls.env = _tool_env({"CODEX_HOME": cls._codex_home})
-        try:
-            probe = _run([cls.binary, "--version"], env=cls.env)
-        except (OSError, subprocess.TimeoutExpired):
-            raise unittest.SkipTest(_UNAVAILABLE) from None
-        if probe.returncode != 0:
-            raise unittest.SkipTest(f"{_UNAVAILABLE}: {probe.stderr.strip()[:200]}")
+        _run_required([cls.binary, "--version"], env=cls.env)
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="delegate-codex-contract-ws-")
@@ -222,13 +281,12 @@ class CodexArgvContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
-@unittest.skipUnless(shutil.which("post"), "post is not installed")
 class PostNotifyContractTests(unittest.TestCase):
     """The exact ``post`` argv ``--notify`` builds is accepted by the real post."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.binary = str(shutil.which("post"))
+        cls.binary = _require_binary("post")
         cls.root = Path(tempfile.mkdtemp(prefix="delegate-post-contract-"))
         cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
         (cls.root / "home").mkdir()
@@ -237,24 +295,19 @@ class PostNotifyContractTests(unittest.TestCase):
         cls.base_env = _tool_env(
             {"HOME": str(cls.root / "home"), "POST_MAIL_ROOT": str(cls.root / "mail")}
         )
-        try:
-            probe = _run([cls.binary, "--version"], env=cls.base_env)
-            cls.room = "delegate-contract-room"
-            registered = _run(
-                [cls.binary, "rooms", "add", cls.room, str(cls.workspace)],
-                env=cls.base_env,
-                cwd=str(cls.workspace),
-            )
-            cls.sender = cls._bind("sender")
-            cls.peer = cls._bind("peer")
-        except (OSError, subprocess.TimeoutExpired):
-            raise unittest.SkipTest(_UNAVAILABLE) from None
-        if probe.returncode != 0 or registered.returncode != 0 or not cls.sender or not cls.peer:
-            raise unittest.SkipTest(f"{_UNAVAILABLE}: {registered.stderr.strip()[:200]}")
+        _run_required([cls.binary, "--version"], env=cls.base_env)
+        cls.room = "delegate-contract-room"
+        _run_required(
+            [cls.binary, "rooms", "add", cls.room, str(cls.workspace)],
+            env=cls.base_env,
+            cwd=str(cls.workspace),
+        )
+        cls.sender = cls._bind("sender")
+        cls.peer = cls._bind("peer")
 
     @classmethod
     def _bind(cls, harness: str) -> str:
-        bound = _run(
+        bound = _run_required(
             [
                 cls.binary,
                 "participant",
@@ -271,8 +324,14 @@ class PostNotifyContractTests(unittest.TestCase):
         prefix = "export POST_PARTICIPANT="
         for line in bound.stdout.splitlines():
             if line.startswith(prefix):
-                return line.removeprefix(prefix).strip()
-        return ""
+                participant = line.removeprefix(prefix).strip()
+                if participant:
+                    return participant
+        raise AssertionError(
+            f"`post participant bind` for {harness!r} printed no `{prefix}...` line, so the "
+            f"throwaway participant could not be set up.\nstdout: {bound.stdout.strip()}\n"
+            f"stderr: {bound.stderr.strip()}"
+        )
 
     def _env_for(self, participant: str) -> dict[str, str]:
         return {**self.base_env, "POST_PARTICIPANT": participant}
@@ -330,6 +389,110 @@ class PostNotifyContractTests(unittest.TestCase):
             cwd=str(self.workspace),
         )
         self.assertNotEqual(result.returncode, 0)
+
+
+class SkipPolicyTests(unittest.TestCase):
+    """The classes above skip only for an absent binary or the explicit opt-out.
+
+    Each case runs a real contract class through a real unittest runner, with a
+    stand-in binary first on PATH, so it exercises the same ``setUpClass`` path
+    production does. These need no installed codex or post.
+    """
+
+    def setUp(self) -> None:
+        self.bin_dir = tempfile.TemporaryDirectory(prefix="delegate-contract-policy-")
+        self.addCleanup(self.bin_dir.cleanup)
+        patcher = mock.patch.dict(os.environ, {"PATH": self.bin_dir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(_OPT_OUT_ENV, None)
+
+    def _install(self, name: str, body: str) -> None:
+        path = Path(self.bin_dir.name) / name
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def _run_class(self, case: type[unittest.TestCase]) -> unittest.TestResult:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(case)
+        return unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+
+    def _assert_fails_with(self, case: type[unittest.TestCase], *needles: str) -> None:
+        result = self._run_class(case)
+        self.assertEqual(
+            result.skipped, [], f"a present-but-broken binary was skipped: {result.skipped}"
+        )
+        self.assertEqual(len(result.errors), 1, result.errors)
+        self.assertEqual(result.testsRun, 0)
+        report = result.errors[0][1]
+        for needle in needles:
+            self.assertIn(needle, report)
+
+    def test_an_absent_binary_skips_and_says_it_is_not_installed(self) -> None:
+        for case, name in ((CodexArgvContractTests, "codex"), (PostNotifyContractTests, "post")):
+            with self.subTest(binary=name):
+                result = self._run_class(case)
+                self.assertEqual(result.errors, [])
+                self.assertEqual(len(result.skipped), 1, result.skipped)
+                self.assertIn(f"{name} is not installed", result.skipped[0][1])
+
+    def test_the_opt_out_skips_even_a_broken_binary_and_names_the_variable(self) -> None:
+        self._install("codex", "#!/bin/sh\necho boom >&2\nexit 1\n")
+        self._install("post", "#!/bin/sh\necho boom >&2\nexit 1\n")
+        for value in ("1", "true", "yes"):
+            for case in (CodexArgvContractTests, PostNotifyContractTests):
+                with (
+                    self.subTest(value=value, case=case.__name__),
+                    mock.patch.dict(os.environ, {_OPT_OUT_ENV: value}),
+                ):
+                    result = self._run_class(case)
+                    self.assertEqual(result.errors, [])
+                    self.assertEqual(len(result.skipped), 1, result.skipped)
+                    self.assertIn(_OPT_OUT_ENV, result.skipped[0][1])
+                    self.assertIn("deliberately off", result.skipped[0][1])
+
+    def test_a_falsey_opt_out_value_does_not_skip(self) -> None:
+        self._install("codex", "#!/bin/sh\necho boom >&2\nexit 1\n")
+        for value in ("0", "false", ""):
+            with (
+                self.subTest(value=value),
+                mock.patch.dict(os.environ, {_OPT_OUT_ENV: value}),
+            ):
+                self._assert_fails_with(CodexArgvContractTests, "boom")
+
+    def test_codex_on_path_that_fails_version_fails_with_its_stderr(self) -> None:
+        self._install("codex", "#!/bin/sh\necho 'codex exploded: no config' >&2\nexit 1\n")
+        self._assert_fails_with(CodexArgvContractTests, "codex exploded: no config", "exited 1")
+
+    def test_codex_on_path_that_hangs_on_version_fails_as_a_timeout(self) -> None:
+        self._install("codex", "#!/bin/sh\nexec /bin/sleep 30\n")
+        with mock.patch(f"{__name__}._TIMEOUT_SEC", 1):
+            self._assert_fails_with(CodexArgvContractTests, "timed out")
+
+    def test_codex_on_path_that_cannot_be_executed_fails(self) -> None:
+        self._install("codex", "#!/nonexistent/interpreter\n")
+        self._assert_fails_with(CodexArgvContractTests, "could not be executed")
+
+    def test_post_on_path_that_fails_version_fails_with_its_stderr(self) -> None:
+        self._install("post", "#!/bin/sh\necho 'post exploded: no store' >&2\nexit 1\n")
+        self._assert_fails_with(PostNotifyContractTests, "post exploded: no store", "exited 1")
+
+    def test_post_on_path_that_cannot_register_the_room_fails_with_its_stderr(self) -> None:
+        self._install(
+            "post",
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "post 0.0.0"; exit 0; fi\n'
+            "echo 'rooms add refused' >&2\nexit 1\n",
+        )
+        self._assert_fails_with(PostNotifyContractTests, "rooms add refused", "exited 1")
+
+    def test_post_on_path_that_binds_no_participant_fails(self) -> None:
+        self._install(
+            "post",
+            "#!/bin/sh\n"
+            'if [ "$1" = "participant" ]; then echo "bound, but no export line"; exit 0; fi\n'
+            'echo "post 0.0.0"\nexit 0\n',
+        )
+        self._assert_fails_with(PostNotifyContractTests, "printed no", "bound, but no export line")
 
 
 if __name__ == "__main__":
