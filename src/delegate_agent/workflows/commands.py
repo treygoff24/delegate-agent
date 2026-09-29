@@ -27,7 +27,7 @@ from delegate_agent import (
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
-from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry, runtime
+from delegate_agent.workflows import WORKFLOW_KEY_VERSION, registry, runtime, status_reasons
 from delegate_agent.workflows import script as workflow_script
 
 workflow_pinning.require_pinned_persona_resolver()
@@ -479,7 +479,17 @@ def emit_run(
             raise DelegateError(exc.error, exc.message) from exc
         # Acquire the lock before any approval/budget mutation so a failed
         # resume cannot clobber a live supervisor's status.json.
-        lock_fd = _acquire_workflow_lock(root, wf_id)
+        try:
+            lock_fd = _acquire_workflow_lock(root, wf_id)
+        except DelegateError as exc:
+            if approve_gate and exc.error == "workflow_locked":
+                # Same code, but say what the operator can do about it.
+                raise DelegateError(
+                    "workflow_locked",
+                    f"Workflow is already running: {wf_id}. "
+                    + _approve_refusal_hint(root, wf_id, "running"),
+                ) from exc
+            raise
         try:
             status = registry.read_json(root / registry.STATUS_FILE) or {}
             _require_current_workflow(status)
@@ -520,12 +530,19 @@ def emit_run(
                     raise DelegateError(
                         "workflow_gate_not_found",
                         f"Workflow {wf_id} has no unapproved gate named {gate_name!r}; "
-                        f"pending gates: {', '.join(pending) if pending else 'none'}.",
+                        f"pending gates: {', '.join(pending) if pending else 'none'}."
+                        + (
+                            ""
+                            if pending
+                            else " " + _approve_refusal_hint(root, wf_id, status.get("status"))
+                        ),
                     )
                 gate_key = recovered.get("key") if recovered else status.get("gateKey")
                 if not isinstance(gate_key, str):
                     raise DelegateError(
-                        "workflow_not_gated", f"Workflow is not waiting on a gate: {wf_id}"
+                        "workflow_not_gated",
+                        f"Workflow is not waiting on a gate: {wf_id}. "
+                        + _approve_refusal_hint(root, wf_id, status.get("status")),
                     )
                 gate_event = recovered or _gate_event(
                     load_journal(), gate_key, status.get("gateResultHash")
@@ -1031,6 +1048,7 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
             f"Workflow status not found: {command.wf_id} (looked in {root}).",
         )
     view = _status_view(root, payload)
+    _add_journal_reasons(root, view)
     runtime_pin, runtime_notice = _status_runtime_pin(root.name, view.get("status"))
     view["runtimePin"] = runtime_pin
     resolved_workspace = _resolved_elsewhere(root, workspace)
@@ -1041,6 +1059,16 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
     else:
         print(f"{view.get('wfId')}: {view.get('status')}", file=stdout)
         print(f"journalPath: {view.get('journalPath')}", file=stdout)
+        pause = view.get("pause")
+        if isinstance(pause, dict):
+            print(f"paused: {pause.get('summary')}", file=stdout)
+        for row in view.get("timeouts") or []:
+            print(
+                f"timeout: {row.get('label') or row.get('key')} item={row.get('item')} "
+                f"engine={row.get('engine')} after {row.get('timeout')}s "
+                f"next={row.get('nextEngine')}",
+                file=stdout,
+            )
         if runtime_notice is not None:
             print(runtime_notice, file=stdout)
         if resolved_workspace is not None:
@@ -1051,6 +1079,21 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
                 file=stdout,
             )
     return EXIT_OK
+
+
+def _add_journal_reasons(root: Path, view: JsonObject) -> None:
+    """Attach ``pause`` (why it is paused) and ``timeouts`` from the journal."""
+    journal = root / registry.JOURNAL_FILE
+    if not journal.exists():
+        return
+    events = list(registry.iter_journal(journal))
+    if view.get("status") == "paused" and isinstance(view.get("gateKey"), str):
+        view["pause"] = status_reasons.pause_reason(
+            root.name, view.get("gateKey"), view.get("gateResultHash"), events
+        )
+    recent = status_reasons.timeouts(events)
+    if recent:
+        view["timeouts"] = recent
 
 
 def _describe_runtime_pin(wf_id: str) -> JsonObject:
@@ -1452,6 +1495,26 @@ def _paused_gate_commands(
             commands.append(["workflow", "approve", wf_id, "--gate", label, "--action", action])
     commands.append(["workflow", "events", wf_id])
     return commands
+
+
+def _approve_refusal_hint(root: Path, wf_id: str, status: object) -> str:
+    """What to do instead of ``approve``, from the workflow's live status."""
+    on_disk = status
+    if on_disk in LIVE_WORKFLOW_STATUSES and not registry.supervisor_alive(root):
+        on_disk = "stalled"
+    failure: str | None = None
+    if on_disk in {"failed", "stalled", "killed"}:
+        events = list(registry.iter_journal(root / registry.JOURNAL_FILE))
+        last = next(
+            (
+                e
+                for e in reversed(events)
+                if e.get("type") in status_reasons.FAILURE_EVENTS and e.get("simulated") is not True
+            ),
+            None,
+        )
+        failure = status_reasons.failure_summary(last) if last is not None else None
+    return status_reasons.approve_refusal_hint(wf_id, on_disk, failure)
 
 
 def _pending_gate_names(

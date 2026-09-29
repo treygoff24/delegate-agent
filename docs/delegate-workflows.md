@@ -160,6 +160,34 @@ unfinished child from an earlier lifetime whose scope now carries a different
 key is stale and is cancelled. A child started by the current lifetime is never
 treated as stale, whatever its scope: `agent_started` carries the supervisor's
 `incarnation` token, and the runtime cancels only children it did not start.
+A dry run cancels and reaps nothing: it journals an
+`agent_stale_scope_would_cancel` row (`key`, `scope`, `replacedBy`,
+`simulated: true`) for each child the live resume would have cancelled.
+
+### Reading a stopped workflow
+
+`workflow status` on a paused workflow adds a `pause` object (and a `paused:`
+line in text): `gateKey`, `gateName`, `title` (the gate name, or a `title` the
+script put in the gate's question), `assignee` (only when the question carries
+one), `actions`, `failure` (one line naming the last agent failure before the
+gate), and `rejection` (the latest `agent_rejected` row's `reason`), plus a
+one-sentence `summary` and the `next` command. Any status with recent agent
+timeouts adds `timeouts`: the last five rows with `label`, `item`, `engine`,
+`timeout`, and `nextEngine`.
+
+`workflow approve` refuses with the real next step. On a failed, killed, or
+stalled workflow it names the last failure and `delegate workflow resume <wfId>`
+(errors `workflow_not_gated` or `workflow_gate_not_found`, unchanged codes). On a
+running workflow the error stays `workflow_locked` and says the workflow is still
+running and its gate is not open yet, pointing at `delegate workflow wait <wfId>`.
+
+Agent journal rows (`agent_started`, `agent_finished`, `agent_timeout`,
+`agent_attempt_failed`, `agent_failed`, `agent_retry`) always carry `label` and
+`item`, each null when the call has none. `item` is the innermost `soft_park()`
+item name, or the position of a `pipeline()`/`parallel()` item. `agent_started`
+records `timeout` (seconds) and `deadlineAt` (first attempt's cut-off) when the
+call has a timeout; `agent_timeout` adds `nextEngine`, the seat that takes over
+(null when it was the last).
 
 ## Gates and resume
 

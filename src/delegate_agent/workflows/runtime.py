@@ -9,6 +9,7 @@ import math
 import os
 import queue
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import (
@@ -1376,6 +1378,35 @@ class _WorkflowInvocation:
 
 _AGENT_AUTHORITY_EVENTS = frozenset({"budget", "agent_started", "agent_child", "agent_finished"})
 
+# Journal rows about one agent call. Each carries ``label`` and ``item`` (null
+# when the call has none) so a reader never has to join rows by key.
+_AGENT_IDENTITY_EVENTS = frozenset(
+    {
+        "agent_started",
+        "agent_finished",
+        "agent_timeout",
+        "agent_attempt_failed",
+        "agent_failed",
+        "agent_retry",
+    }
+)
+_ITEM_SEGMENT_RE = re.compile(r"(?:/soft-park/([^/]+)|/(?:item|thunk)#(\d+))")
+
+
+def _item_from_scope(scope: object) -> str | None:
+    """The innermost per-item name in a scope path, or None outside any item.
+
+    A ``soft_park()`` item is named by the script; a ``pipeline()`` or
+    ``parallel()`` item is named by its position.
+    """
+    if not isinstance(scope, str):
+        return None
+    found = _ITEM_SEGMENT_RE.findall(scope)
+    if not found:
+        return None
+    name, index = found[-1]
+    return name or index
+
 
 def _is_simulated_event(event: JsonObject) -> bool:
     """Return whether a journal row must stay outside live authority."""
@@ -1673,8 +1704,30 @@ class WorkflowState:
                 self._write_status_locked(status="running", last_event=event)
             return event
 
+    def _agent_identity_locked(self, event_type: str, payload: JsonObject) -> JsonObject:
+        """Fill ``label`` and ``item`` on an agent row that lacks them."""
+        if event_type not in _AGENT_IDENTITY_EVENTS:
+            return payload
+        key = payload.get("key")
+        filled = dict(payload)
+        if not filled.get("label") and isinstance(key, str):
+            filled["label"] = next(
+                (name for name, mapped in self.label_keys.items() if mapped == key), None
+            )
+        if "label" not in filled:
+            filled["label"] = None
+        if not filled.get("item"):
+            scope = filled.get("scope")
+            if scope is None and isinstance(key, str):
+                scope = self.started_scopes.get(key)
+            if scope is None:
+                scope = self.current_scope()
+            filled["item"] = _item_from_scope(scope)
+        return filled
+
     def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         with self.journal_lock:
+            payload = self._agent_identity_locked(event_type, payload)
             status = registry.read_json(self.status_path)
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
             if isinstance(last_seq, int):
@@ -2000,6 +2053,16 @@ class WorkflowState:
                 and old_key not in self.lifetime_started_keys
             ]
         for old_key in candidates:
+            if self.dry_run:
+                # A dry run changes nothing on disk except its own journal:
+                # report what the live resume would cancel and reap.
+                self.append_event(
+                    "agent_stale_scope_would_cancel",
+                    key=old_key,
+                    scope=scope,
+                    replacedBy=current_key,
+                )
+                continue
             cancel_workflow_agent_child(self.workspace, self.wf_id, old_key)
             old_run = _find_workflow_agent_run(self.workspace, self.wf_id, old_key)
             if old_run is not None:
@@ -3849,8 +3912,12 @@ class WorkflowDsl:
             ]
 
         def launch() -> tuple[JsonValue | _StructuredNullType, str | None]:
-            for candidate in engines:
+            for position, candidate in enumerate(engines):
                 lane = stage_guard.lane_label(candidate, resolved_model)
+                # A timeout row names the seat that takes over from it.
+                self.state.thread_local.next_engine = (
+                    engines[position + 1] if position + 1 < len(engines) else None
+                )
                 try:
                     result = self._run_agent_attempts(
                         candidate,
@@ -3914,6 +3981,11 @@ class WorkflowDsl:
                 persona_resolution.source if persona_resolution is not None else None
             ),
         }
+        if timeout is not None:
+            # Recorded so a reader can tell when a stuck lane will be cut off
+            # without cross-referencing the script.
+            start_event["timeout"] = timeout
+            start_event["deadlineAt"] = (datetime.now(UTC) + timedelta(seconds=timeout)).isoformat()
         if caller_key is not None:
             start_event["callerKey"] = caller_key
             start_event.update(key_digests)
@@ -4900,6 +4972,7 @@ class WorkflowDsl:
                 label=label,
                 model=model,
                 scope=self.state.current_scope(),
+                nextEngine=getattr(self.state.thread_local, "next_engine", None),
             )
             self.state.notify_event(
                 "agent_timeout",
