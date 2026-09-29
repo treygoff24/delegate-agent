@@ -148,6 +148,7 @@ def _launch_options() -> list[str]:
             if option.flag in {
                 "--mail-push",
                 "--expect-file",
+                "--writable",
                 "--stall-minutes",
                 *command_help.WORKSPACE_SPEC_FLAGS,
             }:

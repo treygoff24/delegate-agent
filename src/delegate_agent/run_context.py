@@ -84,6 +84,7 @@ def from_request(
         fast=request.fast,
         prompt_transport=request.prompt_transport,
         forbid_commit=request.forbid_commit,
+        write_guard=request.write_guard,
         expect_files=request.expect_files,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,

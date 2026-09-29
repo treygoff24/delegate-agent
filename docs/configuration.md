@@ -906,6 +906,95 @@ boundary refuses `--pass-through` and initialized submodules. See the
 [security model](security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)
 for the full boundary and fail-closed conditions.
 
+#### `isolation.writeGuard`
+
+```json
+{
+  "isolation": {
+    "writeGuard": {
+      "enabled": true,
+      "onUnavailable": "warn",
+      "macosSeatbelt": false,
+      "codeRoot": "~/Code",
+      "add": ["~/.config/example-secrets"],
+      "remove": ["~/.config/gcloud"],
+      "writable": ["~/.ssh/known_hosts.d"],
+      "homeCaches": ["~/.cache", "~/.npm"]
+    }
+  }
+}
+```
+
+The work write guard keeps work lanes off a named list of irreplaceable paths
+(credential stores, `~/.ai-profiles`, the installed Delegate runtime, and the
+code root) while everything else stays writable. A lane started through an
+estate launcher (`estate-claude`, `estate-codex`, ...) gets `~/.ai-profiles`
+re-opened, because the launcher writes account and session state there on every
+launch. Every key is optional; an
+unknown key or a wrong type fails config validation (`invalid_isolation_config`).
+See the [security model](security-model.md#work-write-guard) for the default
+protected list, the writable re-opens every run gets, and the backends.
+
+- `enabled` (default `true`): `false` means Delegate adds nothing to work lanes:
+  no wrap, no Codex `--add-dir` roots, no prompt note. The environment variable
+  `DELEGATE_WRITE_GUARD` overrides it (`off`, `0`, `false`, `no` disable; `on`,
+  `1`, `true`, `yes` enable).
+- `onUnavailable` (`warn` default, or `refuse`): what happens when the backend
+  is missing or fails its preflight: bubblewrap on Linux, and `sandbox-exec` on
+  the Mac when `macosSeatbelt` is on (its probe run counts as the preflight).
+  `warn` launches unguarded and records a warning; `refuse` fails the launch
+  with `write_guard_unavailable`. On Linux with `warn`, a preflight that fails
+  because one path will not bind drops only that path, not the whole guard: the
+  manifest lists it under `unbound` and the run gets a warning. If a dropped
+  path was a protected one, the guard status is `partial` instead of `enforced`.
+  `refuse` never retries.
+- `macosSeatbelt` (default `false`): opt in to the macOS Seatbelt guard. It
+  wraps every engine except a Codex lane whose own sandbox is on (that lane gets
+  `--add-dir` roots instead; see the recipe below). A Codex lane running with its
+  sandbox bypassed is wrapped, and that combination is not yet live-tested.
+  While it is `false` the Mac guard status is `off`, with no warning and no
+  refusal.
+- `codeRoot` (default `~/Code`; `null` disables): the directory whose checkouts
+  are protected. The run's own execution root, git common directory and registry
+  are re-opened automatically.
+- `add`: extra paths to protect (absolute; a leading `~` expands).
+- `remove`: default protected paths to drop.
+- `writable`: paths re-opened for every run. `delegate ... --writable PATH`
+  re-opens an existing path for one run only and is CLI-only (there is no
+  `run --input-json` field). This is also how to open an engine's profile
+  directory when Delegate has no home variable for the engine, or when the
+  engine home was refused: only the selected engine's own home variable
+  re-opens anything by itself, and a home that does not itself carry an
+  identity file, contains another profile's home, or is too large or unreadable
+  to check is listed under `refused` in the manifest and stays read-only.
+- `homeCaches`: package-manager cache directories under HOME. Backends that
+  protect a list leave them writable by construction; the Codex native sandbox
+  does not, so its writable roots include the ones that exist.
+
+Missing paths are skipped silently (there is nothing to lose there). Delegate
+records the resolved plan in the run manifest under `writeGuard` and prints it in
+`--dry-run` output.
+
+**Recipe: Codex work lanes on the Mac.** The `external-sandbox` profile makes
+Codex work lanes run with `--dangerously-bypass-approvals-and-sandbox`. To keep
+that profile and put Codex's own `workspace-write` sandbox back on for work
+lanes, override only the harness-scoped field:
+
+```json
+{
+  "policy": {
+    "profile": "external-sandbox",
+    "harness": {"codex": {"work": {"bypassApprovalsAndSandbox": false}}}
+  }
+}
+```
+
+Delegate then emits `--sandbox workspace-write` (with network access per the
+policy), adds the git common directory, registry, run scratch and temp,
+`--writable` paths and existing home caches as `--add-dir` roots, and leaves
+Codex unwrapped. To guard the other engines on the Mac as well, also set
+`isolation.writeGuard.macosSeatbelt` to `true`.
+
 ### `worktrees`
 
 ```json

@@ -37,6 +37,7 @@ from delegate_agent import (
     stall_watchdog,
     structured_output,
     workspace_spec,
+    write_guard,
     wsl,
 )
 from delegate_agent import config as delegate_config
@@ -722,6 +723,7 @@ def effective_prompt(
     worktree_note: str | None = None,
     dirty_note: str | None = None,
     mail_suffix: str | None = None,
+    policy_note: str | None = None,
 ) -> str:
     if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
         # Verbatim means verbatim except for Delegate-owned persistent-worktree
@@ -755,6 +757,8 @@ def effective_prompt(
             segments.append(persona_text)
     if worktree_note is not None:
         segments.append(worktree_note)
+    if policy_note is not None:
+        segments.append(policy_note)
     segments.append(prompt)
     # Every tracked child ends when its model stops; a background job dies with
     # it. Skipped when the prompt already carries the rule (re-framing).
@@ -767,6 +771,48 @@ def effective_prompt(
     if dirty_note is not None:
         segments.append(dirty_note)
     return "\n\n".join(segment for segment in segments if segment)
+
+
+def _codex_native_sandbox_expected(config: JsonObject, engine: str, mode: str) -> bool:
+    """Whether the Codex argv for this config keeps Codex's own workspace-write sandbox."""
+    if engine != "codex" or mode != MODE_WORK:
+        return False
+    policy = delegate_config.effective_policy(config, engine=engine, mode=mode)
+    codex_config = config.get("codex")
+    work_sandbox = (
+        codex_config.get("workSandbox", "workspace-write")
+        if isinstance(codex_config, dict)
+        else "workspace-write"
+    )
+    return policy.get("bypassApprovalsAndSandbox") is not True and work_sandbox == "workspace-write"
+
+
+def _work_policy_note(
+    engine: str,
+    mode: str,
+    config: JsonObject,
+    guard_settings: write_guard.WriteGuardSettings | None,
+    *,
+    forbid_commit: bool,
+    worktree_note_present: bool,
+) -> str | None:
+    """Prompt notes for work-mode policy: no-commit outside a worktree, and the write guard."""
+    if mode != MODE_WORK:
+        return None
+    notes: list[str] = []
+    if forbid_commit and not worktree_note_present:
+        # The persistent-worktree note block carries its own commit note.
+        notes.append(write_guard.NOTE_FORBID_COMMIT_IN_PLACE)
+    if guard_settings is not None:
+        backend = write_guard.predicted_backend(
+            guard_settings,
+            engine=engine,
+            codex_native=_codex_native_sandbox_expected(config, engine, mode),
+        )
+        guard_note = write_guard.prompt_note(guard_settings, backend)
+        if guard_note is not None:
+            notes.append(guard_note)
+    return "\n\n".join(notes) if notes else None
 
 
 def _safe_dirty_tree_note(
@@ -807,7 +853,7 @@ def _validate_forbid_commit(
     if mode != MODE_WORK:
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit requires work mode with persistent worktree isolation.",
+            "--forbid-commit requires work mode.",
         )
     source_workspace = (
         isolation_context.source_workspace
@@ -817,19 +863,10 @@ def _validate_forbid_commit(
     if isolation_context is not None and isolation_context.source_git_root is None:
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit needs worktree isolation, which requires a Git workspace; "
+            "--forbid-commit needs a Git workspace to enforce and verify against; "
             f"{source_workspace} is not a Git repo, so no-commit enforcement isn't "
             "available here. Omit --forbid-commit (the child may commit), or run "
             "from a Git workspace.",
-        )
-    if isolation_context is None or isolation_context.isolation_lifecycle not in (
-        "persistent",
-        "attached",
-    ):
-        raise DelegateError(
-            "invalid_option_combination",
-            "--forbid-commit requires --isolation worktree so Delegate can enforce "
-            "the policy — add --isolation worktree, or omit --forbid-commit.",
         )
 
 
@@ -856,9 +893,9 @@ def _apply_forbid_commit_isolation_implication(
     - When forbid-commit is active in work mode with no explicit isolation, the
       implied worktree isolation is returned for the JSON path (the CLI path
       sets this in the parser), plus the note, and ``implied=True``.
-    - When forbid-commit is active in work mode with explicit ``none``,
-      an ``invalid_option_combination`` error is raised (both paths share this).
-    - Otherwise the inputs are returned unchanged with ``implied=False``.
+    - Otherwise the inputs are returned unchanged with ``implied=False``: an
+      explicit ``none`` is honoured, because commit refusal is enforced by
+      injected git hooks in every isolation mode.
 
     This is the single place that owns the implication so ``run --input-json``
     with ``forbidCommit: true`` and no isolation gets the same implied worktree
@@ -869,12 +906,6 @@ def _apply_forbid_commit_isolation_implication(
     effective = cli_isolation if cli_isolation is not None else json_isolation
     if effective is None:
         return "worktree", _forbid_commit_implied_isolation_note(), True
-    if effective == "none":
-        raise DelegateError(
-            "invalid_option_combination",
-            "--forbid-commit cannot be combined with --isolation none. "
-            "Use --isolation worktree, or omit --forbid-commit.",
-        )
     return json_isolation, None, False
 
 
@@ -1338,6 +1369,27 @@ def _validate_include_dirty(
         )
 
 
+def _resolve_run_writable(
+    launch: LaunchOptions, global_options: GlobalOptions, mode: str
+) -> tuple[str, ...]:
+    """Validate and resolve ``--writable`` before any workspace is created."""
+    if not launch.writable:
+        return ()
+    if mode != MODE_WORK:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--writable requires work mode; safe and call runs cannot write outside their workspace.",
+        )
+    if global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--writable is not supported with --pass-through; pass-through runs are not "
+            "write-guarded.",
+        )
+    base = os.path.abspath(global_options.cwd) if global_options.cwd is not None else os.getcwd()
+    return write_guard.resolve_run_writable(launch.writable, cwd=base)
+
+
 def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
     if dry_run:
         return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), False
@@ -1387,7 +1439,7 @@ def _validate_call_cli_options(global_options: GlobalOptions, launch: LaunchOpti
     if forbid_commit:
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit requires work mode with persistent worktree isolation.",
+            "--forbid-commit requires work mode.",
         )
     if include_dirty:
         raise DelegateError(
@@ -1443,7 +1495,7 @@ def _validate_call_input_json_options(
     if raw_forbid_commit:
         raise DelegateError(
             "invalid_option_combination",
-            "forbidCommit requires work mode with persistent worktree isolation.",
+            "forbidCommit requires work mode.",
         )
     if raw_include_dirty:
         raise DelegateError(
@@ -1614,6 +1666,7 @@ def _build_normalized_launch(
     engine, mode = launch.engine, launch.mode
     assert isinstance(engine, str) and isinstance(mode, str)
     call = mode == MODE_CALL
+    run_writable = _resolve_run_writable(launch, global_options, mode)
     cleanup_workspace = False
     isolation_context = None
     isolation_warnings: tuple[str, ...] = ()
@@ -1751,6 +1804,8 @@ def _build_normalized_launch(
         raise
     if launch.expect_files:
         request.expect_files = tuple(launch.expect_files)
+    if run_writable and request.write_guard is not None:
+        request.write_guard = write_guard.with_run_writable(request.write_guard, run_writable)
     _apply_workspace_spec(request, launch)
     if stderr is not None and not launch.dry_run:
         _print_launch_notices(request, spec.forbid_commit_note, stderr)
@@ -3906,6 +3961,17 @@ def _build_request_for_workspace(
     if worktree_note is not None and forbid_commit:
         worktree_note = f"{PERSISTENT_WORKTREE_COMMIT_NOTE}\n\n{worktree_note}"
     framed_worktree_note = worktree_note if frame_prompt else None
+    guard_settings = (
+        write_guard.settings_from_config(config) if mode == MODE_WORK and stream_capture else None
+    )
+    policy_note = _work_policy_note(
+        engine,
+        mode,
+        config,
+        guard_settings,
+        forbid_commit=forbid_commit,
+        worktree_note_present=worktree_note is not None,
+    )
     if frame_prompt:
         prompt = effective_prompt(
             prompt,
@@ -3913,6 +3979,7 @@ def _build_request_for_workspace(
             mode=mode,
             completion_report_mode=completion_report_mode,
             instruction_mode=prompt_instruction_mode,
+            policy_note=policy_note,
             skip_skill_preamble=(
                 skip_skill_preamble or not delegate_config.skill_review_preamble_enabled(config)
             ),
@@ -4100,6 +4167,7 @@ def _build_request_for_workspace(
             resume_session_id=resume_session_id,
             structured_retry=preserve_safe_workspace,
             continuity_mode=continuity_mode,
+            write_guard=guard_settings,
         ),
         config,
         resolution=profile_resolution,
