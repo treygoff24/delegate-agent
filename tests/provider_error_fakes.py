@@ -42,6 +42,11 @@ def fail(message, error_message=None):
     raise SystemExit(1)
 
 
+if step == "broker403":
+    sys.stderr.write(
+        "estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active\n"
+    )
+    raise SystemExit(1)
 emit({"type": "thread.started", "thread_id": "thr_fake_session"})
 if step == "ok":
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "fake codex done"}})

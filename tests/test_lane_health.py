@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import stat
@@ -631,8 +632,11 @@ USAGE_LIMIT = record("codex", "You've hit your usage limit", status=429)
 class RunnerObservationTests(HomeCase):
     """`runner._observe_lane_health`: which finished runs are allowed to speak for the lane."""
 
-    def observe(self, *, status="failed", rec=PERSISTENT, established=False, fallback=None):
+    def observe(
+        self, *, status="failed", rec=PERSISTENT, established=False, fallback=None, retried=False
+    ):
         ctx = types.SimpleNamespace(
+            auto_resume={"automatic": True} if retried else None,
             lane=self.lane,
             provider_policy=self.policy,
             engine="codex",
@@ -682,6 +686,39 @@ class RunnerObservationTests(HomeCase):
 
     def test_other_persistent_failures_still_mark_a_lane_that_has_a_fallback_profile(self):
         self.assertIn("laneMarked", self.observe(fallback={"CODEX_HOME": "/somewhere"}))
+
+
+class BrokerBindingMarkerTests(HomeCase):
+    """One broker `binding_not_active` is launch-slot contention, not a bad lane."""
+
+    observe = RunnerObservationTests.observe
+
+    BROKER = record(
+        "codex",
+        "estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active",
+        status=403,
+    )
+
+    def test_the_signature_is_the_persistent_lane_scoped_broker_row(self):
+        self.assertEqual(self.BROKER["signature"], "broker_binding_inactive")
+        self.assertTrue(lane_health.earns_marker(self.BROKER))
+
+    def test_a_first_refusal_is_deferred_to_the_retry_and_marks_nothing(self):
+        extra = self.observe(rec=self.BROKER)
+
+        self.assertEqual(extra, {"laneMarkerDeferred": "broker_binding_retry"})
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_the_retry_failing_too_marks_the_lane_as_before(self):
+        extra = self.observe(rec=self.BROKER, retried=True)
+
+        self.assertIn("laneMarked", extra)
+        self.assertIsNotNone(lane_health.check(self.lane)[0])
+
+    def test_with_auto_resume_off_a_refusal_marks_immediately(self):
+        self.policy = dataclasses.replace(self.policy, auto_resume=False)
+
+        self.assertIn("laneMarked", self.observe(rec=self.BROKER))
 
 
 class RefusalTests(unittest.TestCase):

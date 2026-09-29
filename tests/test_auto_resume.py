@@ -176,7 +176,36 @@ class AutoResumeTests(FakeCodexCase):
         self.assertEqual(self.invocation_count(), 1)
         self.assertNotIn("autoResume", payload)
 
-    def test_safe_mode_is_never_resumed(self):
+    def test_safe_mode_is_never_session_resumed_but_gets_one_fresh_rerun(self):
+        self.set_plan("ws_drop", "ok")
+
+        completed, payload = self.json_cli("codex", "safe", "read only question")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.invocation_count(), 2)
+        self.assertFalse(
+            any("resume" in argv for argv in self.invocations()),
+            "a safe rerun is a fresh run, not a session resume",
+        )
+        auto = payload["autoResume"]
+        self.assertEqual(auto["kind"], "rerun")
+        self.assertEqual(auto["attempt"], 1)
+        self.assertEqual(auto["of"]["alias"], "codex-1")
+        self.assertEqual(auto["firstError"]["signature"], "stream_disconnected")
+        self.assertEqual(payload["alias"], "codex-2")
+        self.assertNotIn("followupOf", payload)
+
+    def test_a_second_safe_drop_is_final(self):
+        self.set_plan("ws_drop", "ws_drop", "ok")
+
+        completed, payload = self.json_cli("codex", "safe", "read only question")
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(self.invocation_count(), 2, "exactly one automatic rerun")
+        self.assertEqual(payload["autoResume"]["kind"], "rerun")
+
+    def test_the_opt_out_key_also_turns_off_the_safe_rerun(self):
+        self.config["providerErrors"] = {"autoResume": False}
         self.set_plan("ws_drop", "ok")
 
         completed, payload = self.json_cli("codex", "safe", "read only question")
@@ -184,6 +213,43 @@ class AutoResumeTests(FakeCodexCase):
         self.assertEqual(completed.returncode, 1)
         self.assertEqual(self.invocation_count(), 1)
         self.assertNotIn("autoResume", payload)
+
+    def in_process_json(self, *args: str) -> tuple[int, dict]:
+        buffer = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.env()),
+            mock.patch.object(auto_resume, "sleep") as sleep,
+        ):
+            exit_code = cli.main(["--json", "--cwd", str(self.workspace), *args], stdout=buffer)
+        self.slept = [call.args[0] for call in sleep.call_args_list]
+        return exit_code, json.loads(buffer.getvalue())
+
+    def test_a_broker_binding_refusal_is_retried_once_without_marking_the_lane(self):
+        self.set_plan("broker403", "ok")
+
+        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+
+        self.assertEqual(exit_code, 0, payload)
+        self.assertEqual(self.invocation_count(), 2)
+        self.assertEqual(payload["autoResume"]["kind"], "rerun")
+        self.assertEqual(
+            payload["autoResume"]["firstError"]["signature"], "broker_binding_inactive"
+        )
+        self.assertEqual(len(self.slept), 1)
+        low, high = auto_resume.BROKER_RETRY_BACKOFF_SEC
+        self.assertTrue(low <= self.slept[0] <= high)
+        self.assertEqual(self.marker_files(), [])
+
+    def test_two_broker_refusals_fail_as_before_and_mark_the_lane(self):
+        self.set_plan("broker403", "broker403", "ok")
+
+        exit_code, payload = self.in_process_json("codex", "work", "do the thing")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(self.invocation_count(), 2, "exactly one retry")
+        self.assertEqual(payload["providerError"]["signature"], "broker_binding_inactive")
+        self.assertEqual(payload["autoResume"]["kind"], "rerun")
+        self.assertEqual(len(self.marker_files()), 1)
 
     def test_call_mode_is_never_resumed(self):
         self.set_plan("ws_drop", "ok")
@@ -302,6 +368,40 @@ class SkipReasonTests(unittest.TestCase):
         )
 
 
+class RerunSkipReasonTests(unittest.TestCase):
+    def reason(self, note, *, enabled=True, already_automatic=False):
+        return auto_resume.rerun_skip_reason(
+            note, enabled=enabled, already_automatic=already_automatic
+        )
+
+    def test_a_safe_stream_drop_is_eligible_without_a_saved_session(self):
+        self.assertIsNone(self.reason(_note(mode="safe", session_id=None)))
+
+    def test_each_guard_names_itself(self):
+        cases = {
+            "disabled": self.reason(_note(mode="safe"), enabled=False),
+            "already_automatic": self.reason(_note(mode="safe"), already_automatic=True),
+            "mode": self.reason(_note(mode="work")),
+            "structured_output": self.reason(_note(mode="safe", structured=True)),
+            "not_failed": self.reason(_note(mode="safe", status="succeeded")),
+        }
+        for expected, actual in cases.items():
+            with self.subTest(expected):
+                self.assertEqual(actual, expected)
+
+    def test_a_safe_run_with_a_persistent_failure_is_not_rerun(self):
+        note = _note(mode="safe", provider_error={"signature": "auth_rejected"})
+        self.assertEqual(self.reason(note), "not_a_transient_drop")
+
+    def test_a_broker_binding_refusal_is_eligible_in_any_mode(self):
+        record = {"signature": "broker_binding_inactive", "class": "persistent"}
+        for mode in ("work", "safe"):
+            with self.subTest(mode):
+                self.assertIsNone(self.reason(_note(mode=mode, provider_error=record)))
+        self.assertGreater(auto_resume.broker_backoff_seconds(_note(provider_error=record)), 0)
+        self.assertEqual(auto_resume.broker_backoff_seconds(_note(mode="safe")), 0.0)
+
+
 class AutomaticContinuationGuardTests(unittest.TestCase):
     def test_an_automatic_continuation_is_never_resumed_again(self):
         request = types.SimpleNamespace(
@@ -318,6 +418,7 @@ class AutomaticContinuationGuardTests(unittest.TestCase):
                 config={},
                 config_source=None,
                 workspace=None,
+                completion_report_mode="none",
                 stdin=io.StringIO(),
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
