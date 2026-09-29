@@ -597,6 +597,60 @@ def launch_model_absence_warning(
     )
 
 
+_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+_CLAUDE_ALIASES = (*_CLAUDE_FAMILIES, "best", "opusplan", "default")
+
+
+def claude_unknown_model_error(
+    model: str | None, discovery: JsonObject | None
+) -> DelegateError | None:
+    """Refuse a typed Claude selector that is neither an alias, a catalog id, nor claude-...
+
+    Claude rejects a selector like ``opus-5.5`` only after the workspace and
+    prompt were prepared, and a dry run cannot see that. A ``claude-...`` id the
+    catalog does not list stays allowed (new models ship before the catalog);
+    that case is the advisory ``launch_model_absence_warning``. Returns the
+    ``invalid_alias`` error (the code omp and droid use for an unknown selector)
+    or None when the selector is acceptable.
+    """
+    if not model:
+        return None
+    base = model.partition("[")[0]
+    lowered = base.lower()
+    catalog, _ = launch_catalog(discovery, "claude")
+    if lowered in _CLAUDE_ALIASES or lowered.startswith("claude-") or base in catalog:
+        return None
+    families = [family for family in _CLAUDE_FAMILIES if family in lowered]
+    suggestions: list[str] = []
+    for family in families:
+        ids = [
+            selector
+            for selector in catalog
+            if f"-{family}-" in selector or selector.endswith(f"-{family}")
+        ]
+        newest = max(ids, key=lambda s: tuple(int(n) for n in re.findall(r"\d+", s)), default=None)
+        suggestions.append(f"{family} ({newest})" if newest else family)
+    if not suggestions:
+        suggestions = [
+            redaction.redact_string(s) for s in nearest_model_ids(base, catalog, limit=3)
+        ]
+    did_you_mean = f" did you mean {' or '.join(suggestions)}?" if suggestions else ""
+    valid = (
+        f"Valid: aliases {', '.join(_CLAUDE_ALIASES)}"
+        + (
+            "; catalog ids " + ", ".join(redaction.redact_string(s) for s in catalog)
+            if catalog
+            else ""
+        )
+        + "; any well-formed claude-... id is also accepted."
+    )
+    return DelegateError(
+        "invalid_alias",
+        f"Unknown Claude model {redaction.redact_string(model)!r}:{did_you_mean} {valid} "
+        "Claude would reject this selector after launch; see `delegate models claude`.",
+    )
+
+
 _FAMILY_WORD_RE = re.compile(r"[A-Za-z]+")
 # Preferred effort/tier suffix inside one family version when a bare family name
 # is resolved: the unsuffixed selector, then the balanced tiers.

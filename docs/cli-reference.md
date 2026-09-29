@@ -1174,6 +1174,16 @@ profile environment, but does not update Delegate config or cache. Use setup or
 `capabilities refresh` when ordinary launches should consume the new record.
 Claude is the only harness without a non-interactive live model catalog.
 
+A harness with `harnesses.<name>.enabled: false` in config is omitted from
+`models`, `describe`, and `capabilities` (and skipped by `capabilities refresh`);
+`models <name>` and any launch of it fail with `harness_disabled`, naming the
+config key to flip. See `docs/configuration.md`.
+
+A typed Claude `--model` that is not an alias, a catalog id, or a `claude-...`
+id is refused before launch (dry runs included) with `invalid_alias`, naming the
+closest valid values; `claude-...` ids missing from the catalog still launch with
+a warning.
+
 `--summary` takes no `<engine>` argument: it emits the compact alias-centered
 inventory across engines. Use `delegate models <engine>` for a per-engine
 catalog, optionally with `--live`.

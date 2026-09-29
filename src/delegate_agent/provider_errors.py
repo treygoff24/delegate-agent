@@ -25,6 +25,7 @@ and size-bounded.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -154,6 +155,9 @@ class Signature:
     codes: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
     hints_by_engine: Mapping[str, str] = field(default_factory=dict)
+    # Cursor's login lives per auth realm; render the hint with the realm this
+    # run used (see `_cursor_realm_clause`) instead of the static text.
+    realm_aware: bool = False
     # A transient signature whose immediate continuation is worth one automatic
     # try (a dropped stream), as opposed to throttling or capacity, where an
     # instant retry only repeats the refusal.
@@ -164,9 +168,32 @@ class Signature:
 
     def hint_for(self, engine: str | None, provider: str | None = None) -> str:
         text = self.hints_by_engine.get(engine or "", self.hint)
+        if self.realm_aware and engine == "cursor":
+            text = _cursor_realm_clause()
         return text.replace("{engine}", engine or "harness").replace(
             "{provider}", provider or "that provider"
         )
+
+
+def _cursor_realm_clause() -> str:
+    """Name the auth realm this run used and the other one to try.
+
+    The realm comes from the environment the run inherited (AI_PROFILE, then
+    DELEGATE_PROFILE); when neither names work or personal the wording stays
+    generic rather than guessing.
+    """
+    active = (os.environ.get("AI_PROFILE") or os.environ.get("DELEGATE_PROFILE") or "").strip()
+    other = {"work": "personal", "personal": "work"}.get(active)
+    if other is None:
+        other = "work"
+        used = "the realm this run used"
+    else:
+        used = f"the {active} realm this run used"
+    return (
+        f"Cursor is not logged in for {used}; if your Cursor login lives in the {other} realm, "
+        f"relaunch with --auth-profile {other} (and unset DELEGATE_CONFIG), otherwise run "
+        "`estate-cursor login`, then relaunch."
+    )
 
 
 _BROKER_HINT = (
@@ -346,6 +373,7 @@ SIGNATURES: tuple[Signature, ...] = (
         reason="auth_failed",
         summary="Cursor is not signed in.",
         hint="Run `estate-cursor login`, then relaunch.",
+        realm_aware=True,
         engines=("cursor",),
         patterns=_rx(
             r"\bAuthentication required\b[^\n]{0,80}\blogin\b",
@@ -386,6 +414,7 @@ SIGNATURES: tuple[Signature, ...] = (
         summary="The provider rejected this lane's credentials (HTTP 401).",
         hint="Re-authenticate the {engine} CLI, then relaunch.",
         hints_by_engine={"cursor": "Run `estate-cursor login`, then relaunch."},
+        realm_aware=True,
         statuses=(401,),
         status_alone=True,
         codes=(
