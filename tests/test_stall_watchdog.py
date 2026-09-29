@@ -867,6 +867,8 @@ class CompletionReportTests(unittest.TestCase):
             ("Status: blocked.", "blocked"),
             ("- **Status:** completed  ", "completed"),
             ("> Status: `failed`!", "failed"),
+            ("Status: completed;", "completed"),
+            ("- **Status:** blocked; ", "blocked"),
         ):
             with self.subTest(line=line):
                 text = f"report\n{line}\n- Files: none"
@@ -1194,6 +1196,38 @@ class PiCompletionTargetTests(unittest.TestCase):
         self.assertLessEqual(
             len(accumulator._pending_tool_uses), harness_events.PI_PENDING_TOOL_LIMIT
         )
+
+    def test_abandoned_starts_stay_bounded_for_every_other_harness(self):
+        def claude(index: int) -> str:
+            block = {"type": "tool_use", "id": f"t{index}", "name": "Bash", "input": {}}
+            return json.dumps({"type": "assistant", "message": {"content": [block]}})
+
+        def kimi(index: int) -> str:
+            call = {"id": f"t{index}", "function": {"name": "Shell", "arguments": "{}"}}
+            return json.dumps({"role": "assistant", "content": "", "tool_calls": [call]})
+
+        def grok(index: int) -> str:
+            return json.dumps({"type": "tool_call", "toolCallId": f"t{index}", "name": "bash"})
+
+        def cursor(index: int) -> str:
+            tool_call = {"shellToolCall": {"args": {"command": "ls"}}}
+            payload = {"type": "tool_call", "subtype": "started", "call_id": f"t{index}"}
+            return json.dumps({**payload, "tool_call": tool_call})
+
+        for harness, make in (
+            ("claude", claude),
+            ("kimi", kimi),
+            ("grok", grok),
+            ("cursor", cursor),
+        ):
+            with self.subTest(harness=harness):
+                accumulator = harness_events.StreamAccumulator(harness=harness)
+                for index in range(harness_events.PI_PENDING_TOOL_LIMIT * 4):
+                    accumulator.ingest_line(make(index))
+                self.assertGreater(len(accumulator._pending_tool_uses), 0)
+                self.assertLessEqual(
+                    len(accumulator._pending_tool_uses), harness_events.PI_PENDING_TOOL_LIMIT
+                )
 
     def test_the_start_target_is_forgotten_once_the_tool_completes(self):
         accumulator = harness_events.StreamAccumulator(harness="pi")
