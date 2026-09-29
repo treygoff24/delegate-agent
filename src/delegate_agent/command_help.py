@@ -499,7 +499,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--output-schema FILE] "
             "[--prompt-file PATH] [prompt...]",
-            "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] "
+            "delegate [--json] claude call [--read-only|--pure] [--timeout SECONDS] [--model <alias-or-model>] "
             "[--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
@@ -1054,7 +1054,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "snapshot": CommandSpec(
         name="snapshot",
         summary="Print a bounded snapshot of a tracked run.",
-        usage=("delegate [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",),
+        usage=("delegate [--json] snapshot (<handle>|--latest HARNESS) [--no-redact]",),
         arguments=(
             ArgSpec(
                 "<handle>",
@@ -1096,7 +1096,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
         usage=(
             "delegate [--json] runs [--active|--running|--stale|--recent] "
-            "[--harness HARNESS] [--group NAME] [--limit N] [--structural] [--summary]",
+            "[--harness HARNESS] [--group NAME] [--summary | [--limit N] [--structural]]",
         ),
         options=(
             OptionSpec(
@@ -1372,8 +1372,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="ps",
         summary="List active tracked runs (alias for runs --active).",
         usage=(
-            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] "
-            "[--structural] [--summary]",
+            "delegate [--json] ps [--harness HARNESS] [--group NAME] "
+            "[--summary | [--limit N] [--structural]]",
         ),
         options=(
             OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
@@ -1408,9 +1408,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="run-output",
         summary="Inspect a tracked run's completion report or captured stdout/stderr.",
         usage=(
-            "delegate [--json] run-output [--latest HARNESS] <handle> "
-            "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
-            "[--raw] [--no-redact]",
+            "delegate [--json] run-output (<handle>|--latest HARNESS) "
+            "[--completion-report] [--no-redact] "
+            "[(--stdout|--stderr) [--raw | [--tail N] [--max-chars N]]]",
+            "delegate [--json] run-output (<handle>|--latest HARNESS) [--no-redact] (--raw | --tail N)",
         ),
         arguments=(
             ArgSpec(
@@ -2094,7 +2095,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Remove one persistent worktree and, by default, its branch.",
         usage=(
             "delegate [--cwd PATH] [--json] worktree remove <handle|--group NAME> "
-            "[--discard-uncommitted] [--force-branch] [--force] [--kill-live] [--keep-branch]",
+            "[--discard-uncommitted] [--kill-live] [--keep-branch | [--force-branch] [--force]]",
         ),
         arguments=(
             ArgSpec(
@@ -2406,7 +2407,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--overview", None, "Command index and focused-help topics; no config bodies."
             ),
-            OptionSpec("--summary", None, "Emit a compact command/config surface summary."),
+            OptionSpec(
+                "--summary",
+                None,
+                "Emit the command index plus config resolution, launch options, profiles, and "
+                "workflows. Larger than the default and --overview views, smaller than --full.",
+            ),
             OptionSpec("--full", None, "Emit the full engine argv and policy contract."),
         ),
         examples=(
