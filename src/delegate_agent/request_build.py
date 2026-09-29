@@ -1804,6 +1804,11 @@ def _build_normalized_launch(
         )
         _validate_workspace_spec(launch, mode=mode, isolation_context=isolation_context)
         effective_progress, initial, interval = spec.progress
+    workspace_env = (
+        _resolve_workspace_env(launch)
+        if (launch.workspace_env or launch.workspace_env_files)
+        else None
+    )
     source_prompt = prompt
     if call:
         prompt = _call_effective_prompt(prompt, read_only=launch.read_only)
@@ -1873,7 +1878,7 @@ def _build_normalized_launch(
                 and launch.resume_session_id is None
                 and not launch.replayed_from_manifest
             ),
-            preflight_workspace_env=_workspace_provider_env(launch),
+            preflight_workspace_env=_workspace_provider_env(launch, workspace_env),
         )
     except BaseException:
         if cleanup_workspace:
@@ -1883,7 +1888,7 @@ def _build_normalized_launch(
         request.expect_files = tuple(launch.expect_files)
     if run_writable and request.write_guard is not None:
         request.write_guard = write_guard.with_run_writable(request.write_guard, run_writable)
-    _apply_workspace_spec(request, launch)
+    _apply_workspace_spec(request, launch, workspace_env)
     if stderr is not None and not launch.dry_run:
         _print_launch_notices(request, spec.forbid_commit_note, stderr)
     return request
@@ -1952,27 +1957,52 @@ def _validate_workspace_spec(
         )
 
 
-def _workspace_provider_env(launch: LaunchOptions) -> dict[str, str]:
-    """Claude provider variables the child will get from --env/--env-file.
+@dataclass(frozen=True)
+class _ResolvedWorkspaceEnv:
+    """One read of --env/--env-file: the merged env, or the error reading it raised."""
 
-    Only the presence of the keys in ``model_discovery.CLAUDE_PROVIDER_ENV``
-    matters to the model typo preflight, so nothing else is carried. A missing
-    or malformed env source yields nothing here: ``_apply_workspace_spec`` raises
-    its own error for it after the request builds, exactly as before.
+    env: dict[str, str]
+    error: DelegateError | None = None
+
+
+def _resolve_workspace_env(launch: LaunchOptions) -> _ResolvedWorkspaceEnv:
+    """Read --env/--env-file exactly once per launch.
+
+    The model typo preflight and ``_apply_workspace_spec`` both use this single
+    snapshot, so the preflight cannot see values the child never gets. A read
+    error is held, not raised: it surfaces from ``_apply_workspace_spec`` after
+    the request builds, which is where it always came from.
     """
-    if launch.engine != "claude" or not (launch.workspace_env or launch.workspace_env_files):
-        return {}
     try:
-        env = workspace_spec.resolve_env(launch.workspace_env, launch.workspace_env_files)
-    except DelegateError:
+        return _ResolvedWorkspaceEnv(
+            workspace_spec.resolve_env(launch.workspace_env, launch.workspace_env_files)
+        )
+    except DelegateError as error:
+        return _ResolvedWorkspaceEnv({}, error)
+
+
+def _workspace_provider_env(
+    launch: LaunchOptions, resolved: _ResolvedWorkspaceEnv | None
+) -> dict[str, str]:
+    """Only the presence of the Claude provider keys in the resolved env.
+
+    Nothing else reaches the typo preflight, and never a value.
+    """
+    if resolved is None or launch.engine != "claude" or resolved.error is not None:
         return {}
-    return {name: "1" for name in model_discovery.CLAUDE_PROVIDER_ENV if env.get(name)}
+    return {name: "1" for name in model_discovery.CLAUDE_PROVIDER_ENV if resolved.env.get(name)}
 
 
-def _apply_workspace_spec(request: Request, launch: LaunchOptions) -> None:
+def _apply_workspace_spec(
+    request: Request, launch: LaunchOptions, resolved: _ResolvedWorkspaceEnv | None = None
+) -> None:
     if not _workspace_spec_declared(launch):
         return
-    env = workspace_spec.resolve_env(launch.workspace_env, launch.workspace_env_files)
+    if resolved is None:
+        resolved = _resolve_workspace_env(launch)
+    if resolved.error is not None:
+        raise resolved.error
+    env = resolved.env
     request.workspace_base = launch.workspace_base
     request.workspace_setup = launch.workspace_setup
     request.workspace_env = env or None
