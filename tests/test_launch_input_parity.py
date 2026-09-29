@@ -223,6 +223,13 @@ class LaunchInputParityTests(unittest.TestCase):
             ),
             ("resumable", ("--resumable",), {"resumable": True}, (), {"resumable": True}),
             (
+                "no-resumable",
+                ("--no-resumable",),
+                {"resumable": False},
+                (),
+                {"resumable": False},
+            ),
+            (
                 "pinned",
                 ("--continuity-mode", "pinned"),
                 {"continuityMode": "pinned"},
@@ -370,9 +377,13 @@ class LaunchInputParityTests(unittest.TestCase):
         self.assertEqual(right.env_overrides["DELEGATE_TEST_MARKER"], "selected")
 
     def test_json_workflow_session_fields_keep_their_explicit_scope(self):
+        # Both sides opt out of the default session capture, so the only thing that
+        # can drop `--ephemeral` on the JSON side is the workflow session field.
         left, right = self.pair(
+            options=("--no-resumable",),
             globals=("--group", "wf-fixture"),
             values={
+                "resumable": False,
                 "workflowAgentKey": "agent-key",
                 "structuredSession": True,
                 "structuredRetryWorkspace": True,
@@ -499,6 +510,28 @@ class LaunchInputParityTests(unittest.TestCase):
                 request_build.request_from_input_json(parsed, self.config)
             self.assertEqual(error.exception.error, expected)
             allocate.assert_not_called()
+
+    def test_json_resumable_must_be_a_boolean_when_present(self):
+        # Absent takes the default; a present value is an explicit choice, so `null`
+        # is not "absent" and cannot silently mean either answer.
+        for bad in ("yes", None, 1):
+            with self.subTest(value=bad):
+                path = self.root / "invalid.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "engine": "codex",
+                            "mode": "work",
+                            "prompt": "task",
+                            "cwd": str(self.repo),
+                            "resumable": bad,
+                        }
+                    )
+                )
+                parsed = cli_parser.parse_cli(["run", "--input-json", str(path)])
+                with self.assertRaises(DelegateError) as error:
+                    request_build.request_from_input_json(parsed, self.config)
+                self.assertEqual(error.exception.error, "invalid_resumable")
 
     def test_unsupported_combinations_keep_both_frontend_refusals(self):
         cases = (

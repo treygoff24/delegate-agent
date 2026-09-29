@@ -347,13 +347,16 @@ def build_followup_plan(
     if not raw_session_id:
         raise DelegateError(
             "session-missing",
-            f"Run {alias} has no recorded harnessSessionId; relaunch with --resumable "
-            f"(work-mode codex or claude) to record one, or carry this run's report into a "
-            f"new run with `delegate resume {alias}`.",
+            f"Run {alias} has no recorded harnessSessionId, so no native session was saved for it: "
+            "it was launched with --no-resumable (or resumable: false), before codex and claude "
+            "work Runs saved their session by default, as a workflow agent() call without "
+            "resumable=True, or its child never reported a session. Carry its report into a "
+            f"new Run with `delegate resume {alias}`.",
             diagnostics={"code": "session-missing"},
             next_actions=[
-                "Relaunch the run with --resumable (work mode, codex or claude) when a native followup will be needed.",
                 f'delegate resume {alias} "<extra instructions>"',
+                "A new codex or claude work Run saves its native session by default; "
+                "leave off --no-resumable when a native followup will be needed.",
             ],
         )
 

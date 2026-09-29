@@ -296,7 +296,15 @@ _MAIL_PUSH_OPTION = OptionSpec(
 _RESUMABLE_OPTION = OptionSpec(
     "--resumable",
     None,
-    "Codex and Claude only: preserve harness session for native session resumption.",
+    "Codex and Claude work only: save the native session so `delegate followup` works. "
+    "Already the default for those Runs; use it to override `resumable: false` in config.",
+)
+_NO_RESUMABLE_OPTION = OptionSpec(
+    "--no-resumable",
+    None,
+    "Codex and Claude work only: do not save the native session, so `delegate followup` is "
+    "unavailable and a succeeded worktree Run retires instead of being kept for resumption. "
+    "Wins over the default and the config key.",
 )
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
@@ -449,6 +457,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _RESUMABLE_OPTION,
+            _NO_RESUMABLE_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
             _STALL_MINUTES_OPTION,
@@ -472,6 +481,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "the active Codex configuration; neither changes permissions or reasoning effort.",
             "--output-schema resolves relative paths from the launch cwd and is native Codex "
             "schema enforcement for the final message.",
+            "Work Runs save their native Codex session by default, so `delegate followup` works "
+            "without a launch flag; the session files persist in CODEX_HOME. --no-resumable or "
+            "codex.resumable: false opts out. The default outranks codex.ephemeral: --ephemeral "
+            "applies only to Runs that are not resumable (safe, call, and opted-out Runs).",
             "codex.profile is a Codex CLI config overlay; top-level profiles selects "
             "Delegate-injected auth/env.",
         ),
@@ -497,6 +510,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _RESUMABLE_OPTION,
+            _NO_RESUMABLE_OPTION,
             _READ_ONLY_OPTION,
             _PURE_OPTION,
             _OUTPUT_SCHEMA_OPTION,
@@ -523,6 +537,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Work mode uses claude.workPermissionMode, unless Delegate policy explicitly "
             "enables harness-scoped bypassApprovalsAndSandbox.",
             "Reasoning effort maps to Claude Code --effort.",
+            "Work Runs save their native Claude session by default, so `delegate followup` works "
+            "without a launch flag; the session files persist in the Claude account's projects "
+            "directory. --no-resumable or claude.resumable: false opts out. The default outranks "
+            "claude.noSessionPersistence, which applies only to Runs that are not resumable.",
         ),
         see_also=("cursor", "codex", "droid", "models", "agent-help"),
     ),
@@ -885,7 +903,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
             "reasoningEffort, fast, outputSchema, progress, forbidCommit, persona, allowRepoPersona, "
-            "base, env (object of NAME to string), setup.",
+            "resumable, base, env (object of NAME to string), setup.",
             "Use this for long prompts or programmatic invocation.",
         ),
         see_also=("cursor", "codex", "droid", "claude", "grok", "agent-help"),
@@ -925,6 +943,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Creation-only; rejected when resume attaches to a persistent worktree.",
             ),
+            OptionSpec(
+                "--no-resumable",
+                None,
+                "Codex and Claude work only: do not save the resumed Run's native session.",
+            ),
             *PERSONA_OPTIONS,
             OptionSpec(
                 "--dry-run", None, "Show the resolved continuation launch without executing."
@@ -952,13 +975,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "(workspace-env.json), not the resuming shell's; --base and --setup are "
             "creation-only and are not re-run.",
             "Resume options must appear before the handle; tokens after the handle "
-            "are continuation instructions, including flag-like text.",
+            "are continuation instructions. A token there that exactly names a resume option "
+            "(for example --dry-run) is refused before anything launches (option_after_handle) "
+            "because it would otherwise be sent to the child as prompt text; put `--` before "
+            "the instructions to send flag-like text literally.",
             "For native harness session re-entry with preserved conversation context, "
             "use `delegate followup`.",
-            "Resuming a --resumable source keeps that opt-in when the new engine is codex or "
-            "claude: the resumed Run records its own native session, so continue it with "
-            "`delegate followup <new alias>`. A followup of the original resumes the "
-            "original session and does not see the resumed Run's work.",
+            "A resumed codex or claude work Run saves its own native session, as launches do by "
+            "default (--no-resumable opts out), so continue it with `delegate followup "
+            "<new alias>`. A followup of the original resumes the original session and does "
+            "not see the resumed Run's work. Resuming onto another engine records no session.",
         ),
         see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
         unsupported_global_options=("--isolation",),
@@ -1000,11 +1026,20 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "preserving full conversation context. For cross-engine or plain-text prompt continuation, use `delegate resume`.",
             "The followup run inherits engine, mode, model, continuity mode, effort, timeout, group, and "
             "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
-            "The source run must have been launched with --resumable to capture its native session ID.",
+            "The source run must have saved its native session (recorded as harnessSessionId). "
+            "Codex and Claude work Runs do by default; a Run launched with --no-resumable, or a "
+            "workflow agent() call without resumable=True, did not, and followup refuses it "
+            "with session-missing and points to `delegate resume`.",
+            "If the harness cannot find the saved session (session_expired) the launcher may have "
+            "switched accounts on --resume; retry, or use `delegate resume` to carry the report "
+            "into a new Run.",
             "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",
             "An attached followup re-applies the source Run's recorded --env values, not the "
             "invoking shell's; --base and --setup are creation-only.",
-            "Followup options may appear on either side of the handle before prompt text. Use -- to introduce literal flag-like prompt text.",
+            "Followup options may appear on either side of the handle before prompt text. A token "
+            "after the prompt text that exactly names a followup option (--dry-run, --timeout, "
+            "--prompt-file) is refused before anything launches (option_after_handle). Use -- to "
+            "introduce literal flag-like prompt text.",
         ),
         see_also=("resume", "runs", "snapshot", "run-output", "worktree show"),
         unsupported_global_options=("--isolation",),
@@ -2326,7 +2361,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Give each run a bounded task, owned paths, and a verification requirement.",
             "Use safe mode for review and work mode for edits. Review work-mode diffs before integration.",
             "For tracked runs, do not pipe delegate launches through tail. Use snapshot or run-output; if using a shell pipeline, set -o pipefail.",
-            "Use --prompt-file for long briefs and --resumable when a native followup will be needed.",
+            "Use --prompt-file for long briefs. Codex and Claude work Runs save their native session by default, so `delegate followup` works; --no-resumable opts out.",
             "Model selection uses --model on every engine; use describe and focused engine help for supported modes.",
             SAFE_WORKSPACE_SYNC_NOTE,
         ),
@@ -2413,6 +2448,7 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--expect-file",
         "--mail-push",
         "--resumable",
+        "--no-resumable",
         *WORKSPACE_SPEC_FLAGS,
     }
 )

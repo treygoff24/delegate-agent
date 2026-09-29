@@ -71,7 +71,9 @@ class LaunchOptions:
     persona_record_digest: str | None = None
     persona_record_path: str | None = None
     mail_push: bool = False
-    resumable: bool = False
+    # True/False are explicit (--resumable / --no-resumable); None takes the
+    # default: codex and claude work Runs save their native session.
+    resumable: bool | None = None
     resume_session_id: str | None = None
     continuity_mode: str | None = None
     # Parse-time advisories that only the parser can see (token positions are
@@ -113,6 +115,9 @@ class ResumeOptions:
     no_persona: bool = False
     allow_repo_persona: bool = False
     mail_push: bool = False
+    # --no-resumable: do not save the resumed Run's native session even where
+    # codex/claude work Runs would by default.
+    no_resumable: bool = False
     continuity_mode: str | None = None
     # Parse-time advisories, carried to the synthetic launch like LaunchOptions.
     warnings: tuple[str, ...] = ()
@@ -217,7 +222,7 @@ class PromptTail(NamedTuple):
     persona: str | None
     no_persona: bool
     allow_repo_persona: bool
-    resumable: bool = False
+    resumable: bool | None = None
     continuity_mode: str | None = None
     warnings: tuple[str, ...] = ()
     expect_files: tuple[str, ...] = ()
