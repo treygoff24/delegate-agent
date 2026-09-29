@@ -73,6 +73,7 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *PERSONA_METADATA_KEYS,
     "processGroupTerminationGraceSec",
     "mailInbox",
+    "stallWindow",
     *HARNESS_SESSION_METADATA_KEYS,
 )
 

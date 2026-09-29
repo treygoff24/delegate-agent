@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import stat
@@ -631,8 +632,20 @@ USAGE_LIMIT = record("codex", "You've hit your usage limit", status=429)
 class RunnerObservationTests(HomeCase):
     """`runner._observe_lane_health`: which finished runs are allowed to speak for the lane."""
 
-    def observe(self, *, status="failed", rec=PERSISTENT, established=False, fallback=None):
+    def observe(
+        self,
+        *,
+        status="failed",
+        rec=PERSISTENT,
+        established=False,
+        fallback=None,
+        retried=False,
+        quiet=False,
+        mode="safe",
+    ):
         ctx = types.SimpleNamespace(
+            mode=mode,
+            auto_resume={"automatic": True} if retried else None,
             lane=self.lane,
             provider_policy=self.policy,
             engine="codex",
@@ -647,6 +660,7 @@ class RunnerObservationTests(HomeCase):
             provider_error=rec,
             delegate_established=established,
             merged_extra=extra,
+            no_child_output=quiet,
         )
         return extra
 
@@ -682,6 +696,53 @@ class RunnerObservationTests(HomeCase):
 
     def test_other_persistent_failures_still_mark_a_lane_that_has_a_fallback_profile(self):
         self.assertIn("laneMarked", self.observe(fallback={"CODEX_HOME": "/somewhere"}))
+
+
+class BrokerBindingMarkerTests(HomeCase):
+    """One broker `binding_not_active` is launch-slot contention, not a bad lane."""
+
+    observe = RunnerObservationTests.observe
+
+    BROKER = record(
+        "codex",
+        "estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active",
+        status=403,
+    )
+
+    def test_the_signature_is_the_persistent_lane_scoped_broker_row(self):
+        self.assertEqual(self.BROKER["signature"], "broker_binding_inactive")
+        self.assertTrue(lane_health.earns_marker(self.BROKER))
+
+    def test_a_first_refusal_is_deferred_to_the_retry_and_marks_nothing(self):
+        extra = self.observe(rec=self.BROKER, quiet=True)
+
+        self.assertEqual(extra, {"laneMarkerDeferred": "broker_binding_retry"})
+        self.assertIsNone(lane_health.check(self.lane)[0])
+
+    def test_the_retry_failing_too_marks_the_lane_as_before(self):
+        extra = self.observe(rec=self.BROKER, retried=True, quiet=True)
+
+        self.assertIn("laneMarked", extra)
+        self.assertIsNotNone(lane_health.check(self.lane)[0])
+
+    def test_a_refusal_after_child_output_is_not_deferred_and_marks_as_before(self):
+        self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=False))
+
+    def test_a_quiet_work_refusal_is_not_deferred_because_work_is_never_rerun(self):
+        extra = self.observe(rec=self.BROKER, quiet=True, mode="work")
+
+        self.assertIn("laneMarked", extra)
+        self.assertNotIn("laneMarkerDeferred", extra)
+        self.assertIsNotNone(lane_health.check(self.lane)[0])
+
+    def test_the_hint_tells_a_work_lane_how_to_relaunch(self):
+        self.assertIn("--force-launch", self.BROKER["hint"])
+        self.assertIn("contention", self.BROKER["hint"])
+
+    def test_with_auto_resume_off_a_refusal_marks_immediately(self):
+        self.policy = dataclasses.replace(self.policy, auto_resume=False)
+
+        self.assertIn("laneMarked", self.observe(rec=self.BROKER, quiet=True))
 
 
 class RefusalTests(unittest.TestCase):

@@ -203,6 +203,7 @@ class RunContext:
     # --stall-minutes pinned this run's threshold; DELEGATE_STALL_MINUTES does
     # not override a per-run choice.
     stall_seconds_pinned: bool = False
+    stall_source: str = "default"
     process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
     tracked_stream_max_bytes: int | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
@@ -854,6 +855,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         # Only an explicit --stall-minutes is recorded, so resume and followup
         # inherit operator intent; a config or env default is re-resolved.
         payload["stallMinutes"] = ctx.stall_seconds / stall_watchdog.SECONDS_PER_MINUTE
+    window_seconds, window_source = _effective_stall_window(ctx)
+    payload["stallWindow"] = stall_watchdog.stall_window_record(window_seconds, window_source)
     if ctx.tracked_stream_max_bytes is not None:
         # null records "no cap" (the default) without a misleading 0.
         payload["trackedStreamMaxBytes"] = ctx.tracked_stream_max_bytes or None
@@ -2413,6 +2416,16 @@ def _stall_message(detail: JsonObject) -> str:
     )
 
 
+def _effective_stall_window(ctx: RunContext) -> tuple[float, str]:
+    """The silent window this run's watchdog uses, and its source (env applied)."""
+    return stall_watchdog.apply_env_override(
+        ctx.stall_seconds,
+        ctx.stall_source,
+        pinned=ctx.stall_seconds_pinned,
+        raw_env=os.environ.get(STALL_MINUTES_ENV),
+    )
+
+
 def _stall_seconds_from_env(default: float) -> float:
     """Operator override for the configured stall threshold, in minutes.
 
@@ -2955,11 +2968,7 @@ def _capture_tracked_process(
         continuity_mode=ctx.continuity_mode,
     )
     watchdog = stall_watchdog.StallWatchdog(
-        stall_seconds=(
-            ctx.stall_seconds
-            if ctx.stall_seconds_pinned
-            else _stall_seconds_from_env(ctx.stall_seconds)
-        ),
+        stall_seconds=_effective_stall_window(ctx)[0],
         harness=ctx.harness,
         progress_probe=_worktree_head_probe(ctx.execution_cwd),
     )
@@ -3703,6 +3712,7 @@ def _observe_lane_health(
     provider_error: JsonObject | None,
     delegate_established: bool,
     merged_extra: JsonObject,
+    no_child_output: bool = False,
 ) -> None:
     """Tell the known-bad lane marker how this run ended.
 
@@ -3723,6 +3733,17 @@ def _observe_lane_health(
         and provider_error is not None
         and provider_errors.reason_for_record(provider_error) == "usage_limit"
     ):
+        return
+    if not succeeded and auto_resume.defers_lane_marker(
+        provider_error,
+        enabled=ctx.provider_policy.auto_resume,
+        already_automatic=ctx.auto_resume is not None,
+        no_child_output=no_child_output,
+        mode=ctx.mode,
+    ):
+        # One broker binding refusal is launch-slot contention; the automatic
+        # retry decides whether the lane is really bad.
+        merged_extra["laneMarkerDeferred"] = "broker_binding_retry"
         return
     marker_result = lane_health.observe(
         ctx.lane,
@@ -3921,6 +3942,14 @@ def _finalize_tracked_run(
     failure_message = failure.message if failure is not None else None
     if status == run_registry.STATUS_FAILED and provider_error is not None:
         merged_extra["providerError"] = provider_error
+    accumulator = capture.accumulator
+    no_child_output = (
+        capture.stdout_bytes == 0
+        and accumulator.events.total == 0
+        and not accumulator.assistant_chunks
+        and accumulator.completion_text is None
+        and not outcome.work_summary_shows_changes(merged_extra.get("workSummary"))
+    )
     if not cancel_requested and merged_extra.get("codexAuthFallback") is None:
         _observe_lane_health(
             ctx,
@@ -3930,6 +3959,7 @@ def _finalize_tracked_run(
                 established_reason is not None or provider_terminal_state is not None
             ),
             merged_extra=merged_extra,
+            no_child_output=no_child_output,
         )
     if not cancel_requested:
         auto_resume.note_run(
@@ -3945,6 +3975,7 @@ def _finalize_tracked_run(
                 session_id=(capture.accumulator.harness_session_id if ctx.resumable else None),
                 isolation_lifecycle=ctx.isolation_lifecycle,
                 structured=ctx.output_schema_text is not None or ctx.structured_retry,
+                no_child_output=no_child_output,
             )
         )
     if failure_reason is not None:
