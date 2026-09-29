@@ -2485,7 +2485,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--auto", opencode_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["opencode"])
         self.assertEqual(payload["engineDefaults"]["pi"]["binary"], "pi")
-        self.assertEqual(payload["engineDefaults"]["pi"]["trackedStreamMaxBytes"], 64 * 1024 * 1024)
+        # The tracked stream cap is off by default: null, not a byte count.
+        self.assertIsNone(payload["engineDefaults"]["pi"]["trackedStreamMaxBytes"])
         self.assertEqual(payload["promptTransports"]["pi"], "stdin")
         pi_safe = payload["modeMapping"]["pi"]["safe"]
         pi_work = payload["modeMapping"]["pi"]["work"]
@@ -2495,12 +2496,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--tools", pi_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["pi"])
         self.assertEqual(payload["engineDefaults"]["omp"]["binary"], "omp")
-        self.assertEqual(
-            payload["engineDefaults"]["omp"]["trackedStreamMaxBytes"], 64 * 1024 * 1024
-        )
-        self.assertEqual(
-            payload["engineDefaults"]["codex"]["trackedStreamMaxBytes"], 16 * 1024 * 1024
-        )
+        self.assertIsNone(payload["engineDefaults"]["omp"]["trackedStreamMaxBytes"])
+        self.assertIsNone(payload["engineDefaults"]["codex"]["trackedStreamMaxBytes"])
         self.assertEqual(payload["promptTransports"]["omp"], "stdin")
         self.assertEqual(payload["promptTransports"]["cursor"], "stdin")
         omp_safe = payload["modeMapping"]["omp"]["safe"]
