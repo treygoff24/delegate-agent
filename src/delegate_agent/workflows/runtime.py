@@ -5581,6 +5581,34 @@ def workflow_terminal_child_run_ids(workspace: Path, wf_id: str) -> set[str]:
     return terminal
 
 
+def live_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
+    """Children of a workflow whose process is still alive.
+
+    A row whose pid is dead or was never published is not live: resume seals
+    those as orphans without disturbing any work. A live one is a lane still
+    doing paid work, which is what an operator has to decide about before a
+    resume that cancels it.
+    """
+    root = run_registry.registry_root_if_exists(workspace)
+    if root is None:
+        return []
+    live: list[JsonObject] = []
+    for run_id in _workflow_child_run_ids(root, wf_id):
+        state = run_registry.load_run_state_or_none(root, run_id)
+        if run_registry.status_fields(state).get("effectiveStatus") != run_registry.STATUS_RUNNING:
+            continue
+        alias = state.get("alias") if isinstance(state, dict) else None
+        pid = state.get("pid") if isinstance(state, dict) else None
+        live.append(
+            {
+                "runId": run_id,
+                "alias": alias if isinstance(alias, str) else None,
+                "pid": pid if isinstance(pid, int) else None,
+            }
+        )
+    return live
+
+
 def _workflow_child_run_ids(root: Path, wf_id: str) -> list[str]:
     index = run_registry.load_index(root)
     return [
@@ -6553,6 +6581,7 @@ __all__ = [
     "detach_supervisor",
     "execute_workflow",
     "kill_supervisor",
+    "live_workflow_children",
     "run_supervisor",
     "wait_for_workflow_lock",
 ]
