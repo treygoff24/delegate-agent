@@ -58,6 +58,27 @@ def _make_committed_repo() -> tempfile.TemporaryDirectory:
     return repo
 
 
+def _final_launch_plan(
+    cwd: str, sandbox: sandbox_bwrap.SandboxPlan, *, engine: str = "codex"
+) -> tuple[list[str], list[str]]:
+    """The plan the runner hands to the bwrap preflight, and the argv it then launches."""
+    with (
+        tempfile.TemporaryDirectory() as temp,
+        mock.patch.object(sandbox_bwrap, "preflight_plan") as preflight,
+        mock.patch.object(runner.subprocess, "Popen") as popen,
+    ):
+        runner._launch_tracked_process(
+            [f"{engine}-engine", "--flag"],
+            cwd,
+            stdin_text=None,
+            temp_dir=Path(temp),
+            sandbox=sandbox,
+            engine=engine,
+        )
+    preflight.assert_called_once()
+    return list(preflight.call_args.args[0]), list(popen.call_args.args[0])
+
+
 class BuildBwrapArgvTests(unittest.TestCase):
     def test_emission_order_and_engine_argv_untouched(self):
         argv = sandbox_bwrap.build_bwrap_argv(
@@ -144,6 +165,7 @@ class BuildBwrapArgvTests(unittest.TestCase):
             rw_roots=[],
             ro_roots=[],
         )
+        self.assertNotIn("--unshare-pid", argv)
         self.assertNotIn("--unshare-net", argv)
         self.assertNotIn("--proc", argv)
 
@@ -315,8 +337,20 @@ class WrapEngineArgvTests(unittest.TestCase):
             )
 
             self.assertNotIn(str(fake_home / ".kimi-code"), argv)
-            if shutil.which(sandbox_bwrap.BWRAP_BINARY) is None:
-                self.skipTest("bwrap is not installed")
+
+    @unittest.skipIf(shutil.which(sandbox_bwrap.BWRAP_BINARY) is None, "bwrap is not installed")
+    def test_kimi_run_with_no_default_home_passes_the_live_bwrap_preflight(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={"HOME": str(fake_home), "PATH": os.environ["PATH"]},
+                engine="kimi",
+            )
             sandbox_bwrap.preflight_plan(argv)
 
     def test_an_explicit_kimi_home_override_that_is_absent_still_fails_loudly(self):
@@ -341,6 +375,27 @@ class WrapEngineArgvTests(unittest.TestCase):
 
             self.assertIn(missing, argv)
             self.assertEqual(argv[argv.index(missing) - 1], "--bind")
+
+    @unittest.skipIf(shutil.which(sandbox_bwrap.BWRAP_BINARY) is None, "bwrap is not installed")
+    def test_an_explicit_kimi_home_override_that_is_absent_fails_the_live_bwrap_preflight(self):
+        with (
+            tempfile.TemporaryDirectory() as home_tmp,
+            tempfile.TemporaryDirectory() as workspace_tmp,
+        ):
+            fake_home = Path(home_tmp)
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/bin/true"],
+                cwd=workspace_tmp,
+                env={
+                    "HOME": str(fake_home),
+                    "KIMI_CODE_HOME": str(fake_home / "nowhere"),
+                    "PATH": os.environ["PATH"],
+                },
+                engine="kimi",
+            )
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.preflight_plan(argv)
+            self.assertEqual(caught.exception.error, "bwrap_launch_failed")
 
     def test_kimi_homes_are_hidden_from_other_engines(self):
         with (
@@ -1111,6 +1166,25 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
         with self.assertRaises(DelegateError):
             sandbox_bwrap.preflight_plan([true_path])
 
+    def test_the_runner_preflights_the_plan_it_launches(self):
+        with (
+            tempfile.TemporaryDirectory() as ws,
+            tempfile.TemporaryDirectory() as extra_ro,
+        ):
+            plan = sandbox_bwrap.SandboxPlan(
+                None,
+                masks=(sandbox_bwrap.Mask("secret.env", sandbox_bwrap.MASK_KIND_DEVNULL),),
+                binds=(sandbox_bwrap.Bind(extra_ro, "ro"),),
+            )
+            preflighted, launched = _final_launch_plan(ws, plan)
+        self.assertEqual(preflighted, launched)
+        mounts = [(preflighted[i], preflighted[i + 1]) for i in range(len(preflighted) - 1)]
+        self.assertIn(("--ro-bind", ws), mounts)
+        self.assertIn(("--ro-bind", extra_ro), mounts)
+        self.assertIn(("--ro-bind", "/dev/null"), mounts)
+        self.assertIn(os.path.join(ws, "secret.env"), preflighted)
+        self.assertEqual(preflighted[-3:], ["--", "codex-engine", "--flag"])
+
     def test_missing_registry_is_not_masked(self):
         with tempfile.TemporaryDirectory() as ws:
             argv = sandbox_bwrap.wrap_engine_argv(
@@ -1164,6 +1238,39 @@ class LinkedWorktreeAndSubmoduleTests(unittest.TestCase):
         common = safe_workspace._bwrap_git_common_dir(linked_ws)
         self.assertEqual(common, str((Path(repo.name) / ".git").resolve()))
         self.assertIsNone(safe_workspace._bwrap_git_common_dir(repo.name))
+        iso_ctx = isolation_api.build_isolation_context(
+            source_workspace=linked_ws,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=linked_ws,
+        )
+        request = request_api.build_request(
+            "codex",
+            "safe",
+            None,
+            request_types.ResolvedWorkspace(linked_ws, "git"),
+            "review",
+            config_api.embedded_default_config(),
+            dry_run=True,
+            isolation_context=iso_ctx,
+        )
+        with (
+            mock.patch.object(safe_workspace, "ensure_bwrap_backend", lambda: None),
+            safe_workspace.safe_isolated_request(
+                request, config={}, env={"DELEGATE_SAFE_BACKEND": "bwrap"}
+            ) as isolated,
+        ):
+            sandbox = isolated.isolation_context.sandbox
+            _preflighted, final_argv = _final_launch_plan(linked_ws, sandbox)
+        self.assertIn(sandbox_bwrap.Bind(common, "ro"), sandbox.binds)
+        boundary = final_argv[: final_argv.index("--")]
+        self.assertIn(
+            ["--ro-bind", common, common], [boundary[i : i + 3] for i in range(len(boundary))]
+        )
+        self.assertNotIn(
+            ["--bind", common, common], [boundary[i : i + 3] for i in range(len(boundary))]
+        )
 
     def test_initialized_submodule_is_refused(self):
         outer = _make_committed_repo()

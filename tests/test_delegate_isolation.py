@@ -5,6 +5,7 @@ Tests pure functions only; no filesystem mutations.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -46,16 +47,18 @@ class RepoFingerprintTests(unittest.TestCase):
     def test_path_with_spaces(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory(suffix=" my repo") as tmp:
+            self.assertIn(" ", tmp)
             fp = iso.compute_repo_fingerprint_from_common_dir(tmp)
-        self.assertEqual(len(fp), 12)
-        int(fp, 16)
+            expected = hashlib.sha256(os.path.realpath(tmp).encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(fp, expected)
 
     def test_path_with_unicode(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory(suffix="\u00e9\u00e0\u00f1") as tmp:
+            self.assertTrue(tmp.endswith("\u00e9\u00e0\u00f1"))
             fp = iso.compute_repo_fingerprint_from_common_dir(tmp)
-        self.assertEqual(len(fp), 12)
-        int(fp, 16)
+            expected = hashlib.sha256(os.path.realpath(tmp).encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(fp, expected)
 
     def test_distinct_repos_produce_distinct_fingerprints(self):
         iso = load_isolation()
@@ -96,9 +99,11 @@ class ShortRunIdTests(unittest.TestCase):
         iso = load_isolation()
         result = iso.short_run_id("del_20260524T184455Z_a1b2c3!@#$")
         # !@#$ become ----
-        self.assertNotIn("!", result)
-        self.assertNotIn("@", result)
-        self.assertIn("-", result)
+        self.assertEqual(result, "20260524T184455Z_a1b2c3----")
+        punctuation = "!@#$%^&*()+=[]{}|;:'\",<>?/"
+        self.assertEqual(
+            iso.short_run_id(f"del_run{punctuation}id"), "run" + "-" * len(punctuation) + "id"
+        )
 
     def test_truncates_to_32_chars(self):
         iso = load_isolation()
@@ -264,16 +269,20 @@ class BuildIsolationContextTests(unittest.TestCase):
         self.assertFalse(ctx.preserved_workspace)
 
     def test_any_work_auto_maps_to_none(self):
+        from delegate_agent.constants import KNOWN_ENGINES
+
         iso = load_isolation()
-        ctx = iso.build_isolation_context(
-            source_workspace="/repo",
-            resolved_isolation="auto",
-            engine="cursor",
-            mode="work",
-        )
-        self.assertEqual(ctx.isolation_mode, "auto")
-        self.assertEqual(ctx.effective_isolation, "none")
-        self.assertEqual(ctx.isolation_lifecycle, "none")
+        for engine in KNOWN_ENGINES:
+            with self.subTest(engine=engine):
+                ctx = iso.build_isolation_context(
+                    source_workspace="/repo",
+                    resolved_isolation="auto",
+                    engine=engine,
+                    mode="work",
+                )
+                self.assertEqual(ctx.isolation_mode, "auto")
+                self.assertEqual(ctx.effective_isolation, "none")
+                self.assertEqual(ctx.isolation_lifecycle, "none")
 
     def test_explicit_worktree_work_is_persistent(self):
         iso = load_isolation()

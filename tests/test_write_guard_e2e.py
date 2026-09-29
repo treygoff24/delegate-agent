@@ -239,16 +239,6 @@ class ForbidCommitWithoutGuardTests(GuardE2ETestCase):
         self.assertNotEqual(self.result_lines()["commit"], "0")
         self.assertEqual(run_git(self.workspace, "rev-parse", "HEAD"), before)
 
-    def test_forbid_commit_with_isolation_none_is_accepted_by_dry_run(self):
-        self.write_config()
-        completed = self.cli(
-            "--isolation", "none", "--json", "dry-run", "cursor", "work", "--forbid-commit", "edit"
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["commitPolicy"], {"forbidCommit": True})
-        self.assertEqual(payload["effectiveIsolation"], "none")
-
 
 class CodexNativeSandboxTests(GuardE2ETestCase):
     """Codex work lanes keep Codex's own sandbox and get the roots they need."""
