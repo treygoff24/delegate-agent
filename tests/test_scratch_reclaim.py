@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -439,7 +440,9 @@ class RetentionPassScratchTests(ScratchReclaimTestCase):
         self.assertEqual(result["scratchReclaimed"], 0)
         self.assertEqual(result["scanned"], 1)
 
-    def test_a_pass_cut_short_by_its_budget_does_not_start_the_cadence_window(self) -> None:
+    def test_a_pass_cut_short_by_its_budget_defers_scratch_for_the_cooldown(self) -> None:
+        # A tree too big for one budget must not cost every routine command the
+        # whole budget again: implicit scratch reclaim waits out a cooldown.
         run_id = self.make_run(age_days=40)
 
         with mock.patch.object(retention, "SCRATCH_RECLAIM_BUDGET_SECONDS", 0.0):
@@ -448,10 +451,21 @@ class RetentionPassScratchTests(ScratchReclaimTestCase):
         self.assertEqual(first["scratchReclaimed"], 0)
         self.assertTrue(self.scratch_path(run_id).exists())
 
-        second = retention.run_retention_pass(self.registry_root, self.config(), now=self.now)
+        past_cadence = self.now + timedelta(seconds=retention.RETENTION_CADENCE_SECONDS + 1)
+        with mock.patch.object(retention, "_reclaim_scratch_locked") as walked:
+            retention.run_retention_pass(self.registry_root, self.config(), now=past_cadence)
+        walked.assert_not_called()
+        self.assertTrue(self.scratch_path(run_id).exists())
 
-        self.assertEqual(second["scratchReclaimed"], 1)
+        after_cooldown = self.now + timedelta(
+            seconds=retention.SCRATCH_RECLAIM_COOLDOWN_SECONDS + 1
+        )
+        third = retention.run_retention_pass(self.registry_root, self.config(), now=after_cooldown)
+
+        self.assertEqual(third["scratchReclaimed"], 1)
         self.assertFalse(self.scratch_path(run_id).exists())
+        retention_state = run_registry.load_index(self.registry_root)["retention"]
+        self.assertNotIn("scratchDeferredUntil", retention_state)
 
     def test_a_completed_pass_starts_the_cadence_window(self) -> None:
         run_id = self.make_run(age_days=1)
@@ -823,20 +837,21 @@ class BudgetedRemovalTests(ScratchReclaimTestCase):
         self.assertEqual(self.count_files(scratch), total - self.BUDGET)
         self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
 
-        # The cut-short pass did not start the cadence window, so this runs now.
-        second = retention.run_retention_pass(self.registry_root, self.config(), now=self.now)
+        # The cut-short pass deferred implicit reclaim; after the cooldown it resumes.
+        later = self.now + timedelta(seconds=retention.SCRATCH_RECLAIM_COOLDOWN_SECONDS + 1)
+        second = retention.run_retention_pass(self.registry_root, self.config(), now=later)
 
         self.assertEqual(second["scratchReclaimed"], 1)
         self.assertFalse(scratch.exists())
         self.assertFalse(sidecar.exists())
         state = self.state_of(run_id)
         self.assertIn(retention.SCRATCH_RECLAIMED_AT_KEY, state)
-        # The marker's byte count is what the finishing pass freed: the rest of
-        # the scratch and the sidecar.
+        # The marker counts every pass: what the cut-short pass freed is carried
+        # forward, so it is the whole scratch plus the sidecar.
         self.assertEqual(
-            state[retention.SCRATCH_RECLAIMED_BYTES_KEY],
-            (total - self.BUDGET) * self.FILE_SIZE + self.FILE_SIZE,
+            state[retention.SCRATCH_RECLAIMED_BYTES_KEY], total * self.FILE_SIZE + self.FILE_SIZE
         )
+        self.assertNotIn(retention.SCRATCH_RECLAIM_PARTIAL_BYTES_KEY, state)
 
     def test_the_explicit_command_is_not_budgeted(self) -> None:
         _run_id, scratch, _total = self.big_run()
@@ -847,6 +862,99 @@ class BudgetedRemovalTests(ScratchReclaimTestCase):
         self.assertFalse(result["budgetExhausted"])
         self.assertEqual(len(result["reclaimed"]), 1)
         self.assertFalse(scratch.exists())
+
+
+class MountBoundaryTests(ScratchReclaimTestCase):
+    """Removal never crosses into another filesystem mounted inside scratch.
+
+    A real mount needs privileges the suite does not have, so the device number
+    of one chosen directory is shifted, as a mount point would report it.
+    """
+
+    @staticmethod
+    def on_other_device(info: os.stat_result) -> os.stat_result:
+        fields = list(info[:10])
+        fields[2] = info.st_dev + 1  # st_dev
+        return os.stat_result(fields)
+
+    def mounted_run(self) -> tuple[str, Path, Path]:
+        run_id = self.make_run()
+        scratch = self.scratch_path(run_id)
+        mounted = scratch / "mnt"
+        mounted.mkdir()
+        (mounted / "precious.txt").write_text("not scratch", encoding="utf-8")
+        return run_id, scratch, mounted
+
+    def test_the_scan_refuses_a_mount_inside_scratch_before_removing_anything(self) -> None:
+        run_id, scratch, mounted = self.mounted_run()
+        real = run_scratch._entry_lstat
+
+        def lstat(entry: os.DirEntry[str]) -> os.stat_result:
+            info = real(entry)
+            return self.on_other_device(info) if entry.name == "mnt" else info
+
+        with mock.patch.object(run_scratch, "_entry_lstat", side_effect=lstat):
+            result = self.reclaim()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("another filesystem", result["errors"][0]["message"])
+        self.assertTrue((mounted / "precious.txt").exists())
+        self.assertTrue((scratch / "artifact.bin").exists())
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
+
+    def test_a_mount_that_appears_after_the_scan_is_refused_before_it_is_entered(self) -> None:
+        run_id, _scratch, mounted = self.mounted_run()
+        mounted_inode = mounted.stat().st_ino
+        real = run_scratch._fd_stat
+
+        def fstat(fd: int) -> os.stat_result:
+            info = real(fd)
+            return self.on_other_device(info) if info.st_ino == mounted_inode else info
+
+        with (
+            mock.patch.object(run_scratch, "_scan_for_foreign_owner"),
+            mock.patch.object(run_scratch, "_fd_stat", side_effect=fstat),
+        ):
+            result = self.reclaim()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("another filesystem", result["errors"][0]["message"])
+        self.assertTrue((mounted / "precious.txt").exists())
+        self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
+
+    def test_a_scratch_directory_that_is_itself_a_mount_point_is_refused(self) -> None:
+        run_id = self.make_run()
+        scratch = self.scratch_path(run_id)
+        scratch_inode = scratch.stat().st_ino
+        real_fstat = run_scratch._fd_stat
+        real_lstat = os.lstat
+
+        def fstat(fd: int) -> os.stat_result:
+            info = real_fstat(fd)
+            return self.on_other_device(info) if info.st_ino == scratch_inode else info
+
+        def lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            return self.on_other_device(info) if info.st_ino == scratch_inode else info
+
+        for label, patches in (
+            ("scan", (mock.patch.object(run_scratch.os, "lstat", side_effect=lstat),)),
+            (
+                "removal",
+                (
+                    mock.patch.object(run_scratch, "_scan_for_foreign_owner"),
+                    mock.patch.object(run_scratch, "_fd_stat", side_effect=fstat),
+                ),
+            ),
+        ):
+            with self.subTest(label), contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                result = self.reclaim()
+                self.assertFalse(result["ok"])
+                self.assertIn("scratch directory is a mount point", result["errors"][0]["message"])
+                self.assertTrue((scratch / "artifact.bin").exists())
+                self.assertNotIn(retention.SCRATCH_RECLAIMED_AT_KEY, self.state_of(run_id))
 
 
 if __name__ == "__main__":

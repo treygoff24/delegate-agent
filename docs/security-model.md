@@ -188,8 +188,11 @@ same recorded-path equality check and the same owner-checked, no-follow removal
 (shared code in `run_scratch`), so it cannot delete anything pruning would
 refuse. Removal walks one entry at a time through directory descriptors opened
 without following symlinks, after a first pass that refuses the whole tree if any
-entry has another owner; the ambient pass can stop between entries when its time
-budget ends, leaving a smaller tree and no marker. It never considers a running
+entry has another owner or lies on another filesystem (a mount point); each
+directory opened during removal is checked again against the tree's device, so a
+mount that appears after the first pass is refused before it is entered. The
+ambient pass can stop between entries when its time budget ends, leaving a
+smaller tree and no marker. It never considers a running
 or stale run, and the size walk used for `--dry-run` does not follow symlinks. The cross-workspace roster
 (`~/.delegate/registries.json`, `0600`, bounded) is advisory and is only read
 to find a workspace's `index.json`; nothing acts on a workspace's registry

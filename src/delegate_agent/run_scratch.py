@@ -404,14 +404,28 @@ def _safe_removal_available() -> bool:
     )
 
 
-def _scan_for_foreign_owner(target: Path, deadline: Deadline | None) -> None:
-    """Refuse a tree holding an entry owned by someone else, before removing anything.
+def _entry_lstat(entry: os.DirEntry[str]) -> os.stat_result:
+    return entry.stat(follow_symlinks=False)
 
+
+def _fd_stat(fd: int) -> os.stat_result:
+    return os.fstat(fd)
+
+
+def _scan_for_foreign_owner(target: Path, deadline: Deadline | None) -> None:
+    """Refuse a tree, before removing anything, that holds an entry owned by
+    someone else or an entry on another filesystem.
+
+    A different device inside the tree is a mount point (or a bind mount of a
+    file): removal would otherwise descend into it and delete the mounted
+    filesystem's contents before the mount point itself refused to go. A target
+    on a different device from its parent is refused for the same reason.
     Symlinks are inspected with ``lstat`` semantics and never entered.
     """
-    if not hasattr(os, "geteuid"):
-        return
-    euid = os.geteuid()
+    target_device = os.lstat(target).st_dev
+    if os.lstat(target.parent).st_dev != target_device:
+        raise ScratchSafetyError(f"scratch directory is a mount point: {target}")
+    euid = os.geteuid() if hasattr(os, "geteuid") else None
     pending = [target]
     while pending:
         current = pending.pop()
@@ -419,9 +433,13 @@ def _scan_for_foreign_owner(target: Path, deadline: Deadline | None) -> None:
             for entry in entries:
                 if deadline is not None:
                     deadline.check()
-                info = entry.stat(follow_symlinks=False)
-                if info.st_uid != euid:
+                info = _entry_lstat(entry)
+                if euid is not None and info.st_uid != euid:
                     raise ScratchSafetyError(f"scratch entry has a foreign owner: {entry.path}")
+                if info.st_dev != target_device:
+                    raise ScratchSafetyError(
+                        f"scratch entry is on another filesystem (a mount point): {entry.path}"
+                    )
                 if stat.S_ISDIR(info.st_mode):
                     pending.append(Path(entry.path))
 
@@ -448,12 +466,19 @@ def _remove_tree(target: Path, deadline: Deadline | None, progress: RemovalProgr
     fires the walk stops where it is (``ScratchBudgetExceeded``) and
     ``progress.freed_bytes`` holds what was actually freed. Removal is resumable
     because a half-removed tree is just a smaller tree.
+
+    Every directory opened is also checked to be on the target's filesystem, so
+    a mount that appeared after ``_scan_for_foreign_owner`` is refused before
+    anything under it is listed or removed.
     """
     parent_fd = os.open(target.parent, _DIR_OPEN_FLAGS)
     stack: list[tuple[int, list[tuple[str, bool, int]], str]] = []
     try:
         root_fd = os.open(target.name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
         try:
+            device = _fd_stat(root_fd).st_dev
+            if _fd_stat(parent_fd).st_dev != device:
+                raise ScratchSafetyError(f"scratch directory is a mount point: {target}")
             stack.append((root_fd, _list_directory(root_fd, deadline), target.name))
         except BaseException:
             os.close(root_fd)
@@ -472,6 +497,10 @@ def _remove_tree(target: Path, deadline: Deadline | None, progress: RemovalProgr
             if is_directory:
                 child_fd = os.open(entry_name, _DIR_OPEN_FLAGS, dir_fd=fd)
                 try:
+                    if _fd_stat(child_fd).st_dev != device:
+                        raise ScratchSafetyError(
+                            f"scratch entry is on another filesystem (a mount point): {entry_name}"
+                        )
                     stack.append((child_fd, _list_directory(child_fd, deadline), entry_name))
                 except BaseException:
                     os.close(child_fd)
