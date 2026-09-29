@@ -401,6 +401,8 @@ need separate review or commits, launch each in a persistent worktree and
 integrate them separately; `wait --group` warns when it sees shared same-tree
 work runs.
 
+A tracked launch command is the Run's supervisor: it owns the child's stdout and stderr pipes and writes the terminal state, so it must outlive the child. Killing it does not kill the child (the child runs in its own session), but nothing finalizes the Run afterwards. With the launcher gone, the Run reads `running` while the child is alive and `stale` (`staleReason: dead_pid`) once the child exits, which a child does when it next writes to its closed pipe. SIGTERM and SIGKILL of the launcher behave the same. Launch each parallel lane from its own background shell or harness background task rather than one shell that is later killed. To recover, `delegate cancel <handle>` stops a still-live orphan or seals a stale Run as `cancelled`, and `delegate resume <handle>` or `delegate followup <handle>` continues it; both also work directly on the stale Run without cancelling first. See [troubleshooting](troubleshooting.md#a-run-went-stale-after-its-launch-command-was-killed).
+
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry. Delegate
 injects that profile's flat env map into child launches and metadata probes, and
 uses the same profile name to select cached discovery. It overrides ambient

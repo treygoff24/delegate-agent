@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -133,12 +134,20 @@ def status_fields(state: JsonObject | None) -> JsonObject:
     return fields
 
 
-def stale_next_actions(alias_or_run_id: str, *, cwd: str | None = None) -> list[str]:
-    return [
+def stale_next_actions(
+    alias_or_run_id: str, *, cwd: str | None = None, mode: str | None = None
+) -> list[str]:
+    actions = [
         record_io.snapshot_command(alias_or_run_id, cwd=cwd),
         record_io.run_output_command(alias_or_run_id, completion_report=True, cwd=cwd),
         f"{record_io.run_output_command(alias_or_run_id, cwd=cwd)} --stderr --tail 100",
     ]
+    # A stale Run is usually one whose launch command died; `resume` relaunches
+    # it as a new Run (call Runs cannot be resumed).
+    if mode != "call":
+        argv = ["delegate", "--cwd", cwd, "resume"] if cwd else ["delegate", "resume"]
+        actions.append(shlex.join([*argv, alias_or_run_id]))
+    return actions
 
 
 def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
@@ -324,7 +333,11 @@ def build_run_summary(
             summary["usage"] = usage
     summary.update(status_fields(state))
     if summary.get("effectiveStatus") == STATUS_STALE:
-        summary["nextActions"] = stale_next_actions(handle, cwd=source_cwd)
+        summary["nextActions"] = stale_next_actions(
+            handle,
+            cwd=source_cwd,
+            mode=summary.get("mode") if isinstance(summary.get("mode"), str) else None,
+        )
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
     if state and summary.get("effectiveStatus") == STATUS_RUNNING:

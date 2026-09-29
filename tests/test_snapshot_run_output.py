@@ -1376,6 +1376,30 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ),
             payload["nextActions"],
         )
+        self.assertIn(
+            f"delegate --cwd {self.workspace} resume {alias}",
+            payload["nextActions"],
+        )
+
+    def test_runs_stale_next_actions_point_at_resume(self):
+        _, alias = self.write_run(pid=999999999)
+        stdout = io.StringIO()
+        self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "runs", "--stale"], stdout=stdout
+        )
+        run = json.loads(stdout.getvalue())["runs"][0]
+        self.assertIn(f"delegate --cwd {self.workspace} resume {alias}", run["nextActions"])
+
+    def test_stale_next_actions_skip_resume_for_call_runs(self):
+        self.assertFalse(
+            any(
+                " resume " in action
+                for action in registry_api.stale_next_actions("call-1", mode="call")
+            )
+        )
+        self.assertIn(
+            "delegate resume work-1", registry_api.stale_next_actions("work-1", mode="work")
+        )
 
     def test_stale_status_when_pid_missing(self):
         run_id, alias = self.write_run()
