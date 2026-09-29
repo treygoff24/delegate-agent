@@ -197,6 +197,15 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                 states[run_id] = state
         return states
 
+    def _wait_for_running_child(self, wf_id: str) -> None:
+        self._wait_for(
+            lambda: any(
+                run_status.raw_status(state) == run_status.STATUS_RUNNING
+                and isinstance(state.get("pgid"), int)
+                for state in self._workflow_child_states(wf_id).values()
+            )
+        )
+
     @staticmethod
     def _group_gone(pgid: int) -> bool:
         result = subprocess.run(
@@ -214,7 +223,8 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         return True
 
     def test_state_file_deletion_cancels_real_supervisor_and_releases_lock(self) -> None:
-        _, root = self._launch(10)
+        wf_id, root = self._launch(10)
+        self._wait_for_running_child(wf_id)
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         pid = int(status["supervisorPid"])
         (root / registry.STATUS_FILE).unlink()
@@ -224,13 +234,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
 
     def test_registry_entry_deletion_cancels_real_supervisor(self) -> None:
         wf_id, root = self._launch(10)
-        self._wait_for(
-            lambda: any(
-                run_status.raw_status(state) == run_status.STATUS_RUNNING
-                and isinstance(state.get("pgid"), int)
-                for state in self._workflow_child_states(wf_id).values()
-            )
-        )
+        self._wait_for_running_child(wf_id)
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         pid = int(status["supervisorPid"])
         # Remove the registry entry atomically: recursive deletion races with
