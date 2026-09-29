@@ -18,57 +18,105 @@ if SRC not in sys.path:
 
 from delegate_agent import child_failures, outcome  # noqa: E402
 
-# (literal text from the audit, expected failureReason, expected failureKind)
+# (literal text from the audit, expected failureReason, expected failureKind, the fix the
+# message must name)
 APPENDIX_STRINGS = (
     (
         "Authentication required. Please run agent login first",
         "auth_failed",
         outcome.FAILURE_PROVIDER_AUTH,
+        "estate-cursor login",
     ),
-    ("No API key found for opencode-go", "auth_failed", outcome.FAILURE_PROVIDER_AUTH),
-    ("402 Insufficient account funds", "usage_limit", outcome.FAILURE_PROVIDER_QUOTA),
-    ("Grok Build usage balance exhausted", "usage_limit", outcome.FAILURE_PROVIDER_QUOTA),
+    (
+        "No API key found for opencode-go",
+        "auth_failed",
+        outcome.FAILURE_PROVIDER_AUTH,
+        "pick another alias",
+    ),
+    (
+        "402 Insufficient account funds",
+        "usage_limit",
+        outcome.FAILURE_PROVIDER_QUOTA,
+        "Add credit to the harness account",
+    ),
+    (
+        "Grok Build usage balance exhausted",
+        "usage_limit",
+        outcome.FAILURE_PROVIDER_QUOTA,
+        "Top up the harness usage balance",
+    ),
     (
         "websocket closed by server before response.completed",
         "provider_error",
         outcome.FAILURE_PROVIDER_ERROR,
+        "`delegate followup`",
     ),
     (
         "Error loading configuration: invalid type: boolean true, expected struct HooksToml",
         "harness_config_rejected",
         outcome.FAILURE_EXIT_NONZERO,
+        "Fix the harness configuration",
     ),
     (
         "invalid type: boolean true, expected struct HooksToml",
         "harness_config_rejected",
         outcome.FAILURE_EXIT_NONZERO,
+        "Fix the harness configuration",
     ),
     (
         "estate-harness: uid_unmapped: Broker returned HTTP 403: uid_unmapped",
         "broker_rejected",
         outcome.FAILURE_PROVIDER_AUTH,
+        "ask the estate admin to bind this one",
     ),
-    ("uid_unmapped: Broker returned HTTP 403", "broker_rejected", outcome.FAILURE_PROVIDER_AUTH),
-    ("principal_not_cell_principal", "broker_rejected", outcome.FAILURE_PROVIDER_AUTH),
-    ("Cannot use this model: grok", "provider_error", outcome.FAILURE_PROVIDER_ERROR),
+    (
+        "uid_unmapped: Broker returned HTTP 403",
+        "broker_rejected",
+        outcome.FAILURE_PROVIDER_AUTH,
+        "ask the estate admin to bind this one",
+    ),
+    (
+        "principal_not_cell_principal",
+        "broker_rejected",
+        outcome.FAILURE_PROVIDER_AUTH,
+        "ask the estate admin to bind this one",
+    ),
+    (
+        "Cannot use this model: grok",
+        "provider_error",
+        outcome.FAILURE_PROVIDER_ERROR,
+        "pick another alias",
+    ),
     (
         "Too many images in request: 8 > 4",
         "provider_error",
         outcome.FAILURE_PROVIDER_ERROR,
+        "Attach fewer or smaller images",
     ),
     (
         "This request was flagged for possible cybersecurity risk",
         "provider_refusal",
         outcome.FAILURE_PROVIDER_REFUSAL,
+        "Rephrase the task",
     ),
-    ("18+ age confirmation required", "provider_error", outcome.FAILURE_PROVIDER_ERROR),
-    ("Selected model is at capacity", "provider_error", outcome.FAILURE_PROVIDER_ERROR),
+    (
+        "18+ age confirmation required",
+        "provider_error",
+        outcome.FAILURE_PROVIDER_ERROR,
+        "Complete the provider's age confirmation",
+    ),
+    (
+        "Selected model is at capacity",
+        "provider_error",
+        outcome.FAILURE_PROVIDER_ERROR,
+        "Retry later",
+    ),
 )
 
 
 class AppendixFailureStringTests(unittest.TestCase):
     def test_every_appendix_string_classifies_to_a_named_reason_and_kind(self):
-        for text, reason, kind in APPENDIX_STRINGS:
+        for text, reason, kind, _fix in APPENDIX_STRINGS:
             with self.subTest(text=text):
                 failure = child_failures.classify(text)
                 self.assertIsNotNone(failure, f"{text!r} did not classify")
@@ -76,11 +124,11 @@ class AppendixFailureStringTests(unittest.TestCase):
                 self.assertEqual(outcome.failure_kind_for_reason(failure.code), kind)
 
     def test_each_classified_message_names_the_fix(self):
-        for text, _reason, _kind in APPENDIX_STRINGS:
+        for text, _reason, _kind, fix in APPENDIX_STRINGS:
             with self.subTest(text=text):
                 failure = child_failures.classify(text)
                 self.assertIsNotNone(failure)
-                self.assertGreater(len(failure.message.split()), 5)
+                self.assertIn(fix, failure.message)
 
     def test_the_omp_missing_key_message_names_the_provider(self):
         failure = child_failures.classify("No API key found for opencode-go")

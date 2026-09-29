@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import datetime
 import os
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +21,8 @@ class FailoverStateTests(unittest.TestCase):
             failover_state.write_block("codex", identity, far)
             failover_state.write_block("codex", identity, near)
             self.assertEqual(failover_state.check_blocked("codex", identity), (True, far))
+            other_identity = "auth=/b/auth.json\0profile="
+            self.assertEqual(failover_state.check_blocked("codex", other_identity), (False, None))
             states = list((Path(home) / ".ai-profiles/runtime/failover").glob("*.blocked-until"))
             self.assertEqual(len(states), 1)
             state = states[0]
@@ -27,19 +31,6 @@ class FailoverStateTests(unittest.TestCase):
             self.assertEqual(state.stat().st_mode & 0o777, 0o600)
             failover_state.clear_block("codex", identity)
             self.assertEqual(failover_state.check_blocked("codex", identity), (False, None))
-
-    def test_arbitrary_identities_do_not_cross_contaminate(self) -> None:
-        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
-            expires = int(time.time()) + 60
-            failover_state.write_block("codex", "auth=/a/auth.json\0profile=", expires)
-            self.assertEqual(
-                failover_state.check_blocked("codex", "auth=/a/auth.json\0profile="),
-                (True, expires),
-            )
-            self.assertEqual(
-                failover_state.check_blocked("codex", "auth=/b/auth.json\0profile="),
-                (False, None),
-            )
 
     def test_default_block_expiry_ignores_ai_failover_cooldown_env(self) -> None:
         with (
@@ -97,8 +88,31 @@ class FailoverStateTests(unittest.TestCase):
             self.assertEqual(legacy.read_text().strip(), str(expires))
 
     def test_reset_parser(self) -> None:
-        self.assertIsNotNone(failover_state.parse_reset_epoch("Try again at 6:30 PM"))
-        self.assertIsNone(failover_state.parse_reset_epoch("Try again at 0:30 PM"))
+        now = datetime.datetime(2026, 1, 15, 12, 0, 0)
+
+        class FrozenDatetime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        frozen = types.SimpleNamespace(datetime=FrozenDatetime, timedelta=datetime.timedelta)
+
+        def epoch(day: int, hour: int, minute: int) -> int:
+            return int(datetime.datetime(2026, 1, day, hour, minute).timestamp())
+
+        cases = (
+            ("Try again at 6:30 PM", epoch(15, 18, 30)),  # PM -> 24h, still today
+            ("Try again at 12:05 AM", epoch(16, 0, 5)),  # 12 AM -> hour 0, already past: tomorrow
+            ("Try again at 12:05 PM", epoch(15, 12, 5)),  # 12 PM stays noon
+            ("Try again at 9:15 AM", epoch(16, 9, 15)),  # past time rolls to the next day
+            ("Try again at 12:00 PM", epoch(16, 12, 0)),  # exactly now is not in the future
+            ("Try again at 0:30 PM", None),
+            ("Try again at 6:75 PM", None),
+        )
+        with patch.object(failover_state, "datetime", frozen):
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    self.assertEqual(failover_state.parse_reset_epoch(text), expected)
 
 
 if __name__ == "__main__":

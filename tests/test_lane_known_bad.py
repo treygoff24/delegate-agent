@@ -268,4 +268,7 @@ class KnownBadLaneTests(FakeCodexCase):
         self.json_cli("codex", "work", "first")
 
         self.assertEqual(len(self.marker_files()), 1)
-        self.assertEqual(list((self.workspace / ".delegate").rglob("lane-health*")), [])
+        registry = self.workspace / ".delegate"
+        # Without the registry the empty glob below would pass on a path that never existed.
+        self.assertTrue(registry.is_dir(), "the launch left no run registry to search")
+        self.assertEqual(list(registry.rglob("lane-health*")), [])

@@ -11,15 +11,6 @@ from delegate_agent import child_failures  # noqa: E402
 
 
 class ChildFailureClassifierTests(unittest.TestCase):
-    def test_usage_limit_preserves_reset_time(self):
-        failure = child_failures.classify(
-            "Usage limit reached. Your allowance resets at 2026-07-22 01:00 UTC."
-        )
-
-        self.assertIsNotNone(failure)
-        self.assertEqual(failure.code, "usage_limit")
-        self.assertIn("2026-07-22 01:00 UTC", failure.message)
-
     def test_usage_limit_redacts_credentials_inside_the_reset_window(self):
         failure = child_failures.classify(
             "Usage limit reached. Your allowance resets at 2026-07-22 01:00 UTC "

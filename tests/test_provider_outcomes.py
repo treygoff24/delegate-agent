@@ -36,6 +36,7 @@ class ProviderOutcomeTests(unittest.TestCase):
                 ("aborted", "cancelled"),
                 ("length", "failed"),
                 ("toolUse", None),
+                ("pending", None),
             ):
                 with self.subTest(harness=harness, reason=reason):
                     acc = harness_events.StreamAccumulator(harness=harness)
@@ -149,15 +150,18 @@ class ProviderOutcomeTests(unittest.TestCase):
                 self.assertIn("provider rejected the request", call.message)
 
     def test_previous_retry_error_does_not_classify_a_later_failure(self):
-        acc = harness_events.StreamAccumulator(harness="omp")
-        for event in (
-            turn("error", errorMessage="unauthorized authentication failed"),
+        events = [
+            turn("error", errorMessage="Authentication failed: access token expired."),
             {"type": "auto_retry_start"},
             {"type": "turn_start"},
             turn("error", errorMessage="invalid request payload"),
-        ):
-            acc.ingest_line(json.dumps(event))
-        self.assertEqual(runner._accumulator_failure_signal_text(acc), "invalid request payload")
+        ]
+        with tempfile.TemporaryDirectory() as workspace:
+            code, payload, _state = self._tracked("omp", events, workspace)
+        self.assertEqual(code, 1)
+        # The earlier auth error would have read as auth_failed if it classified the run.
+        self.assertEqual(payload["error"], "provider_error")
+        self.assertIn("invalid request payload", payload["message"])
 
     def test_retry_delay_does_not_trigger_terminal_shutdown(self):
         events = [
@@ -362,13 +366,6 @@ class ProviderOutcomeTests(unittest.TestCase):
                 self.assertIsNone(acc.completion_text)
                 self.assertEqual(acc.assistant_text, "batch queued")
 
-    def test_pending_and_tool_use_stop_reasons_stay_mid_turn(self):
-        for reason in ("pending", "toolUse"):
-            with self.subTest(reason=reason):
-                acc = harness_events.StreamAccumulator(harness="pi")
-                acc.ingest_line(json.dumps(turn(reason)))
-                self.assertIsNone(acc.terminal_status)
-
     def test_an_error_notice_is_recorded_as_an_error_event(self):
         """omp L6: session-layer error notices were dropped entirely."""
         acc = harness_events.StreamAccumulator(harness="omp")
@@ -415,7 +412,8 @@ class ProviderOutcomeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             call = self._call("codex", events, workspace)
         self.assertEqual(call.exit_code, 1)
-        self.assertIsNotNone(call.error)
+        self.assertEqual(call.error, "provider_error")
+        self.assertIn("Provider request failed", call.message)
 
 
 if __name__ == "__main__":
