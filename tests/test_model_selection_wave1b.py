@@ -209,11 +209,16 @@ class ModelOverrideDryRunTests(CommandTestBase):
 
 class DroidModelSelectionTests(CommandTestBase):
     def test_retired_positional_model_is_rejected_even_with_model_flag(self):
-        with self.assertRaises(errors_api.DelegateError) as ctx:
-            parser_api.parse_cli(["droid", "reviewer", "safe", "--model", "other", "review"])
-        self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
-        self.assertIn("positional", ctx.exception.message.lower())
-        self.assertIn("--model", ctx.exception.message)
+        for argv in (
+            ["droid", "reviewer", "safe", "--model", "other", "review"],
+            ["droid", "unknown-alias", "safe", "review"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(errors_api.DelegateError) as ctx:
+                    parser_api.parse_cli(argv)
+                self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
+                self.assertIn("positional", ctx.exception.message.lower())
+                self.assertIn("--model", ctx.exception.message)
 
     def test_model_flag_without_positional_alias(self):
         repo = make_git_repo(with_commit=True)
@@ -226,6 +231,7 @@ class DroidModelSelectionTests(CommandTestBase):
         self.assertIsNone(parsed.payload.model_alias)
         self.assertEqual(parsed.payload.mode, "safe")
         self.assertEqual(parsed.payload.model, "raw-droid")
+        self.assertEqual(parsed.payload.prompt_parts, ["review"])
         request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "raw-droid")
         _assert_argv_has_model(self, request.argv, "raw-droid")
@@ -252,35 +258,6 @@ class DroidModelSelectionTests(CommandTestBase):
         with self.assertRaises(errors_api.DelegateError) as ctx:
             request_api.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(ctx.exception.error, "missing_model")
-
-    def test_retired_positional_syntax_and_raw_model_flag(self):
-        repo = make_git_repo(with_commit=True)
-        self.addCleanup(repo.cleanup)
-        config = config_api.embedded_default_config()
-        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-
-        with self.assertRaises(errors_api.DelegateError) as ctx:
-            parsed = parser_api.parse_cli(
-                ["--cwd", repo.name, "dry-run", "droid", "unknown-alias", "safe", "review"]
-            )
-            request_api.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "invalid_droid_model_syntax")
-
-        parsed = parser_api.parse_cli(
-            [
-                "--cwd",
-                repo.name,
-                "dry-run",
-                "droid",
-                "safe",
-                "--model",
-                "unknown-raw-id",
-                "review",
-            ]
-        )
-        request = request_api.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(request.model, "unknown-raw-id")
-        _assert_argv_has_model(self, request.argv, "unknown-raw-id")
 
     def test_droid_model_flag_alias_resolves(self):
         repo = make_git_repo(with_commit=True)

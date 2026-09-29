@@ -19,11 +19,6 @@ ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
 LIVE_WARNING_LIMIT = 8_000
 LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
 _SOURCE_RANK = {"bundled": 0, "cache": 1, "discovery": 2, "live": 2, "config": 3}
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub("", text)
 
 
 def validate_engine_name(engine: str) -> None:
@@ -734,30 +729,6 @@ def _legacy_reasoning_models(cache: JsonObject | None, engine: str) -> list[Json
     harnesses = cache.get("harnesses")
     record = harnesses.get(engine) if isinstance(harnesses, dict) else None
     return _legacy_models(record) if isinstance(record, dict) else []
-
-
-def parse_cursor_models_output(raw: str) -> list[JsonObject]:
-    return _legacy_models(harness_discovery.parse_cursor_catalog(strip_ansi(raw)))
-
-
-def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
-    return _legacy_models({"models": harness_discovery.parse_droid_settings_models(custom_models)})
-
-
-def parse_pi_models_output(raw: str) -> list[JsonObject]:
-    try:
-        fragment = harness_discovery.parse_pi_catalog(strip_ansi(raw))
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-    return [{"id": item["id"]} for item in _legacy_models(fragment)]
-
-
-def parse_omp_models_output(raw: str) -> list[JsonObject]:
-    try:
-        fragment = harness_discovery.parse_omp_catalog(raw)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-    return [{"id": item["id"]} for item in _legacy_models(fragment)]
 
 
 def emit_engine_models_text(payload: JsonObject, stdout: TextIO) -> None:

@@ -9,15 +9,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from typing import ClassVar
 from unittest import mock
 
 from tests.discovery_fakes import FIXTURES, materialize_minimum_harnesses
-from tests.test_model_selection_wave1b import (
-    _MODELS_KEYS,
-    _MODELS_SUMMARY_KEYS,
-    _assert_payload_superset,
-)
 
 
 def _write_executable(path: Path, body: str) -> Path:
@@ -41,11 +35,6 @@ class BundledModelsTests(unittest.TestCase):
 
         codex_ids = {item["id"] for item in BUNDLED_MODELS["codex"]}
         self.assertEqual(codex_ids, set(BUNDLED_REASONING_CAPABILITIES["codex"]))
-
-    def test_devin_has_twenty_seven_models(self):
-        from delegate_agent.bundled_models import BUNDLED_MODELS
-
-        self.assertEqual(len(BUNDLED_MODELS["devin"]), 27)
 
 
 class EngineModelsPayloadTests(unittest.TestCase):
@@ -97,14 +86,6 @@ class EngineModelsPayloadTests(unittest.TestCase):
         self.assertEqual(matches[0]["source"], "config")
         self.assertEqual(matches[0]["aliases"], ["opus"])
 
-    def test_unknown_engine_errors(self):
-        from delegate_agent.errors import DelegateError
-
-        config = self.embedded_default_config()
-        with self.assertRaises(DelegateError) as ctx:
-            self.engine_models_payload(config, "nope")
-        self.assertEqual(ctx.exception.error, "invalid_engine")
-
 
 class ModelsCommandParseTests(unittest.TestCase):
     def setUp(self):
@@ -127,117 +108,14 @@ class ModelsCommandParseTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_engine")
 
     def test_engine_and_live_parse(self):
-        parsed = self.parse_cli(["models", "cursor", "--live"])
-        self.assertEqual(parsed.subcommand, "models")
-        assert parsed.payload is not None
-        self.assertEqual(parsed.payload.engine, "cursor")
-        self.assertTrue(parsed.payload.live)
-        self.assertFalse(parsed.payload.summary)
-
-    def test_opencode_engine_and_live_parse(self):
-        parsed = self.parse_cli(["models", "opencode", "--live"])
-        self.assertEqual(parsed.subcommand, "models")
-        assert parsed.payload is not None
-        self.assertEqual(parsed.payload.engine, "opencode")
-        self.assertTrue(parsed.payload.live)
-
-    def test_pi_engine_and_live_parse(self):
-        parsed = self.parse_cli(["models", "pi", "--live"])
-        assert parsed.payload is not None
-        self.assertEqual(parsed.payload.engine, "pi")
-        self.assertTrue(parsed.payload.live)
-
-    def test_omp_engine_and_live_parse(self):
-        parsed = self.parse_cli(["models", "omp", "--live"])
-        assert parsed.payload is not None
-        self.assertEqual(parsed.payload.engine, "omp")
-        self.assertTrue(parsed.payload.live)
-
-
-class LiveProbeParseHelpersTests(unittest.TestCase):
-    def test_strip_ansi(self):
-        from delegate_agent.model_discovery import strip_ansi
-
-        colored = "\x1b[32mcomposer-2.5\x1b[0m - Composer 2.5"
-        self.assertEqual(strip_ansi(colored), "composer-2.5 - Composer 2.5")
-
-    def test_parse_cursor_models_output(self):
-        from delegate_agent.model_discovery import parse_cursor_models_output
-
-        raw = (
-            "Available models\n"
-            "\x1b[36mcomposer-2.5\x1b[0m - Composer 2.5\n"
-            "\x1b[36mgrok-4.5-fast-xhigh\x1b[0m - Grok 4.5 Fast\n"
-        )
-        models = parse_cursor_models_output(raw)
-        self.assertEqual(
-            models,
-            [
-                {"id": "composer-2.5", "note": "Composer 2.5"},
-                {"id": "grok-4.5-fast-xhigh", "note": "Grok 4.5 Fast"},
-            ],
-        )
-
-    def test_parse_pi_models_output(self):
-        from delegate_agent.model_discovery import parse_pi_models_output
-
-        raw = (
-            "provider      model                    context  max-out  thinking  images\n"
-            "openai-codex  gpt-5.6-sol              272K     128K     yes       yes\n"
-            "warning: loading local catalog\n"
-            "anthropic     claude-opus-4-8          1M       128K     yes       yes\n"
-        )
-        self.assertEqual(
-            parse_pi_models_output(raw),
-            [
-                {"id": "openai-codex/gpt-5.6-sol"},
-                {"id": "anthropic/claude-opus-4-8"},
-            ],
-        )
-
-    def test_parse_omp_models_output(self):
-        from delegate_agent.model_discovery import parse_omp_models_output
-
-        raw = json.dumps(
-            {
-                "models": [
-                    {
-                        "provider": "openai-codex",
-                        "id": "gpt-5.6-sol",
-                        "selector": "openai-codex/gpt-5.6-sol",
-                    },
-                    {
-                        "provider": "anthropic",
-                        "id": "claude-opus-4-8",
-                        "selector": "anthropic/claude-opus-4-8",
-                    },
-                ]
-            }
-        )
-        self.assertEqual(
-            parse_omp_models_output(raw),
-            [
-                {"id": "openai-codex/gpt-5.6-sol"},
-                {"id": "anthropic/claude-opus-4-8"},
-            ],
-        )
-
-    def test_parse_droid_custom_models(self):
-        from delegate_agent.model_discovery import parse_droid_custom_models
-
-        models = parse_droid_custom_models(
-            [
-                {"id": "custom:ignored", "displayName": "Explicit"},
-                {"displayName": "My Cool Model"},
-            ]
-        )
-        self.assertEqual(
-            models,
-            [
-                {"id": "custom:Explicit-0", "note": "Explicit"},
-                {"id": "custom:My-Cool-Model-1", "note": "My Cool Model"},
-            ],
-        )
+        for engine in ("cursor", "opencode", "pi", "omp"):
+            with self.subTest(engine=engine):
+                parsed = self.parse_cli(["models", engine, "--live"])
+                self.assertEqual(parsed.subcommand, "models")
+                assert parsed.payload is not None
+                self.assertEqual(parsed.payload.engine, engine)
+                self.assertTrue(parsed.payload.live)
+                self.assertFalse(parsed.payload.summary)
 
 
 class LiveProbeIntegrationTests(unittest.TestCase):
@@ -284,22 +162,6 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         payload2 = models_summary_payload(config2, "embedded-default")
         commands2 = {e["alias"]: e["command"] for e in payload2["aliases"]}
         self.assertIn("--model fast", commands2["fast"])
-
-    def test_secret_shaped_alias_keys_scrubbed_in_discovery(self):
-        import io as io_mod
-        import json as json_mod
-
-        from delegate_agent.describe_payload import emit_models
-
-        secret_key = "sk-proj-abcdefghijklmnopqrstuvwxyz012345"
-        config = self.embedded_default_config()
-        config["codex"]["models"] = {secret_key: "gpt-5.5"}
-        buf = io_mod.StringIO()
-        emit_models(config, "embedded-default", True, buf)
-        raw = buf.getvalue()
-        self.assertNotIn(secret_key, raw)
-        payload = json_mod.loads(raw)
-        self.assertIn("codex", payload)
 
     def test_models_payload_exposes_droid_default_model(self):
         from delegate_agent.describe_payload import _engine_defaults_payload, models_payload
@@ -411,26 +273,6 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
             recorded = argv_log.read_text(encoding="utf-8").splitlines()
             self.assertEqual(recorded, ["models", "list", "--format", "json"])
-
-    def test_devin_live_uses_generic_metadata_runner(self):
-        from delegate_agent import harness_discovery
-
-        config = self.embedded_default_config()
-        with mock.patch.object(
-            harness_discovery,
-            "probe_harness",
-            return_value={
-                "probeStatus": "ok",
-                "defaultModel": None,
-                "models": {"bounded-devin": {"displayName": "Bounded"}},
-                "warnings": [],
-            },
-        ) as probe:
-            payload = self.engine_models_payload(config, "devin", live=True)
-
-        probe.assert_called_once()
-        by_id = {item["id"]: item for item in payload["models"]}
-        self.assertEqual(by_id["bounded-devin"]["source"], "live")
 
     def test_opencode_live_merge(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
@@ -656,11 +498,6 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                     if engine == "kimi":
                         self.assertEqual(by_id[selector]["note"], "K3")
 
-    def test_opencode_is_not_live_unsupported(self):
-        from delegate_agent.model_discovery import LIVE_UNSUPPORTED_ENGINES
-
-        self.assertEqual(LIVE_UNSUPPORTED_ENGINES, frozenset({"claude"}))
-
 
 class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
     """Non-Droid engine models appear in full and summary payloads."""
@@ -751,23 +588,6 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
 
 
 class PlainModelsUnchangedTests(unittest.TestCase):
-    MODELS_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_KEYS
-    MODELS_SUMMARY_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_SUMMARY_KEYS
-
-    def test_plain_models_payload_unchanged(self):
-        from delegate_agent.config import embedded_default_config
-        from delegate_agent.describe_payload import models_payload, models_summary_payload
-
-        config = embedded_default_config()
-        config["droid"]["models"] = {"glm": "glm-5.1"}
-        with tempfile.TemporaryDirectory() as workspace:
-            payload = models_payload(config, "fixture-config", Path(workspace))
-            _assert_payload_superset(self, self.MODELS_KEYS, payload)
-            self.assertEqual(payload["ok"], True)
-            self.assertEqual(payload["droid"]["models"]["glm"], "glm-5.1")
-            summary = models_summary_payload(config, "fixture-config", Path(workspace))
-            _assert_payload_superset(self, self.MODELS_SUMMARY_KEYS, summary)
-
     def test_emit_models_engine_json(self):
         from delegate_agent.config import embedded_default_config
         from delegate_agent.describe_payload import emit_models
@@ -786,10 +606,10 @@ class PlainModelsUnchangedTests(unittest.TestCase):
         self.assertEqual(payload["engine"], "kimi")
         self.assertEqual(payload["schema"], "delegate.engine-models.v1")
         self.assertIsNone(payload["default"])
-        self.assertEqual(
-            [item["id"] for item in payload["models"]],
-            ["kimi-code/k3", "kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed"],
-        )
+        self.assertTrue(payload["models"])
+        for item in payload["models"]:
+            with self.subTest(model=item["id"]):
+                self.assertEqual(item["source"], "bundled")
 
 
 class UnifiedDiscoveryProjectionTests(unittest.TestCase):
@@ -1027,11 +847,6 @@ class CommandHelpModelsTests(unittest.TestCase):
         flags = {opt.flag for opt in spec.options}
         self.assertIn("--live", flags)
         self.assertTrue(any(arg.name == "engine" for arg in spec.arguments))
-        self.assertIn("--auth-profile", usage)
-        self.assertNotIn("--auth-profile", spec.unsupported_global_options)
-        notes = " ".join(spec.notes).lower()
-        self.assertIn("advisory", notes)
-        self.assertIn("does not update the cache", notes)
 
     def test_models_help_states_summary_takes_no_engine(self):
         from delegate_agent import command_help

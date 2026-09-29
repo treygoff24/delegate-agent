@@ -94,7 +94,9 @@ class PersonaCapabilityTests(CommandTestBase):
         request = self._request(self._discovery({"native-file": "true"}))
 
         self.assertEqual(request.persona_transport, "prepend")
+        self.assertEqual(request.argv[0], "old-claude-binary")
         self.assertNotIn("--append-system-prompt-file", request.argv)
+        self.assertNotIn("<delegate-persona-file>", request.argv)
         self.assertEqual(request.warnings, (self._FALLBACK_WARNING,))
 
     def test_force_transport_pins_prepend_even_when_native_is_proven(self):
@@ -110,34 +112,18 @@ class PersonaCapabilityTests(CommandTestBase):
         self.assertEqual(request.persona_transport, "native-file")
         self.assertIn("--append-system-prompt-file", request.argv)
 
-    def test_old_claude_binary_never_receives_unknown_flag_on_unproven_cache(self):
-        request = self._request(self._discovery({"native-file": "not-a-bool"}))
-
-        self.assertEqual(request.argv[0], "old-claude-binary")
-        self.assertNotIn("--append-system-prompt-file", request.argv)
-        self.assertNotIn("<delegate-persona-file>", request.argv)
-
     def test_selector_drift_drops_a_positive_native_capability(self):
         with (
             mock.patch.object(discovery_api, "selector_has_drifted", return_value=True),
-            mock.patch.object(discovery_api, "cached_version_has_drifted") as version,
+            mock.patch.object(discovery_api, "cached_version_has_drifted") as has_drifted,
+            mock.patch.object(discovery_api, "cached_version_freshness") as freshness,
         ):
             request = self._request(self._production_discovery(True))
-        version.assert_not_called()
+        has_drifted.assert_not_called()
+        freshness.assert_not_called()
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
         self.assertEqual(request.warnings, (self._FALLBACK_WARNING,))
-
-    def test_version_drift_drops_a_positive_native_capability(self):
-        with (
-            mock.patch.object(discovery_api, "selector_has_drifted", return_value=False),
-            mock.patch.object(discovery_api, "cached_version_freshness", return_value="drifted"),
-        ):
-            request = self._request(self._production_discovery(True))
-        self.assertEqual(request.persona_transport, "prepend")
-        self.assertNotIn("--append-system-prompt-file", request.argv)
-        self.assertEqual(len(request.warnings), 2)
-        self.assertEqual(request.warnings[-1], self._FALLBACK_WARNING)
 
     def test_cached_native_dry_run_never_probes_the_claude_binary(self):
         with (
@@ -147,12 +133,6 @@ class PersonaCapabilityTests(CommandTestBase):
             request = self._request(self._production_discovery(True), dry_run=True)
         version_probe.assert_not_called()
         self.assertEqual(request.persona_transport, "native-file")
-
-    def test_production_shaped_false_capability_stays_prepend(self):
-        with mock.patch.object(discovery_api, "selector_has_drifted", return_value=False):
-            request = self._request(self._production_discovery(False))
-        self.assertEqual(request.persona_transport, "prepend")
-        self.assertNotIn("--append-system-prompt-file", request.argv)
 
     def test_native_file_requires_a_positive_cached_identity_probe(self):
         current = discovery_api.ProbeResult((), 0, "2.1.220", "", None)
@@ -190,6 +170,8 @@ class PersonaCapabilityTests(CommandTestBase):
 
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
+        self.assertEqual(len(request.warnings), 2)
+        self.assertEqual(request.warnings[-1], self._FALLBACK_WARNING)
 
 
 if __name__ == "__main__":

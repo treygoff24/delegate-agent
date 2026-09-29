@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import stat
 import sys
@@ -39,10 +38,10 @@ def _write_dispatch_harness(
     return write_executable(path, body)
 
 
-def materialize_minimum_harnesses(target: Path, *, fixtures: Path = FIXTURES) -> dict[str, Path]:
+def materialize_minimum_harnesses(target: Path) -> dict[str, Path]:
     """Materialize version and metadata responses from sanitized fixtures."""
     provenance: dict[str, object] = json.loads(
-        (fixtures / "provenance.json").read_text(encoding="utf-8")
+        (FIXTURES / "provenance.json").read_text(encoding="utf-8")
     )
     responses: dict[str, dict[tuple[str, ...], tuple[str, str, int]]] = {}
     for fixture_name, entry in provenance["fixtures"].items():
@@ -51,13 +50,13 @@ def materialize_minimum_harnesses(target: Path, *, fixtures: Path = FIXTURES) ->
         binary_responses = responses.setdefault(binary, {})
         binary_responses[("--version",)] = (entry["version"] + "\n", "", 0)
         binary_responses[tuple(arguments)] = (
-            (fixtures / fixture_name).read_text(encoding="utf-8"),
+            (FIXTURES / fixture_name).read_text(encoding="utf-8"),
             "",
             0,
         )
     responses["agent"] = {("--version",): ("grok 0.2.101 (fixture) [alpha]\n", "", 0)}
     responses["pi"][("--help",)] = (
-        (fixtures / "pi_models.txt").read_text(encoding="utf-8"),
+        (FIXTURES / "pi_models.txt").read_text(encoding="utf-8"),
         "",
         0,
     )
@@ -67,16 +66,3 @@ def materialize_minimum_harnesses(target: Path, *, fixtures: Path = FIXTURES) ->
         binary: _write_dispatch_harness(target / binary, binary_responses)
         for binary, binary_responses in responses.items()
     }
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Materialize Delegate discovery fake harnesses")
-    parser.add_argument("target", type=Path)
-    parser.add_argument("--fixtures", type=Path, default=FIXTURES)
-    args = parser.parse_args(argv)
-    materialize_minimum_harnesses(args.target, fixtures=args.fixtures)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
