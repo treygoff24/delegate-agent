@@ -623,7 +623,14 @@ def emit_run(
                 status.get("status") == "dry_run" or status.get("replayJournal") is False
             )
             gate_key = status.get("gateKey")
-            if status.get("status") == "paused" and isinstance(gate_key, str):
+            # A dry run neither approves the gate nor records that it did: a
+            # dry-run park_gate() answers itself, and a recorded approval would
+            # silently open the gate for the next live resume.
+            if (
+                not command.dry_run
+                and status.get("status") == "paused"
+                and isinstance(gate_key, str)
+            ):
                 gate_result_hash = status.get("gateResultHash")
                 if not isinstance(gate_result_hash, str):
                     raise DelegateError(
@@ -670,7 +677,8 @@ def emit_run(
                     "spent": spent,
                     "remaining": max(budget_total - spent, 0),
                 }
-                registry.write_status(root, status)
+                if not command.dry_run:
+                    registry.write_status(root, status)
         except BaseException:
             try:
                 rollback_repin()
@@ -739,9 +747,10 @@ def emit_run(
         except (workflow_pinning.WorkflowPinError, delegate_config.ConfigError) as exc:
             raise DelegateError(exc.error, exc.message) from exc
     if command.dry_run:
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        status.update({"status": "dry_run", "updatedAt": run_registry.utc_now_iso()})
-        registry.write_status(root, status)
+        if not command.resume:
+            status = registry.read_json(root / registry.STATUS_FILE) or {}
+            status.update({"status": "dry_run", "updatedAt": run_registry.utc_now_iso()})
+            registry.write_status(root, status)
         if lock_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(lock_fd)
@@ -760,6 +769,7 @@ def emit_run(
             warnings=warnings,
             stdout=stdout,
             stderr=stderr,
+            preserve_status=bool(command.resume),
         )
     if lock_fd is None:
         lock_fd = _acquire_workflow_lock(root, wf_id)
@@ -922,6 +932,7 @@ def emit_dry_run(
     notify: str | None = None,
     source_script: str | None = None,
     script_hash: str | None = None,
+    preserve_status: bool = False,
 ) -> int:
     state = runtime.WorkflowState(
         wf_id=wf_id,
@@ -933,6 +944,7 @@ def emit_dry_run(
         args=args_value,
         budget=runtime.Budget(budget_total),
         dry_run=True,
+        preserve_status=preserve_status,
         # A dry run writes status too, and status.json is rebuilt rather than
         # merged, so omitting the target here erases it from a workflow that was
         # created with one and then dry-run before launching.
@@ -1062,6 +1074,13 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
         pause = view.get("pause")
         if isinstance(pause, dict):
             print(f"paused: {pause.get('summary')}", file=stdout)
+            gate_line = f"gate: {pause.get('gateKey')}"
+            for field_name in ("gateName", "title", "assignee"):
+                if pause.get(field_name):
+                    gate_line += f" {field_name}={pause[field_name]}"
+            print(gate_line, file=stdout)
+            if pause.get("next"):
+                print(f"next: {pause['next']}", file=stdout)
         for row in view.get("timeouts") or []:
             print(
                 f"timeout: {row.get('label') or row.get('key')} item={row.get('item')} "
@@ -1088,9 +1107,15 @@ def _add_journal_reasons(root: Path, view: JsonObject) -> None:
         return
     events = list(registry.iter_journal(journal))
     if view.get("status") == "paused" and isinstance(view.get("gateKey"), str):
-        view["pause"] = status_reasons.pause_reason(
-            root.name, view.get("gateKey"), view.get("gateResultHash"), events
-        )
+        pause = status_reasons.pause_reason(view.get("gateKey"), view.get("gateResultHash"), events)
+        # The commands come from the gate's declared actions: a bare approve is
+        # refused by a gate that offers only retry/accept.
+        decision = view.get("decision")
+        next_actions = decision.get("nextActions") if isinstance(decision, dict) else None
+        if isinstance(next_actions, list) and next_actions:
+            pause["next"] = next_actions[0]
+            pause["nextActions"] = next_actions
+        view["pause"] = pause
     recent = status_reasons.timeouts(events)
     if recent:
         view["timeouts"] = recent

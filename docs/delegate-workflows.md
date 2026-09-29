@@ -163,15 +163,19 @@ treated as stale, whatever its scope: `agent_started` carries the supervisor's
 A dry run cancels and reaps nothing: it journals an
 `agent_stale_scope_would_cancel` row (`key`, `scope`, `replacedBy`,
 `simulated: true`) for each child the live resume would have cancelled.
+A dry-run resume of an existing workflow writes its journal and nothing else:
+`status.json` keeps its status (a paused workflow stays paused), a `--budget`
+given with it is not persisted, and no gate approval is recorded.
 
 ### Reading a stopped workflow
 
-`workflow status` on a paused workflow adds a `pause` object (and a `paused:`
-line in text): `gateKey`, `gateName`, `title` (the gate name, or a `title` the
-script put in the gate's question), `assignee` (only when the question carries
-one), `actions`, `failure` (one line naming the last agent failure before the
+`workflow status` on a paused workflow adds a `pause` object (and `paused:`,
+`gate:` and `next:` lines in text): `gateKey`, `gateName`, `title` and
+`assignee` (each only when the script put it in the gate's question), `actions`, `failure` (one line naming the last agent failure before the
 gate), and `rejection` (the latest `agent_rejected` row's `reason`), plus a
-one-sentence `summary` and the `next` command. Any status with recent agent
+one-sentence `summary`, and `next`/`nextActions`: commands built from the
+gate's declared actions (a gate offering only `retry`/`accept` gets
+`--gate NAME --action retry`, never a bare `approve`). Any status with recent agent
 timeouts adds `timeouts`: the last five rows with `label`, `item`, `engine`,
 `timeout`, and `nextEngine`.
 

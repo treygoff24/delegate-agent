@@ -66,9 +66,7 @@ def timeouts(events: list[JsonObject]) -> list[JsonObject]:
     return rows[-_MAX_TIMEOUTS:]
 
 
-def pause_reason(
-    wf_id: str, gate_key: object, result_hash: object, events: list[JsonObject]
-) -> JsonObject:
+def pause_reason(gate_key: object, result_hash: object, events: list[JsonObject]) -> JsonObject:
     """Why a paused workflow is paused: the gate, the last failure, any rejection."""
     gate: JsonObject | None = None
     for index, event in enumerate(events):
@@ -94,8 +92,6 @@ def pause_reason(
             value = result.get(field) if isinstance(result, dict) else None
             if isinstance(value, str) and value:
                 pause[field] = value
-        if "title" not in pause and isinstance(name, str):
-            pause["title"] = name
         if gate.get("child") is not None:
             pause["child"] = gate["child"]
         horizon = events[:gate_index]
@@ -125,7 +121,6 @@ def pause_reason(
             f"{_clip(str(rejection.get('reason')))}"
         )
     pause["summary"] = _clip("; ".join(parts)) if not rejection else "; ".join(parts)
-    pause["next"] = f"delegate workflow approve {wf_id}"
     return pause
 
 
