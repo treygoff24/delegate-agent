@@ -30,6 +30,12 @@ It passes with the narrower default. The 130 focused guard tests and the full
 gate (4,691 passed, 17 skipped, plus compile, lint and format checks) passed.
 Explicit code-root protection and its writable override remain covered.
 
+The fix is shipped through Forgejo. Devbox runtime activation is staged and
+queued by estate-sync, which deferred the switch while the Atlas workflow is
+running. The staged package's dry-run confirms the new default and retained
+credential/runtime protection; the active workflow was left on its pinned
+runtime.
+
 ## Symptom
 
 Every `verify_fixes` stage whose declared rows write to the checkout comes back with every adopted finding under `unrun`. The item parks at `verify-fixes-unrun`, and the park pauses the entire workflow ("gate reached in item B1.00; unwinding workers for the pause"). A retry gives the same result: the verifier pool has one seat and the cause is structural. So in any plan where fixes need tests to verify them, every fix round stops the build until a human intervenes.
