@@ -781,6 +781,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendUnavailable`. The isolated build path is unchanged.
 
 ### Changed
+
+- The work write guard no longer protects `~/Code` or sibling checkouts by
+  default (`isolation.writeGuard.codeRoot` now defaults to `null`). Named
+  credential stores, profile homes and the installed Delegate runtime retain
+  their existing protection and re-open rules. Set `codeRoot` or `add` to opt
+  in to checkout protection. Codex's native sandbox retains its own write limits.
 - Work-mode prompts gain two sentences saying nobody can approve during a Run
   and the task is the approval unless the prompt asks only for a plan,
   review, or read-only answer. Safe and call prompts are unchanged.

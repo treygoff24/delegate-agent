@@ -2,7 +2,7 @@
 
 Work mode runs the child with the caller's own filesystem rights, and the
 estate's policy profile turns the engines' own sandboxes off. A confused lane
-(``rm -rf ~``, a stray redirect into a sibling checkout) can therefore destroy
+(``rm -rf ~``, a stray redirect into a credential store) can therefore destroy
 things nobody can recreate. This module owns the *policy*: a named list of
 protected paths, the writable re-opens a lane still needs, and the plan a
 backend (bubblewrap on Linux, Seatbelt on macOS) turns into mounts or rules.
@@ -46,7 +46,7 @@ ON_UNAVAILABLE_WARN = "warn"
 ON_UNAVAILABLE_REFUSE = "refuse"
 VALID_ON_UNAVAILABLE = (ON_UNAVAILABLE_WARN, ON_UNAVAILABLE_REFUSE)
 
-DEFAULT_CODE_ROOT = "~/Code"
+DEFAULT_CODE_ROOT: str | None = None
 
 # Credential stores and estate state a lane must never rewrite. Read access is
 # untouched; only writes, deletes and renames are refused.
@@ -101,8 +101,8 @@ CONFIG_KEYS = frozenset(
 NOTE_PROTECT_LIST = (
     "Delegate write guard: this run cannot write to irreplaceable paths (SSH and GPG keys, "
     "credential stores, agent profile homes, the Delegate install{code_root}); a write there "
-    "fails with a read-only or permission error. Work only inside this workspace and its git "
-    "directory, and report a blocked write instead of working around it."
+    "fails with a read-only or permission error. Report a blocked write instead of working "
+    "around it."
 )
 NOTE_CODEX_NATIVE = (
     "Delegate write guard: this run is sandboxed by Codex to this workspace, its git "

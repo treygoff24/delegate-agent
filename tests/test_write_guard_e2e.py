@@ -32,6 +32,8 @@ EVENTS = (
 DESTRUCTIVE_AGENT = (
     "#!/bin/sh\n"
     'rm -rf "$HOME/.ssh/canary" 2>/dev/null; echo "rm_ssh=$?" > "$GUARD_RESULT_DIR/results"\n'
+    'rm -rf "$HOME/.delegate/src/canary" 2>/dev/null; echo "rm_runtime=$?" >> "$GUARD_RESULT_DIR/results"\n'
+    'echo tampered > "$HOME/.delegate/config.json" 2>/dev/null; echo "write_runtime_config=$?" >> "$GUARD_RESULT_DIR/results"\n'
     'echo x > "$GUARD_SIBLING/f" 2>/dev/null; echo "write_sibling=$?" >> "$GUARD_RESULT_DIR/results"\n'
     'echo x > "$PWD/exec-file"; echo "write_exec=$?" >> "$GUARD_RESULT_DIR/results"\n' + EVENTS
 )
@@ -77,6 +79,9 @@ class GuardE2ETestCase(unittest.TestCase):
         for path in (self.workspace, self.sibling, self.results, self.bin_dir, self.home / ".ssh"):
             path.mkdir(parents=True)
         (self.home / ".ssh" / "canary").write_text("precious", encoding="utf-8")
+        (self.home / ".delegate/src").mkdir(parents=True)
+        (self.home / ".delegate/src/canary").write_text("precious", encoding="utf-8")
+        (self.home / ".delegate/config.json").write_text("{}", encoding="utf-8")
         run_git(self.workspace, "init", "-q", "-b", "main")
         (self.workspace / "seed.txt").write_text("seed", encoding="utf-8")
         run_git(self.workspace, "add", "seed.txt")
@@ -154,22 +159,44 @@ class GuardedRunTests(GuardE2ETestCase):
     def test_work_run_is_guarded_and_the_manifest_records_the_plan(self):
         self.write_config()
         self.write_engine("agent", DESTRUCTIVE_AGENT)
+        for relative, content in (
+            (".ssh/canary", "precious"),
+            (".delegate/src/canary", "precious"),
+            (".delegate/config.json", "{}"),
+        ):
+            self.assertEqual((self.home / relative).read_text(encoding="utf-8"), content)
         completed = self.cli("cursor", "work", "tidy up")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         lines = self.result_lines()
         self.assertNotEqual(lines["rm_ssh"], "0")
-        self.assertNotEqual(lines["write_sibling"], "0")
+        self.assertNotEqual(lines["rm_runtime"], "0")
+        self.assertNotEqual(lines["write_runtime_config"], "0")
+        self.assertEqual(lines["write_sibling"], "0")
         self.assertEqual(lines["write_exec"], "0")
         self.assertEqual((self.home / ".ssh/canary").read_text(encoding="utf-8"), "precious")
-        self.assertFalse((self.sibling / "f").exists())
+        self.assertEqual(
+            (self.home / ".delegate/src/canary").read_text(encoding="utf-8"), "precious"
+        )
+        self.assertEqual((self.home / ".delegate/config.json").read_text(encoding="utf-8"), "{}")
+        self.assertEqual((self.sibling / "f").read_text(encoding="utf-8").strip(), "x")
         manifest, _state = self.latest_run()
         guard = manifest["writeGuard"]
         self.assertEqual(guard["status"], "enforced")
         self.assertIn(os.path.realpath(self.home / ".ssh"), guard["protected"])
-        self.assertIn(os.path.realpath(self.workspace), [w["path"] for w in guard["writable"]])
+        self.assertNotIn(os.path.realpath(self.home / "Code"), guard["protected"])
 
     def test_writable_flag_reaches_the_launch(self):
-        self.write_config()
+        self.write_config(
+            {
+                "isolation": {
+                    "writeGuard": {
+                        "codeRoot": "~/Code",
+                        "macosSeatbelt": True,
+                        "onUnavailable": "refuse",
+                    }
+                }
+            }
+        )
         self.write_engine("agent", DESTRUCTIVE_AGENT)
         completed = self.cli("cursor", "work", "--writable", str(self.sibling), "tidy up")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -178,6 +205,7 @@ class GuardedRunTests(GuardE2ETestCase):
         manifest, _state = self.latest_run()
         reasons = {w["path"]: w["reason"] for w in manifest["writeGuard"]["writable"]}
         self.assertEqual(reasons[os.path.realpath(self.sibling)], "--writable")
+        self.assertIn(os.path.realpath(self.home / "Code"), manifest["writeGuard"]["protected"])
 
     def test_the_guard_can_be_switched_off_for_a_run(self):
         self.write_config()

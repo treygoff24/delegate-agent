@@ -348,8 +348,9 @@ but does not fail solely because commits exist. Validation rejects
 
 `--writable PATH` (repeatable, `work` mode only, CLI-only) leaves an existing
 PATH writable under the [work write guard](security-model.md#work-write-guard)
-even though it sits inside a protected path such as a sibling checkout under the
-code root. Relative paths resolve against the caller's directory. The re-open is
+even though it sits inside a protected path such as a credential directory or a
+sibling checkout under an opted-in code root. Code roots are not protected by
+default. Relative paths resolve against the caller's directory. The re-open is
 recorded in the run manifest and in `--dry-run` under `writeGuard`. The guard's
 protected list and backend choice are configured under
 [`isolation.writeGuard`](configuration.md#isolationwriteguard).
