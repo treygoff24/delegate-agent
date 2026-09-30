@@ -2,6 +2,34 @@
 
 Found during the Atlas Build 1 slice 1 run (workflow `wf_b75bd9cba4c1`, spine `~/Code/atlas/.worktrees/plan-atlas-build1-s1`, delegate 0.31.0, compiled engine `5134e210…` from writing-plans). Papercut `pc2_860817724a5ebc30`.
 
+## Resolution (2026-09-29)
+
+Trey approved narrowing the default work write guard to credentials, profile
+state, and the installed Delegate runtime. `isolation.writeGuard.codeRoot`
+now defaults to `null`, so the guard leaves sibling checkouts writable unless
+the operator explicitly protects a code root or adds a checkout to `add`.
+The protect-list prompt no longer tells the child to work only in its initial
+checkout. No workflow writable-path API or writing-plans change is needed for
+this default-policy failure.
+
+The archived failed run used an enforced **bubblewrap** write guard with
+Codex's own sandbox bypassed, rather than the Codex native sandbox described
+below. Its manifest protected `~/Code` and reopened the spine but omitted the
+review checkout. A read-only mount probe reproduced that distinction. The
+native Codex sandbox, when enabled separately, still enforces its own writable
+roots; this change does not remove those restrictions.
+
+Existing workflows pinned to the earlier Delegate runtime retain the earlier
+behavior until their runtime is repinned. An explicit protected `codeRoot`
+continues to require deliberate writable exceptions. The original diagnosis
+and broader API proposal below are retained as incident history.
+
+Validation: the real CLI regression failed on the earlier default because the
+sibling write was denied, while credential and runtime protection still worked.
+It passes with the narrower default. The 130 focused guard tests and the full
+gate (4,691 passed, 17 skipped, plus compile, lint and format checks) passed.
+Explicit code-root protection and its writable override remain covered.
+
 ## Symptom
 
 Every `verify_fixes` stage whose declared rows write to the checkout comes back with every adopted finding under `unrun`. The item parks at `verify-fixes-unrun`, and the park pauses the entire workflow ("gate reached in item B1.00; unwinding workers for the pause"). A retry gives the same result: the verifier pool has one seat and the cause is structural. So in any plan where fixes need tests to verify them, every fix round stops the build until a human intervenes.

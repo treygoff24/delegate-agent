@@ -311,7 +311,7 @@ _WRITABLE_OPTION = OptionSpec(
     "--writable",
     "PATH",
     "Repeatable, work mode only: leave PATH writable under the work write guard even "
-    "though it sits inside a protected path (a sibling checkout, a credential directory). "
+    "though it sits inside a protected path (a credential directory or an opted-in code root). "
     "PATH must exist; relative paths resolve against the caller's directory. The re-open "
     "is recorded in the manifest and dry-run writeGuard.",
 )

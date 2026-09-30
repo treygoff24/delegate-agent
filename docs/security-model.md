@@ -467,7 +467,7 @@ has moved.
 
 Work mode runs the child with the caller's own filesystem rights, and the
 `external-sandbox` policy profile turns the engines' own sandboxes off. One
-confused lane (`rm -rf ~`, a stray redirect into a sibling checkout) can then
+confused lane (`rm -rf ~`, a stray redirect into a credential store) can then
 destroy things nobody can recreate. The write guard is a **protect-list**, not
 "HOME read-only plus an allowlist": everything a lane legitimately touches
 (caches, toolchains, dotfiles it edits) stays writable, and a named list of
@@ -485,8 +485,11 @@ mode (safe has its own boundaries above).
   `config*.json`). Run scratch, worktrees and caches under `~/.delegate` stay
   writable. `~/.ai-profiles` is protected only from lanes that are not started
   through an estate launcher (see below).
-- The code root (default `~/Code`, configurable), so a lane in one checkout
-  cannot write into a sibling checkout.
+
+Code roots and sibling checkouts are not protected by default. Set
+`isolation.writeGuard.codeRoot` (for example `"~/Code"`) or name paths in
+`isolation.writeGuard.add` to opt in. The default `codeRoot` is `null`.
+Codex's native sandbox still imposes its own workspace write limits when enabled.
 
 **Writable re-opens** inside those paths, so a protected parent never breaks the
 run itself: the execution root, the git common directory (so `git commit` works
@@ -508,8 +511,8 @@ under Seatbelt: `estate-claude` stopped on a `chmod` inside
 `AI_PROFILES_ROOT`, then `~/.ai-profiles`, the order the launcher uses. So on
 the estate, where most engines start through a launcher, those lanes can write
 every profile's files, credentials included; the guard still protects the
-credential stores, the Delegate runtime, and the code root from them. Lanes
-started any other way (Devin, Kimi, OpenCode on the Mac today) keep
+credential stores, the Delegate runtime, and any opted-in code root from them.
+Lanes started any other way (Devin, Kimi, OpenCode on the Mac today) keep
 `~/.ai-profiles` protected. A Codex lane whose own sandbox is on never gets the
 profiles root as a writable root, because the launcher runs outside that
 sandbox.

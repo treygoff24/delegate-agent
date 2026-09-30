@@ -3,9 +3,10 @@
 Each test launches a fake engine through the production launch seam
 (``runner._launch_tracked_process``) with the guard on and a throwaway HOME laid
 out like the estate. The engine runs destructive commands (``rm -rf`` of a
-credential canary, a write into a sibling checkout, moving its own checkout away)
+credential canary, moving its own checkout away)
 and legitimate ones (writing its checkout, a commit, TMPDIR, caches, its engine
 home); the test reads back what each command returned and what survived.
+Sibling checkout writes succeed by default and are denied with an explicit code root.
 
 The guard is configured with ``onUnavailable: refuse`` so a missing backend fails
 the test loudly instead of letting an unguarded child pass it. macOS runs the
@@ -68,6 +69,7 @@ rm -rf "$HOME/.config/gh/canary" 2>/dev/null; note rm_gh_canary $?
 rm -rf "$HOME/.ai-profiles/accounts/claude/personal/canary" 2>/dev/null; note rm_sibling_profile_canary $?
 rm -rf "$HOME/.delegate/src/canary" 2>/dev/null; note rm_delegate_src_canary $?
 echo tampered > "$HOME/.delegate/config.json" 2>/dev/null; note write_delegate_config $?
+# These are refused only when the operator protects the code root.
 echo x > "$GUARD_SIBLING/f" 2>/dev/null; note write_sibling_checkout $?
 rm -rf "$GUARD_SIBLING/canary" 2>/dev/null; note rm_sibling_canary $?
 rm -rf "$HOME/.ssh" 2>/dev/null; note rm_ssh_dir $?
@@ -213,8 +215,6 @@ class LiveWriteGuardTests(unittest.TestCase):
         "rm_sibling_profile_canary",
         "rm_delegate_src_canary",
         "write_delegate_config",
-        "write_sibling_checkout",
-        "rm_sibling_canary",
         "rm_ssh_dir",
         "mv_ssh_dir",
         "mv_exec_root",
@@ -230,7 +230,7 @@ class LiveWriteGuardTests(unittest.TestCase):
         "git_commit",
     )
 
-    def assert_guarded(self, results: dict[str, int]) -> None:
+    def assert_guarded(self, results: dict[str, int], *, code_protected: bool = False) -> None:
         self.assertEqual(self.record["status"], "enforced", self.record)
         for key in self.DENIED:
             with self.subTest(denied=key):
@@ -239,11 +239,19 @@ class LiveWriteGuardTests(unittest.TestCase):
         for key in self.ALLOWED:
             with self.subTest(allowed=key):
                 self.assertEqual(results[key], 0, f"{key} was refused: {results}")
+        for key in ("write_sibling_checkout", "rm_sibling_canary"):
+            if code_protected:
+                self.assertNotEqual(results[key], 0, f"{key} unexpectedly succeeded")
+            else:
+                self.assertEqual(results[key], 0, f"{key} was refused: {results}")
         for canary in self.canaries:
+            if not code_protected and canary == self.home / "Code/sibling/canary":
+                self.assertFalse(canary.exists())
+                continue
             with self.subTest(canary=str(canary.relative_to(self.home))):
                 self.assertEqual(canary.read_text(encoding="utf-8"), "precious")
         self.assertEqual(self.config_file.read_text(encoding="utf-8"), "{}")
-        self.assertFalse((self.home / "Code/sibling/f").exists())
+        self.assertEqual((self.home / "Code/sibling/f").exists(), not code_protected)
         self.assertTrue(self.repo.is_dir(), "the lane moved its own checkout away")
         self.assertTrue((self.home / ".ssh").is_dir())
 
@@ -259,8 +267,12 @@ class LiveWriteGuardTests(unittest.TestCase):
         worktree = self.home / ".delegate/worktrees/wt"
         git(self.repo, "worktree", "add", "-q", "-b", "lane", str(worktree))
         before = git(worktree, "rev-parse", "HEAD")
-        results = self.run_engine(worktree, extra_env={"GUARD_SOURCE": str(self.repo)})
-        self.assert_guarded(results)
+        results = self.run_engine(
+            worktree,
+            settings=self.settings(code_root="~/Code"),
+            extra_env={"GUARD_SOURCE": str(self.repo)},
+        )
+        self.assert_guarded(results, code_protected=True)
         self.assertNotEqual(git(worktree, "rev-parse", "HEAD"), before)
         # The lane tried to write into the source checkout and was refused.
         self.assertNotEqual(results["write_source_new_file"], 0)
@@ -277,8 +289,8 @@ class LiveWriteGuardTests(unittest.TestCase):
         self.scratch.mkdir(parents=True)
         worktree = self.home / ".delegate/worktrees/wt"
         git(self.repo, "worktree", "add", "-q", "-b", "lane", str(worktree))
-        results = self.run_engine(worktree)
-        self.assert_guarded(results)
+        results = self.run_engine(worktree, settings=self.settings(code_root="~/Code"))
+        self.assert_guarded(results, code_protected=True)
         self.assertTrue((self.scratch / "f").exists())
         reasons = {entry["path"]: entry["reason"] for entry in self.record["writable"]}
         self.assertEqual(reasons[os.path.realpath(self.registry)], "run registry")
@@ -427,7 +439,9 @@ class LiveWriteGuardTests(unittest.TestCase):
     def test_writable_reopens_one_protected_path_for_this_run(self):
         results = self.run_engine(
             self.repo,
-            settings=self.settings(run_writable=(os.path.realpath(self.home / "Code/sibling"),)),
+            settings=self.settings(
+                code_root="~/Code", run_writable=(os.path.realpath(self.home / "Code/sibling"),)
+            ),
         )
         self.assertEqual(results["write_sibling_checkout"], 0)
         self.assertTrue((self.home / "Code/sibling/f").exists())
@@ -469,7 +483,7 @@ class LiveWriteGuardTests(unittest.TestCase):
         self.assertTrue((vault / "canary").exists())
 
     def test_record_lists_the_plan_that_was_enforced(self):
-        self.run_engine(self.repo)
+        self.run_engine(self.repo, settings=self.settings(code_root="~/Code"))
         self.assertEqual(
             self.record["backend"], "bwrap" if sys.platform != "darwin" else "seatbelt"
         )

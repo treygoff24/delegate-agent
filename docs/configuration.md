@@ -923,7 +923,7 @@ for the full boundary and fail-closed conditions.
       "enabled": true,
       "onUnavailable": "warn",
       "macosSeatbelt": false,
-      "codeRoot": "~/Code",
+      "codeRoot": null,
       "add": ["~/.config/example-secrets"],
       "remove": ["~/.config/gcloud"],
       "writable": ["~/.ssh/known_hosts.d"],
@@ -934,11 +934,13 @@ for the full boundary and fail-closed conditions.
 ```
 
 The work write guard keeps work lanes off a named list of irreplaceable paths
-(credential stores, `~/.ai-profiles`, the installed Delegate runtime, and the
-code root) while everything else stays writable. A lane started through an
-estate launcher (`estate-claude`, `estate-codex`, ...) gets `~/.ai-profiles`
-re-opened, because the launcher writes account and session state there on every
-launch. Every key is optional; an
+(credential stores, `~/.ai-profiles`, and the installed Delegate runtime).
+Code roots and sibling checkouts are not protected by default; opt in with
+`codeRoot` or `add`. The protect-list backends leave other paths writable;
+Codex's native sandbox still applies its own workspace write limits. A lane
+started through an estate launcher (`estate-claude`, `estate-codex`, ...) gets
+`~/.ai-profiles` re-opened, because the launcher writes account and session state
+there on every launch. Every key is optional; an
 unknown key or a wrong type fails config validation (`invalid_isolation_config`).
 See the [security model](security-model.md#work-write-guard) for the default
 protected list, the writable re-opens every run gets, and the backends.
@@ -962,9 +964,9 @@ protected list, the writable re-opens every run gets, and the backends.
   sandbox bypassed is wrapped, and that combination is not yet live-tested.
   While it is `false` the Mac guard status is `off`, with no warning and no
   refusal.
-- `codeRoot` (default `~/Code`; `null` disables): the directory whose checkouts
-  are protected. The run's own execution root, git common directory and registry
-  are re-opened automatically.
+- `codeRoot` (default `null`): opt in to protecting a directory's checkouts,
+  for example `"~/Code"`. The run's own execution root, git common directory
+  and registry are re-opened automatically. `null` disables this protection.
 - `add`: extra paths to protect (absolute; a leading `~` expands).
 - `remove`: default protected paths to drop.
 - `writable`: paths re-opened for every run. `delegate ... --writable PATH`

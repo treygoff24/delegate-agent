@@ -96,11 +96,10 @@ class PlanTests(HomeTestCase):
             ".delegate/bin",
             ".delegate/config.json",
             ".delegate/config.local.json",
-            "Code",
         ):
             with self.subTest(path=rel):
                 self.assertIn(self.real(rel), plan.protected)
-        for rel in (".delegate/worktrees", ".delegate/registry", ".cache", "."):
+        for rel in (".delegate/worktrees", ".delegate/registry", ".cache", ".", "Code"):
             with self.subTest(path=rel):
                 self.assertNotIn(self.real(rel), plan.protected)
 
@@ -110,7 +109,7 @@ class PlanTests(HomeTestCase):
         self.assertTrue(all(os.path.exists(path) for path in plan.protected))
 
     def test_parents_come_before_children_and_the_exec_root_is_reopened(self):
-        mounts = self.plan().mounts()
+        mounts = self.plan(WriteGuardSettings(code_root="~/Code")).mounts()
         code = ("ro", self.real("Code"))
         repo = ("rw", self.real("Code/repo"))
         self.assertIn(code, mounts)
@@ -121,6 +120,7 @@ class PlanTests(HomeTestCase):
     def test_git_common_dir_of_a_worktree_is_reopened_under_the_protected_source(self):
         (self.home / "Code/repo/.git").mkdir()
         plan = self.plan(
+            WriteGuardSettings(code_root="~/Code"),
             exec_root=str(self.home / ".delegate/worktrees/run-1"),
             git_common_dir=str(self.home / "Code/repo/.git"),
         )
@@ -338,7 +338,9 @@ class PlanTests(HomeTestCase):
 
     def test_config_writable_and_run_writable_lift_a_protection(self):
         plan = self.plan(
-            WriteGuardSettings(writable=("~/.ssh",), run_writable=(self.real("Code/sibling"),))
+            WriteGuardSettings(
+                code_root="~/Code", writable=("~/.ssh",), run_writable=(self.real("Code/sibling"),)
+            )
         )
         self.assertNotIn(self.real(".ssh"), plan.protected)
         mounts = plan.mounts()
@@ -356,7 +358,7 @@ class PlanTests(HomeTestCase):
         self.assertNotIn(self.real("Code"), plan.protected)
 
     def test_payload_names_backend_protected_and_reopens_with_reasons(self):
-        payload = self.plan().payload()
+        payload = self.plan(WriteGuardSettings(code_root="~/Code")).payload()
         self.assertEqual(payload["backend"], "bwrap")
         self.assertIn(self.real(".ssh"), payload["protected"])
         self.assertIn(
@@ -375,7 +377,7 @@ class PlanTests(HomeTestCase):
 
     def test_pin_comes_after_its_protected_parents_and_keeps_an_existing_mode(self):
         repo = self.real("Code/repo")
-        plan = self.plan()
+        plan = self.plan(WriteGuardSettings(code_root="~/Code"))
         self.assertEqual(plan.mounts(pin=[repo]), plan.mounts())
         self.assertLess(
             plan.mounts(pin=[repo]).index(("ro", self.real("Code"))),
@@ -397,7 +399,7 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.enabled)
         self.assertEqual(settings.on_unavailable, "warn")
         self.assertFalse(settings.macos_seatbelt)
-        self.assertEqual(settings.code_root, "~/Code")
+        self.assertIsNone(settings.code_root)
 
     def test_config_section_is_read(self):
         config = {
@@ -729,7 +731,7 @@ class EstateLauncherTests(HomeTestCase):
                 )
                 # Everything else stays protected.
                 self.assertIn(self.real(".ssh"), self.ro_binds(result))
-                self.assertIn(self.real("Code"), self.ro_binds(result))
+                self.assertIn(self.real(".delegate/src"), self.ro_binds(result))
 
     def test_a_lane_started_any_other_way_keeps_the_profiles_root_protected(self):
         for argv0 in ("devin", "/usr/local/bin/claude", "my-estate-claude"):
@@ -1029,7 +1031,9 @@ class PreviewTests(HomeTestCase):
 
 class PromptNoteTests(unittest.TestCase):
     def test_note_names_the_protected_paths_for_a_protect_list_backend(self):
-        note = write_guard.prompt_note(WriteGuardSettings(), write_guard.BACKEND_BWRAP, home="/h")
+        note = write_guard.prompt_note(
+            WriteGuardSettings(code_root="~/Code"), write_guard.BACKEND_BWRAP, home="/h"
+        )
         self.assertIn("SSH", note)
         self.assertIn("/h/Code", note)
         self.assertIn("read-only or permission error", note)
