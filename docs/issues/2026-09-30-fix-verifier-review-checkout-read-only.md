@@ -30,11 +30,11 @@ It passes with the narrower default. The 130 focused guard tests and the full
 gate (4,691 passed, 17 skipped, plus compile, lint and format checks) passed.
 Explicit code-root protection and its writable override remain covered.
 
-The fix is shipped through Forgejo. Devbox runtime activation is staged and
-queued by estate-sync, which deferred the switch while the Atlas workflow is
-running. The staged package's dry-run confirms the new default and retained
-credential/runtime protection; the active workflow was left on its pinned
-runtime.
+The fix is shipped through Forgejo and installed on the devbox. Estate-sync
+initially deferred activation while the Atlas supervisor was active, then
+promoted after it cleared. Installed doctor verifies artifact parity, and the
+installed dry-run confirms the new default and retained SSH/runtime protection.
+The pending activation queue is clear; no running workflow was interrupted.
 
 ## Symptom
 
