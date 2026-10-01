@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-01
+
+This release adds controls for launching and managing agents and resuming
+workflows: `--force-launch`, `--writable`, `--kill-live`, and `--repin`.
+It also improves progress reports, coordinator mail, failure recovery, and
+write protection, and makes optional local profile tooling work on other
+machines without requiring the maintainer's setup.
+
 ### Added
 - **Every work and safe Run carries the lane test rule.** After the operator's
   task, the framed prompt adds a "Delegate lane test rule" section: lanes run
@@ -415,6 +423,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success while the workflow was already dead.
 
 ### Fixed
+- Missing local profile directories are silently omitted from write-guard
+  launcher reopens. Failover state uses `~/.delegate/failover` when the optional
+  profile tree is absent, and missing personal profile homes do not read legacy
+  cooldown files. Existing profile trees keep their current behavior. The
+  development-only `delegate-audit` shim names its optional checkout when absent.
 - `worktree reap` removes linked orphans on Linux again. Its process scan
   refused every removal as `process_scan_unavailable` because Linux hides the
   working directory of the user's own non-dumpable processes (`systemd
@@ -2557,7 +2570,8 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/treygoff24/delegate-agent/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.31.0
 [0.30.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.30.0
 [0.29.1]: https://github.com/treygoff24/delegate-agent/compare/v0.29.0...v0.29.1

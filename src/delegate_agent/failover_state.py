@@ -19,7 +19,11 @@ _LOCK_STALE_SEC = 30.0
 
 
 def _root() -> Path:
-    return Path.home() / ".ai-profiles" / "runtime" / "failover"
+    home = Path.home()
+    profiles = home / ".ai-profiles"
+    if profiles.is_dir():
+        return profiles / "runtime" / "failover"
+    return home / ".delegate" / "failover"
 
 
 def _state_slug(tool: str, identity: str) -> str:
@@ -67,12 +71,15 @@ def _valid(tool: str, identity: str | None) -> bool:
     return tool in _VALID_TOOLS and isinstance(identity, str) and bool(identity)
 
 
-def _legacy_identity(profile_alias: str) -> str:
+def _legacy_identity(profile_alias: str) -> str | None:
     homes = {
         "work": Path.home() / ".codex",
         "personal": Path.home() / ".ai-profiles" / "runtime" / "codex" / "personal",
     }
-    return f"auth={(homes[profile_alias] / 'auth.json').resolve(strict=False)}\0profile="
+    home = homes[profile_alias]
+    if profile_alias == "personal" and not home.is_dir():
+        return None
+    return f"auth={(home / 'auth.json').resolve(strict=False)}\0profile="
 
 
 def _legacy_profile(tool: str, identity: str, profile_alias: str | None) -> str | None:

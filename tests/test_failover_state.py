@@ -13,8 +13,61 @@ from delegate_agent import failover_state
 
 
 class FailoverStateTests(unittest.TestCase):
+    def test_absent_estate_uses_delegate_state_without_creating_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            expires = int(time.time()) + 60
+            identity = "auth=/ordinary/codex/auth.json\0profile="
+            self.assertEqual(failover_state.check_blocked("codex", identity), (False, None))
+            failover_state.write_block("codex", identity, expires)
+            self.assertEqual(failover_state.check_blocked("codex", identity), (True, expires))
+            states = list((Path(home) / ".delegate/failover").glob("*.blocked-until"))
+            self.assertEqual(len(states), 1)
+            self.assertEqual(states[0].stat().st_mode & 0o777, 0o600)
+            failover_state.clear_block("codex", identity)
+            self.assertEqual(failover_state.check_blocked("codex", identity), (False, None))
+            self.assertFalse((Path(home) / ".ai-profiles").exists())
+
+    def test_absent_personal_home_does_not_use_legacy_profile_state(self) -> None:
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            root = Path(home) / ".ai-profiles/runtime/failover"
+            root.mkdir(parents=True)
+            expires = int(time.time()) + 60
+            legacy = root / "codex-personal.blocked-until"
+            legacy.write_text(f"{expires}\n")
+            personal = Path(home) / ".ai-profiles/runtime/codex/personal"
+            identity = f"auth={(personal / 'auth.json').resolve(strict=False)}\0profile="
+            self.assertEqual(
+                failover_state.check_blocked("codex", identity, profile_alias="personal"),
+                (False, None),
+            )
+            failover_state.write_block("codex", identity, expires + 60, profile_alias="personal")
+            self.assertEqual(
+                failover_state.check_blocked("codex", identity, profile_alias="personal"),
+                (True, expires + 60),
+            )
+            failover_state.clear_block("codex", identity, profile_alias="personal")
+            self.assertEqual(legacy.read_text(), f"{expires}\n")
+            self.assertFalse(personal.exists())
+
+    def test_present_personal_home_keeps_legacy_profile_state(self) -> None:
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            personal = Path(home) / ".ai-profiles/runtime/codex/personal"
+            personal.mkdir(parents=True)
+            identity = f"auth={(personal / 'auth.json').resolve(strict=False)}\0profile="
+            expires = int(time.time()) + 60
+            failover_state.write_block("codex", identity, expires, profile_alias="personal")
+            legacy = Path(home) / ".ai-profiles/runtime/failover/codex-personal.blocked-until"
+            self.assertEqual(legacy.read_text(), f"{expires}\n")
+            self.assertEqual(
+                failover_state.check_blocked("codex", identity, profile_alias="personal"),
+                (True, expires),
+            )
+            failover_state.clear_block("codex", identity, profile_alias="personal")
+            self.assertFalse(legacy.exists())
+
     def test_block_is_persistent_monotonic_and_clearable(self) -> None:
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            (Path(home) / ".ai-profiles").mkdir()
             near = int(time.time()) + 60
             far = near + 60
             identity = "auth=/tmp/private/codex-home/auth.json\0profile=ops"
@@ -38,6 +91,7 @@ class FailoverStateTests(unittest.TestCase):
             patch.dict(os.environ, {"HOME": home, "AI_FAILOVER_COOLDOWN": "1"}),
             patch("delegate_agent.failover_state.time.time", return_value=1000),
         ):
+            (Path(home) / ".ai-profiles").mkdir()
             identity = "auth=/a/auth.json\0profile="
             failover_state.write_block("codex", identity)
 
