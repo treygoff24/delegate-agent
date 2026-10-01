@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRY = ROOT / "bin" / "delegate.py"
 PACKAGE_INIT = ROOT / "src" / "delegate_agent" / "__init__.py"
 SHIM = ROOT / "bin" / "delegate-profile-shim"
+HOST_FALLBACK_PYTHON = "/usr/local/bin/python3"
 OLD_VERSION_INFO = "(3, 9, 6, 'final', 0)"
 
 
@@ -149,6 +150,19 @@ class LauncherInterpreterPickerTests(unittest.TestCase):
                 self.skipTest(f"{tool} is not installed")
             (sysbin / tool).symlink_to(found)
         self.path = f"{self.bin}{os.pathsep}{sysbin}"
+        # The shim's last-resort candidate is the absolute /usr/local/bin/python3,
+        # which exists on a macOS runner (and any machine with a local Python)
+        # whatever PATH says, so PATH alone cannot stage "no 3.11+ interpreter".
+        # Run a copy whose only change is that candidate, aimed at a path that
+        # does not exist; the assertion makes a renamed candidate fail loudly
+        # instead of quietly reopening the host dependency.
+        shim_text = SHIM.read_text(encoding="utf-8")
+        self.assertIn(HOST_FALLBACK_PYTHON, shim_text)
+        self.shim = self.root / "delegate-profile-shim"
+        self.shim.write_text(
+            shim_text.replace(HOST_FALLBACK_PYTHON, str(self.root / "absent" / "python3")),
+            encoding="utf-8",
+        )
 
     def _fake_python(
         self,
@@ -177,7 +191,7 @@ class LauncherInterpreterPickerTests(unittest.TestCase):
     def _shim(self, *args: str, **env: str):
         assert self.bash is not None
         full_env = {"PATH": self.path, "HOME": str(self.root), **env}
-        return _run([self.bash, str(SHIM), *args], env=full_env)
+        return _run([self.bash, str(self.shim), *args], env=full_env)
 
     def test_no_3_11_interpreter_is_a_clear_exit_2(self) -> None:
         self._fake_python(self.bin, "python3", (3, 9, 6))

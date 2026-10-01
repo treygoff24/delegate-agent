@@ -300,7 +300,16 @@ class CodexNativeSandboxTests(GuardE2ETestCase):
         self.assertIn("sandboxed by Codex", prompt)
 
     def test_codex_with_the_bypass_on_gets_no_roots_and_the_bypass_flag(self):
-        self.write_config({"policy": {"profile": "external-sandbox"}})
+        # With the bypass on Codex has no sandbox of its own, so Delegate's guard
+        # wraps it (bwrap on Linux). This test is about the argv, not the wrapper:
+        # "warn" lets it run unwrapped, with a warning, on a host without bwrap
+        # instead of refusing the run, and leaves the wrapped case unchanged.
+        self.write_config(
+            {
+                "policy": {"profile": "external-sandbox"},
+                "isolation": {"writeGuard": {"macosSeatbelt": True, "onUnavailable": "warn"}},
+            }
+        )
         self.write_engine("codex", CODEX_LOGGING)
         completed = self.cli("--isolation", "none", "codex", "work", "edit")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)

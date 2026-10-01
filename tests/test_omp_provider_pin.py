@@ -742,7 +742,16 @@ class CoordinatorRoundThreeTests(unittest.TestCase):
             message="Pinned model continuity refused a substitution: requested "
             "opencode-go/glm-5.3, but omp tried to serve fireworks/glm-5p3.",
         )
+        # execute_call is stubbed, but the CLI still checks that the configured
+        # binary resolves before it launches; point it at a file this test owns
+        # so the result does not depend on a real omp being on PATH.
+        stub_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(stub_dir.cleanup)
+        stub = Path(stub_dir.name) / "fake-omp"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
         cfg = delegate_config.embedded_default_config()
+        cfg["omp"]["binary"] = str(stub)
         for json_mode in (False, True):
             with self.subTest(json_mode=json_mode):
                 out, err = io.StringIO(), io.StringIO()
