@@ -637,6 +637,44 @@ class TurnEndClauseTests(unittest.TestCase):
         self.assertEqual(slash, "/goal fix it")
 
 
+class LaneTestsClauseTests(unittest.TestCase):
+    def frame(self, prompt="fix it", **kwargs):
+        options = {"engine": "codex", "mode": "work", "completion_report_mode": "none"}
+        options.update(kwargs)
+        return request_build.effective_prompt(prompt, **options)
+
+    def test_tracked_work_and_safe_prompts_carry_the_lane_rule_once_for_every_engine(self):
+        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi"):
+            for mode in ("work", "safe"):
+                with self.subTest(engine=engine, mode=mode):
+                    framed = self.frame(engine=engine, mode=mode)
+                    self.assertEqual(framed.count(prompt_instructions.LANE_TESTS_INSTRUCTION), 1)
+
+    def test_the_rule_names_targeted_tests_and_keeps_the_gate_for_the_coordinator(self):
+        body = prompt_instructions.LANE_TESTS_INSTRUCTION
+        self.assertIn("Lanes run targeted tests only", body)
+        self.assertIn("testrun <repo> <kind> -- <cmd>", body)
+        self.assertIn("a lane never runs them", body)
+
+    def test_the_rule_follows_the_task_and_precedes_the_turn_end_clause(self):
+        framed = self.frame(prompt="the task")
+        rule = framed.index(prompt_instructions.LANE_TESTS_INSTRUCTION)
+        self.assertGreater(rule, framed.index("the task"))
+        self.assertLess(rule, framed.index(prompt_instructions.TURN_END_INSTRUCTION))
+
+    def test_reframing_does_not_repeat_the_rule(self):
+        once = self.frame(mode="safe")
+        self.assertEqual(self.frame(prompt=once, mode="safe"), once)
+        work = self.frame(prompt=once, mode="work")
+        self.assertEqual(work.count(prompt_instructions.LANE_TESTS_INSTRUCTION), 1)
+
+    def test_call_mode_slash_passthrough_and_unmoded_prompts_do_not_get_it(self):
+        self.assertNotIn(prompt_instructions.LANE_TESTS_INSTRUCTION, self.frame(mode="call"))
+        self.assertNotIn(prompt_instructions.LANE_TESTS_INSTRUCTION, self.frame(mode=""))
+        slash = self.frame(prompt="/goal fix it", instruction_mode=PROMPT_INSTRUCTION_MODE_SLASH)
+        self.assertEqual(slash, "/goal fix it")
+
+
 class ClaudeWorkEnvOverridesTests(unittest.TestCase):
     def env(self, timeout_seconds, **claude):
         return argv_builders.claude_work_env_overrides(

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Every work and safe Run carries the lane test rule.** After the operator's
+  task, the framed prompt adds a "Delegate lane test rule" section: lanes run
+  targeted tests only (the files they changed and their neighbours, through
+  `testrun` with worker caps), and the full suite and the project gate stay
+  with the coordinator (Trey, 2026-09-30). Call mode, unmoded prompts, and
+  slash passthrough are untouched; reframing never repeats it.
 - `runs` and `ps` show how long a running Run has left: a running Run with a
   timeout carries `deadlineAt` (recorded by the runner when its timeout clock
   starts, after workspace setup) and `remainingSeconds`, and the text listing

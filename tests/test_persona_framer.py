@@ -178,6 +178,7 @@ class PersonaFramerTests(CommandTestBase):
                             prompt_instructions.SKILL_REVIEW_PREFIX.rstrip(),
                             safe,
                             user,
+                            prompt_instructions.LANE_TESTS_INSTRUCTION,
                             (
                                 prompt_instructions.WORK_TURN_END_INSTRUCTION
                                 if mode == "work"
@@ -221,6 +222,7 @@ class PersonaFramerTests(CommandTestBase):
                             persona,
                             safe,
                             user,
+                            prompt_instructions.LANE_TESTS_INSTRUCTION,
                             (
                                 prompt_instructions.WORK_TURN_END_INSTRUCTION
                                 if mode == "work"
@@ -267,6 +269,7 @@ class PersonaFramerTests(CommandTestBase):
                         worktree_execution.PERSISTENT_WORKTREE_COMMIT_NOTE,
                         PERSISTENT_WORKTREE_CONTEXT_NOTE,
                         user,
+                        prompt_instructions.LANE_TESTS_INSTRUCTION,
                         prompt_instructions.WORK_TURN_END_INSTRUCTION,
                         prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                     )
@@ -422,6 +425,7 @@ class PersonaFramerTests(CommandTestBase):
                             persona,
                             PERSISTENT_WORKTREE_CONTEXT_NOTE,
                             user,
+                            prompt_instructions.LANE_TESTS_INSTRUCTION,
                             prompt_instructions.WORK_TURN_END_INSTRUCTION,
                             prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
                             mail.MAIL_PROMPT_SUFFIX,

@@ -793,6 +793,10 @@ def effective_prompt(
     if policy_note is not None:
         segments.append(policy_note)
     segments.append(prompt)
+    # A tracked run is a lane: it runs targeted tests, never the full suite or
+    # the project gate (prompt_instructions.LANE_TESTS_INSTRUCTION).
+    if mode in (MODE_WORK, MODE_SAFE) and prompt_instructions.LANE_TESTS_INSTRUCTION not in prompt:
+        segments.append(prompt_instructions.LANE_TESTS_INSTRUCTION)
     # Every tracked child ends when its model stops; a background job dies with
     # it. Skipped when the prompt already carries the rule (re-framing).
     if mode in (MODE_WORK, MODE_SAFE) and prompt_instructions.TURN_END_INSTRUCTION not in prompt:
