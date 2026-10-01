@@ -49,7 +49,8 @@ VALID_ON_UNAVAILABLE = (ON_UNAVAILABLE_WARN, ON_UNAVAILABLE_REFUSE)
 DEFAULT_CODE_ROOT: str | None = None
 
 # Credential stores and estate state a lane must never rewrite. Read access is
-# untouched; only writes, deletes and renames are refused.
+# untouched; only writes, deletes and renames are refused. The planner silently
+# omits missing paths, including optional profile state.
 DEFAULT_PROTECTED = (
     "~/.ssh",
     "~/.gnupg",
@@ -580,6 +581,8 @@ def estate_launcher_roots(
     # The launcher's own resolution order (estate-harness get_profiles_root).
     root = env.get("ESTATE_AI_PROFILES_ROOT") or env.get("AI_PROFILES_ROOT")
     path = os.path.expanduser(root) if root else os.path.join(home, ".ai-profiles")
+    if not os.path.isdir(path):
+        return ()
     return (Reopen(path, ESTATE_LAUNCHER_REASON),)
 
 

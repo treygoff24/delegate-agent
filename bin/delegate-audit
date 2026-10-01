@@ -1,4 +1,9 @@
 #!/bin/sh
 # Plan-run audit shim: the compiled close verifier invokes bin/delegate-audit
 # relative to this repo; the tool lives in the writing-plans checkout.
-exec "$HOME/Code/writing-plans/bin/delegate-audit" "$@"
+audit_tool="$HOME/Code/writing-plans/bin/delegate-audit"
+if [ ! -x "$audit_tool" ]; then
+    printf 'delegate-audit: requires the optional writing-plans checkout; executable not found: %s\n' "$audit_tool" >&2
+    exit 127
+fi
+exec "$audit_tool" "$@"

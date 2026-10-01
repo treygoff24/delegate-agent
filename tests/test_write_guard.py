@@ -108,6 +108,19 @@ class PlanTests(HomeTestCase):
         self.assertNotIn(self.real(".aws"), plan.protected)
         self.assertTrue(all(os.path.exists(path) for path in plan.protected))
 
+    def test_missing_estate_profiles_are_silently_omitted(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / ".ssh").mkdir()
+            plan = write_guard.plan_guard(
+                WriteGuardSettings(),
+                GuardFacts(home=home, exec_root=home),
+                backend=write_guard.BACKEND_BWRAP,
+            )
+            self.assertEqual(plan.protected, (str((Path(home) / ".ssh").resolve()),))
+            self.assertEqual(plan.refused, ())
+            self.assertEqual(plan.writable, ())
+            self.assertFalse((Path(home) / ".ai-profiles").exists())
+
     def test_parents_come_before_children_and_the_exec_root_is_reopened(self):
         mounts = self.plan(WriteGuardSettings(code_root="~/Code")).mounts()
         code = ("ro", self.real("Code"))
@@ -756,6 +769,15 @@ class EstateLauncherTests(HomeTestCase):
         )
         self.assertEqual([r.path for r in roots], [str(other)])
         self.assertEqual(write_guard.estate_launcher_roots([], {}, str(self.home)), ())
+
+    def test_missing_launcher_profiles_root_is_silently_omitted(self):
+        with tempfile.TemporaryDirectory() as home:
+            for env in ({}, {"ESTATE_AI_PROFILES_ROOT": str(Path(home) / "missing")}):
+                with self.subTest(env=env):
+                    self.assertEqual(
+                        write_guard.estate_launcher_roots(["estate-codex"], env, home), ()
+                    )
+            self.assertFalse((Path(home) / ".ai-profiles").exists())
 
     def test_dry_run_preview_shows_the_reopen(self):
         with (

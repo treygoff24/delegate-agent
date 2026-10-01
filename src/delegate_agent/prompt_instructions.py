@@ -35,11 +35,8 @@ TURN_END_INSTRUCTION = """## Delegate run rule
 
 Ending your turn ends this Run, and nothing will wake you afterward: any background task or monitor still running is killed and its result is never seen. Run long jobs (tests, builds, gates) in the foreground and finish them before your final message."""
 
-# Trey, 2026-09-30: lanes run targeted tests only. The rule's source of truth
-# is the "Lanes run targeted tests only" bullet in
-# ~/.claude-shared/rules/agent-operating-contract.md; a promoted release is a
-# pinned artifact, so the text is carried here rather than read at run time.
-# Change both together.
+# Lanes run targeted tests only. A promoted release is a pinned artifact, so
+# the rule is carried here rather than read from a local policy file at runtime.
 LANE_TESTS_INSTRUCTION = """## Delegate lane test rule
 
 Lanes run targeted tests only: the test files for what you changed and their immediate neighbours, through `testrun <repo> <kind> -- <cmd>` with explicit worker caps (vitest --maxWorkers=8, cargo -j 8 / --test-threads=8, pytest -n 8). The full suite and the project gate are the coordinator's, run once on the integrated candidate; a lane never runs them, whatever a repository or skill file says. (Trey, 2026-09-30.)"""

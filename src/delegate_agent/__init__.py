@@ -19,6 +19,6 @@ if sys.version_info < (3, 11):  # noqa: UP036 - the point is to run on old Pytho
     )
     raise SystemExit(2)
 
-VERSION = "0.31.0"
+VERSION = "0.32.0"
 
 __all__ = ["VERSION"]

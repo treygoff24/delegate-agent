@@ -20,3 +20,53 @@ efc8ad8fe936aaddca6154a7b0a866eeedcae228:tests/test_profiles.py:generic-api-key:
 # the literals (63638cf usage-limit redaction test, 8b5516f profile discovery).
 63638cf5d73ef07afa93557df2ee04bf4b96a3c0:tests/test_codex_thread_resilience.py:generic-api-key:214
 8b5516f45092bab51cebadfcd882d1b2de9c7078:tests/test_capability_commands.py:generic-api-key:513
+
+# Additional fake redaction fixtures and deterministic replay-key digests in
+# test history, verified while preparing 0.32.0. No non-test findings ignored.
+0e745f37e2a720161b25d848e7e2635927a79234:tests/test_omp_provider_pin.py:generic-api-key:572
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_inspection_commands.py:generic-api-key:241
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_model_discovery.py:generic-api-key:1132
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_model_discovery.py:generic-api-key:1220
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_runner_capture.py:generic-api-key:2324
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_workflow_retry_outcomes.py:generic-api-key:317
+0f7ff641bb10595d15e41184fce89a3d2ada7422:tests/test_workflow_retry_outcomes.py:generic-api-key:513
+11ec913ee086b5170db84eb367b214f640db720e:tests/test_workflow_commands.py:generic-api-key:6288
+123d695dd26f1957044a22f2752f05997d044c4e:tests/test_snapshot_redaction.py:private-key:151
+3803b5a28bbcdadd543e60630f864880bc84685c:tests/test_provider_error_records.py:generic-api-key:123
+3803b5a28bbcdadd543e60630f864880bc84685c:tests/test_provider_error_records.py:generic-api-key:315
+3803b5a28bbcdadd543e60630f864880bc84685c:tests/test_provider_errors.py:generic-api-key:162
+4e64682fe02f7602cda1a25ab4c69475a99d6e9d:tests/test_snapshot_redaction.py:private-key:187
+53222d6fcd99b75107ac700ab840b8a4a0cd2268:tests/test_status_truth.py:generic-api-key:133
+78514c9e58d7dd85b947db959ae6437dc005c921:tests/test_workspace_spec.py:generic-api-key:233
+78514c9e58d7dd85b947db959ae6437dc005c921:tests/test_workspace_spec.py:generic-api-key:268
+7a0ff8289443d5b7e83a0deb0c3c15b5d90aeabe:tests/test_snapshot_redaction.py:private-key:187
+7ba44d22239a50035c94082d16fa311760b798da:tests/test_workflow_commands.py:generic-api-key:6288
+829d37f6bf7c18b0011408b0a3504b088f9de5c7:tests/test_snapshot_redaction.py:private-key:151
+859aa2c114e0d632dc9e8e295675a0b35ea99f4a:tests/test_snapshot_redaction.py:private-key:187
+91e9a03e42d384fca554b081661efebd71d6f321:tests/test_workflow_commands.py:generic-api-key:4124
+957b0fac02ba1b4b40c1e50e1ad8add78b92434e:tests/test_workspace_spec.py:jwt:935
+a3b48a72d86412e3f3c0f0dc33cad702800850b4:tests/test_workflow_commands.py:generic-api-key:6288
+ac8e766fc50ad5ad45188c9d75a912b05b1c0277:tests/test_snapshot_redaction.py:private-key:151
+f64db6c40cde39150a42f43124a017b0c7fb7710:tests/test_workflow_commands.py:generic-api-key:6288
+
+# The same synthetic fixtures in source-tree scans (gitleaks --no-git --source .).
+tests/test_capability_commands.py:generic-api-key:1030
+tests/test_model_discovery.py:generic-api-key:1035
+tests/test_model_discovery.py:generic-api-key:947
+tests/test_omp_provider_pin.py:generic-api-key:944
+tests/test_provider_error_records.py:generic-api-key:125
+tests/test_provider_error_records.py:generic-api-key:346
+tests/test_provider_errors.py:generic-api-key:145
+tests/test_runner_capture.py:generic-api-key:2626
+tests/test_snapshot_redaction.py:private-key:152
+tests/test_snapshot_redaction.py:private-key:166
+tests/test_snapshot_redaction.py:private-key:188
+tests/test_snapshot_redaction.py:private-key:212
+tests/test_status_truth.py:generic-api-key:235
+tests/test_workflow_commands.py:generic-api-key:7683
+tests/test_workflow_retry_outcomes.py:generic-api-key:478
+tests/test_workflow_retry_outcomes.py:generic-api-key:674
+tests/test_workspace_spec.py:generic-api-key:438
+tests/test_workspace_spec.py:generic-api-key:473
+tests/test_inspection_commands.py:generic-api-key:241
+tests/test_workspace_spec.py:jwt:935
