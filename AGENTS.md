@@ -28,7 +28,7 @@ scripts/gate.sh --fast                # quick tests plus all static checks
 uv run --extra dev python scripts/test.py -- tests/test_delegate_parser.py
 ```
 
-Run affected tests while iterating and the full gate before merge. `--fast` is
+Run affected tests while iterating; the coordinator runs the full gate once on the integrated candidate before merge, and lanes never run it (Trey, 2026-09-30). `--fast` is
 partial regression coverage; append affected paths after `--` when useful.
 The full gate refuses test filters and ignores ambient `PYTEST_ADDOPTS`.
 
