@@ -12,6 +12,25 @@ place, so the lane keeps its pid, process group, environment, cwd, and pipes;
 the runner's own signal handling is unchanged. Anywhere the slice is absent
 (macOS, no user systemd, no user bus, the slice not installed) or
 ``DELEGATE_LANE_SLICE=off`` is set, lanes launch exactly as before.
+
+Slice release contract (shared with linux-devbox ``testrun``, keep both in step)
+-------------------------------------------------------------------------------
+A slice stays loaded in the user manager until something stops it, and
+thousands of empty ``agent-tests-<repo>.slice`` units made daemon-reloads take
+minutes. So every user of a slice coordinates through one lock file,
+``${XDG_RUNTIME_DIR:-/tmp}/testrun/<slice>.lock``: a user holds ``flock -s``
+on it for its whole life, and at the end tries ``flock -x -n``; only a user that
+gets it, and finds the slice's cgroup with no child directories, runs
+``systemctl --user stop --job-mode=fail <slice>``. :func:`acquire` takes the
+shared lock before the lane launches and :func:`stop` does the release.
+
+The delegate runner process owns the lock fd, never the lane: it outlives the
+lane (it waits on it and stops its scope), the fd is close-on-exec and
+``Popen(close_fds=True)`` so no lane command or daemon it spawns inherits it,
+and a runner that dies by SIGKILL drops the lock while the orphaned lane's
+scope still keeps the slice's cgroup non-empty, which the release check honours.
+Every step is fail-open: a lock or stop problem never fails the lane, and the
+only wait is the bounded :data:`_LOCK_WAIT_SEC` to take the shared lock.
 """
 
 from __future__ import annotations
@@ -23,9 +42,15 @@ import secrets
 import shutil
 import subprocess  # nosec B404 - fixed systemd argv, shell=False.
 import sys
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+try:  # not available on Windows; the slice is Linux-only anyway
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 PARENT_SLICE = "agent-tests.slice"
 OPT_OUT_ENV = "DELEGATE_LANE_SLICE"
@@ -38,8 +63,29 @@ BUS_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
 STOP_TIMEOUT_SEC = 5
 _PROBE_TIMEOUT_SEC = 5.0
 _STOP_WAIT_SEC = 15.0
+# Longest the lane waits to take the shared slice lock: only a releaser's
+# exclusive attempt, a few milliseconds, can hold it off.
+_LOCK_WAIT_SEC = 1.0
+LOCK_SUBDIR = "testrun"
+CGROUP_ROOT = "/sys/fs/cgroup"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+@dataclass
+class SliceLock:
+    """The lane's shared lock on its slice; ``fd`` is None when not held."""
+
+    fd: int | None = None
+    path: Path | None = None
+
+    def __del__(self) -> None:
+        # Safety net for an exit path that never reached release(): closing
+        # the fd drops the lock; no slice stop is attempted from here.
+        fd, self.fd = self.fd, None
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -48,6 +94,7 @@ class LaneScope:
     slice: str
     systemd_run: str
     systemctl: str
+    lock: SliceLock = field(default_factory=SliceLock, compare=False, repr=False)
 
 
 def repo_slug(path: str | None) -> str:
@@ -138,19 +185,120 @@ def ensure_bus_env(env: dict[str, str], parent: Mapping[str, str] | None = None)
             env[key] = source[key]
 
 
-def stop(scope: LaneScope | None, *, run: Runner = subprocess.run) -> None:
+def stop(scope: LaneScope | None, *, run: Runner = subprocess.run, launched: bool = True) -> None:
     """Stop the lane's scope, killing anything left in it. Never raises.
 
     A scope whose processes all exited is already gone (``--collect``), and
-    the stop then fails harmlessly.
+    the stop then fails harmlessly. ``launched=False`` (the lane never started)
+    skips the scope stop. Either way the slice lock is then released.
     """
     if scope is None:
         return
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        run(  # nosec B603 - fixed systemctl argv, shell=False.
-            [scope.systemctl, "--user", "stop", scope.unit],
-            capture_output=True,
-            text=True,
-            timeout=_STOP_WAIT_SEC,
-            check=False,
-        )
+    try:
+        if launched:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                run(  # nosec B603 - fixed systemctl argv, shell=False.
+                    [scope.systemctl, "--user", "stop", scope.unit],
+                    capture_output=True,
+                    text=True,
+                    timeout=_STOP_WAIT_SEC,
+                    check=False,
+                )
+    finally:
+        # Only after the scope is gone: the slice is stopped only if childless.
+        release(scope, run=run)
+
+
+def lock_path(slice_name: str, environ: Mapping[str, str] | None = None) -> Path:
+    """The shared lock file for ``slice_name``, the same path testrun uses."""
+    env = os.environ if environ is None else environ
+    base = env.get("XDG_RUNTIME_DIR") or "/tmp"  # nosec B108 - testrun's own fallback.
+    return Path(base) / LOCK_SUBDIR / f"{slice_name}.lock"
+
+
+def acquire(
+    scope: LaneScope | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    wait_sec: float = _LOCK_WAIT_SEC,
+) -> None:
+    """Take the shared slice lock before the lane launches. Never raises.
+
+    Fails open: if the lock cannot be taken within ``wait_sec`` the lane runs
+    unprotected, which at worst lets a concurrent releaser stop the slice
+    early; the cgroup-emptiness check still guards a launched scope.
+    """
+    if scope is None or fcntl is None or scope.lock.fd is not None:
+        return
+    fd: int | None = None
+    try:
+        path = lock_path(scope.slice, environ)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        deadline = time.monotonic() + max(wait_sec, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+    except (OSError, ValueError):
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        return
+    scope.lock.fd = fd
+    scope.lock.path = path
+
+
+def _slice_is_childless(
+    scope: LaneScope, *, run: Runner, cgroup_root: str, env: Mapping[str, str] | None
+) -> bool:
+    shown = run(  # nosec B603 - fixed systemctl argv, shell=False.
+        [scope.systemctl, "--user", "show", "-p", "ControlGroup", "--value", scope.slice],
+        capture_output=True,
+        text=True,
+        timeout=_PROBE_TIMEOUT_SEC,
+        check=False,
+        **({"env": dict(env)} if env is not None else {}),
+    )
+    cgroup = (shown.stdout or "").strip()
+    if shown.returncode != 0 or not cgroup.startswith("/"):
+        return False
+    with os.scandir(cgroup_root.rstrip("/") + cgroup) as entries:
+        return not any(entry.is_dir(follow_symlinks=False) for entry in entries)
+
+
+def release(
+    scope: LaneScope | None,
+    *,
+    run: Runner = subprocess.run,
+    cgroup_root: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Drop the shared lock; stop the slice if this was its last user. Never raises."""
+    if scope is None:
+        return
+    fd, scope.lock.fd = scope.lock.fd, None
+    if fd is None or fcntl is None:
+        return
+    try:
+        # Convert the shared lock on the same fd, as testrun does: it fails
+        # while any other user still holds the slice.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _slice_is_childless(scope, run=run, cgroup_root=cgroup_root or CGROUP_ROOT, env=environ):
+            run(  # nosec B603 - fixed systemctl argv, shell=False.
+                [scope.systemctl, "--user", "stop", "--job-mode=fail", scope.slice],
+                capture_output=True,
+                text=True,
+                timeout=_STOP_WAIT_SEC,
+                check=False,
+                **({"env": dict(environ)} if environ is not None else {}),
+            )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)

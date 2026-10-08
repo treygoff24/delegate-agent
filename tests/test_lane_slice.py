@@ -5,6 +5,8 @@ file (the devbox cell installs it); elsewhere it skips and the gating tests
 still run.
 """
 
+import fcntl
+import io
 import os
 import subprocess
 import sys
@@ -12,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import lane_slice, runner
 
@@ -133,6 +136,286 @@ class LaneSliceLiveTests(unittest.TestCase):
             while _alive(grandchild) and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertFalse(_alive(grandchild), "detached grandchild outlived the lane")
+
+
+SLICE = "agent-tests-delegate_agent.slice"
+CGROUP = f"/user.slice/user-1001.slice/user@1001.service/agent.slice/agent-tests.slice/{SLICE}"
+
+
+def _scope() -> lane_slice.LaneScope:
+    return lane_slice.LaneScope(
+        unit="delegate-x-abc123.scope",
+        slice=SLICE,
+        systemd_run="/usr/bin/systemd-run",
+        systemctl="/usr/bin/systemctl",
+    )
+
+
+class FakeSystemctl:
+    """Stands in for systemctl: records argv, answers ``show -p ControlGroup``."""
+
+    def __init__(self, cgroup: str = CGROUP, show_rc: int = 0, raises: Exception | None = None):
+        self.calls: list[list[str]] = []
+        self.cgroup = cgroup
+        self.show_rc = show_rc
+        self.raises = raises
+
+    def __call__(self, argv, **_kwargs):
+        self.calls.append(list(argv))
+        if self.raises is not None:
+            raise self.raises
+        if "show" in argv:
+            return subprocess.CompletedProcess(
+                argv, self.show_rc, stdout=self.cgroup + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def slice_stops(self) -> list[list[str]]:
+        return [c for c in self.calls if "stop" in c and SLICE in c]
+
+
+class SliceLockTests(unittest.TestCase):
+    """The slice release contract shared with linux-devbox testrun."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.env = {"XDG_RUNTIME_DIR": str(self.root / "run")}
+        self.cgroot = self.root / "cgroup"
+        (self.cgroot / CGROUP.lstrip("/")).mkdir(parents=True)
+        self.lock_file = self.root / "run" / "testrun" / f"{SLICE}.lock"
+
+    def _other_fd(self) -> int:
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(lambda: os.close(fd) if _fd_open(fd) else None)
+        return fd
+
+    def _release(self, scope, systemctl, **kw):
+        lane_slice.release(scope, run=systemctl, cgroup_root=str(self.cgroot), environ=None, **kw)
+
+    def test_lock_path_is_the_shared_contract_path_with_tmp_fallback(self):
+        self.assertEqual(
+            lane_slice.lock_path(SLICE, {"XDG_RUNTIME_DIR": "/run/user/1001"}),
+            Path(f"/run/user/1001/testrun/{SLICE}.lock"),
+        )
+        self.assertEqual(lane_slice.lock_path(SLICE, {}), Path(f"/tmp/testrun/{SLICE}.lock"))
+
+    def test_acquire_holds_a_shared_lock_that_blocks_exclusive_but_not_shared(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        self.assertIsNotNone(scope.lock.fd)
+        self.assertTrue(self.lock_file.exists())
+        other = self._other_fd()
+        fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)  # sharing is fine
+        with self.assertRaises(BlockingIOError):
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(other, fcntl.LOCK_UN)
+        lane_slice.release(scope, run=FakeSystemctl(), cgroup_root=str(self.cgroot))
+        self.assertIsNone(scope.lock.fd)
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lock gone with the fd
+
+    def test_the_lock_fd_does_not_leak_into_the_lane_command(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        self.addCleanup(lane_slice.release, scope, run=FakeSystemctl())
+        self.assertFalse(os.get_inheritable(scope.lock.fd))
+        out = subprocess.run(
+            ["sh", "-c", "ls -l /proc/self/fd"],
+            capture_output=True,
+            text=True,
+            # Even a launcher that kept fds open would not hand this one over.
+            close_fds=False,
+            check=True,
+        ).stdout
+        self.assertNotIn(f"{SLICE}.lock", out)
+
+    def test_acquire_and_release_are_noops_without_a_scope(self):
+        lane_slice.acquire(None, environ=self.env)
+        lane_slice.release(None, run=FakeSystemctl())
+        self.assertFalse(self.lock_file.exists())
+
+    def test_acquire_fails_open_when_the_lock_dir_is_unusable(self):
+        blocker = self.root / "blocker"
+        blocker.write_text("a file where a directory must go")
+        scope = _scope()
+        lane_slice.acquire(scope, environ={"XDG_RUNTIME_DIR": str(blocker)})
+        self.assertIsNone(scope.lock.fd)
+        # Releasing a scope that never got the lock must not stop anything.
+        fake = FakeSystemctl()
+        self._release(scope, fake)
+        self.assertEqual(fake.calls, [])
+
+    def test_acquire_gives_up_within_its_bound_when_an_exclusive_holder_persists(self):
+        other = self._other_fd()
+        fcntl.flock(other, fcntl.LOCK_EX)
+        scope = _scope()
+        start = time.monotonic()
+        lane_slice.acquire(scope, environ=self.env, wait_sec=0.1)
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertIsNone(scope.lock.fd)
+
+    def test_last_user_with_a_childless_slice_stops_it_with_job_mode_fail(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        fake = FakeSystemctl()
+        self._release(scope, fake)
+        self.assertEqual(
+            fake.slice_stops(), [["/usr/bin/systemctl", "--user", "stop", "--job-mode=fail", SLICE]]
+        )
+        self.assertIn(
+            ["/usr/bin/systemctl", "--user", "show", "-p", "ControlGroup", "--value", SLICE],
+            fake.calls,
+        )
+
+    def test_another_shared_holder_keeps_the_slice(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        other = self._other_fd()
+        fcntl.flock(other, fcntl.LOCK_SH)  # e.g. a testrun still in the slice
+        fake = FakeSystemctl()
+        self._release(scope, fake)
+        self.assertEqual(fake.calls, [])
+
+    def test_a_cgroup_child_keeps_the_slice(self):
+        (self.cgroot / CGROUP.lstrip("/") / "some-other.scope").mkdir()
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        fake = FakeSystemctl()
+        self._release(scope, fake)
+        self.assertEqual(fake.slice_stops(), [])
+        self.assertTrue(any("show" in c for c in fake.calls))  # the check did run
+
+    def test_an_unreadable_cgroup_never_stops_the_slice_and_never_raises(self):
+        for label, fake in [
+            ("show fails", FakeSystemctl(show_rc=1)),
+            ("empty cgroup", FakeSystemctl(cgroup="")),
+            ("cgroup dir missing", FakeSystemctl(cgroup="/not/there")),
+            ("systemctl missing", FakeSystemctl(raises=FileNotFoundError())),
+            ("systemctl hangs", FakeSystemctl(raises=subprocess.TimeoutExpired("systemctl", 1))),
+        ]:
+            with self.subTest(label):
+                scope = _scope()
+                lane_slice.acquire(scope, environ=self.env)
+                self._release(scope, fake)
+                self.assertEqual(fake.slice_stops(), [])
+                self.assertIsNone(scope.lock.fd)
+
+    def test_stop_ends_the_scope_before_it_considers_the_slice(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        fake = FakeSystemctl()
+        with mock.patch.object(lane_slice, "CGROUP_ROOT", str(self.cgroot)):
+            lane_slice.stop(scope, run=fake)
+        stops = [c for c in fake.calls if "stop" in c]
+        self.assertEqual(
+            stops,
+            [
+                ["/usr/bin/systemctl", "--user", "stop", scope.unit],
+                ["/usr/bin/systemctl", "--user", "stop", "--job-mode=fail", SLICE],
+            ],
+        )
+
+    def test_stop_for_a_lane_that_never_launched_skips_the_scope_stop_but_releases(self):
+        scope = _scope()
+        lane_slice.acquire(scope, environ=self.env)
+        fake = FakeSystemctl()
+        with mock.patch.object(lane_slice, "CGROUP_ROOT", str(self.cgroot)):
+            lane_slice.stop(scope, run=fake, launched=False)
+        self.assertNotIn(["/usr/bin/systemctl", "--user", "stop", scope.unit], fake.calls)
+        self.assertIsNone(scope.lock.fd)
+
+    def test_plan_none_means_no_lock_traffic_at_all(self):
+        # macOS / opt-out: plan() is None and every hook is inert.
+        scope = lane_slice.plan(
+            "r", "/x", platform="darwin", environ=self.env, which=_which, run=_probe(INSTALLED)
+        )
+        self.assertIsNone(scope)
+        lane_slice.acquire(scope, environ=self.env)
+        lane_slice.stop(scope, run=FakeSystemctl())
+        self.assertFalse((self.root / "run").exists())
+
+
+def _fd_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
+class RunnerWiringTests(unittest.TestCase):
+    """The tracked-attempt path takes the lock before launch and always releases it."""
+
+    def _ctx(self, workspace: str):
+        run_registry = runner.run_registry
+        root = run_registry.ensure_registry(Path(workspace), workspace_kind="directory")
+        run_id, alias = run_registry.register_run(root, harness="codex")
+        return runner.RunContext(
+            registry_root=root,
+            run_id=run_id,
+            alias=alias,
+            harness="codex",
+            engine="codex",
+            mode="safe",
+            model=None,
+            source_cwd=workspace,
+            execution_cwd=workspace,
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-07-16T12:00:00Z",
+        )
+
+    def _attempt(self, argv, workspace):
+        events: list[str] = []
+        scope = _scope()
+        real_launch = runner._launch_tracked_process
+
+        def launch(*a, **kw):
+            events.append("launch")
+            return real_launch(*a, **kw)
+
+        with (
+            mock.patch.object(lane_slice, "plan", return_value=scope),
+            mock.patch.object(lane_slice, "wrap_argv", side_effect=lambda a, _s: a),
+            mock.patch.object(
+                lane_slice, "acquire", side_effect=lambda s, **k: events.append("acquire")
+            ),
+            mock.patch.object(
+                lane_slice,
+                "stop",
+                side_effect=lambda s, **k: events.append(
+                    f"stop launched={k.get('launched', True)}"
+                ),
+            ),
+            mock.patch.object(runner, "_launch_tracked_process", side_effect=launch),
+        ):
+            try:
+                runner.execute_tracked(
+                    argv,
+                    workspace,
+                    self._ctx(workspace),
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            except Exception as exc:
+                events.append(f"raised {type(exc).__name__}: {exc}")
+        return events
+
+    def test_lock_is_taken_before_launch_and_released_after_the_lane(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            events = self._attempt([sys.executable, "-c", "pass"], workspace)
+        self.assertEqual(events[0], "acquire")
+        self.assertEqual(events[1], "launch")
+        self.assertEqual(events[-1], "stop launched=True")
+
+    def test_a_failed_launch_still_releases_the_lock(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            events = self._attempt([str(Path(workspace) / "no-such-binary")], workspace)
+        self.assertEqual(events[0], "acquire")
+        self.assertIn("stop launched=False", events)
 
 
 if __name__ == "__main__":

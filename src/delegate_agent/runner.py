@@ -4571,6 +4571,9 @@ def _run_single_tracked_attempt(
     boundary_exc: DelegateError | None = None
     # Probed outside the registry lock: one short systemctl call on Linux.
     lane_scope = lane_slice.plan(ctx.run_id, ctx.source_git_root or ctx.source_cwd)
+    # Held (shared) until stop() below, so no other slice user stops the slice
+    # while this lane starts; this process owns it, the lane never inherits it.
+    lane_slice.acquire(lane_scope)
     # Admission, launch, and pid/pgid publication are one locked generation
     # transition for both the primary attempt and retries. Cancel therefore
     # observes either its marker blocking a retry or a complete live generation;
@@ -4582,6 +4585,7 @@ def _run_single_tracked_attempt(
         # judged dead) must never gain a child: the sealer relaunches the step
         # and a second live child for one step would follow.
         if _launch_refused(run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)):
+            lane_slice.stop(lane_scope, launched=False)
             raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
         if attempt_label is not None:
             _append_attempt_delimiter(files.stderr_log, label=attempt_label)
@@ -4673,7 +4677,11 @@ def _run_single_tracked_attempt(
                     grace_seconds=grace_seconds,
                     identity_ctx=ctx,
                 )
+                lane_slice.stop(lane_scope)
                 raise
+    if boundary_exc is not None or launch_exc is not None:
+        # The child never ran: no scope to stop, only the slice lock to drop.
+        lane_slice.stop(lane_scope, launched=False)
     if boundary_exc is not None:
         boundary_error = RunnerLaunchError(boundary_exc.error, boundary_exc.message)
         _record_tracked_launch_failure(files, ctx, boundary_error, prior_capture=prior_capture)
@@ -4718,8 +4726,7 @@ def _run_single_tracked_attempt(
         )
         # The scope holds anything that left the process group (a setsid
         # daemon, a detached test runner); stopping it ends them too.
-        if process is not None:
-            lane_slice.stop(lane_scope)
+        lane_slice.stop(lane_scope)
     if capture is None:  # pragma: no cover - the try block either returns or raises
         raise AssertionError("tracked capture did not produce a result")
     if not group_exited:
