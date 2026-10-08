@@ -5,6 +5,7 @@ file (the devbox cell installs it); elsewhere it skips and the gating tests
 still run.
 """
 
+import contextlib
 import fcntl
 import io
 import os
@@ -200,11 +201,20 @@ class SliceLockTests(unittest.TestCase):
             lane_slice.lock_path(SLICE, {"XDG_RUNTIME_DIR": "/run/user/1001"}),
             Path(f"/run/user/1001/testrun/{SLICE}.lock"),
         )
-        self.assertEqual(lane_slice.lock_path(SLICE, {}), Path(f"/tmp/testrun/{SLICE}.lock"))
+        # testrun's rule when XDG_RUNTIME_DIR is unset: /run/user/<uid> if it exists, else /tmp.
+        with mock.patch.object(lane_slice.os, "getuid", return_value=4242):
+            with mock.patch.object(Path, "is_dir", return_value=True):
+                self.assertEqual(
+                    lane_slice.lock_path(SLICE, {}), Path(f"/run/user/4242/testrun/{SLICE}.lock")
+                )
+            with mock.patch.object(Path, "is_dir", return_value=False):
+                self.assertEqual(
+                    lane_slice.lock_path(SLICE, {}), Path(f"/tmp/testrun/{SLICE}.lock")
+                )
 
     def test_acquire_holds_a_shared_lock_that_blocks_exclusive_but_not_shared(self):
         scope = _scope()
-        lane_slice.acquire(scope, environ=self.env)
+        self.assertTrue(lane_slice.acquire(scope, environ=self.env))
         self.assertIsNotNone(scope.lock.fd)
         self.assertTrue(self.lock_file.exists())
         other = self._other_fd()
@@ -216,6 +226,10 @@ class SliceLockTests(unittest.TestCase):
         self.assertIsNone(scope.lock.fd)
         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lock gone with the fd
 
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir(),
+        "reads /proc/self/fd",
+    )
     def test_the_lock_fd_does_not_leak_into_the_lane_command(self):
         scope = _scope()
         lane_slice.acquire(scope, environ=self.env)
@@ -232,7 +246,7 @@ class SliceLockTests(unittest.TestCase):
         self.assertNotIn(f"{SLICE}.lock", out)
 
     def test_acquire_and_release_are_noops_without_a_scope(self):
-        lane_slice.acquire(None, environ=self.env)
+        self.assertFalse(lane_slice.acquire(None, environ=self.env))
         lane_slice.release(None, run=FakeSystemctl())
         self.assertFalse(self.lock_file.exists())
 
@@ -240,7 +254,13 @@ class SliceLockTests(unittest.TestCase):
         blocker = self.root / "blocker"
         blocker.write_text("a file where a directory must go")
         scope = _scope()
-        lane_slice.acquire(scope, environ={"XDG_RUNTIME_DIR": str(blocker)})
+        logged: list[str] = []
+        got = lane_slice.acquire(
+            scope, environ={"XDG_RUNTIME_DIR": str(blocker)}, log=logged.append
+        )
+        self.assertFalse(got)  # the caller must then launch unwrapped
+        self.assertEqual(len(logged), 1)
+        self.assertIn(SLICE, logged[0])
         self.assertIsNone(scope.lock.fd)
         # Releasing a scope that never got the lock must not stop anything.
         fake = FakeSystemctl()
@@ -252,8 +272,11 @@ class SliceLockTests(unittest.TestCase):
         fcntl.flock(other, fcntl.LOCK_EX)
         scope = _scope()
         start = time.monotonic()
-        lane_slice.acquire(scope, environ=self.env, wait_sec=0.1)
+        logged: list[str] = []
+        got = lane_slice.acquire(scope, environ=self.env, wait_sec=0.1, log=logged.append)
         self.assertLess(time.monotonic() - start, 2.0)
+        self.assertFalse(got)
+        self.assertEqual(len(logged), 1)
         self.assertIsNone(scope.lock.fd)
 
     def test_last_user_with_a_childless_slice_stops_it_with_job_mode_fail(self):
@@ -367,30 +390,40 @@ class RunnerWiringTests(unittest.TestCase):
             started_at="2026-07-16T12:00:00Z",
         )
 
-    def _attempt(self, argv, workspace):
+    def _attempt(self, argv, workspace, *, lock_ok=True, registry_lock=None):
         events: list[str] = []
+        launch_kwargs: list[dict] = []
         scope = _scope()
         real_launch = runner._launch_tracked_process
 
         def launch(*a, **kw):
             events.append("launch")
+            launch_kwargs.append(kw)
             return real_launch(*a, **kw)
 
         with (
             mock.patch.object(lane_slice, "plan", return_value=scope),
             mock.patch.object(lane_slice, "wrap_argv", side_effect=lambda a, _s: a),
             mock.patch.object(
-                lane_slice, "acquire", side_effect=lambda s, **k: events.append("acquire")
+                lane_slice,
+                "acquire",
+                side_effect=lambda s, **k: events.append("acquire") or lock_ok,
             ),
             mock.patch.object(
                 lane_slice,
                 "stop",
                 side_effect=lambda s, **k: events.append(
-                    f"stop launched={k.get('launched', True)}"
+                    f"stop scope={'yes' if s is not None else 'none'} "
+                    f"launched={k.get('launched', True)}"
                 ),
             ),
             mock.patch.object(runner, "_launch_tracked_process", side_effect=launch),
+            contextlib.ExitStack() as extra,
         ):
+            if registry_lock is not None:
+                extra.enter_context(
+                    mock.patch.object(runner, "_launch_registry_lock", registry_lock)
+                )
             try:
                 runner.execute_tracked(
                     argv,
@@ -402,6 +435,7 @@ class RunnerWiringTests(unittest.TestCase):
                 )
             except Exception as exc:
                 events.append(f"raised {type(exc).__name__}: {exc}")
+        self.launch_kwargs = launch_kwargs
         return events
 
     def test_lock_is_taken_before_launch_and_released_after_the_lane(self):
@@ -409,13 +443,34 @@ class RunnerWiringTests(unittest.TestCase):
             events = self._attempt([sys.executable, "-c", "pass"], workspace)
         self.assertEqual(events[0], "acquire")
         self.assertEqual(events[1], "launch")
-        self.assertEqual(events[-1], "stop launched=True")
+        self.assertEqual(events[-1], "stop scope=yes launched=True")
 
     def test_a_failed_launch_still_releases_the_lock(self):
         with tempfile.TemporaryDirectory() as workspace:
             events = self._attempt([str(Path(workspace) / "no-such-binary")], workspace)
         self.assertEqual(events[0], "acquire")
-        self.assertIn("stop launched=False", events)
+        self.assertIn("stop scope=yes launched=False", events)
+
+    def test_a_lock_that_cannot_be_taken_launches_the_lane_unwrapped(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            events = self._attempt([sys.executable, "-c", "pass"], workspace, lock_ok=False)
+        self.assertEqual(events[:2], ["acquire", "launch"])
+        self.assertNotIn("lane_scope", self.launch_kwargs[0])
+        self.assertEqual(events[-1], "stop scope=none launched=True")
+
+    def test_a_failure_before_the_launch_still_releases_the_lock(self):
+        # Registry admission timing out used to sit outside the cleanup boundary.
+        @contextlib.contextmanager
+        def refused(*_a, **_k):
+            raise TimeoutError("registry busy")
+            yield  # pragma: no cover
+
+        with tempfile.TemporaryDirectory() as workspace:
+            events = self._attempt([sys.executable, "-c", "pass"], workspace, registry_lock=refused)
+        self.assertEqual(events[0], "acquire")
+        self.assertNotIn("launch", events)
+        self.assertIn("stop scope=yes launched=False", events)
+        self.assertTrue(any(e.startswith("raised TimeoutError") for e in events))
 
 
 if __name__ == "__main__":

@@ -4571,167 +4571,167 @@ def _run_single_tracked_attempt(
     boundary_exc: DelegateError | None = None
     # Probed outside the registry lock: one short systemctl call on Linux.
     lane_scope = lane_slice.plan(ctx.run_id, ctx.source_git_root or ctx.source_cwd)
-    # Held (shared) until stop() below, so no other slice user stops the slice
-    # while this lane starts; this process owns it, the lane never inherits it.
-    lane_slice.acquire(lane_scope)
-    # Admission, launch, and pid/pgid publication are one locked generation
-    # transition for both the primary attempt and retries. Cancel therefore
-    # observes either its marker blocking a retry or a complete live generation;
-    # there is no launched-but-unpublished child it can accidentally miss.
-    with _launch_registry_lock(ctx):
-        # Every attempt, the first included, re-reads the record immediately
-        # before Popen. A record another process already finished or marked
-        # for cancel (an operator cancel, or a workflow sealing a launch it
-        # judged dead) must never gain a child: the sealer relaunches the step
-        # and a second live child for one step would follow.
-        if _launch_refused(run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)):
-            lane_slice.stop(lane_scope, launched=False)
-            raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
-        if attempt_label is not None:
-            _append_attempt_delimiter(files.stderr_log, label=attempt_label)
-        # Work-mode policy kwargs ride only when the run has them, so a launch seam
-        # that predates them keeps its signature.
-        policy_launch: dict[str, object] = {}
-        if ctx.write_guard is not None:
-            policy_launch.update(
-                guard_settings=ctx.write_guard,
-                guard_record=guard_record,
-                guard_registry_root=ctx.registry_root,
-                guard_run_roots=guard_run_roots,
-            )
-        if ctx.forbid_commit:
-            policy_launch["forbid_commit"] = True
-        if lane_scope is not None:
-            policy_launch["lane_scope"] = lane_scope
-        try:
-            process = _launch_tracked_process(
-                argv,
-                cwd,
-                stdin_text=stdin_text,
-                env_overrides=env_overrides,
-                drop_env=(
-                    ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
-                ),
-                scratch_dir=scratch_dir,
-                temp_dir=files.temp_dir,
-                sandbox=ctx.sandbox,
-                engine=ctx.engine,
-                extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
-                run_path=files.run_path,
-                **policy_launch,
-            )
-        except OSError as exc:
-            launch_exc = exc
-        except DelegateError as exc:
-            # bwrap boundary construction or preflight refused the plan: the
-            # child never ran. Recorded below, outside the registry lock.
-            boundary_exc = exc
-        else:
-            try:
-                process_pgid = _process_group_for_process(process)
-                # start_new_session makes the child the group leader. Keep the
-                # launch pid as a last-resort record when an immediately
-                # exiting child has already made getpgid() return ESRCH.
-                if process_pgid is None:
-                    raise RunnerLaunchError(
-                        "missing_child_pid",
-                        "Child process did not expose a numeric pid for process-group tracking.",
-                    )
-                # Publication is a compare-and-set: it never replaces a record
-                # that turned terminal or cancel-requested after the admission
-                # read. Every sealer takes this lock, so this only fires for a
-                # writer that bypassed it; the child is killed by the handler
-                # below and the record is left exactly as that writer left it.
-                if _launch_refused(
-                    run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
-                ):
-                    raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
-                write_state(
-                    files.run_path,
-                    build_run_record(
-                        ctx,
-                        status="running",
-                        pid=process.pid,
-                        pgid=process_pgid,
-                    ),
-                )
-                manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id)
-                if isinstance(manifest, dict):
-                    manifest["pid"] = process.pid
-                    manifest["pgid"] = process_pgid
-                    manifest["processGroupTerminationGraceSec"] = grace_seconds
-                    if guard_record:
-                        manifest["writeGuard"] = dict(guard_record)
-                    write_manifest(files.run_path, manifest)
-                index = run_registry.load_index(ctx.registry_root)
-                runs = index.get("runs")
-                entry = runs.get(ctx.run_id) if isinstance(runs, dict) else None
-                if isinstance(entry, dict):
-                    entry["pid"] = process.pid
-                    entry["pgid"] = process_pgid
-                    run_registry.save_index(ctx.registry_root, index)
-            except BaseException:
-                _terminate_call_process(
-                    process,
-                    pgid=process_pgid,
-                    grace_seconds=grace_seconds,
-                    identity_ctx=ctx,
-                )
-                lane_slice.stop(lane_scope)
-                raise
-    if boundary_exc is not None or launch_exc is not None:
-        # The child never ran: no scope to stop, only the slice lock to drop.
-        lane_slice.stop(lane_scope, launched=False)
-    if boundary_exc is not None:
-        boundary_error = RunnerLaunchError(boundary_exc.error, boundary_exc.message)
-        _record_tracked_launch_failure(files, ctx, boundary_error, prior_capture=prior_capture)
-        raise boundary_error from boundary_exc
-    if launch_exc is not None:
-        exc = launch_exc
-        error = _runner_launch_error(argv, cwd, exc)
-        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
-        raise error from exc
-    guard_warning = guard_record.get("warning") if guard_record else None
-    if isinstance(guard_warning, str) and on_guard_warning is not None:
-        on_guard_warning(guard_warning)
-    assert process is not None
-    capture: TrackedCaptureResult | None = None
+    # Held (shared) until the finally below, so no other slice user stops the slice
+    # while this lane starts; this process owns it, the lane never inherits it. If the
+    # lock cannot be had the lane runs unwrapped (no scope), as when plan() is None.
+    if lane_scope is not None and not lane_slice.acquire(lane_scope):
+        lane_scope = None
     try:
-        capture = _capture_tracked_process(
-            process,
-            files,
-            ctx,
-            started=started,
-            stdin_text=stdin_text,
-            deadline=deadline,
-            progress_stderr=progress_stderr,
-            progress_initial_delay_sec=progress_initial_delay_sec,
-            progress_interval_sec=progress_interval_sec,
-            process_group_pgid=process_pgid,
-            process_group_grace_seconds=grace_seconds,
-        )
-    except RunnerLaunchError as error:
-        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
-        raise
+        # Admission, launch, and pid/pgid publication are one locked generation
+        # transition for both the primary attempt and retries. Cancel therefore
+        # observes either its marker blocking a retry or a complete live generation;
+        # there is no launched-but-unpublished child it can accidentally miss.
+        with _launch_registry_lock(ctx):
+            # Every attempt, the first included, re-reads the record immediately
+            # before Popen. A record another process already finished or marked
+            # for cancel (an operator cancel, or a workflow sealing a launch it
+            # judged dead) must never gain a child: the sealer relaunches the step
+            # and a second live child for one step would follow.
+            if _launch_refused(run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)):
+                raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
+            if attempt_label is not None:
+                _append_attempt_delimiter(files.stderr_log, label=attempt_label)
+            # Work-mode policy kwargs ride only when the run has them, so a launch seam
+            # that predates them keeps its signature.
+            policy_launch: dict[str, object] = {}
+            if ctx.write_guard is not None:
+                policy_launch.update(
+                    guard_settings=ctx.write_guard,
+                    guard_record=guard_record,
+                    guard_registry_root=ctx.registry_root,
+                    guard_run_roots=guard_run_roots,
+                )
+            if ctx.forbid_commit:
+                policy_launch["forbid_commit"] = True
+            if lane_scope is not None:
+                policy_launch["lane_scope"] = lane_scope
+            try:
+                process = _launch_tracked_process(
+                    argv,
+                    cwd,
+                    stdin_text=stdin_text,
+                    env_overrides=env_overrides,
+                    drop_env=(
+                        ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
+                    ),
+                    scratch_dir=scratch_dir,
+                    temp_dir=files.temp_dir,
+                    sandbox=ctx.sandbox,
+                    engine=ctx.engine,
+                    extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
+                    run_path=files.run_path,
+                    **policy_launch,
+                )
+            except OSError as exc:
+                launch_exc = exc
+            except DelegateError as exc:
+                # bwrap boundary construction or preflight refused the plan: the
+                # child never ran. Recorded below, outside the registry lock.
+                boundary_exc = exc
+            else:
+                try:
+                    process_pgid = _process_group_for_process(process)
+                    # start_new_session makes the child the group leader. Keep the
+                    # launch pid as a last-resort record when an immediately
+                    # exiting child has already made getpgid() return ESRCH.
+                    if process_pgid is None:
+                        raise RunnerLaunchError(
+                            "missing_child_pid",
+                            "Child process did not expose a numeric pid for process-group tracking.",
+                        )
+                    # Publication is a compare-and-set: it never replaces a record
+                    # that turned terminal or cancel-requested after the admission
+                    # read. Every sealer takes this lock, so this only fires for a
+                    # writer that bypassed it; the child is killed by the handler
+                    # below and the record is left exactly as that writer left it.
+                    if _launch_refused(
+                        run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+                    ):
+                        raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
+                    write_state(
+                        files.run_path,
+                        build_run_record(
+                            ctx,
+                            status="running",
+                            pid=process.pid,
+                            pgid=process_pgid,
+                        ),
+                    )
+                    manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id)
+                    if isinstance(manifest, dict):
+                        manifest["pid"] = process.pid
+                        manifest["pgid"] = process_pgid
+                        manifest["processGroupTerminationGraceSec"] = grace_seconds
+                        if guard_record:
+                            manifest["writeGuard"] = dict(guard_record)
+                        write_manifest(files.run_path, manifest)
+                    index = run_registry.load_index(ctx.registry_root)
+                    runs = index.get("runs")
+                    entry = runs.get(ctx.run_id) if isinstance(runs, dict) else None
+                    if isinstance(entry, dict):
+                        entry["pid"] = process.pid
+                        entry["pgid"] = process_pgid
+                        run_registry.save_index(ctx.registry_root, index)
+                except BaseException:
+                    _terminate_call_process(
+                        process,
+                        pgid=process_pgid,
+                        grace_seconds=grace_seconds,
+                        identity_ctx=ctx,
+                    )
+                    raise
+        if boundary_exc is not None:
+            boundary_error = RunnerLaunchError(boundary_exc.error, boundary_exc.message)
+            _record_tracked_launch_failure(files, ctx, boundary_error, prior_capture=prior_capture)
+            raise boundary_error from boundary_exc
+        if launch_exc is not None:
+            exc = launch_exc
+            error = _runner_launch_error(argv, cwd, exc)
+            _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
+            raise error from exc
+        guard_warning = guard_record.get("warning") if guard_record else None
+        if isinstance(guard_warning, str) and on_guard_warning is not None:
+            on_guard_warning(guard_warning)
+        assert process is not None
+        capture: TrackedCaptureResult | None = None
+        try:
+            capture = _capture_tracked_process(
+                process,
+                files,
+                ctx,
+                started=started,
+                stdin_text=stdin_text,
+                deadline=deadline,
+                progress_stderr=progress_stderr,
+                progress_initial_delay_sec=progress_initial_delay_sec,
+                progress_interval_sec=progress_interval_sec,
+                process_group_pgid=process_pgid,
+                process_group_grace_seconds=grace_seconds,
+            )
+        except RunnerLaunchError as error:
+            _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
+            raise
+        finally:
+            # Capture terminates timeout/stall/overflow paths while the leader is
+            # alive. This second, unconditional pass handles normal exits, failed
+            # exits, retries, and unexpected capture exceptions where grandchildren
+            # can remain in the recorded group after the leader was reaped.
+            group_exited = _terminate_call_process(
+                process,
+                pgid=process_pgid,
+                grace_seconds=grace_seconds,
+                identity_ctx=ctx,
+            )
+        if capture is None:  # pragma: no cover - the try block either returns or raises
+            raise AssertionError("tracked capture did not produce a result")
+        if not group_exited:
+            capture = replace(capture, process_group_survived=True)
+        return capture
     finally:
-        # Capture terminates timeout/stall/overflow paths while the leader is
-        # alive. This second, unconditional pass handles normal exits, failed
-        # exits, retries, and unexpected capture exceptions where grandchildren
-        # can remain in the recorded group after the leader was reaped.
-        group_exited = _terminate_call_process(
-            process,
-            pgid=process_pgid,
-            grace_seconds=grace_seconds,
-            identity_ctx=ctx,
-        )
-        # The scope holds anything that left the process group (a setsid
-        # daemon, a detached test runner); stopping it ends them too.
-        lane_slice.stop(lane_scope)
-    if capture is None:  # pragma: no cover - the try block either returns or raises
-        raise AssertionError("tracked capture did not produce a result")
-    if not group_exited:
-        capture = replace(capture, process_group_survived=True)
-    return capture
+        # Every exit, launched or not: stop the scope (if one started; it holds
+        # anything that left the process group, a setsid daemon or a detached
+        # test runner), then release the slice lock and stop the slice if this was its last user.
+        lane_slice.stop(lane_scope, launched=process is not None)
 
 
 def _merge_tracked_attempt_captures(

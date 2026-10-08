@@ -29,8 +29,10 @@ lane (it waits on it and stops its scope), the fd is close-on-exec and
 ``Popen(close_fds=True)`` so no lane command or daemon it spawns inherits it,
 and a runner that dies by SIGKILL drops the lock while the orphaned lane's
 scope still keeps the slice's cgroup non-empty, which the release check honours.
-Every step is fail-open: a lock or stop problem never fails the lane, and the
-only wait is the bounded :data:`_LOCK_WAIT_SEC` to take the shared lock.
+Every step is fail-open: a lock or stop problem never fails the lane. If the
+shared lock cannot be taken within :data:`_LOCK_WAIT_SEC`, the lane launches
+unwrapped (no scope, as when :func:`plan` is None) rather than unlocked in the
+slice, since a releaser could then stop the slice under a running scope.
 """
 
 from __future__ import annotations
@@ -63,9 +65,9 @@ BUS_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
 STOP_TIMEOUT_SEC = 5
 _PROBE_TIMEOUT_SEC = 5.0
 _STOP_WAIT_SEC = 15.0
-# Longest the lane waits to take the shared slice lock: only a releaser's
-# exclusive attempt, a few milliseconds, can hold it off.
-_LOCK_WAIT_SEC = 1.0
+# Longest the lane waits to take the shared slice lock: an exclusive holder
+# only holds it for one systemctl show plus stop.
+_LOCK_WAIT_SEC = 30.0
 LOCK_SUBDIR = "testrun"
 CGROUP_ROOT = "/sys/fs/cgroup"
 
@@ -212,7 +214,11 @@ def stop(scope: LaneScope | None, *, run: Runner = subprocess.run, launched: boo
 def lock_path(slice_name: str, environ: Mapping[str, str] | None = None) -> Path:
     """The shared lock file for ``slice_name``, the same path testrun uses."""
     env = os.environ if environ is None else environ
-    base = env.get("XDG_RUNTIME_DIR") or "/tmp"  # nosec B108 - testrun's own fallback.
+    # testrun's rule: XDG_RUNTIME_DIR, else /run/user/<uid> when it exists, else /tmp.
+    base = env.get("XDG_RUNTIME_DIR")
+    if not base:
+        user_run = Path(f"/run/user/{os.getuid()}")
+        base = str(user_run) if user_run.is_dir() else "/tmp"  # nosec B108 - testrun's fallback.
     return Path(base) / LOCK_SUBDIR / f"{slice_name}.lock"
 
 
@@ -221,15 +227,21 @@ def acquire(
     *,
     environ: Mapping[str, str] | None = None,
     wait_sec: float = _LOCK_WAIT_SEC,
-) -> None:
-    """Take the shared slice lock before the lane launches. Never raises.
+    log: Callable[[str], None] | None = None,
+) -> bool:
+    """Take the shared slice lock before the lane launches; True when held.
 
-    Fails open: if the lock cannot be taken within ``wait_sec`` the lane runs
-    unprotected, which at worst lets a concurrent releaser stop the slice
-    early; the cgroup-emptiness check still guards a launched scope.
+    Never raises. False means the lane must launch unwrapped, with no scope:
+    a lane started in the slice without the lock could have its slice stopped
+    by a releaser that sees an empty cgroup just before the scope appears
+    (``--job-mode=fail`` covers pending jobs, not a scope that already
+    started). One line says why. A None scope returns False (nothing to hold).
     """
-    if scope is None or fcntl is None or scope.lock.fd is not None:
-        return
+    if scope is None or fcntl is None:
+        return False
+    if scope.lock.fd is not None:
+        return True
+    say = log if log is not None else _log
     fd: int | None = None
     try:
         path = lock_path(scope.slice, environ)
@@ -244,13 +256,24 @@ def acquire(
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.02)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        return
+        with contextlib.suppress(Exception):
+            say(
+                f"delegate: slice lock for {scope.slice} unavailable ({exc!r}); "
+                "launching the lane without a cgroup scope"
+            )
+        return False
     scope.lock.fd = fd
     scope.lock.path = path
+    return True
+
+
+def _log(message: str) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        print(message, file=sys.stderr)
 
 
 def _slice_is_childless(
