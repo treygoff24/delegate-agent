@@ -1132,10 +1132,10 @@ def _reject_pi_family_flag_like_value(value: JsonValue, *, path: str, error: str
     _reject_opencode_flag_like_value(value, path=path, error=error)
     if not isinstance(value, str):
         return
-    if ":" in value:
+    if reasoning.has_pi_thinking_suffix(value):
         raise ConfigError(
             error,
-            f"{path} must not contain ':'; use the thinking field to set Pi reasoning effort.",
+            f"{path} must not end in ':<thinking level>'; use the thinking field to set Pi reasoning effort.",
         )
 
 

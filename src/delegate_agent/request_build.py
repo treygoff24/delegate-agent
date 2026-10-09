@@ -1312,10 +1312,10 @@ def _resolve_pi_family_alias(section: JsonObject, value: str) -> tuple[str, str 
 
 
 def _reject_pi_model_thinking_suffix(model: str | None) -> None:
-    if isinstance(model, str) and ":" in model:
+    if isinstance(model, str) and reasoning.has_pi_thinking_suffix(model):
         raise DelegateError(
             "invalid_model",
-            "model must not contain ':'; use the alias thinking field or --reasoning-effort.",
+            "model must not end in ':<thinking level>'; use the alias thinking field or --reasoning-effort.",
         )
 
 

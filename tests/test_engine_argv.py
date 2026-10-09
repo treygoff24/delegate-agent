@@ -3170,6 +3170,20 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "invalid_model")
         self.assertIn("thinking", ctx.exception.message)
 
+    def test_omp_raw_model_keeps_provider_colon_id(self):
+        request = self.build_git_request(
+            "omp",
+            "work",
+            None,
+            "/repo",
+            "answer",
+            delegate_config.embedded_default_config(),
+            dry_run=True,
+            model_override="inco/glm-5.3-flash:fast",
+        )
+        self.assertEqual(request.model, "inco/glm-5.3-flash:fast")
+        self.assertIn("inco/glm-5.3-flash:fast", request.argv)
+
     def test_pi_call_is_temp_cwd_no_session_and_read_only_when_requested(self):
         with (
             tempfile.TemporaryDirectory() as temp_cwd,

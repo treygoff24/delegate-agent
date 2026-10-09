@@ -315,6 +315,10 @@ class EngineModelsConfigTests(unittest.TestCase):
         }
         self.config_mod.validate_config(config)
 
+        # A colon in the provider's own id is not a thinking suffix.
+        config["omp"]["models"] = {"flash": "inco/glm-5.3-flash:fast"}
+        self.config_mod.validate_config(config)
+
         config["omp"]["models"] = {
             "quick": {"model": "openai-codex/gpt-5.6-sol:off", "thinking": "high"}
         }

@@ -90,6 +90,17 @@ OMP_NATIVE_EFFORTS = (*PI_NATIVE_EFFORTS, "auto")
 PI_THINKING_LEVELS = OMP_NATIVE_EFFORTS
 
 
+def has_pi_thinking_suffix(model: str) -> bool:
+    """True when ``model`` ends in ``:<thinking level>`` (Pi/OMP's inline effort form).
+
+    A colon that is part of a provider's own model id (Inco's
+    ``glm-5.3-flash:fast``) is not a thinking suffix: OMP keeps the whole id
+    when the tail is not a level, and delegate passes effort via --thinking.
+    """
+    head, sep, tail = model.rpartition(":")
+    return bool(sep and head) and tail in PI_THINKING_LEVELS
+
+
 def thinking_vocabulary_prose(efforts: tuple[str, ...]) -> str:
     """`a, b, or c` — a native `--thinking` vocabulary rendered for help prose.
 
