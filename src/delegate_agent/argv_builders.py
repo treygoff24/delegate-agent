@@ -111,6 +111,11 @@ CLAUDE_SAFE_ALLOWED_TOOLS = (
 # invocation, not of ambient config.
 OMP_WORK_APPROVAL = ("--approval-mode", "yolo")
 
+# omp defaults to cutting tool output at 768 columns. Every Delegate launch
+# raises that per-line limit to match Loom's read tool.
+_OMP_TOOL_OUTPUT_CONFIG = {"tools": {"outputMaxColumns": 8000}}
+OMP_CONFIG_OVERLAY = json.dumps(_OMP_TOOL_OUTPUT_CONFIG, separators=(",", ":"))
+
 # omp's own retry chain (`retry.fallbackChains`) moves a failing request to a
 # different model, often on a different provider and a metered key, and reports
 # it as an ordinary event. A pinned launch must not depend on noticing that after
@@ -120,7 +125,7 @@ OMP_WORK_APPROVAL = ("--approval-mode", "yolo")
 # same switch, closed for the same reason. The text is JSON, which omp's YAML
 # overlay loader reads as-is.
 OMP_NO_MODEL_FALLBACK_OVERLAY = json.dumps(
-    {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+    {**_OMP_TOOL_OUTPUT_CONFIG, "retry": {"modelFallback": False, "usageAwareFallback": False}},
     separators=(",", ":"),
 )
 
@@ -692,7 +697,7 @@ def _build_pi_family_argv(
         argv.extend(["--model", model])
     if thinking:
         argv.extend(["--thinking", thinking])
-    if no_model_fallback and engine == "omp":
+    if engine == "omp":
         argv.extend(["--config", OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER])
     # Both forks read the prompt from non-TTY stdin (omp 18.1.13 `src/main.ts`
     # reads piped input for every non-protocol mode, and `--mode json` is not a

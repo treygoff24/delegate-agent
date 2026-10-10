@@ -45,6 +45,7 @@ from delegate_agent import config as delegate_config
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     CLAUDE_WORK_OWNED_ENV,
+    OMP_CONFIG_OVERLAY,
     OMP_NO_MODEL_FALLBACK_OVERLAY,
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
@@ -3935,7 +3936,9 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
-        agent_config_text=OMP_NO_MODEL_FALLBACK_OVERLAY if no_model_fallback else None,
+        agent_config_text=OMP_NO_MODEL_FALLBACK_OVERLAY
+        if no_model_fallback
+        else OMP_CONFIG_OVERLAY,
         display_argv=omp_display_argv(argv),
         default_continuity_mode="pinned" if pinned_by_default else None,
         warnings=(

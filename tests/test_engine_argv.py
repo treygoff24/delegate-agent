@@ -2943,7 +2943,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertEqual(request.prompt_transport, transport_api.PROMPT_TRANSPORT_STDIN)
         self.assertIn("review task", request.stdin_text)
-        self.assertEqual(request.display_argv, request.argv)
+        self.assertEqual(request.display_argv, transport_api.omp_display_argv(request.argv))
         self.assertEqual(
             request.argv,
             [
@@ -2962,6 +2962,8 @@ class EngineArgvTests(CommandTestBase):
                 "--no-lsp",
                 "--approval-mode",
                 "always-ask",
+                "--config",
+                transport_api.OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER,
             ],
         )
         # --approval-mode always-ask is the load-bearing read-only enforcer: omp
@@ -2971,6 +2973,9 @@ class EngineArgvTests(CommandTestBase):
         # tests/test_omp_read_only_behavior.py is the gated behavioral backstop.
         self.assertIn("--approval-mode", request.argv)
         self.assertIn("always-ask", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
         for forbidden in (
             "bash",
             "edit",
@@ -3005,6 +3010,9 @@ class EngineArgvTests(CommandTestBase):
                     omp, mode, None, None, "/ws", call_read_only=read_only
                 )
                 self.assertEqual(argv[argv.index("--approval-mode") + 1], expected)
+                self.assertEqual(
+                    argv[-2:], ["--config", transport_api.OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER]
+                )
 
     def test_pi_write_capable_call_gets_no_omp_approval_flag(self):
         """The planted negative: --approval-mode is omp's flag, not pi's."""
@@ -3085,13 +3093,17 @@ class EngineArgvTests(CommandTestBase):
                 "openai-codex/gpt-5.6-sol",
                 "--thinking",
                 "xhigh",
+                "--config",
+                transport_api.OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER,
             ],
         )
         self.assertEqual(request.stdin_text, "implement")
         # An alias carries multi-subscription failover even though its target
         # names a provider, so it launches without the no-failover overlay.
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertIsNone(request.agent_config_text)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
         self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
