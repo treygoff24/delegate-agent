@@ -91,7 +91,10 @@ class OmpProviderPinRequestTests(CommandTestBase):
         self.assertEqual(request.argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
         self.assertEqual(
             json.loads(request.agent_config_text),
-            {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+            {
+                "tools": {"outputMaxColumns": 8000},
+                "retry": {"modelFallback": False, "usageAwareFallback": False},
+            },
         )
 
     def test_the_overlay_shows_as_a_named_placeholder_in_display_argv(self):
@@ -116,19 +119,24 @@ class OmpProviderPinRequestTests(CommandTestBase):
 
     def test_an_alias_with_a_provider_target_stays_fungible(self):
         # Every live alias points at a provider/model target, and aliases are how
-        # the fleet gets failover across subscriptions: no overlay, no refusal.
+        # the fleet gets failover across subscriptions: no retry overrides, no refusal.
         config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
         request = self._request("builder", config=config)
         self.assertEqual(request.model, "openai-codex/gpt-5.6-sol")
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
-        self.assertIsNone(request.agent_config_text)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_the_positional_alias_form_stays_fungible_too(self):
         config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
         request = self._request(None, config=config, alias="builder")
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_an_alias_key_wins_over_the_raw_id_reading(self):
         # A key of omp.models is an alias even when it looks like provider/model,
@@ -137,7 +145,10 @@ class OmpProviderPinRequestTests(CommandTestBase):
         request = self._request("opencode-go/glm-5.3", config=config)
         self.assertEqual(request.model, "fireworks/glm-5p3")
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_the_configured_default_model_stays_fungible(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
@@ -145,8 +156,10 @@ class OmpProviderPinRequestTests(CommandTestBase):
         request = self._request(None, config=config)
         self.assertEqual(request.model, "opencode-go/glm-5.3")
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
-        self.assertIsNone(request.agent_config_text)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_naming_pinned_on_an_alias_still_pins_it(self):
         config = _config_with_aliases(builder="openai-codex/gpt-5.6-sol")
@@ -168,9 +181,11 @@ class OmpProviderPinRequestTests(CommandTestBase):
             with self.subTest(mode=mode):
                 request = self._request("opencode-go/glm-5.3", continuity_mode=mode)
                 self.assertEqual(request.continuity_mode, mode)
-                self.assertNotIn("--config", request.argv)
-                self.assertIsNone(request.agent_config_text)
-                self.assertNotIn(prompt_transport.OMP_CONFIG_OVERLAY_DISPLAY, request.display_argv)
+                self.assertIn("--config", request.argv)
+                self.assertEqual(
+                    json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+                )
+                self.assertIn(prompt_transport.OMP_CONFIG_OVERLAY_DISPLAY, request.display_argv)
 
     def test_naming_pinned_switches_failover_off_even_for_a_bare_id(self):
         request = self._request(
@@ -183,18 +198,23 @@ class OmpProviderPinRequestTests(CommandTestBase):
 
     # -- no model, bare ids, and other engines keep their behavior ------------
 
-    def test_a_run_without_a_model_stays_fungible_and_carries_no_overlay(self):
+    def test_a_run_without_a_model_stays_fungible_with_output_overlay(self):
         request = self._request(None)
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
-        self.assertIsNone(request.agent_config_text)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_a_bare_catalog_id_keeps_the_fungible_default(self):
         # Exact bare ids resolve inside omp without naming a provider, so there is
         # no provider for Delegate to pin.
         request = self._request("glm-5.3", discovery=_catalog("opencode-go/glm-5.3"))
         self.assertEqual(request.continuity_mode, "fungible")
-        self.assertNotIn("--config", request.argv)
+        self.assertIn("--config", request.argv)
+        self.assertEqual(
+            json.loads(request.agent_config_text), {"tools": {"outputMaxColumns": 8000}}
+        )
 
     def test_other_engines_are_unaffected(self):
         for engine in ("pi", "cursor"):
@@ -309,7 +329,15 @@ class OmpProviderPinRequestTests(CommandTestBase):
                     ):
                         request = request_build.request_from_input_json(parsed, config)
                     self.assertEqual(request.continuity_mode, expected)
-                    self.assertEqual("--config" in request.argv, expected == "pinned")
+                    self.assertIn("--config", request.argv)
+                    overlay = json.loads(request.agent_config_text)
+                    self.assertEqual(overlay["tools"], {"outputMaxColumns": 8000})
+                    if expected == "pinned":
+                        self.assertEqual(
+                            overlay["retry"], {"modelFallback": False, "usageAwareFallback": False}
+                        )
+                    else:
+                        self.assertNotIn("retry", overlay)
 
 
 class OmpArgvOverlayTests(unittest.TestCase):
@@ -323,14 +351,16 @@ class OmpArgvOverlayTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_the_overlay_flag_is_only_present_when_asked_for(self):
-        self.assertNotIn("--config", self._argv())
-        self.assertNotIn("--config", self._argv(no_model_fallback=False))
-        argv = self._argv(no_model_fallback=True)
-        self.assertEqual(argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
+    def test_the_overlay_flag_is_always_present(self):
+        for kwargs in ({}, {"no_model_fallback": False}, {"no_model_fallback": True}):
+            with self.subTest(**kwargs):
+                argv = self._argv(**kwargs)
+                self.assertEqual(argv[-2:], ["--config", OVERLAY_PLACEHOLDER])
+                self.assertEqual(argv.count("--config"), 1)
 
     def test_the_overlay_disables_both_failover_paths(self):
         overlay = json.loads(argv_api.OMP_NO_MODEL_FALLBACK_OVERLAY)
+        self.assertEqual(overlay["tools"], {"outputMaxColumns": 8000})
         self.assertIs(overlay["retry"]["modelFallback"], False)
         self.assertIs(overlay["retry"]["usageAwareFallback"], False)
 
@@ -432,7 +462,10 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         # The child saw a real overlay file, not the placeholder.
         self.assertEqual(
             json.loads(launch["overlay"]),
-            {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+            {
+                "tools": {"outputMaxColumns": 8000},
+                "retry": {"modelFallback": False, "usageAwareFallback": False},
+            },
         )
         # And the run was refused because it was served by another provider anyway.
         self.assertNotEqual(code, 0, err)
@@ -459,8 +492,8 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0, err)
-        self.assertNotIn("--config", launch["argv"])
-        self.assertIsNone(launch["overlay"])
+        self.assertIn("--config", launch["argv"])
+        self.assertEqual(json.loads(launch["overlay"]), {"tools": {"outputMaxColumns": 8000}})
         payload = json.loads(out)
         self.assertEqual(payload["continuityMode"], "fungible")
         self.assertEqual(payload["servedProvider"], "fireworks")
@@ -483,7 +516,10 @@ class OmpPinnedLaunchTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(launch["overlay"]),
-            {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+            {
+                "tools": {"outputMaxColumns": 8000},
+                "retry": {"modelFallback": False, "usageAwareFallback": False},
+            },
         )
         self.assertNotEqual(code, 0, err)
         payload = json.loads(out)
@@ -496,7 +532,8 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0, err)
-        self.assertNotIn("--config", launch["argv"])
+        self.assertIn("--config", launch["argv"])
+        self.assertEqual(json.loads(launch["overlay"]), {"tools": {"outputMaxColumns": 8000}})
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "fireworks")
         self.assertEqual(payload["servedModel"], "glm-5p3")
@@ -548,7 +585,10 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         self.assertNotEqual(config_path, OVERLAY_PLACEHOLDER)
         self.assertEqual(
             json.loads(launch["overlay"]),
-            {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+            {
+                "tools": {"outputMaxColumns": 8000},
+                "retry": {"modelFallback": False, "usageAwareFallback": False},
+            },
         )
         payload = json.loads(out)
         self.assertEqual(payload["servedProvider"], "opencode-go")
@@ -569,8 +609,8 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0, err)
-        self.assertNotIn("--config", launch["argv"])
-        self.assertIsNone(launch["overlay"])
+        self.assertIn("--config", launch["argv"])
+        self.assertEqual(json.loads(launch["overlay"]), {"tools": {"outputMaxColumns": 8000}})
 
     def test_a_pinned_call_is_refused_when_another_provider_answers(self):
         # The overlay is the prevention; if a child exits 0 while its stream says
@@ -661,7 +701,8 @@ class OmpPinnedLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0, err)
-        self.assertNotIn("--config", launch["argv"])
+        self.assertIn("--config", launch["argv"])
+        self.assertEqual(json.loads(launch["overlay"]), {"tools": {"outputMaxColumns": 8000}})
         self.assertEqual(json.loads(out)["servedProvider"], "fireworks")
         self.assertIn("model_substitution", launch["report"])
         self.assertIn("fireworks/glm-5p3", launch["report"])
@@ -793,7 +834,10 @@ class CoordinatorRoundThreeTests(unittest.TestCase):
             config_path = Path(retry_argv[retry_argv.index("--config") + 1])
             self.assertEqual(
                 json.loads(config_path.read_text(encoding="utf-8")),
-                {"retry": {"modelFallback": False, "usageAwareFallback": False}},
+                {
+                    "tools": {"outputMaxColumns": 8000},
+                    "retry": {"modelFallback": False, "usageAwareFallback": False},
+                },
             )
             self.assertTrue(retry_stdin.startswith("the prompt"))
             self.assertNotEqual(retry_stdin, "the prompt")
