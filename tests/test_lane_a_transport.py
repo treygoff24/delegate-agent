@@ -97,7 +97,9 @@ class OmpStdinTransportTests(CommandTestBase):
         self.assertIn("review task", request.stdin_text)
         for token in request.argv:
             self.assertNotIn("review task", token)
-        self.assertEqual(request.display_argv, request.argv)
+        # Every omp launch carries a --config overlay; the display shows it by name.
+        self.assertEqual(request.display_argv, transport_api.omp_display_argv(request.argv))
+        self.assertIn(transport_api.OMP_CONFIG_OVERLAY_DISPLAY, request.display_argv)
         # The read-only lockdown is untouched by the transport move.
         self.assertIn("--approval-mode", request.argv)
         self.assertIn("always-ask", request.argv)
