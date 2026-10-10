@@ -761,26 +761,28 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
 - `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
+- Delegate launches every OMP run with a private `--config` overlay that sets
+  `tools.outputMaxColumns` to `8000`. The overlay beats your `config.yml`;
+  dry-run and full describe argv show it as `--config <omp config overlay>`.
 - A `provider/model-id` you type yourself (`--model`, input-JSON `model`, or a
   literal `agent(model=...)` in a workflow) is pinned by default: the run behaves
   as `--continuity-mode pinned`. A delegate alias (a key of `omp.models`) and
   `defaultModel` stay `fungible` even though their targets name a provider, so
   aliases keep multi-subscription failover; the run still records and warns
   about which provider answered, and `--continuity-mode pinned` on an alias pins
-  it. Delegate launches a pinned OMP run with a private `--config` overlay that sets
+  it. For pinned runs, the overlay also sets
   `retry.modelFallback` and `retry.usageAwareFallback` to `false`, so OMP's own
   retry chains (`retry.fallbackChains`) cannot move the run to another model or
-  provider. Retrying the same model is unaffected. The overlay beats your
-  `config.yml`; the dry-run argv shows it as `--config <omp config overlay>`.
+  provider. Retrying the same model is unaffected.
   If a different provider or model is served anyway, the run fails
   (`model_continuity_paused`) with a message naming what OMP tried to serve,
   for example `requested opencode-go/glm-5.3, but omp tried to serve
   fireworks/glm-5p3`.
 - Naming `--continuity-mode fungible` or `panel` is the opt-in to failover: the
-  overlay is not sent, OMP may fail over, and a served model that differs from
-  the request is recorded as a `model_substitution` warning that names the
-  served provider. A run with no model, or with a bare model ID, is `fungible`
-  unless you name a mode.
+  overlay omits the pinned-only retry settings, so OMP may fail over. A served
+  model that differs from the request is recorded as a `model_substitution`
+  warning that names the served provider. A run with no model, or with a bare
+  model ID, is `fungible` unless you name a mode.
 - Use the full `provider/model-id` selector, including the provider even when the
   model ID itself contains `/`. OMP reports provider and model separately;
   Delegate compares their exact combined identity. A slash-free bare model ID
