@@ -65,6 +65,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
     devin_display_argv,
+    omp_display_argv,
     prompt_file_display_argv,
 )
 from delegate_agent.sandbox_bwrap import SAFE_BACKEND_ENV, bwrap_available
@@ -873,7 +874,7 @@ def _pi_family_describe_argv(
         model=model,
     )
     if engine == "omp":
-        return build_omp_argv(section, mode, model, thinking, workspace)
+        return omp_display_argv(build_omp_argv(section, mode, model, thinking, workspace))
     return build_pi_argv(section, mode, model, thinking)
 
 
@@ -1370,12 +1371,14 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses omp -p --mode json --no-session --cwd <workspace> with prompt delivered on stdin.",
+                    "Delegate passes a private --config overlay setting tools.outputMaxColumns to 8000; pinned runs also disable retry.modelFallback and retry.usageAwareFallback.",
                     "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
                     "Oh My Pi 18.1.13 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
                 ],
                 "work": omp_work_argv,
                 "workNotes": [
                     "All modes use --no-session; Delegate run tracking is the durable record.",
+                    "Delegate passes a private --config overlay setting tools.outputMaxColumns to 8000; pinned runs also disable retry.modelFallback and retry.usageAwareFallback.",
                     "Reasoning effort maps directly to omp --thinking "
                     f"({', '.join(reasoning.OMP_NATIVE_EFFORTS)}).",
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",

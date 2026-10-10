@@ -2502,6 +2502,15 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(payload["promptTransports"]["cursor"], "stdin")
         omp_safe = payload["modeMapping"]["omp"]["safe"]
         omp_work = payload["modeMapping"]["omp"]["work"]
+        for mode in ("safe", "work"):
+            with self.subTest(mode=mode):
+                argv = payload["modeMapping"]["omp"][mode]
+                self.assertEqual(argv[argv.index("--config") + 1], "<omp config overlay>")
+                self.assertNotIn(transport_api.OMP_CONFIG_OVERLAY_ARG_PLACEHOLDER, argv)
+                self.assertIn(
+                    "tools.outputMaxColumns to 8000",
+                    " ".join(payload["modeMapping"]["omp"][mode + "Notes"]),
+                )
         self.assertEqual(omp_safe[omp_safe.index("--tools") + 1], "read")
         self.assertIn("--no-rules", omp_safe)
         self.assertIn("--no-lsp", omp_safe)
