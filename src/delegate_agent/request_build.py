@@ -2600,7 +2600,8 @@ def request_from_input_json(
     )
 
 
-_MCP_SERVER_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _parse_mcp_servers(value: object) -> list[JsonObject]:
@@ -2611,6 +2612,7 @@ def _parse_mcp_servers(value: object) -> list[JsonObject]:
         raise DelegateError("invalid_mcp_servers", "mcpServers must be a list of objects.")
     servers: list[JsonObject] = []
     seen: set[str] = set()
+    env_seen: dict[str, str] = {}
     for entry in value:
         if not isinstance(entry, dict) or set(entry) - {"name", "command", "args", "env"}:
             raise DelegateError(
@@ -2621,7 +2623,7 @@ def _parse_mcp_servers(value: object) -> list[JsonObject]:
         command = entry.get("command")
         args = entry.get("args", [])
         env = entry.get("env", {})
-        if not isinstance(name, str) or not _MCP_SERVER_NAME.match(name) or name in seen:
+        if not isinstance(name, str) or not _MCP_SERVER_NAME.fullmatch(name) or name in seen:
             raise DelegateError(
                 "invalid_mcp_servers",
                 "mcpServers name must be a unique string of letters, digits, '_' or '-'.",
@@ -2638,44 +2640,87 @@ def _parse_mcp_servers(value: object) -> list[JsonObject]:
             raise DelegateError(
                 "invalid_mcp_servers", "mcpServers env must map strings to strings."
             )
+        for key, val in env.items():
+            if not _ENV_NAME.fullmatch(key):
+                raise DelegateError(
+                    "invalid_mcp_servers",
+                    f"mcpServers env name {key!r} must be letters, digits and '_', "
+                    "not starting with a digit.",
+                )
+            if env_seen.get(key, val) != val:
+                raise DelegateError(
+                    "invalid_mcp_servers",
+                    f"mcpServers env {key} has different values in two servers; "
+                    "values pass through the Run's environment, so they must agree.",
+                )
+            env_seen[key] = val
         seen.add(name)
         servers.append({"name": name, "command": command, "args": args, "env": env})
     return servers
 
 
 def _toml_string(value: str) -> str:
-    # A JSON string with ASCII escapes is a valid TOML basic string.
-    return json.dumps(value, ensure_ascii=True)
+    """Encode a TOML basic string (TOML escapes are \\uXXXX or \\UXXXXXXXX, never surrogates)."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04x}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise DelegateError(
+                "invalid_mcp_servers", "mcpServers strings must not contain lone surrogates."
+            )
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
 
 
 def _apply_mcp_servers(request: Request, servers: list[JsonObject]) -> Request:
     """Mount per-Run MCP servers where the engine CLI supports per-invocation config.
 
-    Codex takes ``-c mcp_servers.<name>.*`` overrides before ``exec``. Other
-    engines have no per-invocation MCP flag; the Run carries a warning instead
-    of dropping the field silently.
+    Codex takes global ``-c mcp_servers.<name>.*`` overrides, placed right after
+    the executable so no subcommand search is needed. Env values never go into
+    argv (readable via /proc/<pid>/cmdline): they go into the Run's environment
+    and the server config names them in its ``env_vars`` allowlist, which Codex
+    forwards to the server. Other engines have no per-invocation MCP flag; the
+    Run carries a warning instead of dropping the field silently.
     """
     if not servers:
         return request
     names = ", ".join(str(server["name"]) for server in servers)
-    if request.engine != "codex" or "exec" not in request.argv:
+    if request.engine != "codex" or not request.argv:
         warning = (
             f"mcpServers not mounted ({names}): {request.engine} has no per-Run MCP "
             "config in Delegate; the Run proceeds without them."
         )
         return replace(request, warnings=_dedupe_warnings((*request.warnings, warning)))
     overrides: list[str] = []
+    env_overrides = dict(request.env_overrides or {})
     for server in servers:
         prefix = f"mcp_servers.{server['name']}"
         args = ", ".join(_toml_string(a) for a in server["args"])
-        env = ", ".join(f"{_toml_string(k)} = {_toml_string(v)}" for k, v in server["env"].items())
         overrides.extend(["-c", f"{prefix}.command={_toml_string(str(server['command']))}"])
         overrides.extend(["-c", f"{prefix}.args=[{args}]"])
         if server["env"]:
-            overrides.extend(["-c", f"{prefix}.env={{{env}}}"])
-    index = request.argv.index("exec")
-    argv = [*request.argv[:index], *overrides, *request.argv[index:]]
-    return replace(request, argv=argv)
+            keys = ", ".join(_toml_string(k) for k in server["env"])
+            overrides.extend(["-c", f"{prefix}.env_vars=[{keys}]"])
+            env_overrides.update(server["env"])
+    # Overrides carry names, commands, args and env names only, so they are safe to display.
+    argv = [request.argv[0], *overrides, *request.argv[1:]]
+    display_argv = None
+    if request.display_argv is not None:
+        display_argv = [request.display_argv[0], *overrides, *request.display_argv[1:]]
+    return replace(
+        request,
+        argv=argv,
+        display_argv=display_argv,
+        env_overrides=env_overrides or request.env_overrides,
+    )
 
 
 def _structured_retry_launch(
