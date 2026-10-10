@@ -95,6 +95,15 @@ STALL_SECONDS_DEFAULT = stall_watchdog.stall_seconds_from_minutes(
 STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
 NO_PAGE_ASK_ENV = "DELEGATE_CHILD_NO_PAGE_ASK"
 NO_PAGE_ASK_DIRNAME = "no-page-bin"
+NON_INTERACTIVE_ENV: dict[str, str] = {
+    "GIT_EDITOR": "true",
+    "GIT_SEQUENCE_EDITOR": "true",
+    "EDITOR": "true",
+    "VISUAL": "true",
+    "GIT_TERMINAL_PROMPT": "0",
+    "PAGER": "cat",
+    "GIT_PAGER": "cat",
+}
 # Exit 2 is ask's own "relay down" code, so a caller that handles an
 # unreachable human already does the right thing with the stub.
 NO_PAGE_ASK_EXIT = 2
@@ -2781,6 +2790,9 @@ def _launch_tracked_process(
     )
     for key in drop_env:
         env.pop(key, None)
+    # A Run's stdin is closed: an editor, pager or credential prompt would hang
+    # it. Forced for every engine, over profile and ambient values.
+    env.update(NON_INTERACTIVE_ENV)
     _install_no_page_ask(env, temp_dir or scratch_dir or run_path)
     hooks_root = run_path or temp_dir or scratch_dir
     if forbid_commit and hooks_root is not None:
@@ -6289,6 +6301,7 @@ def _execute_call_once(
         output_schema_path=output_schema_path,
     )
     env = profiles.child_environment(overrides=env_overrides, pure=pure)
+    env.update(NON_INTERACTIVE_ENV)
     started = time.monotonic()
     seatbelt_profile_path: str | None = None
     ephemeral_codex_home: str | None = None
@@ -6703,6 +6716,7 @@ def execute_passthrough(
         agent_config_placeholder=agent_config_placeholder,
     )
     env = profiles.child_environment(overrides=env_overrides)
+    env.update(NON_INTERACTIVE_ENV)
     process: subprocess.Popen[str] | None = None
     process_pgid: int | None = None
     try:

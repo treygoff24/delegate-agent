@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import select
 import shutil
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
@@ -118,6 +119,7 @@ from delegate_agent.request_models import (
 
 RUN_INPUT_KEYS = {
     "engine",
+    "mcpServers",
     "mode",
     "model",
     "cwd",
@@ -2544,6 +2546,7 @@ def request_from_input_json(
         structured_retry_run_id=raw_structured_retry_run_id,
         structured_retry_backend=raw_structured_retry_backend,
     )
+    mcp_servers = _parse_mcp_servers(raw.get("mcpServers"))
     if mode == MODE_CALL:
         if json_persona is not None:
             error = "persona_read_only_call_refused" if raw_read_only else "persona_call_refused"
@@ -2555,7 +2558,9 @@ def request_from_input_json(
             raw_forbid_commit=raw_forbid_commit,
             raw_include_dirty=raw_include_dirty,
         )
-        return _build_normalized_launch(spec, config, stderr=stderr)
+        return _apply_mcp_servers(
+            _build_normalized_launch(spec, config, stderr=stderr), mcp_servers
+        )
 
     # Preserve JSON-specific absence/null semantics before common planning.
     json_cwd = raw.get("cwd")
@@ -2580,15 +2585,141 @@ def request_from_input_json(
             json_isolation=json_isolation,
         )
     workspace = workspace or resolve_workspace(global_options.cwd, json_cwd)
-    return _build_normalized_launch(
-        replace(
-            spec,
-            workspace=workspace,
-            json_isolation=json_isolation,
-            forbid_commit_note=forbid_commit_note,
+    return _apply_mcp_servers(
+        _build_normalized_launch(
+            replace(
+                spec,
+                workspace=workspace,
+                json_isolation=json_isolation,
+                forbid_commit_note=forbid_commit_note,
+            ),
+            config,
+            stderr=stderr,
         ),
-        config,
-        stderr=stderr,
+        mcp_servers,
+    )
+
+
+_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _parse_mcp_servers(value: object) -> list[JsonObject]:
+    """Validate input JSON ``mcpServers``: a list of {name, command, args?, env?}."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise DelegateError("invalid_mcp_servers", "mcpServers must be a list of objects.")
+    servers: list[JsonObject] = []
+    seen: set[str] = set()
+    env_seen: dict[str, str] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) - {"name", "command", "args", "env"}:
+            raise DelegateError(
+                "invalid_mcp_servers",
+                "each mcpServers entry must be an object with name, command, args, env.",
+            )
+        name = entry.get("name")
+        command = entry.get("command")
+        args = entry.get("args", [])
+        env = entry.get("env", {})
+        if not isinstance(name, str) or not _MCP_SERVER_NAME.fullmatch(name) or name in seen:
+            raise DelegateError(
+                "invalid_mcp_servers",
+                "mcpServers name must be a unique string of letters, digits, '_' or '-'.",
+            )
+        if not isinstance(command, str) or not command:
+            raise DelegateError(
+                "invalid_mcp_servers", "mcpServers command must be a non-empty string."
+            )
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise DelegateError("invalid_mcp_servers", "mcpServers args must be a list of strings.")
+        if not isinstance(env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+        ):
+            raise DelegateError(
+                "invalid_mcp_servers", "mcpServers env must map strings to strings."
+            )
+        for key, val in env.items():
+            if not _ENV_NAME.fullmatch(key):
+                raise DelegateError(
+                    "invalid_mcp_servers",
+                    f"mcpServers env name {key!r} must be letters, digits and '_', "
+                    "not starting with a digit.",
+                )
+            if env_seen.get(key, val) != val:
+                raise DelegateError(
+                    "invalid_mcp_servers",
+                    f"mcpServers env {key} has different values in two servers; "
+                    "values pass through the Run's environment, so they must agree.",
+                )
+            env_seen[key] = val
+        seen.add(name)
+        servers.append({"name": name, "command": command, "args": args, "env": env})
+    return servers
+
+
+def _toml_string(value: str) -> str:
+    """Encode a TOML basic string (TOML escapes are \\uXXXX or \\UXXXXXXXX, never surrogates)."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04x}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise DelegateError(
+                "invalid_mcp_servers", "mcpServers strings must not contain lone surrogates."
+            )
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _apply_mcp_servers(request: Request, servers: list[JsonObject]) -> Request:
+    """Mount per-Run MCP servers where the engine CLI supports per-invocation config.
+
+    Codex takes global ``-c mcp_servers.<name>.*`` overrides, placed right after
+    the executable so no subcommand search is needed. Env values never go into
+    argv (readable via /proc/<pid>/cmdline): they go into the Run's environment
+    and the server config names them in its ``env_vars`` allowlist, which Codex
+    forwards to the server. Other engines have no per-invocation MCP flag; the
+    Run carries a warning instead of dropping the field silently.
+    """
+    if not servers:
+        return request
+    names = ", ".join(str(server["name"]) for server in servers)
+    if request.engine != "codex" or not request.argv:
+        warning = (
+            f"mcpServers not mounted ({names}): {request.engine} has no per-Run MCP "
+            "config in Delegate; the Run proceeds without them."
+        )
+        return replace(request, warnings=_dedupe_warnings((*request.warnings, warning)))
+    overrides: list[str] = []
+    env_overrides = dict(request.env_overrides or {})
+    for server in servers:
+        prefix = f"mcp_servers.{server['name']}"
+        args = ", ".join(_toml_string(a) for a in server["args"])
+        overrides.extend(["-c", f"{prefix}.command={_toml_string(str(server['command']))}"])
+        overrides.extend(["-c", f"{prefix}.args=[{args}]"])
+        if server["env"]:
+            keys = ", ".join(_toml_string(k) for k in server["env"])
+            overrides.extend(["-c", f"{prefix}.env_vars=[{keys}]"])
+            env_overrides.update(server["env"])
+    # Overrides carry names, commands, args and env names only, so they are safe to display.
+    argv = [request.argv[0], *overrides, *request.argv[1:]]
+    display_argv = None
+    if request.display_argv is not None:
+        display_argv = [request.display_argv[0], *overrides, *request.display_argv[1:]]
+    return replace(
+        request,
+        argv=argv,
+        display_argv=display_argv,
+        env_overrides=env_overrides or request.env_overrides,
     )
 
 

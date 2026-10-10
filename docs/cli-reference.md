@@ -1187,7 +1187,13 @@ Supported input keys:
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
 - `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `base`, `env`, `setup`: optional workspace spec for `mode: "work"` with `isolation: "worktree"`, the same as `--base`, `--env`, and `--setup`. `env` is an object of names to strings. See [Workspace spec](worktrees.md#workspace-spec-base-env-setup).
+- `mcpServers`: optional list of extra MCP servers mounted for this run only: `[{"name": "report", "command": "/path/to/server", "args": ["--stdio"], "env": {"KEY": "value"}}]`. `name` is letters, digits, `_` or `-` and unique; `args` and `env` are optional. Codex receives them as global `-c mcp_servers.<name>.command/args/env_vars` overrides right after the executable; these show in dry-run and manifest argv. `env` values never go into process arguments: they are set in the run's environment and listed by name in the server's `env_vars` allowlist. Env names must be valid variable names, and a name given in two servers must have the same value. Other engines have no per-invocation MCP config: the run proceeds without them and its result carries a `mcpServers not mounted` warning.
 - `prompt`: required task prompt.
+
+Every engine process runs non-interactively: Delegate sets `GIT_EDITOR`,
+`GIT_SEQUENCE_EDITOR`, `EDITOR` and `VISUAL` to `true`, `GIT_TERMINAL_PROMPT=0`,
+and `PAGER`/`GIT_PAGER` to `cat`, over profile and ambient values, so a
+`git commit` without `-m` or a pager cannot hang a run whose stdin is closed.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config
 overlay in `codex.profile` instead. That is separate from the top-level
