@@ -906,7 +906,13 @@ Embedded defaults:
 bubblewrap): eligible non-Cursor safe runs on Git workspaces then run zero-copy
 inside a bubblewrap boundary. The real workspace is read-only-bound, gitignored
 paths are hidden by parity masks, `$HOME` and `/tmp` are private tmpfs, and the
-workspace `.delegate/` registry is masked. `DELEGATE_SAFE_BACKEND` overrides
+workspace `.delegate/` registry is masked. Ignored dependency directories
+(`node_modules`, `.pnpm-store`, `.venv`, `venv`, `.tox`, `.nox`, `__pycache__`,
+`target`, `vendor`, at any depth) stay visible read-only so a safe reviewer can
+run the project's checks; secret-shaped ignored files stay masked, and
+`"maskDependencyDirs": true` masks dependency directories too (for a
+repository whose ignored dependency directories could hold secrets). The copy
+backend never contains ignored paths, dependency directories included. `DELEGATE_SAFE_BACKEND` overrides
 the key; an invalid value on either channel fails closed. `bwrapBinds` lists extra host
 paths (`{"path", "mode": "ro"|"rw"}`, tilde-expanded) the engine launch needs
 inside the boundary (absolute after `~` expansion); a missing path fails the
