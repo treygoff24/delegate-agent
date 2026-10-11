@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess  # nosec B404 - fixed ps argv for a process start time, shell=False.
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -97,6 +99,73 @@ def process_alive(pid: int | None) -> bool | None:
     return True
 
 
+def process_start_token(pid: int) -> str | None:
+    """A token naming one process for its lifetime: its start time.
+
+    Two live processes with the same pid never share a start time, so a pid
+    reused after the original exited does not match the token recorded for it.
+    Linux reads ``/proc/<pid>/stat`` (start time in clock ticks since boot);
+    elsewhere ``ps -o lstart=`` is asked. None when neither answers.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        raw = None
+    if raw is not None:
+        # Fields after the parenthesised command name start at field 3 (state);
+        # starttime is field 22.
+        fields = raw.rsplit(b")", 1)[-1].split()
+        return f"proc:{fields[19].decode('ascii', 'replace')}" if len(fields) > 19 else None
+    if sys.platform.startswith("linux"):
+        return None
+    try:
+        completed = subprocess.run(  # nosec B603 - fixed ps argv, shell=False.
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    started = completed.stdout.strip()
+    return f"ps:{started}" if completed.returncode == 0 and started else None
+
+
+_SELF_START_TOKEN: tuple[int, str | None] | None = None
+
+
+def self_start_token() -> str | None:
+    """``process_start_token`` of this process, read once per pid."""
+    global _SELF_START_TOKEN
+    pid = os.getpid()
+    if _SELF_START_TOKEN is None or _SELF_START_TOKEN[0] != pid:
+        _SELF_START_TOKEN = (pid, process_start_token(pid))
+    return _SELF_START_TOKEN[1]
+
+
+def supervisor_alive(state: JsonObject | None) -> bool:
+    """Whether the Delegate process supervising a running record is still alive.
+
+    A running record names its child's pid, and that child exits before the
+    supervisor writes the completion report and the terminal record. Between
+    the two, a reader that judged the run by the child alone saw it ``stale``
+    (an ended status) with no report yet. The supervisor counts as alive only
+    when its recorded start token matches the live process, so a reused pid
+    never keeps a dead run looking alive.
+    """
+    if not state:
+        return False
+    pid = state.get("supervisorPid")
+    token = state.get("supervisorStart")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1 or not isinstance(token, str):
+        return False
+    if process_alive(pid) is not True:
+        return False
+    return process_start_token(pid) == token
+
+
 def effective_status(state: JsonObject | None) -> str:
     return status_fields(state)["effectiveStatus"]
 
@@ -122,6 +191,10 @@ def status_fields(state: JsonObject | None) -> JsonObject:
             effective, reason = STATUS_STALE, "missing_pid"
         elif process_alive(pid) is False:
             effective, reason = STATUS_STALE, "dead_pid"
+        if effective == STATUS_STALE and supervisor_alive(state):
+            # The child is gone but its supervisor is still finalizing (or
+            # launching the next attempt): the run has not ended.
+            effective, reason = raw, None
     fields: JsonObject = {
         "rawStatus": raw,
         "effectiveStatus": effective,
