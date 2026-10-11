@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **bwrap safe runs can see dependency directories.** Ignored `node_modules`,
+  `.pnpm-store`, `.venv`, `venv`, `.tox`, `.nox`, `__pycache__`, `target` and
+  `vendor` directories are no longer masked, so a safe reviewer can run the
+  project's checks; they stay read-only through the workspace bind.
+  Secret-shaped ignored files stay masked, and
+  `isolation.maskDependencyDirs: true` restores full masking. The copy backend
+  is unchanged.
+
+### Fixed
+- **A run no longer reads `stale` while Delegate finalizes it.** A running
+  record now names its supervising Delegate process (`supervisorPid`,
+  `supervisorStart`). Between the child's exit and the completion report,
+  `snapshot`, `runs` and `wait` used to report the run `stale`, an ended
+  status with no report yet. They now keep it `running` while that process is
+  alive. A reused pid does not count, because its start time differs.
+
 ## [0.32.0] - 2026-10-01
 
 This release adds controls for launching and managing agents and resuming

@@ -48,6 +48,7 @@ from delegate_agent import (
     run_metadata,
     run_registry,
     run_scratch,
+    run_status,
     sandbox_bwrap,
     seatbelt,
     stall_watchdog,
@@ -950,6 +951,11 @@ def build_run_record(
     }
     if status == run_registry.STATUS_RUNNING and ctx.deadline_at is not None:
         record["deadlineAt"] = ctx.deadline_at
+    if status == run_registry.STATUS_RUNNING:
+        # This process writes the report and the terminal record after the child
+        # exits; naming it keeps readers from taking that window for the end.
+        record["supervisorPid"] = os.getpid()
+        record["supervisorStart"] = run_status.self_start_token()
     record.update(_served_envelope_fields(record["modelProvenance"]))
     warnings = list(ctx.warnings)
     if (

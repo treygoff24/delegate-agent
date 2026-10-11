@@ -395,7 +395,17 @@ the same tree shape a copy would), `$HOME` and `/tmp` are private tmpfs, the
 workspace `.delegate/` registry is masked (prior runs' prompts, logs and
 manifests are invisible) with only the current run's neutral scratch rw-bound,
 and only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
-is writable. System roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
+is writable. Ignored dependency directories are the one exception to the
+masks: a directory named `node_modules`, `.pnpm-store`, `.venv`, `venv`,
+`.tox`, `.nox`, `__pycache__`, `target` or `vendor` (at any depth) is left
+unmasked, so it is visible read-only through the workspace bind and a safe
+reviewer can run the project's own checks (tsc, vitest, pytest, cargo check).
+Secret-shaped ignored files (`.env*`, `*.pem`, `*.key`, credential and secret
+names, `.npmrc`, `.netrc`, `.pypirc`) stay masked, and every other ignored path
+is masked as before. The contents of a wholly ignored dependency directory are
+exposed as a unit; for a repository whose dependency directories could hold
+secrets, `isolation.maskDependencyDirs: true` restores full masking. System
+roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
 `~/.bun`, the engine's dot-directory, the engine executable itself, a
 linked worktree's common git dir, and any configured `isolation.bwrapBinds`
 are bound read-only (or rw where declared). `/proc` is the host's (fresh proc

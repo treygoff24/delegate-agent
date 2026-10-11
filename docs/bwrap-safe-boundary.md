@@ -4,7 +4,10 @@ The agent-facing summary of the experimental `isolation.safeBackend` / `DELEGATE
 
 - Safe mode optionally runs zero-copy on Linux behind an experimental bubblewrap
   backend (`isolation.safeBackend` / `DELEGATE_SAFE_BACKEND=bwrap`): the workspace
-  is read-only-bound with gitignore-parity masks, and every fail-closed condition
+  is read-only-bound with gitignore-parity masks (ignored dependency
+  directories such as `node_modules` and `.venv` stay visible read-only unless
+  `isolation.maskDependencyDirs` is true; secret-shaped files stay masked),
+  and every fail-closed condition
   (bubblewrap unavailable, a leaking untracked symlink, mask overflow, a missing
   or workspace-intersecting `isolation.bwrapBinds` entry, an initialized submodule)
   aborts the run instead of falling back to the copy backend. Inside the

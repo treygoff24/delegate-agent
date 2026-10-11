@@ -1084,13 +1084,18 @@ def describe_payload(
             "configKeys": {
                 "config": "isolation.safeBackend",
                 "binds": "isolation.bwrapBinds",
+                "maskDependencyDirs": "isolation.maskDependencyDirs",
                 "env": SAFE_BACKEND_ENV,
                 "note": (
                     "DELEGATE_SAFE_BACKEND overrides isolation.safeBackend; an invalid "
                     "value on either channel fails closed. bwrap applies to non-cursor "
                     "safe runs on Git workspaces with effective worktree isolation "
                     "(experimental): the real workspace is read-only-bound and gitignored "
-                    "paths are hidden with gitignore-parity masks. It fails closed when "
+                    "paths are hidden with gitignore-parity masks, except ignored "
+                    "dependency directories (node_modules, .pnpm-store, .venv, venv, .tox, "
+                    ".nox, __pycache__, target, vendor), which stay visible read-only so "
+                    "the project's checks can run; isolation.maskDependencyDirs: true "
+                    "masks them too. It fails closed when "
                     "bubblewrap is unavailable, an untracked symlink would leak host "
                     "paths, or masks exceed the 2000-entry overflow limit; Cursor safe "
                     "always uses the copy backend. isolation.bwrapBinds declares extra "

@@ -517,6 +517,11 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
                     f"isolation.bwrapBinds[{index}] must be an object with a non-empty "
                     f"string path and mode one of: {', '.join(VALID_BWRAP_BIND_MODES)}.",
                 )
+    if "maskDependencyDirs" in isolation and not isinstance(isolation["maskDependencyDirs"], bool):
+        raise ConfigError(
+            "invalid_isolation_config",
+            "isolation.maskDependencyDirs must be true or false.",
+        )
     if "writeGuard" in isolation:
         problem = write_guard.validate_config_section(isolation["writeGuard"])
         if problem is not None:

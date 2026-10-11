@@ -20,6 +20,7 @@ rw-bound on top of it.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import subprocess  # nosec B404 - Delegate launches a fixed bwrap probe argv with shell=False.
@@ -334,7 +335,66 @@ def bwrap_available(bwrap_path: str | None = None) -> bool:
         return False
 
 
-def parity_masks(git_root: str) -> tuple[Mask, ...]:
+# Ignored directories a package manager or build tool populates. A safe review
+# needs them to run the project's own checks (tsc, vitest, pytest, cargo
+# check), so by default they are left unmasked: the workspace ro-bind already
+# shows them read-only. ``isolation.maskDependencyDirs: true`` masks them again
+# for a repository whose ignored dependency directories could hold secrets.
+DEPENDENCY_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        ".pnpm-store",
+        ".venv",
+        "venv",
+        ".tox",
+        ".nox",
+        "__pycache__",
+        "target",
+        "vendor",
+    }
+)
+
+# Secret-shaped file names stay masked even below a visible dependency
+# directory (only reachable when the directory itself is not wholly ignored,
+# since ``--directory`` collapses a wholly ignored directory to one entry).
+_SECRET_NAME_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "id_ed25519*",
+    "*credential*",
+    "*secret*",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+)
+
+
+def mask_dependency_dirs_requested(config: Mapping[str, object] | None) -> bool:
+    """Whether ``isolation.maskDependencyDirs`` asks for full gitignore masking."""
+    isolation = config.get("isolation") if config is not None else None
+    return isinstance(isolation, Mapping) and isolation.get("maskDependencyDirs") is True
+
+
+def _secret_shaped(name: str) -> bool:
+    lowered = name.lower()
+    return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in _SECRET_NAME_PATTERNS)
+
+
+def _dependency_entry(relative: str, *, is_dir: bool) -> bool:
+    """True when an ignored entry is (or lies inside) a dependency directory."""
+    parts = relative.split("/")
+    dir_parts = parts if is_dir else parts[:-1]
+    if not any(part in DEPENDENCY_DIR_NAMES for part in dir_parts):
+        return False
+    return is_dir or not _secret_shaped(parts[-1])
+
+
+def parity_masks(git_root: str, *, mask_dependency_dirs: bool = False) -> tuple[Mask, ...]:
     """Return parity masks hiding gitignored paths for a zero-copy safe run.
 
     Uses ``git ls-files -o -i --exclude-standard --directory -z`` from the
@@ -345,6 +405,11 @@ def parity_masks(git_root: str) -> tuple[Mask, ...]:
     (prior runs' prompts, logs and manifests must stay invisible). Current-run
     scratch is mounted from a neutral path outside the workspace. Non-git
     workspaces have no masks by construction (callers pass an empty tuple).
+
+    Ignored dependency directories (``DEPENDENCY_DIR_NAMES``, at any depth) are
+    not masked unless ``mask_dependency_dirs`` is set, so they stay visible
+    through the read-only workspace bind. Secret-shaped files below one stay
+    masked, and a dependency-named *symlink* (a file entry) is still masked.
     """
     result = run_git_bytes(
         git_root,
@@ -361,6 +426,8 @@ def parity_masks(git_root: str) -> tuple[Mask, ...]:
         if top == ".delegate":
             continue
         if any(relative.startswith(prefix) for prefix in covered_prefixes):
+            continue
+        if not mask_dependency_dirs and _dependency_entry(relative, is_dir=entry.endswith("/")):
             continue
         masks.append(
             Mask(path=relative, kind=MASK_KIND_TMPFS if entry.endswith("/") else MASK_KIND_DEVNULL)

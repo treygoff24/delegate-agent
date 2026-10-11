@@ -505,18 +505,20 @@ class ParityMasksTests(unittest.TestCase):
         (self.repo / "untracked.txt").write_text("local-only\n", encoding="utf-8")
 
     def test_masks_collapse_directories_and_skip_delegate(self):
-        masks = sandbox_bwrap.parity_masks(str(self.repo))
+        secret = sandbox_bwrap.Mask(path="secret.env", kind=sandbox_bwrap.MASK_KIND_DEVNULL)
+        # Dependency directories stay visible (read-only) unless full masking is asked for.
+        self.assertEqual(sandbox_bwrap.parity_masks(str(self.repo)), (secret,))
         self.assertEqual(
-            masks,
+            sandbox_bwrap.parity_masks(str(self.repo), mask_dependency_dirs=True),
             (
                 sandbox_bwrap.Mask(path="node_modules", kind=sandbox_bwrap.MASK_KIND_TMPFS),
-                sandbox_bwrap.Mask(path="secret.env", kind=sandbox_bwrap.MASK_KIND_DEVNULL),
+                secret,
             ),
         )
 
     def test_overflow_raises(self):
         with (
-            mock.patch.object(sandbox_bwrap, "MASK_OVERFLOW_LIMIT", 1),
+            mock.patch.object(sandbox_bwrap, "MASK_OVERFLOW_LIMIT", 0),
             self.assertRaises(sandbox_bwrap.BwrapMaskOverflow),
         ):
             sandbox_bwrap.parity_masks(str(self.repo))

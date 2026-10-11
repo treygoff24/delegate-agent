@@ -52,6 +52,7 @@ from delegate_agent.sandbox_bwrap import (
     SandboxPlan,
     configured_bwrap_binds,
     ensure_bwrap_backend,
+    mask_dependency_dirs_requested,
     parity_masks,
     requested_safe_backend,
 )
@@ -1212,7 +1213,10 @@ def safe_isolated_request(
         _refuse_bwrap_initialized_submodules(source_git_root)
         git_common_dir = _bwrap_git_common_dir(source_git_root)
         try:
-            masks = parity_masks(source_git_root)
+            masks = parity_masks(
+                source_git_root,
+                mask_dependency_dirs=mask_dependency_dirs_requested(config),
+            )
         except BwrapMaskOverflow as exc:
             raise DelegateError(
                 "bwrap_mask_overflow",
