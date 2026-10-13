@@ -226,6 +226,7 @@ class SlashPassthroughDescribeTests(ExecutionTestBase):
                 "opencode": True,
                 "pi": True,
                 "omp": True,
+                "muse": True,
             },
         )
         self.assertFalse(modes["callReadOnlyAllowed"])

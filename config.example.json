@@ -121,6 +121,13 @@
     "defaultModel": "kimi-code/k3",
     "defaultReasoningEffort": null
   },
+  "muse": {
+    "binary": "muse",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "resumable": true,
+    "models": {}
+  },
   "isolation": {
     "safe": "auto",
     "work": "none"

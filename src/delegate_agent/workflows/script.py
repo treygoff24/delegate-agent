@@ -270,9 +270,11 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
                     "resumable=True with mode='safe' is invalid; safe workspaces are temporary "
                     "and a captured session would have no re-entry path"
                 )
-            if any(item is not None and item not in {"codex", "claude"} for item in engines):
+            if any(
+                item is not None and item not in {"codex", "claude", "muse"} for item in engines
+            ):
                 raise WorkflowScriptError(
-                    "resumable=True is only supported by codex and claude; other engines do "
+                    "resumable=True is only supported by codex, claude, and muse; other engines do "
                     "not support native session resumption"
                 )
 

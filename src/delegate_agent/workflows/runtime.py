@@ -62,7 +62,7 @@ DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
 ENGINE_ARGV_TRANSPORT = ARGV_PROMPT_TRANSPORT_ENGINES
-STRUCTURED_RESUME_ENGINES = frozenset({"codex", "claude", "cursor", "omp"})
+STRUCTURED_RESUME_ENGINES = frozenset({"codex", "claude", "cursor", "omp", "muse"})
 PERSONA_RESOLUTION_ERRORS = frozenset(
     {
         "persona_not_found",
@@ -3828,10 +3828,10 @@ class WorkflowDsl:
                 "resumable=True with mode='safe' is invalid; safe workspaces are temporary "
                 "and a captured session would have no re-entry path"
             )
-        if resumable and any(candidate not in {"codex", "claude"} for candidate in engines):
+        if resumable and any(candidate not in {"codex", "claude", "muse"} for candidate in engines):
             raise ValueError(
-                f"resumable=True is only supported by codex and claude; "
-                f"{', '.join(e for e in engines if e not in {'codex', 'claude'})} does not support "
+                f"resumable=True is only supported by codex, claude, and muse; "
+                f"{', '.join(e for e in engines if e not in {'codex', 'claude', 'muse'})} does not support "
                 "native session resumption"
             )
         resolved_model = model or self.defaults.get("model")
@@ -4982,7 +4982,7 @@ class WorkflowDsl:
             payload["readOnly"] = True
         if resumable:
             payload["resumable"] = True
-        elif mode == MODE_WORK and engine in ("codex", "claude"):
+        elif mode == MODE_WORK and engine in ("codex", "claude", "muse"):
             # Standalone codex/claude work Runs save their native session by
             # default; a workflow child keeps that opt-in per agent() call
             # (`resumable=True`), because a fan-out that retains every session
@@ -5696,7 +5696,7 @@ def _native_schema(engine: str, schema: JsonObject) -> JsonObject | None:
         return None
     if engine == "codex":
         return _codex_native_schema(schema)
-    if engine == "claude":
+    if engine in {"claude", "muse"}:
         return schema
     return None
 

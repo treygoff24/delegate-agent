@@ -51,7 +51,7 @@ HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delega
 ```
 
 Droid real runs require non-placeholder model IDs. Dry-runs for Cursor, Droid,
-Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, and Kimi do not require
+Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, Kimi, and Muse do not require
 child binaries. Engine event tests use captured fixtures under
 `tests/fixtures/`.
 
@@ -101,4 +101,4 @@ installs a private HOME/temp environment, and strips ambient env.
 `tests/` is never collected and never runs.
 
 Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin,
-OpenCode, Pi, Oh My Pi, or Kimi binaries.
+OpenCode, Pi, Oh My Pi, Kimi, or Muse binaries.

@@ -95,4 +95,10 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "anthropic/claude-opus-4-8"},
         {"id": "anthropic/claude-sonnet-5"},
     ),
+    "muse": (
+        {"id": "muse-wonder-1.0"},
+        {"id": "muse-wonder-full-1.0"},
+        {"id": "muse-spark-1.3"},
+        {"id": "muse-spark-1.2"},
+    ),
 }

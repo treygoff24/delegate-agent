@@ -175,6 +175,14 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
         "models": {},
     },
+    "muse": {
+        "binary": "muse",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
+        "resumable": True,
+        "trackedStreamMaxBytes": DEFAULT_TRACKED_STREAM_MAX_BYTES,
+        "models": {},
+    },
     "policy": {
         "profile": "safe",
         "work": {
@@ -1089,6 +1097,45 @@ def _validate_opencode_section(opencode: JsonValue) -> None:
     _validate_opencode_models(opencode.get("models"))
 
 
+def _validate_muse_section(muse: JsonValue) -> None:
+    error = "invalid_muse_config"
+    if not isinstance(muse, dict):
+        raise ConfigError(error, "muse config must be an object.")
+    require_non_empty_str(muse.get("binary"), path="muse.binary", error=error)
+    optional_str(muse.get("defaultModel"), path="muse.defaultModel", error=error)
+    _reject_opencode_flag_like_value(
+        muse.get("defaultModel"), path="muse.defaultModel", error=error
+    )
+    default_effort = muse.get("defaultReasoningEffort")
+    if default_effort is not None and (
+        not isinstance(default_effort, str) or default_effort not in reasoning.MUSE_NATIVE_EFFORTS
+    ):
+        raise ConfigError(
+            error,
+            "muse.defaultReasoningEffort must be one of: "
+            + ", ".join(reasoning.MUSE_NATIVE_EFFORTS)
+            + ".",
+        )
+    if not isinstance(muse.get("resumable", True), bool):
+        raise ConfigError(error, "muse.resumable must be a boolean.")
+    models = muse.get("models")
+    if models is not None:
+        if not isinstance(models, dict):
+            raise ConfigError(error, "muse.models must be an object.")
+        for alias, mapping in models.items():
+            _reject_opencode_flag_like_value(alias, path="muse.models", error=error)
+            if isinstance(mapping, str):
+                _reject_opencode_flag_like_value(mapping, path=f"muse.models.{alias}", error=error)
+            elif isinstance(mapping, dict):
+                raise ConfigError(
+                    error,
+                    f"muse.models.{alias} must be a model string; object-form aliases "
+                    "are not supported for muse.",
+                )
+            else:
+                raise ConfigError(error, f"muse.models.{alias} must be a string or object.")
+
+
 def _validate_pi_family_section(section: JsonValue, *, engine: str) -> None:
     error = f"invalid_{engine}_config"
     if not isinstance(section, dict):
@@ -1806,6 +1853,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_opencode_section(config.get("opencode"))
     _validate_pi_family_section(config.get("pi"), engine="pi")
     _validate_pi_family_section(config.get("omp"), engine="omp")
+    _validate_muse_section(config.get("muse"))
     _validate_engine_tracked_stream_max_bytes(config)
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))

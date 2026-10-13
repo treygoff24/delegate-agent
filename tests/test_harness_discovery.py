@@ -856,7 +856,17 @@ class AdapterOrchestrationTests(unittest.TestCase):
             materialize_minimum_harnesses(root)
             env = {"PATH": str(root), "HOME": str(Path(tmp) / "home")}
             config = embedded_default_config()
-            for harness in ("codex", "omp", "opencode", "kimi", "cursor", "claude", "grok", "pi"):
+            for harness in (
+                "codex",
+                "omp",
+                "opencode",
+                "kimi",
+                "cursor",
+                "claude",
+                "grok",
+                "pi",
+                "muse",
+            ):
                 with self.subTest(harness=harness):
                     record = probe_harness(config, harness, env=env)
                     self.assertTrue(record["installed"])

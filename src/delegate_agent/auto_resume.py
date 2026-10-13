@@ -38,7 +38,7 @@ KIND_RERUN = "rerun"
 BROKER_RETRY_BACKOFF_SEC = (1.0, 3.0)
 BROKER_SIGNATURE = "broker_binding_inactive"
 
-AUTO_RESUME_ENGINES = ("codex", "claude")
+AUTO_RESUME_ENGINES = ("codex", "claude", "muse")
 # An automatic continuation must land where the first attempt's work still is:
 # the plain checkout or a worktree that outlives the run. A temporary worktree is
 # gone, and a fresh one would resume the conversation without the files.

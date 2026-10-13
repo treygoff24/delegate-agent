@@ -41,6 +41,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v pi || echo "Pi coding agent missing"
    command -v omp || echo "Oh My Pi missing"
    command -v kimi || echo "Kimi Code CLI missing"
+   command -v muse || echo "Muse missing"
    ```
 
    Delegate does not manage runtime login. Run each runtime's own login/status command before real launches. A missing child binary causes Delegate to fail with exit code `3` for real runs.
@@ -140,7 +141,7 @@ and the [security model](security-model.md#zero-copy-safe-isolation-linux-isolat
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Grok, Devin work, OpenCode, Pi, Oh My Pi, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Devin safe mode is intentionally rejected because filesystem surveys may require generic `exec`, which cannot be allowed without weakening the read-only boundary. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode maps to `--variant`; Pi and Oh My Pi map to `--thinking`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Devin work, OpenCode, Pi, Oh My Pi, Cursor, Kimi, and Muse dry-runs succeed with the unedited example config when no reasoning effort is requested. Devin safe mode is intentionally rejected because filesystem surveys may require generic `exec`, which cannot be allowed without weakening the read-only boundary. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; Muse maps to `--reasoning-effort`; OpenCode maps to `--variant`; Pi and Oh My Pi map to `--thinking`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ### OpenCode
 
@@ -223,6 +224,7 @@ For an orchestrating agent, script, or CI job:
    command -v pi >/dev/null || exit 3
    command -v omp >/dev/null || exit 3
    command -v kimi >/dev/null || exit 3
+   command -v muse >/dev/null || exit 3
    ```
 
 6. Keep prompts bounded and machine-readable where possible. For long tasks, use `--prompt-file` or `delegate --json run --input-json FILE`.
@@ -248,7 +250,7 @@ For an orchestrating agent, script, or CI job:
 ## CI expectations
 
 The required test suite does not need real Cursor, Droid, Codex, Claude, Grok,
-Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries. Tests use dry-run paths and fake binaries
+Devin, OpenCode, Pi, Oh My Pi, Kimi, or Muse binaries. Tests use dry-run paths and fake binaries
 where needed:
 
 ```bash

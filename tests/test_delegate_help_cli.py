@@ -605,7 +605,17 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "omp", "droid"):
+        for command in (
+            "cursor",
+            "kimi",
+            "codex",
+            "claude",
+            "opencode",
+            "pi",
+            "omp",
+            "droid",
+            "muse",
+        ):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, error_types.EXIT_OK)
@@ -619,7 +629,17 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["--json", "describe", "--full"])
         self.assertEqual(code, error_types.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "omp", "droid"):
+        for command in (
+            "cursor",
+            "kimi",
+            "codex",
+            "claude",
+            "opencode",
+            "pi",
+            "omp",
+            "droid",
+            "muse",
+        ):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
 

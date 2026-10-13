@@ -51,6 +51,7 @@ from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
     _grok_harness_bypass_enabled,
+    _muse_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
@@ -58,6 +59,7 @@ from delegate_agent.argv_builders import (
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_muse_argv,
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
@@ -553,10 +555,10 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
             "Grok --json-schema forces final json output, which breaks Delegate tracked "
             "streaming snapshots; --output-schema is not supported for grok in v1.",
         )
-    if engine not in {"codex", "claude"}:
+    if engine not in {"codex", "claude", "muse"}:
         raise DelegateError(
             "unsupported_output_schema",
-            "--output-schema/outputSchema is only supported by codex and claude; "
+            "--output-schema/outputSchema is only supported by codex, claude, and muse; "
             f"{engine} has no native schema enforcement.",
         )
     if not isinstance(output_schema, str) or not output_schema:
@@ -637,8 +639,9 @@ def _preflight_claude_output_schema(
     structured_output, which owns the same decision on the workflow path; this
     only asks and reports the reason.
     """
-    if engine != "claude" or (output_schema is None and schema_text is None):
+    if engine not in {"claude", "muse"} or (output_schema is None and schema_text is None):
         return
+    label = "Claude" if engine == "claude" else "Muse"
     try:
         serialized = (
             schema_text
@@ -649,7 +652,7 @@ def _preflight_claude_output_schema(
     except json.JSONDecodeError as exc:
         raise DelegateError(
             "invalid_output_schema",
-            f"Claude output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
+            f"{label} output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
         ) from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise DelegateError(
@@ -657,13 +660,13 @@ def _preflight_claude_output_schema(
         ) from exc
     # `serialized` is the exact text this path inlines as the `--json-schema`
     # argv token, so it is what the argv ceiling has to be measured against.
-    reason = structured_output.native_schema_eligible("claude", schema, serialized=serialized)
+    reason = structured_output.native_schema_eligible(engine, schema, serialized=serialized)
     if reason is None:
         return
     raise DelegateError(
         "schema_not_native",
-        f"Claude cannot enforce this --output-schema natively: {reason}. Use a schema "
-        "Claude accepts, or run the stage through a workflow, which falls back to "
+        f"{label} cannot enforce this --output-schema natively: {reason}. Use a schema "
+        f"{label} accepts, or run the stage through a workflow, which falls back to "
         "prompt-and-parse." + DRY_RUN_HINT,
     )
 
@@ -2355,12 +2358,12 @@ def request_from_input_json(
             "invalid_option_combination",
             "resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
-    if raw_resumable and engine not in {"codex", "claude"}:
+    if raw_resumable and engine not in {"codex", "claude", "muse"}:
         raise DelegateError(
             "followup-unsupported",
-            f"resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            f"resumable is only supported by codex, claude, and muse; {engine} does not support native session resumption.",
             diagnostics={"code": "followup-unsupported"},
-            next_actions=["Use resumable with codex or claude."],
+            next_actions=["Use resumable with codex, claude, or muse."],
         )
     raw_continuity_mode: str | None = None
     if "continuityMode" in raw:
@@ -2813,7 +2816,7 @@ def default_resumable(
     flips the default; it also outranks `codex.ephemeral` and
     `claude.noSessionPersistence`, which apply only to Runs that are not resumable.
     """
-    if engine not in ("codex", "claude") or mode != MODE_WORK or pass_through:
+    if engine not in ("codex", "claude", "muse") or mode != MODE_WORK or pass_through:
         return False
     section = config.get(engine)
     return not (isinstance(section, dict) and section.get("resumable") is False)
@@ -2905,12 +2908,12 @@ def build_request(
             "invalid_option_combination",
             "--resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
-    if resumable and engine not in {"codex", "claude"}:
+    if resumable and engine not in {"codex", "claude", "muse"}:
         raise DelegateError(
             "followup-unsupported",
-            f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            f"--resumable is only supported by codex, claude, and muse; {engine} does not support native session resumption.",
             diagnostics={"code": "followup-unsupported"},
-            next_actions=["Use --resumable with codex or claude."],
+            next_actions=["Use --resumable with codex, claude, or muse."],
         )
     # None means the caller named no mode; it stays None until the engine's
     # request parts exist, because omp's default depends on the resolved selector.
@@ -4119,6 +4122,51 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _muse_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    muse = build.config["muse"]
+    model, capability_model, capability_model_source = _resolve_model_context(
+        muse, build, harness="muse"
+    )
+    capability, warnings = _capability_with_config_fallback(
+        lambda: reasoning.resolve_harness_enum_capability(
+            harness="muse",
+            model=capability_model,
+            requested_effort=build.requested_effort,
+            discovery=build.discovery,
+            alias=build.model_alias,
+        ),
+        engine="muse",
+        effort_source=build.effort_source,
+    )
+    effort = capability.effort if capability is not None else None
+    argv = build_muse_argv(
+        muse,
+        build.mode,
+        build.resolved.path,
+        model,
+        reasoning_effort=effort,
+        allow_bypass_permissions=_muse_harness_bypass_enabled(build.config, build.mode),
+        call_read_only=build.call_read_only,
+        pure=build.pure,
+        output_schema=build.output_schema,
+        # A resumable work run must keep its Muse session log or followup
+        # re-enters an empty session (caught by the live smoke, 2026-10-12).
+        persist_session=build.persist_session or build.resumable,
+        resume_session_id=build.resume_session_id,
+    )
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_FILE,
+        prompt_file_text=build.prompt,
+        display_argv=prompt_file_display_argv(argv),
+        warnings=warnings,
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, build.effort_source),
+    )
+
+
 EngineRequestPartsBuilder = Callable[[EngineBuildInput], EngineRequestParts]
 
 ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
@@ -4132,6 +4180,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "pi": _pi_request_parts,
     "omp": _omp_request_parts,
     "kimi": _kimi_request_parts,
+    "muse": _muse_request_parts,
 }
 
 
@@ -4213,13 +4262,13 @@ def _build_request_for_workspace(
     if mode != MODE_CALL:
         if engine == "codex":
             output_schema_record_text = materialized_schema_text
-        elif engine == "claude":
+        elif engine in {"claude", "muse"}:
             output_schema_record_text = output_schema_text
     if (
         output_schema is not None
         and output_schema_record_text is None
         and output_schema_text is None
-        and engine in {"codex", "claude"}
+        and engine in {"codex", "claude", "muse"}
         and mode != MODE_CALL
     ):
         try:

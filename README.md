@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, OpenCode, Pi, Oh My Pi, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, OpenCode, Pi, Oh My Pi, Kimi Code, and Muse so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -15,7 +15,7 @@ Use it when you want a predictable wrapper around prompts like:
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
 Prompt handling is provider-specific: Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi
-prompts are delivered to the child runtime over stdin; Droid, Grok, and Devin prompts
+prompts are delivered to the child runtime over stdin; Droid, Grok, Devin, and Muse prompts
 are delivered through private temporary prompt files; Kimi Code is the only Harness
 that still requires prompt argv, and the only one whose prompt Delegate redacts in
 dry-run output and run manifests. Redaction hides the prompt from Delegate's own
@@ -92,6 +92,7 @@ command -v opencode # OpenCode CLI, used by delegate opencode ...
 command -v pi      # Pi coding agent, used by delegate pi ...
 command -v omp     # Oh My Pi, used by delegate omp ...
 command -v kimi    # Kimi Code CLI, used by delegate kimi ...
+command -v muse    # Muse (Meta), used by delegate muse ...
 ```
 
 Supported modes:
@@ -108,6 +109,7 @@ Supported modes:
 | Pi | `pi` | Yes | Yes | Yes |
 | Oh My Pi | `omp` | Yes | Yes | Yes |
 | Kimi Code | `kimi` | Yes | Yes | Yes |
+| Muse | `muse` | Yes | Yes | Yes |
 
 Devin `safe` is rejected because Delegate cannot enforce a read-only filesystem
 survey through Devin's generic execution tool. See the
@@ -181,6 +183,7 @@ delegate --json dry-run claude safe "Review this repository. Do not edit files."
 delegate --json dry-run opencode safe "Review this repository. Do not edit files."
 delegate --json dry-run pi safe "Review this repository. Do not edit files."
 delegate --json dry-run omp safe "Review this repository. Do not edit files."
+delegate --json dry-run muse safe "Review this repository. Do not edit files."
 ```
 
 Run a read-only review in an isolated throwaway workspace:
@@ -243,12 +246,12 @@ $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
 
-For Codex or Claude fan-outs that must return machine-parseable records, add
+For Codex, Claude, or Muse fan-outs that must return machine-parseable records, add
 `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report
 injection so the schema owns the final message. Codex schemas are
 strict-preflighted recursively: every property must be required, and a missing
 `additionalProperties: false` is supplied in a warned temporary copy without
-changing the source file.
+changing the source file. Muse schemas are enforced natively and the root object must set `additionalProperties: false`.
 
 For a one-hop prompt that should not see the current repo or create a tracked
 run, use stateless `call` mode:
@@ -290,7 +293,7 @@ It changes only the requested model thinking depth/cost/latency; it does not
 change safe/work/call mode, sandboxing, approvals, or edit capability.
 Codex/Droid validate exact model metadata, Cursor selects an explicit configured
 or corroborated discovered effort route, Claude and Grok map to native
-`--effort`, OpenCode validates discovered exact variants when present and
+`--effort`, Muse maps to `--reasoning-effort` (`none`…`ultra`), OpenCode validates discovered exact variants when present and
 otherwise warns on pass-through, and Pi/Oh My Pi map to `--thinking` with
 evidence-aware validation. Devin and Kimi do not expose a Delegate
 reasoning-effort flag. Explicit Codex effort can target the harness default model
@@ -453,7 +456,7 @@ non-ignored files from a dirty source checkout before launch, report the counts
 in a `dirty_source_auto_included` warning, and tear down the worktree if syncing
 fails. `--include-dirty` remains an explicit, harmless no-op on a clean source.
 
-Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/OpenCode/Pi/Oh My Pi/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/OpenCode/Pi/Oh My Pi/Kimi/Muse safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

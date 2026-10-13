@@ -50,7 +50,7 @@ warning is needed: the mail tree is inside that workspace. For isolated runs:
 | Kimi | Adds `--add-dir <mail-root>`. | Local `kimi --help` lists `--add-dir` as an additional workspace directory. |
 | Oh My Pi | Adds `--add-dir=<mail-root>`. | Local `omp --help` lists repeatable `--add-dir`. |
 | Cursor | No grant and no `--sandbox enabled`; its default work launch is unsandboxed/workspace-writable. | Delegate's existing Cursor work argv contains no sandbox selection. |
-| Droid, Devin, OpenCode, Pi | No mail-specific grant; their work rows are workspace-writable/unsandboxed. | No measured constrained writable-root mechanism in Delegate's current work argv. |
+| Droid, Devin, OpenCode, Pi, Muse | No mail-specific grant; their work rows are workspace-writable/unsandboxed. | No measured constrained writable-root mechanism in Delegate's current work argv. |
 | Grok | Derived from emitted `--sandbox`: absent/`none` is unsandboxed and `workspace` is workspace-writable, so neither gets a grant or warning. `devbox`, `read-only`, and `strict` warn that the isolated mailbox is unreachable; unknown values warn as degraded. | Delegate's emitted argv is the classification source; no measured Grok writable-root grant exists. |
 
 The warning is reserved for isolated policies that cannot reach the source-root
@@ -61,7 +61,7 @@ for workspace-writable or unsandboxed rows.
 
 Delegate controls:
 
-- Which child argv is built for Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi.
+- Which child argv is built for Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, Kimi, or Muse.
 - Whether the child is launched in `safe`, `work`, or stateless `call` mode.
 - Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
@@ -107,7 +107,7 @@ Delegate does not control:
 
 Safe mode is for review and investigation.
 
-- Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
+- Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, Kimi safe, and Muse safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only. It does **not** select a Cursor read-only mode: the isolated workspace copy and the safe-review prompt prefix are what make a Cursor safe run review-shaped, and neither is harness-enforced. `cursor call --read-only` is the one Cursor path that takes `--mode ask`, which Cursor documents as read-only and which a live child confirmed by reporting shell access blocked.
 - Codex safe sets `-c approval_policy="never"` inside the `exec` scope; the
   global `--ask-for-approval` flag is declared on the interactive TUI and never
@@ -316,16 +316,17 @@ supported pure matrix may contain only Claude for some time.
 
 ## Native session files
 
-Codex and Claude **work** Runs are resumable by default, so `delegate followup`
-works without a launch flag. A resumable Run does not pass `--ephemeral` (Codex)
-or `--no-session-persistence` (Claude), which means the harness keeps its own
+Codex, Claude, and Muse **work** Runs are resumable by default, so `delegate followup`
+works without a launch flag. A resumable Run does not pass `--ephemeral` (Codex),
+`--no-session-persistence` (Claude), or `--no-session-log` (Muse), which means the harness keeps its own
 session record: Codex's rollout under `CODEX_HOME/sessions`, Claude Code's
-transcript under its `projects` directory. Delegate stores only the session id
+transcript under its `projects` directory, Muse's session log under
+`~/.local/share/muse/sessions`. Delegate stores only the session id
 in the Run manifest.
 
 The consequence for what stays on disk:
 
-- These session files now exist for **every** Codex and Claude work Run, where
+- These session files now exist for **every** Codex, Claude, and Muse work Run, where
   before they existed only for Runs launched with `--resumable`.
 - They contain the prompt as sent, the child's replies, and tool call inputs and
   results (file contents the child read, command output). Delegate's redaction
@@ -340,7 +341,7 @@ The consequence for what stays on disk:
   not resumable.
 
 Reduce the footprint with `--no-resumable` on a launch, or `codex.resumable:
-false` / `claude.resumable: false` in config (see
+false` / `claude.resumable: false` / `muse.resumable: false` in config (see
 [configuration](configuration.md#native-session-files-and-the-resumable-default)).
 Safe and call Runs, `--pass-through` Runs, other engines, and workflow `agent()`
 children without `resumable=True` never save a session, so the untrusted-input
@@ -377,7 +378,7 @@ security control.
 
 ### Temporary safe isolation
 
-Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
+Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, Oh My Pi safe, Kimi safe, and Muse safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 

@@ -1272,12 +1272,12 @@ def parse_modeless_engine(
             "invalid_option_combination",
             "--resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
-    if resumable and engine not in {"codex", "claude"}:
+    if resumable and engine not in {"codex", "claude", "muse"}:
         raise DelegateError(
             "followup-unsupported",
-            f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            f"--resumable is only supported by codex, claude, and muse; {engine} does not support native session resumption.",
             diagnostics={"code": "followup-unsupported"},
-            next_actions=["Use --resumable with codex or claude."],
+            next_actions=["Use --resumable with codex, claude, or muse."],
         )
     _validate_pure_options(engine, mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:
@@ -1419,9 +1419,9 @@ def parse_droid(
     if resumable:
         raise DelegateError(
             "followup-unsupported",
-            "--resumable is only supported by codex and claude; droid does not support native session resumption.",
+            "--resumable is only supported by codex, claude, and muse; droid does not support native session resumption.",
             diagnostics={"code": "followup-unsupported"},
-            next_actions=["Use --resumable with codex or claude."],
+            next_actions=["Use --resumable with codex, claude, or muse."],
         )
     _validate_pure_options("droid", mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:

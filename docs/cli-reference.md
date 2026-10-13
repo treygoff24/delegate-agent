@@ -227,13 +227,17 @@ delegate omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [
 delegate kimi safe [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
 delegate kimi work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH | prompt...]
 delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH | prompt...]
+
+delegate muse safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate muse work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate muse call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH | prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin; give exactly one (combining them fails with `ambiguous_prompt_source`). A relative `--prompt-file` resolves against the shell cwd first; if that file does not exist but one exists under `--cwd DIR`, that one is used and a warning says so. When neither exists the `prompt_file_not_found` error names both absolute paths tried. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
 Delegate resolves the prompt, Codex, Claude, OpenCode, Pi, Cursor Agent, and Oh My Pi prompts are passed to
 the child runtime over stdin; Cursor Agent 2026.09.02-c22c1a3 and Oh My Pi 18.1.13 both consume a piped
-prompt in the verified non-interactive invocation. Droid and Grok prompts are written to a private temporary
-prompt file and passed with Droid's documented `--file` option or Grok's `--prompt-file`. Kimi Code prompt
+prompt in the verified non-interactive invocation. Droid, Grok, Devin, and Muse prompts are written to a private temporary
+prompt file and passed with Droid's documented `--file` option or the `--prompt-file` option Grok, Devin, and Muse accept. Kimi Code prompt
 mode still takes `--prompt`, so Kimi alone uses argv transport; Delegate redacts Kimi prompt argv in dry-run
 output and run manifests, which keeps the prompt out of Delegate's own records but not out of the child's
 `/proc/<pid>/cmdline`.
@@ -270,7 +274,7 @@ by hyphens and the index is the entry's position in Factory's settings. The
 older id-based selectors no longer resolve, so re-read `delegate models droid`
 and update any `droid.models` alias that pinned one. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
-`delegate models <engine> --live`. Every harness except Claude exposes a live
+`delegate models <engine> --live`. Every harness except Claude and Muse exposes a live
 model probe; see [Discovery](#discovery) for the evidence each probe records.
 Each engine row carries `binaryMissing`, true when the configured binary does
 not resolve from the Delegate process; the text view prints `(missing)` after
@@ -292,7 +296,7 @@ same-family effort selector and records a warning. Without that exact family,
 an explicit effort fails closed; a configured default instead degrades with a
 warning and preserves the pinned selector. Droid emits
 `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config
-override; Claude and Grok emit native `--effort`; OpenCode emits `--variant`
+override; Claude and Grok emit native `--effort`; Muse emits native `--reasoning-effort`; OpenCode emits `--variant`
 and validates it when exact discovered variants exist; Pi and Oh My Pi emit
 `--thinking`. Devin and Kimi expose no Delegate effort transport.
 
@@ -683,6 +687,31 @@ delegate kimi call "Summarize this context in three bullets."
 delegate --isolation worktree kimi work "Implement the feature in a persistent worktree."
 ```
 
+### `delegate muse`
+
+Wraps Muse's headless mode (Meta's Muse family models).
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] muse {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--output-schema FILE] [--prompt-file PATH | prompt...]
+delegate [--json] muse call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH | prompt...]
+```
+
+- Delegate launches `muse exec --json --workspace <dir>` and delivers the prompt with `--prompt-file`, so the prompt never appears in argv.
+- Safe mode and `call --read-only` add `--disable-write --disable-shell --disable-web-tools`, keep Muse's sandbox on, and leave the workspace untrusted (repo-local Muse skills do not load; verified against Muse 1.4.6). Safe reviewers use Muse's native read/search tools and have no shell, so they cannot run git or tests. User-level Muse configuration still loads; a user-configured MCP server's behavior under the safe flags is not yet probed.
+- Work mode adds `--trust-workspace` and keeps the sandbox on unless `policy.harness.muse.work.bypassApprovalsAndSandbox` is explicitly enabled. Delegate never emits `--yolo`.
+- `--reasoning-effort` maps directly to `--reasoning-effort`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.
+- `--output-schema` uses Muse's native enforcement; the schema's root object must set `additionalProperties: false` or the launch is refused before the child starts.
+- The `muse` binary accepts unknown model IDs without error, so Delegate makes no served-model claim for Muse runs and a pinned run ends unverified. `delegate models muse` reports the bundled advisory list; there is no live enumeration.
+- Work runs keep their Muse session log by default, so `delegate followup` re-enters the session; `--no-resumable` or `muse.resumable: false` opts out. Run JSON reports usage as unavailable: the Muse exec stream carries no token-usage events.
+
+Examples:
+
+```bash
+delegate muse safe "Review this repo for regressions; report file/line/severity."
+delegate muse work --model muse-spark-1.3 "Implement the scoped task; report changed files and tests."
+delegate muse call --read-only --output-schema verdict.json --prompt-file rubric.md
+```
+
 ### `delegate workflow`
 
 Workflows run a Python DSL supervisor that can fan out normal Delegate child
@@ -995,7 +1024,7 @@ When a profile is active, dry-run and completion payloads add `authProfile`
 a fallback is configured. Dry-run also adds `profileEnv` (the injected env map,
 with values redacted). Profile metadata is omitted when no profile is active.
 
-For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an explicit `--isolation none`
+For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, Kimi, and Muse safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
@@ -1173,19 +1202,19 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, or `kimi`.
+- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, `kimi`, or `muse`.
 - `mode`: `safe`, `work`, or `call`.
 - The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
 - `model`: optional alias-or-id for every engine, resolved exactly like `--model`. A matching `<engine>.models` alias is expanded; other values pass through as raw model IDs.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, Kimi, and Muse safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"`, makes commits fail inside the child through run-owned git hooks, and fails the run if the child creates commits (any isolation, including `none`; with isolation omitted it implies `worktree`). `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
-- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
+- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex, Claude, and Muse in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `base`, `env`, `setup`: optional workspace spec for `mode: "work"` with `isolation: "worktree"`, the same as `--base`, `--env`, and `--setup`. `env` is an object of names to strings. See [Workspace spec](worktrees.md#workspace-spec-base-env-setup).
 - `mcpServers`: optional list of extra MCP servers mounted for this run only: `[{"name": "report", "command": "/path/to/server", "args": ["--stdio"], "env": {"KEY": "value"}}]`. `name` is letters, digits, `_` or `-` and unique; `args` and `env` are optional. Codex receives them as global `-c mcp_servers.<name>.command/args/env_vars` overrides right after the executable; these show in dry-run and manifest argv. `env` values never go into process arguments: they are set in the run's environment and listed by name in the server's `env_vars` allowlist. Env names must be valid variable names, and a name given in two servers must have the same value. Other engines have no per-invocation MCP config: the run proceeds without them and its result carries a `mcpServers not mounted` warning.
 - `prompt`: required task prompt.
@@ -1227,13 +1256,13 @@ argv shapes, and expanded command options. Use `help <command>` when only one
 command's contract is needed.
 
 `models` reports configured settings and cached discovery for Cursor, Droid,
-Codex, Kimi, Claude, Grok, Devin, OpenCode, Pi, and Oh My Pi. A per-engine
+Codex, Kimi, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, and Muse. A per-engine
 catalog merges sources in this order: explicit config, current live or
 profile-scoped discovery, the legacy workspace reasoning cache, then bundled
 advisory IDs. `models <engine> --live` runs one fresh probe in the selected
 profile environment, but does not update Delegate config or cache. Use setup or
 `capabilities refresh` when ordinary launches should consume the new record.
-Claude is the only harness without a non-interactive live model catalog.
+Claude and Muse are the only harnesses without a non-interactive live model catalog.
 
 A harness with `<engine>.enabled: false` in config (for example
 `"cursor": {"enabled": false}`) is omitted from `models`, `describe`,
@@ -1267,6 +1296,7 @@ Automatic setup and refresh use these evidence sources:
 | Devin | Family slugs, aliases, and concrete variants visible to the active account | The prompt-free JSON catalog carries display names; Delegate has no Devin effort transport. |
 | OpenCode | Harness catalog | Listed variants are `exact` for that model; models without exact variant evidence retain the documented unvalidated pass-through path. |
 | Pi | Harness catalog | Thinking support is model-specific, but available labels come from a harness-wide enum and are reported as partial model evidence. |
+| Muse | Bundled advisory list; no live enumeration | Static `--reasoning-effort` enum (`none`…`ultra`) from the binary's documented values. |
 | Oh My Pi | Harness catalog | A model's explicit `thinking` array is exact; missing arrays use harness-partial compatibility rather than fabricated model evidence. |
 
 `modelScope`/`catalogScope` describes where a list came from, not whether a real
@@ -1500,7 +1530,7 @@ creating a Run or writing a prompt record.
 | --- | --- | --- | --- | --- |
 | Engine | `engine`, falling back to `harness` | `--engine` | A missing or unknown source engine refuses resume. | The selected engine becomes the target; engine-scoped fields below may drop. |
 | Mode | `mode` | None; v1 does not override mode. | A missing or invalid mode refuses resume. | Retained unchanged. |
-| Native session | `resumable` | `--no-resumable` | A source recorded as exactly `true` keeps it. Any other source takes the launch default: Codex and Claude work Runs save their session unless `--no-resumable` or `codex.resumable` / `claude.resumable: false` opts out. | Kept only for Codex or Claude work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
+| Native session | `resumable` | `--no-resumable` | A source recorded as exactly `true` keeps it. Any other source takes the launch default: Codex, Claude, and Muse work Runs save their session unless `--no-resumable` or `codex.resumable` / `claude.resumable` / `muse.resumable: false` opts out. | Kept only for Codex, Claude, or Muse work Runs; otherwise dropped with a note advising continuation with `delegate resume`. |
 | Model selection | `modelAlias`, then `modelRequested`, `modelResolved`, then `model` | `--model` | No usable key uses the target engine configuration default and emits a note. | Source model selection drops; pass `--model` to pin a target model. |
 | Reasoning effort | `requestedReasoningEffort`, then `resolvedReasoningEffort`, together with `reasoningEffortSource` | `--reasoning-effort` | Missing effort uses the target default and emits a note. A source value from configuration is re-resolved through target capability/configuration; only `cli` and `input-json` source intent is inherited directly. | Source effort drops with a note; an explicit override remains valid. |
 | Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |
@@ -1508,7 +1538,7 @@ creating a Run or writing a prompt record.
 | Timeout | `timeoutSeconds` | `--timeout` | Omitted uses the target timeout default and emits a note. A present value must be a positive integer (an integral JSON float is accepted). | Retained. |
 | Stall threshold | `stallMinutes`, written only when the source launch passed `--stall-minutes` | None | Omitted means the source ran on the configured default, so the resumed Run re-resolves `stallMinutes` config, `DELEGATE_STALL_MINUTES`, and the engine default with no note. A present value must be a finite number >= 0 (0 disables); anything else refuses resume. `delegate followup` inherits it the same way and ignores an invalid value. | Retained; an inherited value is an explicit operator threshold, honored on every engine. |
 | Tracked stream limit | `trackedStreamMaxBytes` (`null` when uncapped, the default) | None | Launch provenance only: the resumed Run re-resolves the limit from the target engine configuration and does not inherit the recorded value. | Not inherited. |
-| Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Codex and Claude inherit inline schema text. Other engines soft-drop it with a note before output-schema validation. |
+| Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Codex, Claude, and Muse inherit inline schema text. Other engines soft-drop it with a note before output-schema validation. |
 | OpenCode agent | `agent` | None | Omitted means no agent selection. | Inherited only for a same-engine OpenCode resume; otherwise dropped with a note. |
 | Workspace cwd / execution cwd | `cwd`; persistent records also derive `executionCwd`, branch, and source Git root | None (`--cwd` selects the registry workspace and must match recorded `cwd`) | Missing `cwd` falls back to the selected registry workspace; missing persistent-worktree metadata causes attachment validation to refuse. | Retained as workspace context; an attach uses the validated existing worktree rather than copying `executionCwd` into a new worktree. |
 | Isolation / lifecycle | `isolationMode`; persistent detection also reads `isolationLifecycle`, `preservedWorkspace`, `worktreeStatus`, and `worktreeAttachment` | None; `--isolation` is rejected for resume. | Missing ordinary `isolationMode` uses target isolation configuration and emits a note. | Retained. Persistent or attached sources become an `attached` execution lifecycle. |
@@ -1524,16 +1554,16 @@ creating a Run or writing a prompt record.
 delegate followup [--timeout SEC] [--prompt-file PATH] [--mail-push|--no-mail-push] [--dry-run] <alias|runId> [prompt...]
 ```
 
-`delegate followup` continues a Codex or Claude Run by resuming its saved native
+`delegate followup` continues a Codex, Claude, or Muse Run by resuming its saved native
 session, so the child keeps its own conversation context. (`resume` instead
 relaunches from the original prompt and a report digest, and works across
 engines.)
 
-- **Launch default.** Codex and Claude work Runs save their native session by
+- **Launch default.** Codex, Claude, and Muse work Runs save their native session by
   default, so `followup` works without `--resumable` at launch. Launch with
   `--no-resumable` (JSON `resumable: false`), or set `codex.resumable` /
-  `claude.resumable` to `false`, to skip it; `--resumable` on a launch beats the
-  config key. Safe Runs, call Runs, and engines other than Codex and Claude never
+  `claude.resumable` / `muse.resumable` to `false`, to skip it; `--resumable` on a launch beats the
+  config key. Safe Runs, call Runs, and engines other than Codex, Claude, and Muse never
   save a session. See [Configuration](configuration.md#native-session-files-and-the-resumable-default)
   for the storage consequence.
 - **No session recorded.** A source with no recorded session (launched with

@@ -867,7 +867,7 @@ def build_resume_plan(
         if isinstance(schema_text, str) and schema_text:
             # Soft-drop BEFORE the validator for engines that cannot enforce a
             # schema in tracked modes (grok and the rest have no native support).
-            if engine in {"codex", "claude"}:
+            if engine in {"codex", "claude", "muse"}:
                 output_schema_text = schema_text
             else:
                 notes.append(
@@ -882,7 +882,7 @@ def build_resume_plan(
     # Runs save their native session unless `--no-resumable` (or the engine's
     # `resumable: false` config key) opts out.
     source_resumable = manifest.get("resumable") is True
-    native_target = mode == MODE_WORK and engine in {"codex", "claude"}
+    native_target = mode == MODE_WORK and engine in {"codex", "claude", "muse"}
     resumable: bool | None
     if opts.no_resumable:
         resumable = False
@@ -893,7 +893,7 @@ def build_resume_plan(
     if source_resumable and not native_target and not opts.no_resumable:
         notes.append(
             f"resumable dropped: {engine} {mode} runs do not support --resumable; "
-            "native followup requires a codex or claude work run, so "
+            "native followup requires a codex, claude, or muse work run, so "
             "continue the resumed run with delegate resume, not followup."
         )
 

@@ -1,0 +1,6 @@
+muse: workspace root: /var/folders/12/nd4g1y_j14zc1bt2l3c2pk900000gn/T/tmp.oGsXPWV0V5 (explicit)
+muse: Skills: 72 loaded · 1 warning · 9 details hidden
+muse:   `skills_catalog` was trimmed to fit its size limit (32 KB): 20 descriptions compacted, 0 skill ids omitted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+run ended with Failed: API error 400 [request_id=27922339-0e2c-468d-997b-652d61c81675]: 'additionalProperties' is required to be supplied and to be false. (invalid_request_error)

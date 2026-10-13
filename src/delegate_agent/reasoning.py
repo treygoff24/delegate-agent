@@ -80,6 +80,8 @@ TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
+TRANSPORT_MUSE_EFFORT_FLAG = "muse-effort-flag"
+MUSE_NATIVE_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 GROK_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh")
 TRANSPORT_OPENCODE_VARIANT_FLAG = "variant-flag"
 TRANSPORT_PI_THINKING_FLAG = "pi-thinking-flag"
@@ -169,6 +171,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         TRANSPORT_PI_THINKING_FLAG,
         "static-enum",
         static_efforts=OMP_NATIVE_EFFORTS,
+    ),
+    "muse": ReasoningProfile(
+        TRANSPORT_MUSE_EFFORT_FLAG,
+        "static-enum",
+        static_efforts=MUSE_NATIVE_EFFORTS,
     ),
 }
 
@@ -1007,6 +1014,12 @@ def _grok_alias_reasoning_summary(
     return _static_alias_reasoning_summary("grok", grok, discovery)
 
 
+def _muse_alias_reasoning_summary(
+    muse: JsonObject, discovery: JsonObject | None = None
+) -> JsonObject:
+    return _static_alias_reasoning_summary("muse", muse, discovery)
+
+
 def _pi_alias_reasoning_summary(
     pi: JsonObject, discovery: JsonObject | None = None, *, harness: str = "pi"
 ) -> JsonObject:
@@ -1268,6 +1281,17 @@ def build_alias_reasoning_summaries(
     else:
         summaries["grok"] = {}
 
+    muse = config.get("muse")
+    if isinstance(muse, dict):
+        default_model = muse.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        summary_fn = partial(_muse_alias_reasoning_summary, discovery=discovery)
+        muse_aliases: JsonObject = {alias_key: summary_fn(muse)}
+        _add_static_alias_summaries(muse_aliases, muse, summary_fn)
+        summaries["muse"] = muse_aliases
+    else:
+        summaries["muse"] = {}
+
     devin = config.get("devin")
     if isinstance(devin, dict):
         default_model = devin.get("defaultModel")
@@ -1360,7 +1384,7 @@ def build_reasoning_capabilities_payload(
         "transport": TRANSPORT_BY_HARNESS["cursor"],
         "models": cursor_models,
     }
-    for harness in ("claude", "grok", "pi", "omp"):
+    for harness in ("claude", "grok", "pi", "omp", "muse"):
         models_payload = {}
         if harness == "grok":
             _overlay_payload_models(

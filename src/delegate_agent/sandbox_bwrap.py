@@ -65,6 +65,11 @@ _OPTIONAL_ENGINE_DOT_DIRS = {
     "grok": ".grok",
     "pi": ".pi",
     "omp": ".omp",
+    # Muse keeps auth/settings under ~/.config/muse (its state and session
+    # logs live under ~/.local/share/muse, already covered by the generic
+    # .local ro-bind; safe runs pass --no-session-log so nothing there must
+    # be writable inside the boundary).
+    "muse": ".config/muse",
 }
 _OPTIONAL_HOME_RO_BINDS = (".local", ".cargo/bin", ".bun")
 

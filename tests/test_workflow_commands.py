@@ -7995,7 +7995,7 @@ class WorkflowCommandTests(unittest.TestCase):
         check_droid = self.run_delegate(["--json", "workflow", "check", str(script_droid)])
         self.assertNotEqual(check_droid.returncode, 0)
         self.assertIn(
-            "only supported by codex and claude", json.loads(check_droid.stdout)["message"]
+            "only supported by codex, claude, and muse", json.loads(check_droid.stdout)["message"]
         )
 
         script_safe = self.write_workflow(

@@ -498,6 +498,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 },
             },
             "grok": {},
+            "muse": {},
             "pi": {},
             "omp": {},
         }

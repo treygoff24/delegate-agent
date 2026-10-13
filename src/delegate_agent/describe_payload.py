@@ -31,11 +31,13 @@ from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
     _claude_harness_bypass_enabled,
     _grok_harness_bypass_enabled,
+    _muse_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
     build_devin_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_muse_argv,
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
@@ -143,6 +145,7 @@ def _launch_options() -> list[str]:
         "pi",
         "omp",
         "kimi",
+        "muse",
     ):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
@@ -354,6 +357,11 @@ def models_payload(
         "defaultModel": config["omp"]["defaultModel"],
         "defaultReasoningEffort": config["omp"].get("defaultReasoningEffort"),
     }
+    muse: JsonObject = {
+        "binary": config["muse"]["binary"],
+        "defaultModel": config["muse"]["defaultModel"],
+        "defaultReasoningEffort": config["muse"].get("defaultReasoningEffort"),
+    }
     for engine, section in (
         ("cursor", cursor),
         ("codex", codex),
@@ -364,6 +372,7 @@ def models_payload(
         ("opencode", opencode),
         ("pi", pi),
         ("omp", omp),
+        ("muse", muse),
     ):
         models = _nonempty_engine_models(config[engine])
         if models is not None:
@@ -394,6 +403,7 @@ def models_payload(
         "opencode": opencode,
         "pi": pi,
         "omp": omp,
+        "muse": muse,
     }
 
 
@@ -458,6 +468,12 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "defaultModel": config["omp"]["defaultModel"],
             "defaultReasoningEffort": config["omp"].get("defaultReasoningEffort"),
             "trackedStreamMaxBytes": config["omp"]["trackedStreamMaxBytes"],
+        },
+        "muse": {
+            "binary": config["muse"]["binary"],
+            "defaultModel": config["muse"]["defaultModel"],
+            "defaultReasoningEffort": config["muse"].get("defaultReasoningEffort"),
+            "trackedStreamMaxBytes": config["muse"]["trackedStreamMaxBytes"],
         },
     }
 
@@ -709,6 +725,8 @@ def _policy_field_support_matrix() -> JsonObject:
     grok_supported = dict(unsupported)
     grok_supported["webSearch"] = True
     grok_supported["bypassApprovalsAndSandbox"] = True
+    muse_supported = dict(unsupported)
+    muse_supported["bypassApprovalsAndSandbox"] = True
     return {
         "codex": codex_supported,
         "claude": claude_supported,
@@ -720,6 +738,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "opencode": unsupported,
         "pi": unsupported,
         "omp": unsupported,
+        "muse": muse_supported,
     }
 
 
@@ -753,6 +772,10 @@ def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
 
 def _grok_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
     return _runtime_policy(config, mode, "grok", _grok_harness_bypass_enabled)
+
+
+def _muse_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
+    return _runtime_policy(config, mode, "muse", _muse_harness_bypass_enabled)
 
 
 def _codex_describe_argv(
@@ -859,6 +882,28 @@ def _opencode_describe_argv(
     return prompt_file_display_argv(argv)
 
 
+def _muse_describe_argv(
+    config: JsonObject, section: JsonObject, *, mode: str, workspace: str
+) -> list[str]:
+    model = _resolve_default_model(section)
+    default_effort = section.get("defaultReasoningEffort")
+    effort = reasoning.resolve_native_effort(
+        "muse",
+        default_effort if isinstance(default_effort, str) else None,
+        model=model,
+    )
+    return prompt_file_display_argv(
+        build_muse_argv(
+            section,
+            mode,
+            workspace,
+            model,
+            reasoning_effort=effort,
+            allow_bypass_permissions=_muse_harness_bypass_enabled(config, mode),
+        )
+    )
+
+
 def _pi_family_describe_argv(
     section: JsonObject, engine: str, *, mode: str, workspace: str
 ) -> list[str]:
@@ -908,12 +953,15 @@ def describe_payload(
     opencode = config["opencode"]
     pi = config["pi"]
     omp = config["omp"]
+    muse = config["muse"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
     claude_work_policy = _claude_runtime_policy(config, MODE_WORK)
     grok_safe_policy = _grok_runtime_policy(config, MODE_SAFE)
     grok_work_policy = _grok_runtime_policy(config, MODE_WORK)
+    muse_safe_policy = _muse_runtime_policy(config, MODE_SAFE)
+    muse_work_policy = _muse_runtime_policy(config, MODE_WORK)
     codex_safe_argv = _codex_describe_argv(
         codex,
         mode=MODE_SAFE,
@@ -975,6 +1023,10 @@ def describe_payload(
         omp, "omp", mode=MODE_SAFE, workspace="<isolated-workspace>"
     )
     omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK, workspace="<workspace>")
+    muse_safe_argv = _muse_describe_argv(
+        config, muse, mode=MODE_SAFE, workspace="<isolated-workspace>"
+    )
+    muse_work_argv = _muse_describe_argv(config, muse, mode=MODE_WORK, workspace="<workspace>")
     return {
         "ok": True,
         "summary": False,
@@ -1002,6 +1054,10 @@ def describe_payload(
                 "safe": grok_safe_policy,
                 "work": grok_work_policy,
             },
+            "muse": {
+                "safe": muse_safe_policy,
+                "work": muse_work_policy,
+            },
         },
         "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "promptSources": ["direct", "prompt-file", "stdin"],
@@ -1016,6 +1072,7 @@ def describe_payload(
             "opencode": PROMPT_TRANSPORT_STDIN,
             "pi": PROMPT_TRANSPORT_STDIN,
             "omp": PROMPT_TRANSPORT_STDIN,
+            "muse": PROMPT_TRANSPORT_FILE,
         },
         "personaTransports": {
             "safe": {engine: "prepend" for engine in KNOWN_ENGINES},
@@ -1390,6 +1447,22 @@ def describe_payload(
                     "model ID is refused (invalid_alias) once a catalog exists.",
                 ],
             },
+            "muse": {
+                "safe": muse_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses muse exec --json with the prompt delivered by --prompt-file.",
+                    "Safe mode passes --disable-write --disable-shell --disable-web-tools with Muse's sandbox on and the workspace untrusted; repo-local Muse skills do not load. No shell is available to the reviewer.",
+                    "Delegate also runs safe mode in an isolated copy.",
+                ],
+                "work": muse_work_argv,
+                "workNotes": [
+                    "Work mode trusts the workspace and keeps Muse's sandbox on unless Delegate policy explicitly enables harness-scoped bypassApprovalsAndSandbox.",
+                    "Reasoning effort maps directly to muse --reasoning-effort "
+                    f"({', '.join(reasoning.MUSE_NATIVE_EFFORTS)}).",
+                    "The muse binary accepts unknown model IDs without error; Delegate records no served-model claim for muse runs.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -1587,6 +1660,15 @@ def _emit_models_text(
             file=stdout,
         )
         _print_engine_aliases(kimi, stdout)
+    muse = payload.get("muse")
+    if isinstance(muse, dict):
+        print(
+            "muse: "
+            f"binary={_binary_label(muse)} "
+            f"defaultModel={_text_or_none(muse.get('defaultModel'))}",
+            file=stdout,
+        )
+        _print_engine_aliases(muse, stdout)
     runtime = payload.get("runtime")
     if isinstance(runtime, dict):
         print(

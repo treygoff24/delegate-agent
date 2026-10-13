@@ -699,6 +699,48 @@ def classify_line(line: str, *, harness: str | None = None) -> LineSignals:
     return signals
 
 
+def _classify_muse(payload: JsonObject) -> LineSignals:
+    """Muse records key progress on payload_type, not type.
+
+    Every record carries unique ids and timestamps, so the whole-line
+    fallback would read endless lifecycle noise as progress and the watchdog
+    would never fire. Only model output, real tool boundaries, and the
+    terminal record signal anything; the rest explicitly signals nothing.
+    Tool starts ride task.lifecycle.side_effect_intent (operation
+    "tool:<name>", idempotency_key "tool:<call_id>"); tool.result finishes
+    the same call_id.
+    """
+    payload_type = payload.get("payload_type")
+    inner = payload.get("payload")
+    if not isinstance(payload_type, str) or not isinstance(inner, dict):
+        return _NO_SIGNALS
+    if payload_type == "run.output.delta":
+        text = inner.get("text")
+        if isinstance(text, str) and text:
+            return LineSignals(deltas=(f"text:{text}",), delta_chars=(len(text),), label="text")
+        return _NO_SIGNALS
+    if payload_type == "task.lifecycle.side_effect_intent":
+        event = inner.get("event")
+        if isinstance(event, dict):
+            operation = event.get("operation")
+            key = event.get("idempotency_key")
+            if (
+                isinstance(operation, str)
+                and operation.startswith("tool:")
+                and isinstance(key, str)
+                and key.startswith("tool:")
+            ):
+                return LineSignals(tools_started=(key[5:],), label=operation[5:])
+        return _NO_SIGNALS
+    if payload_type == "tool.result":
+        call_id = inner.get("call_id")
+        key = call_id if isinstance(call_id, str) and call_id else "tool"
+        return LineSignals(tools_finished=(key,), progress=True, label="tool_result")
+    if payload_type.startswith("run.terminal."):
+        return LineSignals(progress=True, label="terminal")
+    return _NO_SIGNALS
+
+
 def _classify_payload(
     payload: JsonObject,
     event_type: JsonValue,
@@ -713,6 +755,8 @@ def _classify_payload(
         return _classify_grok(payload, event_type) if isinstance(event_type, str) else None
     if harness == "cursor":
         return _classify_cursor(payload, event_type) if isinstance(event_type, str) else None
+    if harness == "muse":
+        return _classify_muse(payload)
     if not isinstance(event_type, str):
         return _classify_kimi_role_envelope(payload)
     return _classify_typed(payload, event_type)
