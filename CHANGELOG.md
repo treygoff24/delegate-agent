@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-12
+
+This release adds Muse (Meta's Muse family) as the eleventh harness, at parity with the best-supported engines: safe/work/call modes, structured output, native session followup, and the full effort enum.
+
+### Added
+- **Muse is a Delegate harness.** `delegate muse safe|work|call` wraps
+  Meta's Muse (`muse exec --json`) with Muse family models: prompt-file
+  delivery, a flag-enforced safe lockdown (`--disable-write --disable-shell
+  --disable-web-tools`, sandbox on, workspace untrusted), work mode with the
+  sandbox kept on, native `--output-schema` enforcement, session followup and
+  auto-resume, and the full static effort enum through `ultra`. The `muse`
+  binary accepts unknown model IDs silently, so Delegate records no
+  served-model claim for Muse runs.
+
+### Fixed
+- The test runner (`scripts/test.py`) no longer aborts on hosts where
+  lowering its own priority with `os.nice` is not permitted (sandboxed
+  agent harnesses); it warns and continues under the worker caps.
+
 ## [0.32.0] - 2026-10-01
 
 This release adds controls for launching and managing agents and resuming
@@ -2570,7 +2589,8 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/treygoff24/delegate-agent/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/treygoff24/delegate-agent/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.31.0
 [0.30.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.30.0
