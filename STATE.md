@@ -21,15 +21,16 @@ Change the section a fact belongs to rather than appending a story; a finished c
 
 ## How it works now
 
-- **Gate.** `scripts/gate.sh --fast` (about 9s) and `scripts/gate.sh` (full regression) share explicit workers, low priority, and a cross-worktree lock; Linux uses a two-core quota. Last full main gate: 4,691 tests, 17 skips, 3,861 subtests, all static checks. Mutation proofs: set `PYTHONDONTWRITEBYTECODE=1`, because a same-size edit restored within the same second leaves a stale `.pyc` Python trusts.
+- **Gate.** `scripts/gate.sh --fast` (about 9s) and `scripts/gate.sh` (full regression) share explicit workers, low priority, and a cross-worktree lock; Linux uses a two-core quota. Last full main gate: 4,736 tests, 25 skips, 3,936 subtests, all static checks (2026-10-12, release 0.33.0). Mutation proofs: set `PYTHONDONTWRITEBYTECODE=1`, because a same-size edit restored within the same second leaves a stale `.pyc` Python trusts.
 - **Write guard.** It re-opens `~/.ai-profiles` for lanes started through an `estate-*` launcher; `~/.ssh` and the installed runtime stay protected. Protecting `~/Code` is opt-in. Existing pinned workflows need the new runtime to pick up the new default. Known limits: `docs/security-model.md`.
-- **Installed runtime.** The narrower guard is installed and verified on the devbox; `delegate doctor` reports matching runtime/promotion artifacts.
+- **Installed runtime.** 0.33.0 is installed on the Mac (`~/.delegate`) and the devbox cell (`/home/trey/.delegate`), each with a pre-update backup under its `backups/`; the devbox host has no install. The `muse` engine needs the `muse` binary, present on the Mac only.
 - **Worktree reap on Linux.** A hidden process with our real and effective uid/gid is noted, not blocking; other ids still block. Best-effort by design (module docstring of `src/delegate_agent/worktree_procs.py`); the final saved-id tweak for set-gid ssh-agent was not outside-reviewed.
 - **Papercuts and overnight clusters** (epic `dlg-erz`, closed) are in `main`: `CHANGELOG.md` [Unreleased]; `docs/audits/2026-09-28-papercuts/REPORT.md`; `docs/handoffs/2026-09-28-papercuts-fixes-for-integrators.md`.
-- **Skills.** `delegate-agent` and `delegate-workflows` are short and current (pool `~/.agents/skill-library`).
+- **Skills.** `delegate-agent` and `delegate-workflows` are short and current (pool `~/.agents/skill-library`). Routing (Trey, 2026-10-12): Muse Wonder Full stands equal to Opus max/Sol max in heavy rotation; Muse Spark stands equal to Sonnet as a default worker; `muse` engine lanes are Mac-only until `muse` exists on the devbox.
 
 ## Recent
 
+- 2026-10-12 Muse (Meta) is the eleventh engine (`delegate muse safe|work|call`); released as 0.33.0 to GitHub and PyPI, installed on Mac and devbox cell. Plan: `docs/plans/2026-10-12-muse-engine.md` (gitignored). Open follow-ups `dlg-n32r` (MCP safe probe), `dlg-36qv` (auth/lost-session fixtures), `dlg-ehgd` (image input).
 - 2026-09-29 Default work write guard narrowed (Trey); 130 focused tests, full gate passed.
 - 2026-09-29 Test-speed work complete; full-suite median 357.755s to 235.908s at the same budget.
 - 2026-09-29 Test-value audit landed; two workflow bugs fixed (`failureReason` read, `retries=-1`), dead seams removed.
