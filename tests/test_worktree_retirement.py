@@ -112,7 +112,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             path for path in (Path(home) / ".delegate" / "worktrees").glob("*/*") if path.is_dir()
         ]
 
-    def test_clean_completion_retires_worktree_and_preserves_branch(self):
+    def test_clean_completion_retires_worktree_and_deletes_empty_branch(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()
             agent = self._clean_agent()
@@ -152,7 +152,149 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 capture_output=True,
                 check=True,
             ).stdout.splitlines()
-            self.assertEqual(len(branches), 1)
+            # The run made no commit, so its branch holds nothing to merge.
+            self.assertEqual(branches, [])
+            self.assertTrue(payload["worktreeBranchRemoved"])
+            self.assertFalse(payload["worktreeBranchPreserved"])
+            self.assertNotIn("worktreeBranchKept", payload)
+            self.assertTrue(state["worktreeBranchRemoved"])
+            self.assertFalse(state["worktreeBranchPreserved"])
+
+    def _delegate_branches(self, repo: str) -> list[str]:
+        return subprocess.run(
+            ["git", "-C", repo, "for-each-ref", "--format=%(refname)", "refs/heads/delegate/"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.splitlines()
+
+    def _git(self, repo: str, *args: str, check: bool = True):
+        return subprocess.run(
+            ["git", "-C", repo, *args], text=True, capture_output=True, check=check
+        )
+
+    def test_completion_with_a_commit_keeps_its_branch(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            agent = self._clean_agent()
+            agent.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'work\\n' > made.txt && git add made.txt "
+                "&& git commit -q -m 'agent work'\n"
+                "printf 'done\\n'\n"
+                'printf \'{"type":"result","result":"Status: completed\\\\n'
+                "- committing fake\"}\\n'\n",
+                encoding="utf-8",
+            )
+            agent.chmod(0o755)
+            code, payload = self._run_cursor(
+                repo.name,
+                config_api.embedded_default_config(),
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0, payload)
+            self.assertTrue(payload["worktreeRetired"], payload)
+            self.assertFalse(self._worktree_paths(fake_home))
+            self.assertEqual(len(self._delegate_branches(repo.name)), 1)
+            self.assertFalse(payload["worktreeBranchRemoved"])
+            self.assertTrue(payload["worktreeBranchPreserved"])
+            self.assertEqual(payload["worktreeBranchKept"], "has_commits")
+
+    def test_missing_start_commit_keeps_the_empty_branch(self):
+        fake_home, repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        real_record = worktree_api._completion_record
+
+        def record_without_start(ctx):
+            record = dict(real_record(ctx))
+            creation = dict(record["creationContext"])
+            self.assertIn("sourceHeadOid", creation)
+            del creation["sourceHeadOid"]
+            record["creationContext"] = creation
+            return record
+
+        with mock.patch.object(worktree_api, "_completion_record", record_without_start):
+            extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+
+        self.assertTrue(extra["worktreeRetired"], extra)
+        self.assertFalse(self._worktree_paths(fake_home.name))
+        self.assertEqual(len(self._delegate_branches(repo.name)), 1)
+        self.assertFalse(extra["worktreeBranchRemoved"])
+        self.assertEqual(extra["worktreeBranchKept"], "start_commit_missing")
+
+    def test_unresolvable_start_commit_keeps_the_empty_branch(self):
+        _fake_home, repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        real_record = worktree_api._completion_record
+
+        def record_with_bogus_start(ctx):
+            record = dict(real_record(ctx))
+            record["creationContext"] = {
+                **record["creationContext"],
+                "sourceHeadOid": "0123456789abcdef0123456789abcdef01234567",
+            }
+            return record
+
+        with mock.patch.object(worktree_api, "_completion_record", record_with_bogus_start):
+            extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+
+        self.assertTrue(extra["worktreeRetired"], extra)
+        self.assertEqual(len(self._delegate_branches(repo.name)), 1)
+        self.assertEqual(extra["worktreeBranchKept"], "start_commit_unresolvable")
+
+    def test_empty_branch_is_deleted_when_start_is_not_merged_into_source_head(self):
+        # `--base other-branch`: the lane starts from a commit the source's
+        # current HEAD does not contain, so `git branch -d` refuses an empty
+        # branch as unmerged. Tip == start still proves nothing would be lost.
+        _fake_home, repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        start = self._git(repo.name, "rev-parse", "HEAD").stdout.strip()
+        self._git(repo.name, "switch", "--orphan", "elsewhere")
+        self._git(repo.name, "commit", "--allow-empty", "-m", "unrelated head")
+        # Precondition: the start is not an ancestor of the source's HEAD, and
+        # git's own safe delete refuses the (empty) branch.
+        self.assertEqual(
+            self._git(
+                repo.name, "merge-base", "--is-ancestor", start, "HEAD", check=False
+            ).returncode,
+            1,
+        )
+        branches = self._delegate_branches(repo.name)
+        self.assertEqual(len(branches), 1)
+        refused = self._git(repo.name, "branch", "-d", branches[0], check=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(self._delegate_branches(repo.name), branches)
+        extra = worktree_api.retire_completed_worktree(registry_root, run_id)
+
+        self.assertTrue(extra["worktreeRetired"], extra)
+        self.assertTrue(extra["worktreeBranchRemoved"], extra)
+        self.assertEqual(self._delegate_branches(repo.name), [])
+        self.assertNotIn("worktreeBranchRemovalError", extra)
+
+    def test_branch_still_checked_out_in_a_worktree_is_not_deleted(self):
+        fake_home, repo, _config, _run_id, _registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        branches = self._delegate_branches(repo.name)
+        self.assertEqual(len(branches), 1)
+        branch = branches[0].removeprefix("refs/heads/")
+        # The completed lane's worktree still has the branch checked out.
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
+        start = self._git(repo.name, "rev-parse", "HEAD").stdout.strip()
+        result = worktree_remove_api.remove_branch_if_at_start(repo.name, branch, start)
+
+        self.assertFalse(result.removed)
+        self.assertEqual(result.kept_reason, "branch_delete_refused")
+        self.assertEqual(self._delegate_branches(repo.name), [f"refs/heads/{branch}"])
 
     def test_true_child_dirt_is_retained_and_reported(self):
         with tempfile.TemporaryDirectory() as fake_home:

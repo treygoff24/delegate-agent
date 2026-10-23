@@ -649,7 +649,11 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
         retain("branch_missing")
         return
 
-    from delegate_agent.worktree_remove import remove_empty_pool_parent, remove_worktree
+    from delegate_agent.worktree_remove import (
+        remove_branch_if_at_start,
+        remove_empty_pool_parent,
+        remove_worktree,
+    )
 
     try:
         result = remove_worktree(
@@ -673,12 +677,27 @@ def _retire_worktree_on_completion(ctx: RetirementContext, completion_extra: Jso
         remove_empty_pool_parent(execution_cwd)
     completion_extra["worktreeRetired"] = True
     completion_extra["worktreeStatus"] = STATUS_REMOVED
-    completion_extra["worktreeBranchPreserved"] = True
+    # The branch survives the worktree unless it holds no commit of its own: a
+    # run that committed nothing leaves an empty branch nobody will merge.
+    creation_context = record.get("creationContext")
+    start_oid = (
+        creation_context.get("sourceHeadOid") if isinstance(creation_context, dict) else None
+    )
+    branch_result = remove_branch_if_at_start(source_git_root, branch, start_oid)
+    completion_extra["worktreeBranchPreserved"] = not branch_result.removed
+    completion_extra["worktreeBranchRemoved"] = branch_result.removed
     persisted: JsonObject = {
         "worktreeStatus": STATUS_REMOVED,
         "worktreeRetired": True,
-        "worktreeBranchPreserved": True,
+        "worktreeBranchPreserved": not branch_result.removed,
+        "worktreeBranchRemoved": branch_result.removed,
     }
+    if branch_result.kept_reason:
+        completion_extra["worktreeBranchKept"] = branch_result.kept_reason
+        persisted["worktreeBranchKept"] = branch_result.kept_reason
+    if branch_result.error:
+        completion_extra["worktreeBranchRemovalError"] = branch_result.error
+        persisted["worktreeBranchRemovalError"] = branch_result.error
     salvage_path = result.get("salvagePath")
     if isinstance(salvage_path, str):
         # Changed ledger files were copied here before the worktree went away.
