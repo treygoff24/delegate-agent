@@ -2822,6 +2822,19 @@ def default_resumable(
     return not (isinstance(section, dict) and section.get("resumable") is False)
 
 
+GROK_SAFE_REFUSED_MESSAGE = (
+    "grok safe mode is not supported: Grok never runs in delegate safe mode. "
+    "Run Grok reviews as worktree work runs with a read-only brief: "
+    "delegate --isolation worktree grok work --forbid-commit --model grok-4.7 "
+    '--reasoning-effort xhigh "<read-only brief>"'
+)
+
+
+def _refuse_grok_safe(engine: str, mode: str) -> None:
+    if engine == "grok" and mode == MODE_SAFE:
+        raise DelegateError("grok_safe_unsupported", GROK_SAFE_REFUSED_MESSAGE)
+
+
 def build_request(
     engine: str,
     mode: str,
@@ -2880,6 +2893,7 @@ def build_request(
     preflight_claude_model: bool = False,
     preflight_workspace_env: Mapping[str, str] | None = None,
 ) -> Request:
+    _refuse_grok_safe(engine, mode)
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(

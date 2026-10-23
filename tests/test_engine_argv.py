@@ -2535,17 +2535,17 @@ class EngineArgvTests(CommandTestBase):
                 model_index = argv.index("--model")
                 self.assertEqual(argv[model_index + 1], "kimi-code/pinned-model")
 
-    def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
+    def test_grok_work_argv_uses_prompt_file_and_work_controls(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))
         prompt = request_api.effective_prompt(
             "review task",
             engine="grok",
-            mode="safe",
+            mode="work",
             completion_report_mode="none",
         )
         request = request_api.build_request(
             "grok",
-            "safe",
+            "work",
             None,
             request_types.ResolvedWorkspace("/repo", "git"),
             prompt,
@@ -2553,14 +2553,12 @@ class EngineArgvTests(CommandTestBase):
             dry_run=True,
         )
         self.assertEqual(request.prompt_transport, "file")
-        self.assertIn("Delegate Grok safe mode", request.prompt_file_text or "")
         self.assertIn("--prompt-file", request.argv)
         self.assertIn("--output-format", request.argv)
         self.assertIn("streaming-json", request.argv)
         self.assertIn("--permission-mode", request.argv)
-        self.assertIn("dontAsk", request.argv)
-        self.assertIn("--sandbox", request.argv)
-        self.assertIn("read-only", request.argv)
+        self.assertNotIn("dontAsk", request.argv)
+        self.assertNotIn("read-only", request.argv)
         self.assertIn("--disable-web-search", request.argv)
         self.assertIn(transport_api.PROMPT_FILE_DISPLAY, request.display_argv or [])
         self.assertNotIn("review task", request.display_argv or [])
@@ -2568,7 +2566,7 @@ class EngineArgvTests(CommandTestBase):
     def test_grok_reasoning_effort_reports_static_capability_source(self):
         request = self.build_git_request(
             "grok",
-            "safe",
+            "work",
             None,
             "/repo",
             "review task",
@@ -2616,7 +2614,7 @@ class EngineArgvTests(CommandTestBase):
             "grok": {"future-grok": {"supported": ["future-level"]}}
         }
         request = self.build_git_request(
-            "grok", "safe", None, "/repo", "review", config, dry_run=True
+            "grok", "work", None, "/repo", "review", config, dry_run=True
         )
         self.assertEqual(request.reasoning_effort, "future-level")
         self.assertEqual(request.reasoning_capability_source, "config")

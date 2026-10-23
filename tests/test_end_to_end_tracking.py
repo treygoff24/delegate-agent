@@ -130,7 +130,7 @@ def make_grok_streaming_script(*, include_completion: bool = True) -> str:
         "while [ $# -gt 0 ]; do\n"
         '  if [ "$1" = "--prompt-file" ]; then\n'
         "    shift\n"
-        '    grep -q "Delegate Grok safe mode" "$1" || exit 11\n'
+        '    [ -s "$1" ] || exit 11\n'
         "    break\n"
         "  fi\n"
         "  shift\n"
@@ -962,7 +962,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         payload = json.loads(json_tail.stdout)
         self.assertFalse(payload["sections"]["stdout"]["truncated"])
 
-    def test_tracked_grok_safe_run_records_prompt_file_and_snapshot(self):
+    def test_tracked_grok_work_run_records_prompt_file_and_snapshot(self):
         argv_log = self.workspace / "grok-argv.log"
         self.write_fake_binaries()
         env = self.delegate_env()
@@ -975,7 +975,7 @@ class EndToEndTrackingTests(unittest.TestCase):
                 "--cwd",
                 str(self.workspace),
                 "grok",
-                "safe",
+                "work",
                 "Review this workspace. Do not edit files.",
             ],
             text=True,
@@ -1004,7 +1004,7 @@ class EndToEndTrackingTests(unittest.TestCase):
 
     def test_tracked_grok_without_end_recovers_completion_report_from_stream(self):
         self.write_fake_binaries(include_completion=False)
-        completed = self.run_cli(["grok", "safe", "Recover streamed Grok text."])
+        completed = self.run_cli(["grok", "work", "Recover streamed Grok text."])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         alias = parse_alias_from_bounded_stdout(completed.stdout)
         run_id, run_path = self.lookup_run(alias)

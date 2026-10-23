@@ -614,12 +614,12 @@ means in practice:
 - `trackedStreamMaxBytes`: retained-stream byte cap for tracked runs. Off by default (`null`): nothing is truncated, hidden from the parser, or killed for being verbose, and `stdout.log` keeps the whole stream. Set a positive integer to opt in; a Run that then exceeds it is stopped as `output_limit_exceeded` with its partial output kept in the completion report. Only an opted-in cap applies the OMP 256 MiB transport and 16 MiB per-record ceilings, which are not configurable.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
-- `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
-- `safeSandbox`: Grok sandbox profile for safe runs. Defaults to `read-only`.
+- `safePermissionMode`: Grok permission mode for read-only runs (`grok call --read-only`; `grok safe` is refused). Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
+- `safeSandbox`: Grok sandbox profile for read-only runs (`grok call --read-only`). Defaults to `read-only`.
 - `workSandbox`: optional Grok sandbox profile for work runs: `workspace`, `devbox`, `read-only`, `strict`, or `null` (omit `--sandbox` when `null`).
 - `disableWebSearch`: defaults to `true`. Delegate adds `--disable-web-search` only when this is `true` and effective `policy.webSearch` is not `true`. Set `policy.work.webSearch` to `true` or `grok.disableWebSearch` to `false` to allow web search.
 - `noSubagents`: defaults to `false`. When `true`, Delegate adds `--no-subagents` to Grok argv.
-- Grok safe mode uses prompt-file transport, `--sandbox read-only`, and `--permission-mode dontAsk` by default, plus Delegate's isolated throwaway workspace.
+- `grok safe` is refused with `grok_safe_unsupported`; use `delegate --isolation worktree grok work --forbid-commit --model grok-4.7 --reasoning-effort xhigh "<read-only brief>"`. Grok runs use prompt-file transport.
 
 ### `kimi`
 
@@ -916,7 +916,7 @@ use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, Codex, Kimi, and Muse safe use temporary workspace isolation by default. Devin safe is unsupported.
+- `safe`: `auto`. Cursor, Claude, OpenCode, Pi, Oh My Pi, Droid, Codex, Kimi, and Muse safe use temporary workspace isolation by default. Devin safe is unsupported.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 #### `isolation.safeBackend` and `isolation.bwrapBinds` (Linux)
