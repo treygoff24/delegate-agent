@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`delegate grok safe` is refused.** Grok never runs in Delegate safe mode; the
+  request fails before any process starts with `grok_safe_unsupported` and points
+  at `delegate --isolation worktree grok work --forbid-commit --model grok-4.7
+  --reasoning-effort xhigh "<read-only brief>"`. `grok work` and `grok call` are
+  unchanged.
+
 ### Fixed
 - Completion retirement of a persistent worktree now also deletes its
   `delegate/*` branch when the run made no commit of its own (branch tip equals

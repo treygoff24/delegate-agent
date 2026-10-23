@@ -191,7 +191,6 @@ Run a read-only review in an isolated throwaway workspace:
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
-delegate grok safe "Review this repository for correctness risks. Do not edit files."
 delegate opencode safe "Review this repository for correctness risks. Do not edit files."
 delegate pi safe "Review this repository for correctness risks. Do not edit files."
 delegate omp safe "Review this repository for correctness risks. Do not edit files."
@@ -425,7 +424,7 @@ Defaults are intentionally conservative for review paths:
   needs. Read the [configuration guide](docs/configuration.md#isolationsafebackend-and-isolationbwrapbinds-linux)
   for the config shape and the [security model](docs/security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)
   for the boundary and refusal conditions.
-- Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
+- Grok safe mode is refused (`grok_safe_unsupported`). Run Grok reviews as worktree work runs with a read-only brief: `delegate --isolation worktree grok work --forbid-commit --model grok-4.7 --reasoning-effort xhigh "<read-only brief>"`. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Pi safe mode and `pi call --read-only` use only the built-in `read` tool and disable extension, skill, prompt-template, and project-approval discovery. All Pi modes use `--no-session`; Delegate's run registry is the durable record.

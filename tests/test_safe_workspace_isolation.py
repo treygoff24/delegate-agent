@@ -953,7 +953,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self._assert_safe_prompt_paths_are_rerooted("codex", "stdin_text")
 
     def test_safe_isolation_reroots_prompt_file_paths(self):
-        self._assert_safe_prompt_paths_are_rerooted("grok", "prompt_file_text")
+        self._assert_safe_prompt_paths_are_rerooted("muse", "prompt_file_text")
 
     def _assert_safe_slash_prompt_is_verbatim(self, engine, transport_field, workspace_flag):
         repo = make_git_repo(with_commit=True)
@@ -1007,7 +1007,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self._assert_safe_slash_prompt_is_verbatim("codex", "stdin_text", "--cd")
 
     def test_safe_isolation_preserves_slash_prompt_file(self):
-        self._assert_safe_slash_prompt_is_verbatim("grok", "prompt_file_text", "--cwd")
+        self._assert_safe_slash_prompt_is_verbatim("muse", "prompt_file_text", "--workspace")
 
     def test_safe_workspace_path_replacement_requires_exact_prefix_boundary(self):
         source = "/workspace/repo"

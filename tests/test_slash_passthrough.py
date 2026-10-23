@@ -86,11 +86,10 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         request = self.build(["codex", "safe", prompt])
         self.assert_verbatim(request, prompt)
 
-    def test_claude_and_grok_safe_slash_allowed(self):
-        for engine in ("claude", "grok"):
-            prompt = "/goal audit"
-            request = self.build([engine, "safe", prompt])
-            self.assert_verbatim(request, prompt)
+    def test_claude_safe_slash_allowed(self):
+        prompt = "/goal audit"
+        request = self.build(["claude", "safe", prompt])
+        self.assert_verbatim(request, prompt)
 
     def test_devin_safe_slash_fails_as_unsupported_mode(self):
         with self.assertRaises(DelegateError) as caught:
