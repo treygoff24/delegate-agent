@@ -467,8 +467,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertTrue(
                 Path(logged_cwd).resolve().is_relative_to(worktree_root.resolve()), logged_cwd
             )
-            # A clean completed worktree is retired automatically; its branch
-            # remains as the durable artifact.
+            # A clean completed worktree is retired automatically; the run made
+            # no commit, so its empty branch goes with it.
             worktrees = list(worktree_root.glob("*/*"))
             self.assertFalse(worktrees)
             branches = subprocess.run(
@@ -484,7 +484,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 capture_output=True,
                 check=True,
             ).stdout.splitlines()
-            self.assertEqual(len(branches), 1)
+            self.assertEqual(branches, [])
 
     def test_grok_work_persistent_worktree_rewrites_cwd_and_redacts_prompt_file(self):
         """Grok work --isolation worktree rewrites --cwd and keeps prompt-file redaction."""
@@ -1830,6 +1830,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             config = dict(config_api.embedded_default_config())
             config["droid"] = dict(config["droid"])
             config["droid"]["models"] = {"qwen": "custom:OpenRouter-:-Qwen-3.7-Max-0"}
+            # Keep the worktree: an empty branch is deleted at retirement.
+            config["worktrees"] = {**config["worktrees"], "retireWorktreeOnCompletion": False}
             workspace = request_api.resolve_workspace(repo.name)
             request = self._make_persistent_worktree_request(
                 "droid",

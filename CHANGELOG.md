@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Completion retirement of a persistent worktree now also deletes its
+  `delegate/*` branch when the run made no commit of its own (branch tip equals
+  the recorded start commit, including `--base` lanes), so read-only review
+  runs no longer leave empty branches behind. A branch with any commit, or one
+  whose start commit is not recorded or does not resolve, is still kept. The
+  completion JSON gains `worktreeBranchRemoved` and `worktreeBranchKept`; the
+  run's exit status is unchanged.
+
 ## [0.33.0] - 2026-10-12
 
 This release adds Muse (Meta's Muse family) as the eleventh harness, at parity with the best-supported engines: safe/work/call modes, structured output, native session followup, and the full effort enum.
