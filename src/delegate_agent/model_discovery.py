@@ -17,7 +17,7 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
 LIVE_WARNING_LIMIT = 8_000
-LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
+LIVE_UNSUPPORTED_ENGINES = frozenset({"claude", "muse"})
 _SOURCE_RANK = {"bundled": 0, "cache": 1, "discovery": 2, "live": 2, "config": 3}
 
 

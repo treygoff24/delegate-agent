@@ -548,6 +548,38 @@ class RunsReclaimCommandTests(ScratchReclaimTestCase):
         self.assertFalse(self.scratch_path(old).exists())
         self.assertTrue(self.scratch_path(recent).exists())
 
+    def test_structural_inventory_does_not_run_retention(self) -> None:
+        for command in ("runs", "ps"):
+            with self.subTest(command=command):
+                old = self.make_run(age_days=10)
+                scratch = self.scratch_path(old)
+                index_before = (self.registry_root / "index.json").read_bytes()
+                state_before = self.state_of(old)
+
+                with mock.patch.object(
+                    cli, "maybe_run_retention_pass", wraps=cli.maybe_run_retention_pass
+                ) as maintenance:
+                    code, out, err = self.run_cli("--json", command, "--structural")
+
+                self.assertEqual(code, 0, err)
+                self.assertTrue(json.loads(out)["ok"])
+                maintenance.assert_not_called()
+                self.assertTrue(scratch.exists())
+                self.assertEqual((self.registry_root / "index.json").read_bytes(), index_before)
+                self.assertEqual(self.state_of(old), state_before)
+
+    def test_an_ordinary_ps_command_still_runs_retention(self) -> None:
+        old = self.make_run(age_days=10)
+
+        with mock.patch.object(
+            cli, "maybe_run_retention_pass", wraps=cli.maybe_run_retention_pass
+        ) as maintenance:
+            code, _out, err = self.run_cli("--json", "ps")
+
+        self.assertEqual(code, 0, err)
+        maintenance.assert_called_once()
+        self.assertFalse(self.scratch_path(old).exists())
+
     def test_the_snapshot_of_a_reclaimed_run_says_so(self) -> None:
         run_id = self.make_run(age_days=10)
         self.reclaim()

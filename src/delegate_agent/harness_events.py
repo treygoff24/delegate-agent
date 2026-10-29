@@ -282,7 +282,7 @@ def _add_bounded_event_field(payload: JsonObject, key: str, value: str) -> None:
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
 ASSISTANT_RECOVERY_HARNESSES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp", "muse"}
 )
 
 # Engines whose stdout may carry arbitrary tool output, so a line that is not a
@@ -290,7 +290,7 @@ ASSISTANT_RECOVERY_HARNESSES = frozenset(
 # `omp` shares pi's parser but not this list: it reaches the same handler
 # through `_ingest_pi_event`, and its stdout is a serialized event stream with
 # no raw passthrough.
-MALFORMED_LINE_PROTECTED_HARNESSES = frozenset({"kimi", "opencode", "pi"})
+MALFORMED_LINE_PROTECTED_HARNESSES = frozenset({"kimi", "opencode", "pi", "muse"})
 
 
 @dataclass
@@ -823,6 +823,7 @@ class StreamAccumulator:
     provider_error: JsonObject | None = None
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     _pi_text_buffer: str = field(default="", repr=False)
+    _muse_text_buffer: str = field(default="", repr=False)
     _pi_recovery_error: str | None = field(default=None, repr=False)
     # Running token totals for harnesses that report usage per message or step
     # (pi, omp, opencode) rather than once at the end. Summed here and published
@@ -994,6 +995,13 @@ class StreamAccumulator:
             self._record_devin_assistant_text(text)
 
     def _ingest_object(self, payload: JsonObject) -> None:
+        if self.harness == "muse":
+            # Muse records key on payload_type, not type, and must return
+            # before the generic model capture below: run.model.configured
+            # only echoes the requested model, so treating it as served
+            # would pass every continuity pin falsely.
+            self._ingest_muse_event(payload)
+            return
         event_type = payload.get("type")
         if not isinstance(event_type, str):
             self._ingest_role_content_message(payload)
@@ -1951,6 +1959,68 @@ class StreamAccumulator:
             self.completion_text = stripped
         self.current = _current_from_text(stripped)
         self._invalidate_assistant_text_cache()
+
+    def _publish_muse_text(self, text: str, *, completion: bool = False) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        self.assistant_chunks = [stripped]
+        self._last_recoverable_assistant_text = stripped
+        if is_substantive_assistant_text(stripped):
+            self._last_substantive_assistant_text = stripped
+        if completion:
+            self.completion_text = stripped
+        self.current = _current_from_text(stripped)
+        self._invalidate_assistant_text_cache()
+
+    def _ingest_muse_event(self, payload: JsonObject) -> None:
+        payload_type = payload.get("payload_type")
+        inner = payload.get("payload")
+        if not isinstance(payload_type, str) or not isinstance(inner, dict):
+            return
+        stream = payload.get("stream")
+        if isinstance(stream, dict) and stream.get("kind") == "session":
+            self._ingest_harness_session_id(stream.get("id"))
+            if self.harness_session_id is not None:
+                self.session_id = self.harness_session_id
+        if payload_type == "run.output.delta":
+            delta = inner.get("text")
+            if isinstance(delta, str) and delta:
+                self._muse_text_buffer = bound_assistant_text(self._muse_text_buffer + delta)
+                self._publish_muse_text(self._muse_text_buffer)
+            return
+        if payload_type == "tool.result":
+            facts = inner.get("correlation_facts")
+            tool = "tool"
+            status = "success"
+            if isinstance(facts, dict):
+                name = facts.get("tool_name")
+                if isinstance(name, str) and name:
+                    tool = name
+                if facts.get("outcome") not in (None, "success"):
+                    status = "error"
+            self.events.append(NormalizedEvent(kind="tool.completed", tool=tool, status=status))
+            self.current = _tool_current(tool, None)
+            return
+        if payload_type == "run.terminal.completed":
+            text = inner.get("text")
+            final = text if isinstance(text, str) and text.strip() else self._muse_text_buffer
+            if final:
+                self._publish_muse_text(final, completion=True)
+            self._record_terminal_event(event="muse.run.terminal", status="succeeded")
+            return
+        if payload_type.startswith("run.terminal."):
+            terminal = inner.get("terminal")
+            reason = inner.get("reason")
+            reason_text = reason if isinstance(reason, str) and reason else None
+            status = "cancelled" if terminal == "cancelled" else "failed"
+            if status == "failed":
+                self.completion_text = None
+                self._ingest_error_event({"message": reason_text or "Muse run failed."})
+            self._record_terminal_event(
+                event="muse.run.terminal", status=status, reason=reason_text
+            )
+            return
 
     def _ingest_pi_event(self, payload: JsonObject, event_type: str) -> None:
         if event_type == "auto_retry_start":

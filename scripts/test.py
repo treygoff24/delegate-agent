@@ -107,7 +107,12 @@ def contain(cpu_limit: int, *, gate: bool) -> None:
         print(f"tests: CPU budget {cpu_limit} cores, low priority", flush=True)
     else:
         print("tests: low priority; hard CPU quotas require Linux and testrun", flush=True)
-    os.nice(10)
+    try:
+        os.nice(10)
+    except PermissionError:
+        # Best effort: a sandboxed harness may forbid renicing even to a
+        # lower priority. The worker caps above still bound the run.
+        print("tests: could not lower priority (os.nice not permitted); continuing", flush=True)
 
 
 def common_git_dir() -> Path:

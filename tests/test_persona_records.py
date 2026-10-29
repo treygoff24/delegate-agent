@@ -529,6 +529,7 @@ class PersonaRecordTests(unittest.TestCase):
                     "opencode",
                     "pi",
                     "omp",
+                    "muse",
                 )
             },
         )

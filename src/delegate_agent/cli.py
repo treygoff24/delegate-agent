@@ -2179,7 +2179,13 @@ def main(
                 and parsed.payload is not None
                 and parsed.payload.action in {"prune", "reclaim"}
             )
-            if existing_registry is not None and not pruning_runs:
+            # Polling a structural inventory must not run inline archival or cleanup.
+            structural_inventory = (
+                parsed.subcommand in {"runs", "ps"}
+                and isinstance(parsed.payload, _inspection_commands.RunsCommand)
+                and parsed.payload.structural
+            )
+            if existing_registry is not None and not pruning_runs and not structural_inventory:
                 maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
             return _inspection_commands.emit_snapshot(

@@ -51,6 +51,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "omp": "Delegate Omp safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
+    "muse": "Delegate Muse safe mode",
 }
 SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
     engine: f"{label} {_SAFE_REVIEW_BODY}" for engine, label in _SAFE_REVIEW_LABEL_BY_ENGINE.items()
@@ -253,6 +254,10 @@ def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
 
 def _grok_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
     return _harness_bypass_enabled(config, mode, "grok")
+
+
+def _muse_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
+    return _harness_bypass_enabled(config, mode, "muse")
 
 
 def _reject_pure(engine: str, mode: str, pure: bool, *, supported: bool = False) -> None:
@@ -752,6 +757,62 @@ def build_omp_argv(
         resume_session_id=resume_session_id,
         no_model_fallback=no_model_fallback,
     )
+
+
+# Safe/read-only Muse lockdown: native read/search tools stay available,
+# every write-capable surface the binary owns is off. Pinned by the Phase 0
+# probes in docs/plans/2026-10-12-muse-engine.md (writes rejected, repo-local
+# skills skipped while untrusted, no memory-write tool present).
+MUSE_SAFE_LOCKDOWN = ("--disable-write", "--disable-shell", "--disable-web-tools")
+
+
+def build_muse_argv(
+    muse: JsonObject,
+    mode: str,
+    workspace: str,
+    model: str | None,
+    *,
+    reasoning_effort: str | None = None,
+    allow_bypass_permissions: bool = False,
+    prompt_transport: str = PROMPT_TRANSPORT_FILE,
+    call_read_only: bool = False,
+    pure: bool = False,
+    output_schema: str | None = None,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
+) -> list[str]:
+    _reject_pure("muse", mode, pure)
+    if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
+        validate_mode(mode)
+    argv = [str(muse["binary"]), "exec", "--json", "--workspace", workspace]
+    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    if read_only:
+        argv.extend(MUSE_SAFE_LOCKDOWN)
+    if mode == MODE_WORK:
+        # The workspace's own Muse skills/rules are part of a work lane's
+        # brief; safe/call runs stay untrusted so a hostile checkout cannot
+        # load repo-local extensions into a review.
+        argv.append("--trust-workspace")
+        if allow_bypass_permissions:
+            argv.append("--disable-sandbox")
+    argv.append("--disable-approval")
+    if resume_session_id is not None:
+        argv.extend(["--session-id", resume_session_id])
+    elif not persist_session:
+        argv.append("--no-session-log")
+    if output_schema is not None:
+        argv.extend(["--output-schema", output_schema])
+    if model:
+        argv.extend(["--model", model])
+    if reasoning_effort is not None:
+        argv.extend(["--reasoning-effort", reasoning_effort])
+    if prompt_transport != PROMPT_TRANSPORT_FILE:
+        raise DelegateError(
+            "invalid_prompt_transport",
+            f"Unsupported Muse prompt transport: {prompt_transport}",
+        )
+    argv.extend(["--prompt-file", PROMPT_FILE_ARG_PLACEHOLDER])
+    return argv
 
 
 def build_codex_argv(

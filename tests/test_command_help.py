@@ -34,6 +34,7 @@ TOP_LEVEL_COMMANDS = (
     "opencode",
     "pi",
     "omp",
+    "muse",
     "codex",
     "droid",
     "kimi",

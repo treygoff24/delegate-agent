@@ -252,6 +252,12 @@ is absent.
     "defaultModel": "kimi-code/k3",
     "defaultReasoningEffort": null
   },
+  "muse": {
+    "binary": "muse",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "models": {}
+  },
   "workflows": {
     "engineCaps": {},
     "itemThreads": 64,
@@ -556,13 +562,14 @@ different. Delegate warns when:
 
 #### Native session files and the resumable default
 
-Codex and Claude **work** Runs are resumable by default. A resumable Run leaves
+Codex, Claude, and Muse **work** Runs are resumable by default. A resumable Run leaves
 the harness's own session on disk (Codex's rollout under `CODEX_HOME/sessions`,
-Claude Code's transcript under its `projects` directory) and records the session
+Claude Code's transcript under its `projects` directory, Muse's session log under
+`~/.local/share/muse/sessions`) and records the session
 id in the Run's manifest, which is what `delegate followup` resumes. What that
 means in practice:
 
-- **Storage.** Native session files now persist for every Codex and Claude work
+- **Storage.** Native session files now persist for every Codex, Claude, and Muse work
   Run, not only Runs launched with `--resumable`. They hold the prompt, the
   child's output, and its tool results in the harness's own store, outside
   `.delegate/` and outside Delegate's redaction and `runs prune`. Delegate does
@@ -574,7 +581,7 @@ means in practice:
 - **Precedence.** The default beats `codex.ephemeral: true` and
   `claude.noSessionPersistence: true`. Those keys only apply to Runs that are not
   resumable. Opt out per launch with `--no-resumable` (JSON `resumable: false`),
-  or per engine with `codex.resumable: false` / `claude.resumable: false`. A launch
+  or per engine with `codex.resumable: false` / `claude.resumable: false` / `muse.resumable: false`. A launch
   that says `--resumable` beats the engine key.
 - **Unchanged.** Safe and call Runs, `--pass-through` Runs, and every other
   engine stay ephemeral, and `--no-resumable` is a quiet no-op there.
@@ -607,12 +614,12 @@ means in practice:
 - `trackedStreamMaxBytes`: retained-stream byte cap for tracked runs. Off by default (`null`): nothing is truncated, hidden from the parser, or killed for being verbose, and `stdout.log` keeps the whole stream. Set a positive integer to opt in; a Run that then exceeds it is stopped as `output_limit_exceeded` with its partial output kept in the completion report. Only an opted-in cap applies the OMP 256 MiB transport and 16 MiB per-record ceilings, which are not configurable.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
-- `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
-- `safeSandbox`: Grok sandbox profile for safe runs. Defaults to `read-only`.
+- `safePermissionMode`: Grok permission mode for read-only runs (`grok call --read-only`; `grok safe` is refused). Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
+- `safeSandbox`: Grok sandbox profile for read-only runs (`grok call --read-only`). Defaults to `read-only`.
 - `workSandbox`: optional Grok sandbox profile for work runs: `workspace`, `devbox`, `read-only`, `strict`, or `null` (omit `--sandbox` when `null`).
 - `disableWebSearch`: defaults to `true`. Delegate adds `--disable-web-search` only when this is `true` and effective `policy.webSearch` is not `true`. Set `policy.work.webSearch` to `true` or `grok.disableWebSearch` to `false` to allow web search.
 - `noSubagents`: defaults to `false`. When `true`, Delegate adds `--no-subagents` to Grok argv.
-- Grok safe mode uses prompt-file transport, `--sandbox read-only`, and `--permission-mode dontAsk` by default, plus Delegate's isolated throwaway workspace.
+- `grok safe` is refused with `grok_safe_unsupported`; use `delegate --isolation worktree grok work --forbid-commit --model grok-4.7 --reasoning-effort xhigh "<read-only brief>"`. Grok runs use prompt-file transport.
 
 ### `kimi`
 
@@ -733,7 +740,7 @@ provider, including configured custom or local providers.
 { "droid": { "enabled": false } }
 ```
 
-- Every engine block (`cursor`, `droid`, `codex`, `kimi`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`) accepts an optional boolean `enabled`, default `true`. A non-boolean value fails config load with `invalid_<engine>_config`.
+- Every engine block (`cursor`, `droid`, `codex`, `kimi`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, `muse`) accepts an optional boolean `enabled`, default `true`. A non-boolean value fails config load with `invalid_<engine>_config`.
 - `enabled: false` removes the harness from `delegate models`, `describe`, and `capabilities` listings (JSON and text), skips it in `capabilities refresh`, and makes every launch of it (and `delegate models <name>`) fail fast with `harness_disabled` naming `<engine>.enabled`. Static help text and the `describe` overview still mention the harness. Use it to retire a harness whose binary is still on `PATH`.
 
 ### `omp`
@@ -798,6 +805,30 @@ provider, including configured custom or local providers.
   with `invalid_alias` and lists the configured aliases and the nearest catalog
   selectors. With no catalog the run proceeds with a warning; run
   `delegate capabilities refresh` so bare names can be checked.
+
+### `muse`
+
+```json
+{
+  "muse": {
+    "binary": "muse",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "resumable": true,
+    "models": {
+      "reviewer": "replace-with-muse-model-id"
+    }
+  }
+}
+```
+
+- `binary`: path to the Muse executable.
+- `defaultModel`: optional Muse model ID (for example a `muse-spark` or `muse-wonder` ID from `delegate models muse`). `null` preserves Muse's configured default. The binary accepts unknown IDs without error, so Delegate cannot verify which model served a run.
+- `defaultReasoningEffort`: optional `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` default, emitted as `--reasoning-effort`.
+- `resumable`: work Runs keep their Muse session log so `delegate followup` works; `false` (or per-run `--no-resumable`) launches with `--no-session-log`.
+- `trackedStreamMaxBytes`: retained-stream byte cap for tracked runs. Off by default (`null`): nothing is truncated, hidden from the parser, or killed for being verbose, and `stdout.log` keeps the whole stream. Set a positive integer to opt in; a Run that then exceeds it is stopped as `output_limit_exceeded` with its partial output kept in the completion report. Only an opted-in cap applies the OMP 256 MiB transport and 16 MiB per-record ceilings, which are not configurable.
+- `models`: optional alias map from local names to Muse model IDs.
+- Safe mode and `call --read-only` pass `--disable-write --disable-shell --disable-web-tools` with Muse's sandbox on and the workspace untrusted. Work mode trusts the workspace; `--disable-sandbox` is emitted only under the explicit harness policy bypass.
 
 ### `reasoning`
 
@@ -877,7 +908,7 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 ```
 
 Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
-OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
+OpenCode, Pi, Oh My Pi, Droid, Kimi, and Muse safe mode, an effective value of `none` is normalized to `auto`
 because those safe contracts depend on Delegate's temporary workspace/config
 boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
 config default is normalized without a separate per-run warning. Codex safe can
@@ -885,7 +916,7 @@ use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, Codex, and Kimi safe use temporary workspace isolation by default. Devin safe is unsupported.
+- `safe`: `auto`. Cursor, Claude, OpenCode, Pi, Oh My Pi, Droid, Codex, Kimi, and Muse safe use temporary workspace isolation by default. Devin safe is unsupported.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 #### `isolation.safeBackend` and `isolation.bwrapBinds` (Linux)
@@ -1031,7 +1062,7 @@ Codex unwrapped. To guard the other engines on the Mac as well, also set
 
 - `dataHome`: persistent-worktree root. `null` means `~/.delegate/worktrees`.
 - `poolWarnCount`: non-negative worktree-count threshold for a launch-time warning when the shared persistent-worktree pool holds more worktrees. The default is 20. The warning does not block or delete anything.
-- `retireWorktreeOnCompletion`: when true (the default), a successful work-lane run retires its clean persistent worktree while preserving the `delegate/*` branch. Unchanged source dirt seeded at launch is treated as clean; failed/cancelled runs, child edits, unverifiable state, and unsafe metadata retain the worktree and are reported in the completion payload. Set false to keep manual cleanup behavior.
+- `retireWorktreeOnCompletion`: when true (the default), a successful work-lane run retires its clean persistent worktree while preserving the `delegate/*` branch (a branch with no commit of its own, tip equal to the recorded start commit, is deleted with it). Unchanged source dirt seeded at launch is treated as clean; failed/cancelled runs, child edits, unverifiable state, and unsafe metadata retain the worktree and are reported in the completion payload. Set false to keep manual cleanup behavior.
 - `autoPrune.enabled`: if true, `delegate worktree list` and work-lane completion run the existing opportunistic prune pass for clean, fully merged worktrees older than `mergedOlderThanDays`.
 - `autoPrune.mergedOlderThanDays`: non-negative integer.
 

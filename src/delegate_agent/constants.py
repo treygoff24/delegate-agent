@@ -33,6 +33,7 @@ KNOWN_ENGINES = (
     "opencode",
     "pi",
     "omp",
+    "muse",
 )
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
@@ -86,9 +87,9 @@ ENGINE_CAPABILITIES = {
     engine: {
         "pureCall": pure_call_supported(engine),
         "pureTripwire": engine == "claude",
-        "structuredOutput": engine in {"codex", "claude"},
-        "noSessionPersistence": engine in {"codex", "claude", "pi", "omp"},
-        "nativeSessionResume": engine in {"codex", "claude"},
+        "structuredOutput": engine in {"codex", "claude", "muse"},
+        "noSessionPersistence": engine in {"codex", "claude", "pi", "omp", "muse"},
+        "nativeSessionResume": engine in {"codex", "claude", "muse"},
         "usageEvents": engine == "claude",
         # These engines use stdin for all modes (not pure-only); keep the capability.
         "promptStdin": engine in {"codex", "claude", "opencode", "pi"},
@@ -119,6 +120,7 @@ SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
         "omp",
         "droid",
         "kimi",
+        "muse",
     }
 )
 # Stable public summary order; membership is still derived from the modeless engine set.
@@ -134,6 +136,7 @@ MODEL_SUMMARY_ENGINES = tuple(
         "opencode",
         "pi",
         "omp",
+        "muse",
     )
     if engine in MODELESS_ENGINES
 )

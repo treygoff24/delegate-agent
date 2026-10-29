@@ -19,7 +19,7 @@ class DiscoveryContractsTests(HelpCliTestBase):
         overview = json.loads(out)
         self.assertTrue(overview["overview"])
         self.assertEqual(overview["modes"], ["safe", "work", "call"])
-        self.assertEqual(len(overview["engines"]), 10)
+        self.assertEqual(len(overview["engines"]), len(parser_api.KNOWN_ENGINES))
         self.assertIn("version", overview)
         for excluded in ("configSource", "configResolution", "profiles", "launchOptions"):
             self.assertNotIn(excluded, overview)

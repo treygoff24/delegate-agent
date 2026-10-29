@@ -11,7 +11,7 @@ from delegate_agent import cli_parser, profile_guard, request_build
 from delegate_agent import config as delegate_config
 from delegate_agent.errors import DelegateError
 
-ENGINES = ("cursor", "kimi", "codex", "claude", "grok", "devin", "opencode", "pi", "omp")
+ENGINES = ("cursor", "kimi", "codex", "claude", "grok", "devin", "opencode", "pi", "omp", "muse")
 
 
 class PersonaParserTests(unittest.TestCase):

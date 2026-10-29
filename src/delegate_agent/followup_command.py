@@ -157,6 +157,15 @@ def validate_session_id(session_id: object, engine: str, alias: str = "run") -> 
                 diagnostics={"code": "session-invalid"},
                 next_actions=["The run record may be corrupt or tampered."],
             )
+    elif engine == "muse":
+        # Muse session ids are UUIDs; the binary rejects anything else.
+        if not CLAUDE_SESSION_ID_RE.fullmatch(session_id) or session_id.count("-") != 4:
+            raise DelegateError(
+                "session-invalid",
+                f"The recorded Muse session id {session_id!r} for {alias} is malformed.",
+                diagnostics={"code": "session-invalid"},
+                next_actions=["The run record may be corrupt or tampered."],
+            )
     elif engine == "codex":
         if not CODEX_SESSION_ID_RE.fullmatch(session_id):
             raise DelegateError(
@@ -168,7 +177,7 @@ def validate_session_id(session_id: object, engine: str, alias: str = "run") -> 
     else:
         raise DelegateError(
             "followup-unsupported",
-            f"Engine {engine} does not support native session resumption; supported engines are codex and claude.",
+            f"Engine {engine} does not support native session resumption; supported engines are codex, claude, and muse.",
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use delegate resume instead of followup for this engine."],
         )
@@ -337,10 +346,10 @@ def build_followup_plan(
     source_engine = _manifest_str(manifest, "engine") or _manifest_str(manifest, "harness")
     if source_engine not in KNOWN_ENGINES:
         raise _record_invalid("The source run's manifest does not name a known engine.")
-    if source_engine not in ("codex", "claude"):
+    if source_engine not in ("codex", "claude", "muse"):
         raise DelegateError(
             "followup-unsupported",
-            f"Engine {source_engine} does not support native session resumption; supported engines are codex and claude.",
+            f"Engine {source_engine} does not support native session resumption; supported engines are codex, claude, and muse.",
             diagnostics={"code": "followup-unsupported"},
             next_actions=["Use delegate resume instead of followup for this engine."],
         )

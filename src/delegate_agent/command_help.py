@@ -22,6 +22,7 @@ from delegate_agent.constants import (
 )
 from delegate_agent.json_types import JsonObject
 from delegate_agent.reasoning import (
+    MUSE_NATIVE_EFFORTS,
     OMP_NATIVE_EFFORTS,
     PI_NATIVE_EFFORTS,
     thinking_vocabulary_prose,
@@ -224,7 +225,7 @@ _AGENT_OPTION = OptionSpec(
 _OUTPUT_SCHEMA_OPTION = OptionSpec(
     "--output-schema",
     "FILE",
-    "codex/claude JSON Schema for the final message (codex passes the schema path natively; "
+    "codex/claude/muse JSON Schema for the final message (codex and muse pass the schema path natively; "
     "claude inlines the schema contents); also suppresses the completion-report instruction.",
 )
 _FAST_OPTION = OptionSpec(
@@ -334,13 +335,13 @@ _NO_MAIL_PUSH_OPTION = OptionSpec(
 _RESUMABLE_OPTION = OptionSpec(
     "--resumable",
     None,
-    "Codex and Claude work only: save the native session so `delegate followup` works. "
+    "Codex, Claude, and Muse work only: save the native session so `delegate followup` works. "
     "Already the default for those Runs; use it to override `resumable: false` in config.",
 )
 _NO_RESUMABLE_OPTION = OptionSpec(
     "--no-resumable",
     None,
-    "Codex and Claude work only: do not save the native session, so `delegate followup` is "
+    "Codex, Claude, and Muse work only: do not save the native session, so `delegate followup` is "
     "unavailable and a succeeded worktree Run retires instead of being kept for resumption. "
     "Wins over the default and the config key.",
 )
@@ -813,6 +814,61 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("pi", "opencode", "codex", "models", "agent-help"),
     ),
+    "muse": CommandSpec(
+        name="muse",
+        summary="Run Muse (Meta) in safe, work, or stateless call mode.",
+        usage=(
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "muse {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--output-schema FILE] "
+            "[--prompt-file PATH | prompt...]",
+            "delegate [--json] muse call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] "
+            "[--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH | prompt...]",
+        ),
+        arguments=(_MODE_ARG, _PROMPT_ARG),
+        options=(
+            _MODEL_OPTION,
+            _REASONING_EFFORT_OPTION,
+            _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
+            _FORBID_COMMIT_OPTION,
+            _INCLUDE_DIRTY_OPTION,
+            _RESUMABLE_OPTION,
+            _NO_RESUMABLE_OPTION,
+            _READ_ONLY_OPTION,
+            _OUTPUT_SCHEMA_OPTION,
+            _CHILD_TIMEOUT_OPTION,
+            _STALL_MINUTES_OPTION,
+            _PROMPT_FILE_OPTION,
+        ),
+        examples=(
+            'delegate muse safe "Review this workspace. Do not edit files."',
+            'delegate muse work --model muse-spark-1.3 "Implement the scoped fix and verify."',
+            "delegate muse call --read-only --prompt-file judge.md",
+        ),
+        notes=(
+            "Uses muse exec --json with the prompt delivered by --prompt-file; dry-run argv "
+            "and run manifests do not contain the prompt.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
+            CALL_MODE_NOTE,
+            "Safe and call --read-only pass --disable-write --disable-shell --disable-web-tools "
+            "with Muse's sandbox on and the workspace untrusted, so repo-local Muse skills "
+            "do not load. Safe mode has no shell: reviewers use Muse's native read/search "
+            "tools and cannot run git or tests.",
+            "Safe mode is not hermetic against user-level Muse configuration: a user-configured "
+            "MCP server's behavior under the safe flags is not yet probed.",
+            "Work mode trusts the workspace and keeps Muse's sandbox on unless Delegate policy "
+            "explicitly enables harness-scoped bypassApprovalsAndSandbox.",
+            "Reasoning effort maps directly to muse --reasoning-effort: "
+            f"{thinking_vocabulary_prose(MUSE_NATIVE_EFFORTS)}.",
+            "The muse binary accepts unknown model IDs without error, so Delegate cannot verify "
+            "which model served a run; pinned continuity for muse ends unverified.",
+            "Work Runs keep their Muse session log by default, so `delegate followup` works "
+            "without a launch flag; --no-resumable or muse.resumable: false opts out.",
+        ),
+        see_also=("claude", "codex", "models", "agent-help"),
+    ),
     "droid": CommandSpec(
         name="droid",
         summary="Run a Factory Droid BYOK model alias in safe, work, or stateless call mode.",
@@ -857,10 +913,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "dry-run": CommandSpec(
         name="dry-run",
-        summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode/pi/omp invocation and print the planned argv without running it.",
+        summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode/pi/omp/muse invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,claude,grok,opencode,pi,omp} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,claude,grok,opencode,pi,omp,muse} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH | prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run kimi {safe,work} [--model <alias-or-model>] "
@@ -923,10 +979,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate dry-run omp safe "Review this repo."',
             'delegate dry-run claude safe "Review this repo."',
             'delegate dry-run kimi safe "Review this repo."',
+            'delegate dry-run muse safe "Review this repo."',
         ),
         notes=(
             "dry-run shares the full engine grammar but launches no child process.",
-            "--output-schema is accepted only for codex and claude dry-runs.",
+            "--output-schema is accepted only for codex, claude, and muse dry-runs.",
             "--fast and --no-fast are accepted only for codex dry-runs.",
             "Reasoning effort is resolved from config/cache/bundled capabilities without invoking child binaries.",
         ),
@@ -2743,6 +2800,7 @@ for _engine in (
     "pi",
     "omp",
     "droid",
+    "muse",
 ):
     COMMAND_SPECS[f"{_engine} call"] = _focused_call_spec(COMMAND_SPECS[_engine])
 
@@ -2759,7 +2817,7 @@ COMMAND_SPECS["dry-run call"] = CommandSpec(
         "isolation, progress heartbeat, or commit policy. --cwd PATH is accepted only with "
         "--group to resolve the same registry/config workspace as a real grouped call; "
         "it never changes the child's throwaway execution cwd, and dry-run creates no run entry.",
-        "--output-schema is accepted for codex and claude dry-runs; --fast and --no-fast only for codex.",
+        "--output-schema is accepted for codex, claude, and muse dry-runs; --fast and --no-fast only for codex.",
     ),
     see_also=("dry-run", "cursor call", "codex call", "droid call"),
     unsupported_global_options=_CALL_UNSUPPORTED_GLOBAL_OPTIONS,

@@ -581,14 +581,14 @@ class TurnEndClauseTests(unittest.TestCase):
         return request_build.effective_prompt(prompt, **options)
 
     def test_tracked_work_and_safe_prompts_carry_the_clause_once_for_every_engine(self):
-        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi"):
+        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi", "muse"):
             for mode in ("work", "safe"):
                 with self.subTest(engine=engine, mode=mode):
                     framed = self.frame(engine=engine, mode=mode)
                     self.assertEqual(framed.count(prompt_instructions.TURN_END_INSTRUCTION), 1)
 
     def test_work_prompt_says_nobody_can_approve_and_safe_prompt_does_not(self):
-        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi"):
+        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi", "muse"):
             with self.subTest(engine=engine):
                 work = self.frame(engine=engine, mode="work")
                 self.assertIn("Nobody can answer a question or approve a step", work)
@@ -644,7 +644,7 @@ class LaneTestsClauseTests(unittest.TestCase):
         return request_build.effective_prompt(prompt, **options)
 
     def test_tracked_work_and_safe_prompts_carry_the_lane_rule_once_for_every_engine(self):
-        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi"):
+        for engine in ("claude", "codex", "cursor", "omp", "grok", "kimi", "droid", "pi", "muse"):
             for mode in ("work", "safe"):
                 with self.subTest(engine=engine, mode=mode):
                     framed = self.frame(engine=engine, mode=mode)

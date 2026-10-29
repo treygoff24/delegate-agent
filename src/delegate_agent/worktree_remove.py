@@ -71,6 +71,50 @@ def _remove_branch(source_git_root: str, branch: str, *, force: bool) -> BranchR
     return BranchRemovalResult(removed=False, error=stderr)
 
 
+def _resolve_commit(source_git_root: str, rev: str) -> str | None:
+    result = wm._run_git(
+        source_git_root,
+        ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        timeout_seconds=wm.GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    oid = result.stdout.strip()
+    return oid if result.returncode == 0 and oid else None
+
+
+def remove_branch_if_at_start(
+    source_git_root: str,
+    branch: str,
+    start_oid: object,
+) -> BranchRemovalResult:
+    """Delete ``branch`` only when its tip is exactly the recorded start commit.
+
+    Tip equal to the start commit proves the branch holds no commit of its own,
+    so nothing is lost by dropping it. That proof is what justifies the forced
+    delete: ``git branch -d`` would also demand the start be merged into the
+    source's current HEAD, which a ``--base`` lane need not satisfy. Anything
+    unproven keeps the branch and names why in ``kept_reason``. Git itself still
+    refuses to delete a branch another worktree has checked out.
+    """
+
+    if not isinstance(start_oid, str) or not start_oid:
+        return BranchRemovalResult(removed=False, kept_reason="start_commit_missing")
+    start = _resolve_commit(source_git_root, start_oid)
+    if start is None:
+        return BranchRemovalResult(removed=False, kept_reason="start_commit_unresolvable")
+    tip = _resolve_commit(source_git_root, wm._branch_ref(branch))
+    if tip is None:
+        return BranchRemovalResult(removed=False, kept_reason="branch_unresolvable")
+    if tip != start:
+        return BranchRemovalResult(removed=False, kept_reason="has_commits")
+    result = _remove_branch(source_git_root, branch, force=True)
+    if result.removed:
+        return result
+    # e.g. checked out by another worktree: the branch stays, the run does not fail.
+    return BranchRemovalResult(
+        removed=False, kept_reason="branch_delete_refused", error=result.error
+    )
+
+
 def _apply_branch_removal_result(
     payload: JsonObject,
     result: BranchRemovalResult,

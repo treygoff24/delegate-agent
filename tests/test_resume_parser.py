@@ -76,7 +76,7 @@ class ResumeParserTests(unittest.TestCase):
                 with self.assertRaises(DelegateError) as caught:
                     parse_cli([engine, "work", "--resumable", "prompt"])
                 self.assertEqual(caught.exception.error, "followup-unsupported")
-                self.assertIn("codex and claude", caught.exception.message)
+                self.assertIn("codex, claude, and muse", caught.exception.message)
                 self.assertEqual(caught.exception.diagnostics.get("code"), "followup-unsupported")
 
     def test_resumable_rejected_on_duplicate_flag(self):

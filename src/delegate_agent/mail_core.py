@@ -72,6 +72,7 @@ MAIL_SANDBOX_ROWS: dict[str, str] = {
     "opencode": "workspace-writable",
     "pi": "workspace-writable",
     "omp": "scoped",
+    "muse": "workspace-writable",
 }
 if set(MAIL_SANDBOX_ROWS) != set(KNOWN_ENGINES):
     raise RuntimeError("Every known engine needs an explicit mail sandbox row.")

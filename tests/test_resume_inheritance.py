@@ -630,6 +630,6 @@ class ResumeKeepsNativeSessionOptInTests(ResumeFixture):
 
         self.assertFalse(payload.get("resumable", False))
         self.assertIn("resumable dropped: codex safe runs do not support --resumable", stderr)
-        self.assertIn("native followup requires a codex or claude work run", stderr)
+        self.assertIn("native followup requires a codex, claude, or muse work run", stderr)
         self.assertIn("continue the resumed run with delegate resume", stderr)
         self.assertNotIn("cannot record a native session", stderr)

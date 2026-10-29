@@ -132,7 +132,7 @@ class FollowupRefusalsTests(unittest.TestCase):
                 payload = json.loads(stdout)
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["code"], "followup-unsupported")
-                self.assertIn("codex and claude", payload["message"])
+                self.assertIn("codex, claude, and muse", payload["message"])
 
     def test_refusal_session_missing(self):
         _run_id, alias = self.write_test_run(harness_session_id=None, resumable=False)

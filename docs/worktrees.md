@@ -63,7 +63,15 @@ end-state is clean. Failed or cancelled runs are retained for inspection.
 Source dirt copied into the worktree at launch is compared
 by content against a launch digest, so unchanged seeded files do not block
 retirement while a child edit to a seeded file does. The `delegate/*` branch is
-kept as the durable artifact. Dirty, unverifiable, or unsafe worktrees remain
+kept as the durable artifact, unless the run made no commit of its own: when the
+branch tip is still the commit the run started from (the recorded
+`creationContext.sourceHeadOid`, which is the `--base` commit for a based lane),
+there is nothing to merge and the empty branch is deleted too. A branch with any
+commit is kept, as is one whose start commit is not recorded or does not resolve,
+or that another worktree has checked out. The completion JSON reports
+`worktreeBranchRemoved` and, when kept for lack of proof,
+`worktreeBranchKept` (`has_commits` is the ordinary reason); neither changes the
+exit status. Dirty, unverifiable, or unsafe worktrees remain
 on disk and the completion JSON includes `worktreeRetained` with a reason. Set
 `worktrees.retireWorktreeOnCompletion` to `false` to preserve the previous
 manual-cleanup behavior. If `worktrees.autoPrune.enabled` is true, its existing

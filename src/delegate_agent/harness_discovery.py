@@ -90,6 +90,7 @@ _CANONICAL_VERSION_PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE | re.MULTILINE,
     ),
     "devin": re.compile(r"^devin\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "muse": re.compile(r"^Muse Code\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
     "omp": re.compile(r"^omp/[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
     "cursor": re.compile(r"^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$", re.IGNORECASE | re.MULTILINE),
 }
@@ -1331,6 +1332,24 @@ def parse_claude_efforts(raw: str) -> JsonObject:
     )
 
 
+def parse_muse_efforts(raw: str) -> JsonObject:
+    # Muse has no model enumeration command; `muse exec --help` documents the
+    # effort enum inline ("Meta reasoning effort: none|minimal|...|ultra").
+    match = re.search(r"reasoning effort:\s*([a-z][a-z|]*)", raw, re.IGNORECASE)
+    if match is None:
+        raise ValueError("Muse help had no reasoning effort list")
+    supported = [item.strip() for item in match.group(1).split("|") if item.strip()]
+    if not supported or not all(_transport_safe_effort(item) for item in supported):
+        raise ValueError("Muse help had an invalid effort list")
+    return _fragment(
+        model_scope="unknown",
+        models={},
+        harness_reasoning={"supported": supported, "evidence": "harness"},
+        probe_status="partial",
+        warnings=["Muse does not expose non-interactive model enumeration"],
+    )
+
+
 def parse_grok_catalog(raw: str) -> JsonObject:
     default_match = re.search(r"^Default model:\s*(\S+)\s*$", raw, re.MULTILINE)
     default_model = default_match.group(1) if default_match else None
@@ -1527,6 +1546,11 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
     return fragment
 
 
+def _probe_muse(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None) -> JsonObject:
+    help_output = _probe_output(selector, ("exec", "--help"), env)
+    return parse_muse_efforts(f"{help_output.stdout}\n{help_output.stderr}")
+
+
 def _probe_grok(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None) -> JsonObject:
     return parse_grok_catalog(_probe_output(selector, ("models",), env).stdout)
 
@@ -1558,6 +1582,7 @@ ADAPTERS = {
     "opencode": _probe_opencode,
     "pi": _probe_pi,
     "omp": _probe_omp,
+    "muse": _probe_muse,
 }
 
 

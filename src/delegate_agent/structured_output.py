@@ -12,7 +12,7 @@ class SchemaPreflightError(ValueError):
     pass
 
 
-NATIVE_SCHEMA_ENGINES = frozenset({"claude", "codex"})
+NATIVE_SCHEMA_ENGINES = frozenset({"claude", "codex", "muse"})
 CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES = 120_000
 
 
@@ -44,6 +44,13 @@ def native_schema_eligible(
                 f"{serialized_bytes} bytes; the argv limit is under "
                 f"{CLAUDE_NATIVE_SCHEMA_ARGV_MAX_BYTES} bytes."
             )
+    # The Meta API rejects a json_schema whose root object does not set
+    # additionalProperties: false (verified live, Muse 1.4.6).
+    if engine == "muse" and schema.get("additionalProperties") is not False:
+        return (
+            "muse native structured output requires the root object to set "
+            "additionalProperties: false."
+        )
     if engine == "codex":
         free_form = free_form_object_path(schema, "schema")
         if free_form is not None:
