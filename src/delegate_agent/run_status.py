@@ -11,7 +11,12 @@ from typing import NamedTuple
 from delegate_agent import archived_logs, pending_tool, record_io, usage_record
 from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
-from delegate_agent.terminal_states import COMPLETED_UNVERIFIED, COMPLETED_VERIFIED, STALLED
+from delegate_agent.terminal_states import (
+    COMPLETED_UNVERIFIED,
+    COMPLETED_VERIFIED,
+    STALLED,
+    TERMINAL_STATE_MEANINGS,
+)
 
 LARGE_LOG_WARN_MIB = 50
 # One MiB, shared as a value rather than an import from the mutation layer.
@@ -204,6 +209,7 @@ def status_fields(state: JsonObject | None) -> JsonObject:
         fields["staleReason"] = reason
     if effective == STATUS_STALE:
         fields["terminalState"] = STALLED
+        fields["terminalStateMeaning"] = TERMINAL_STATE_MEANINGS[STALLED]
     return fields
 
 
@@ -369,6 +375,7 @@ def build_run_summary(
             "terminalEvent",
             "terminalStatus",
             "terminalState",
+            "terminalStateMeaning",
             "terminalRecord",
             "continuityMode",
             "modelProvenance",

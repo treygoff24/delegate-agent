@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Terminal states say what they mean.** The run's closing `terminal state:` line
+  now carries a plain explanation, and run receipts, `status` and `wait` output
+  carry it as `terminalStateMeaning`. `completed_unverified` reads "completed
+  normally; no verification step ran, so nothing checked the output": it is the
+  ordinary success state, not a warning. The state values are unchanged.
 - **bwrap safe runs can see dependency directories.** Ignored `node_modules`,
   `.pnpm-store`, `.venv`, `venv`, `.tox`, `.nox`, `__pycache__`, `target` and
   `vendor` directories are no longer masked, so a safe reviewer can run the

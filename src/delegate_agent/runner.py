@@ -1621,7 +1621,9 @@ def emit_bounded_text_summary(
     if extra is not None:
         terminal_state = extra.get("terminalState")
         if isinstance(terminal_state, str) and terminal_state:
-            print(f"terminal state: {terminal_state}", file=stdout)
+            meaning = terminal_states.terminal_state_meaning(terminal_state)
+            suffix = f" ({meaning})" if meaning else ""
+            print(f"terminal state: {terminal_state}{suffix}", file=stdout)
         failover_notice = extra.get("failoverNotice")
         if isinstance(failover_notice, str) and failover_notice:
             print(failover_notice, file=stdout)
@@ -2911,6 +2913,7 @@ def _record_tracked_launch_failure(
         "message": error.message,
         "resultQuality": None,
         "terminalState": terminal_states.FAILED,
+        "terminalStateMeaning": terminal_states.TERMINAL_STATE_MEANINGS[terminal_states.FAILED],
         "terminalRecord": _terminal_record(
             ctx,
             terminal_state=terminal_states.FAILED,
@@ -4169,6 +4172,7 @@ def _finalize_tracked_run(
         pinned_pause=merged_extra.get("pinnedContinuityPause") is True,
     )
     merged_extra["terminalState"] = terminal_state
+    merged_extra["terminalStateMeaning"] = terminal_states.TERMINAL_STATE_MEANINGS[terminal_state]
     merged_extra["terminalRecord"] = _terminal_record(
         ctx,
         terminal_state=terminal_state,

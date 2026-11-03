@@ -73,6 +73,7 @@ WAIT_STRUCTURAL_KEYS = (
     "effectiveStatus",
     "status",
     "terminalState",
+    "terminalStateMeaning",
     "resultQuality",
     "degraded",
     "degradedReason",

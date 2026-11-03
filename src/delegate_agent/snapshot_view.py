@@ -80,6 +80,7 @@ class SnapshotView(TypedDict, total=False):
     unreadMail: JsonObject
     mailInbox: JsonObject
     terminalState: str
+    terminalStateMeaning: str
     terminalRecord: JsonObject
     continuityMode: str
     modelProvenance: JsonObject
