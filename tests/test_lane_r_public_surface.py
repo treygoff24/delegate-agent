@@ -5,20 +5,22 @@ from tests.delegate_commands_test_base import CommandTestBase
 
 
 class LaneRPublicSurfaceTests(CommandTestBase):
-    def _dry_run(self, engine: str, effort: str) -> tuple[int, dict[str, object]]:
+    def _dry_run(
+        self, engine: str, effort: str, mode: str = "safe"
+    ) -> tuple[int, dict[str, object]]:
         code, stdout, stderr = self.run_main(
-            ["--json", "dry-run", engine, "safe", "--reasoning-effort", effort, "x"]
+            ["--json", "dry-run", engine, mode, "--reasoning-effort", effort, "x"]
         )
         self.assertEqual(stderr, "")
         return code, json.loads(stdout)
 
     def test_grok_xhigh_succeeds_and_max_is_rejected(self) -> None:
-        code, payload = self._dry_run("grok", "xhigh")
+        code, payload = self._dry_run("grok", "xhigh", "work")
         self.assertEqual(code, 0)
         self.assertIs(payload["ok"], True)
         self.assertEqual(payload["resolvedReasoningEffort"], "xhigh")
 
-        code, payload = self._dry_run("grok", "max")
+        code, payload = self._dry_run("grok", "max", "work")
         self.assertEqual(code, 2)
         self.assertIs(payload["ok"], False)
         self.assertEqual(payload["error"], "unsupported_reasoning_effort")

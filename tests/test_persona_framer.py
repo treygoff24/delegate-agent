@@ -40,7 +40,8 @@ class PersonaFramerTests(CommandTestBase):
         "pi",
         "omp",
     )
-    _SAFE_ENGINES = tuple(engine for engine in _ENGINES if engine != "devin")
+    # Devin has no safe mode and Grok safe runs are refused at request build.
+    _SAFE_ENGINES = tuple(engine for engine in _ENGINES if engine not in ("devin", "grok"))
     # Kimi is the last argv-transport engine; cursor and omp moved to stdin.
     _TRANSPORT_ENGINES = (("argv", "kimi"), ("stdin", "codex"), ("file", "droid"))
 
@@ -154,7 +155,7 @@ class PersonaFramerTests(CommandTestBase):
         repo = self._dirty_repo()
         for engine in self._ENGINES:
             for mode in ("safe", "work"):
-                if engine == "devin" and mode == "safe":
+                if mode == "safe" and engine not in self._SAFE_ENGINES:
                     continue
                 with self.subTest(engine=engine, mode=mode):
                     request = self.build_git_request(

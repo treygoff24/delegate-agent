@@ -171,10 +171,12 @@ class CursorFamilyNameTests(CommandTestBase):
 
 class LaunchCatalogWarningTests(CommandTestBase):
     def _request(self, engine, model, discovery):
+        # Grok refuses safe mode, so its catalog checks run on a work request.
+        mode = "work" if engine == "grok" else "safe"
         with mock.patch.object(harness_discovery, "load_discovery_cache", return_value=discovery):
             return self.build_git_request(
                 engine,
-                "safe",
+                mode,
                 None,
                 "/repo",
                 "review",
