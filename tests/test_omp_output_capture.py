@@ -163,6 +163,31 @@ class OmpOutputCaptureTests(unittest.TestCase):
             os.kill(pid, signal.SIGKILL)  # our own probe child; do not leave it spinning
         self.fail(f"{path} path left the flooding child {pid} running or unreaped")
 
+    @contextlib.contextmanager
+    def child_kill_deadline(self, pid_file, path, seconds=15):
+        """Fail, rather than hang, if the runner never ends the flooding child.
+
+        The flooder ignores SIGPIPE and loops forever, so a runner that stops
+        killing it would block the call below with no end. This timer is the
+        test's own: it SIGKILLs the child from its pid file and the test fails.
+        """
+        fired = threading.Event()
+
+        def kill_child():
+            fired.set()
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+        timer = threading.Timer(seconds, kill_child)
+        timer.daemon = True
+        timer.start()
+        try:
+            yield
+        finally:
+            timer.cancel()
+        if fired.is_set():
+            self.fail(f"{path} path never ended the flooding child within {seconds}s")
+
     def test_infinite_thinking_hits_transport_limit_and_reaps_child(self):
         # The transport ceiling belongs to an opted-in cap; with no cap it never fires.
         started = time.monotonic()
@@ -187,7 +212,10 @@ class OmpOutputCaptureTests(unittest.TestCase):
                     "    except OSError: pass\n"
                 )
 
-            with self.assertRaises(runner.RunnerLaunchError) as error:
+            with (
+                self.child_kill_deadline(tracked_pid, "tracked"),
+                self.assertRaises(runner.RunnerLaunchError) as error,
+            ):
                 self.tracked(Path(temp), flood(tracked_pid))
             self.assertEqual(error.exception.error, "output_limit_exceeded")
             self.assert_child_reaped(tracked_pid, "tracked")
@@ -199,7 +227,10 @@ class OmpOutputCaptureTests(unittest.TestCase):
             self.assertLessEqual(
                 state["stdoutCapture"]["transportBytes"], 16384 + runner.STREAM_READ_CHUNK_BYTES
             )
-            with self.assertRaises(runner.RunnerLaunchError) as call_error:
+            with (
+                self.child_kill_deadline(call_pid, "call"),
+                self.assertRaises(runner.RunnerLaunchError) as call_error,
+            ):
                 runner.execute_call(
                     [sys.executable, "-c", flood(call_pid)], temp, harness="omp", timeout=10
                 )
