@@ -170,6 +170,12 @@ def rerun_skip_reason(note: RunNote, *, enabled: bool, already_automatic: bool) 
     signature = provider_errors.signature_for_record(note.provider_error)
     if signature is None:
         return "not_a_transient_drop"
+    # The broker case is decided before the structured-output exclusion on
+    # purpose. That exclusion exists because the workflow supervisor owns the
+    # retry of a structured run whose output may be bad; a broker refusal with no
+    # child output means no vendor process ran, so there is no output to judge,
+    # and the supervisor reads the rerun's envelope (its runId included) as the
+    # child's one result.
     if signature.id == BROKER_SIGNATURE:
         if note.mode == "work":
             return "work_side_effects"

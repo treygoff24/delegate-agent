@@ -524,8 +524,11 @@ carries `autoResume` with `attempted: false` and a `reason`.
   too, the failure is final and the lane is marked as before.
 
 `call` mode is not covered. `providerErrors.autoResume: false` turns both reruns
-off (the broker refusal then marks the lane immediately). Pass-through and
-structured-output safe runs are never rerun.
+off (the broker refusal then marks the lane immediately). Pass-through runs are
+never rerun. A structured-output safe run is not rerun after a stream drop (the
+workflow supervisor owns that retry, because it validates the output), but a
+broker launch refusal with no child output is rerun like any other safe launch:
+no vendor process ran, and the supervisor reads the rerun's envelope and run id.
 
 ## A finished Run never read the coordinator's mail (`unreadMail`)
 
