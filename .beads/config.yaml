@@ -65,6 +65,6 @@ issue-prefix: "dlg"
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/treygoff24/delegate-agent.git"
+# sync.remote: "git+https://github.com/treygoff24/delegate-agent.git"
 export:
     auto: true
