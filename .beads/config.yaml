@@ -68,4 +68,4 @@ issue-prefix: "dlg"
 export:
     auto: true
 sync:
-    remote: "git+https://github.com/treygoff24/delegate-agent-dev.git"
+    # remote: "git+https://github.com/treygoff24/delegate-agent-dev.git"
