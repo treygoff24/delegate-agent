@@ -1,0 +1,31 @@
+# Depot CI: delegate-agent's validation gate, run on a remote Linux machine.
+#
+# Runs scripts/gate.sh exactly as written (AGENTS.md "Validation gate"): pytest
+# (xdist, 4 workers on Linux), compileall, ruff check, ruff format --check, with
+# the ruff version pinned in pyproject.toml's dev extra. Nothing is unwrapped:
+# scripts/test.py only uses `testrun` and cgroup CPU quotas when `testrun` is on
+# PATH, which it is not here, so it falls back to plain low-priority workers.
+#
+# Not run: the GitHub Actions matrix extras (python -m build, twine check, wheel
+# install smoke, macOS job). Those are release checks in .github/workflows/ci.yml,
+# not part of scripts/gate.sh.
+#
+# Manual only (workflow_dispatch). Run from a working tree:
+#   depot ci run --workflow .depot/workflows/ci.yml --job gate
+name: gate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Python 3.13: what the repo's own .venv uses (requires-python >=3.11).
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Gate (scripts/gate.sh)
+        run: ./scripts/gate.sh
