@@ -1261,6 +1261,16 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(cfg["isolation"]["safe"], "auto")
         self.assertEqual(cfg["isolation"]["work"], "none")
 
+    def test_worktree_creation_budget_requires_a_positive_integer(self):
+        config = delegate_config.embedded_default_config()
+        self.assertEqual(config["isolation"]["worktreeCreateTimeoutSeconds"], 30)
+        for value in (None, True, 0, -1, 3.5, "90"):
+            config["isolation"]["worktreeCreateTimeoutSeconds"] = value
+            with self.subTest(value=value), self.assertRaises(delegate_config.ConfigError) as exc:
+                delegate_config.validate_config(config)
+            self.assertEqual(exc.exception.error, "invalid_isolation_config")
+            self.assertIn("worktreeCreateTimeoutSeconds", exc.exception.message)
+
     def test_isolation_work_unknown_value_raises(self):
         config_mod = load_config_module()
         with self.assertRaises(config_mod.ConfigError) as ctx:

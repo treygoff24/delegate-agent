@@ -424,6 +424,19 @@ class BuildIsolationContextTests(unittest.TestCase):
 
 
 class GitTimeoutTests(unittest.TestCase):
+    def test_timeout_diagnostics_do_not_turn_failed_git_probes_into_absence(self):
+        from delegate_agent import worktree_timeout
+
+        with tempfile.TemporaryDirectory() as base:
+            message, diagnostics = worktree_timeout.describe_timeout(
+                base, str(Path(base) / "not-created"), branch="delegate/cursor-test", seconds=30
+            )
+        detail = diagnostics["worktreeCreation"]
+        self.assertEqual(detail["pathKind"], "missing")
+        self.assertIsNone(detail["registered"])
+        self.assertIsNone(detail["branchExists"])
+        self.assertIn("registered=unknown", message)
+
     def test_create_persistent_worktree_branch_probe_timeout_is_structured(self):
         iso = load_isolation()
         with (

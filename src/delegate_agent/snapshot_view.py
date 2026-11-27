@@ -50,6 +50,7 @@ class SnapshotView(TypedDict, total=False):
     isolationBackend: str
     sourceGitRoot: str
     branch: str
+    worktreeCreation: JsonObject
     creationContext: JsonObject
     worktreeStatus: str
     safeWorkspaceMethod: str

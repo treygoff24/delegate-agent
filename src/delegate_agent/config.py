@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -22,6 +23,7 @@ COMPLETION_REPORT_MODES = (
     COMPLETION_REPORT_MODE_NONE,
 )
 
+DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS: Final = 30
 ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
@@ -211,6 +213,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "isolation": {
         "safe": ISOLATION_AUTO,
+        "worktreeCreateTimeoutSeconds": DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS,
         "work": ISOLATION_NONE,
     },
     "worktrees": {
@@ -472,6 +475,19 @@ def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None
                     )
 
 
+def worktree_create_timeout_seconds(config: Mapping[str, object] | None) -> int:
+    section = config.get("isolation") if config is not None else None
+    if not isinstance(section, Mapping):
+        return DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS
+    value = section.get("worktreeCreateTimeoutSeconds", DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS)
+    if not is_non_negative_int(value) or value < 1:
+        raise ConfigError(
+            "invalid_isolation_config",
+            "isolation.worktreeCreateTimeoutSeconds must be a positive integer.",
+        )
+    return value
+
+
 def _validate_isolation_section(isolation: JsonValue) -> None:
     if isolation is None:
         return
@@ -480,6 +496,7 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
             "invalid_isolation_config",
             "isolation config must be an object.",
         )
+    worktree_create_timeout_seconds({"isolation": isolation})
     for mode in ("safe", "work"):
         if mode not in isolation:
             continue

@@ -1106,20 +1106,58 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertEqual(isolated.model_requested, "requested-model")
 
     def test_create_git_safe_workspace_reports_worktree_timeout(self):
-        timeout = subprocess.CompletedProcess(
-            ["git"],
-            124,
-            "",
-            "git command timed out after 30s",
+        # The add timed out before Git registered this destination. A directory
+        # with files is still not ours to delete (nor a finished checkout).
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = config_api.embedded_default_config()
+        config["isolation"]["worktreeCreateTimeoutSeconds"] = 93
+        iso = isolation_api.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="worktree",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
         )
-        with (
-            mock.patch.object(safe_workspace, "_run_git", return_value=timeout),
-            self.assertRaises(errors_api.DelegateError) as ctx,
-        ):
-            safe_api.create_git_safe_workspace("/repo")
+        request = request_api.build_request(
+            "codex",
+            "safe",
+            None,
+            request_types.ResolvedWorkspace(repo.name, "git"),
+            "review",
+            config,
+            dry_run=False,
+            isolation_context=iso,
+        )
+        run = safe_workspace._run_git
 
+        def partial(cwd, args, **kwargs):
+            if args[:2] != ["worktree", "add"]:
+                return run(cwd, args, **kwargs)
+            self.assertEqual(kwargs["timeout_seconds"], 93)
+            wt = Path(args[-2])
+            wt.mkdir()
+            (wt / "partial").touch()
+            return subprocess.CompletedProcess(args, 124, "", "git timed out")
+
+        with tempfile.TemporaryDirectory() as base:
+            with (
+                mock.patch.object(safe_workspace, "safe_workspace_temp_base", return_value=base),
+                mock.patch.object(safe_workspace, "_run_git", side_effect=partial),
+                self.assertRaises(errors_api.DelegateError) as ctx,
+                safe_api.safe_isolated_request(request, config=config),
+            ):
+                self.fail("no harness may launch after a creation timeout")
+            self.assertTrue((Path(base) / "wt/partial").is_file())
         self.assertEqual(ctx.exception.error, "safe_workspace_create_failed")
-        self.assertIn("timed out", ctx.exception.message)
+        self.assertIn("timed out after 93s", ctx.exception.message)
+        detail = ctx.exception.diagnostics["worktreeCreation"]
+        self.assertEqual(detail["pathKind"], "directory")
+        self.assertEqual(detail["gitMarker"], "missing")
+        self.assertTrue(detail["hasCheckoutEntries"])
+        self.assertFalse(detail["registered"])
+        self.assertIsNone(detail["indexLocked"])
+        self.assertNotIn("branch", detail)
 
     def test_read_git_tracked_diff_reports_timeout_from_binary_runner(self):
         timeout = subprocess.CompletedProcess(

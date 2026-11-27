@@ -39,6 +39,7 @@ from delegate_agent.isolation import (
     IsolationContext,
     IsolationExecutionError,
     PoolRootUnreadable,
+    WorktreeAddTimeout,
     branch_label,
     compute_repo_fingerprint_from_common_dir,
     create_persistent_worktree,
@@ -566,6 +567,7 @@ def _create_persistent_worktree_or_record_failure(
             registration.branch,
             registration.worktree_path,
             preflight.base_oid,
+            timeout_seconds=delegate_config.worktree_create_timeout_seconds(execution.config),
         )
         source_dirty = preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
         if execution.request.workspace_base is not None and source_dirty:
@@ -652,13 +654,26 @@ def _create_persistent_worktree_or_record_failure(
                     public_argv(execution.request),
                 ),
             )
+    except WorktreeAddTimeout as exc:
+        # Inspect outside the cleanup path: the checkout may still have a live
+        # helper or a lock, even if a diagnostic fails.
+        message, diagnostics = exc.inspect()
+        snapshot = run_registry.snapshot_command(registration.alias, cwd=preflight.source_git_root)
+        diagnostics.update(
+            runId=registration.run_id, alias=registration.alias, snapshotCommand=snapshot
+        )
+        message += f" Failed run: {snapshot}."
+        _record_persistent_worktree_failure(
+            registration, error=exc.error, message=message, extra=diagnostics
+        )
+        raise PersistentWorktreeError(exc.error, message, diagnostics=diagnostics) from exc
     except IsolationExecutionError as exc:
         _record_persistent_worktree_failure(
             registration,
             error=exc.error,
             message=exc.message,
         )
-        if exc.error != "branch_collision":
+        if exc.error not in {"branch_collision", "git_timeout"}:
             _cleanup_partial_worktree(
                 preflight.source_git_root,
                 registration.worktree_path,

@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 # Re-export isolation constants from config for convenience
 from delegate_agent.config import (
+    DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS,
     ISOLATION_AUTO,
     ISOLATION_NONE,
     ISOLATION_WORKTREE,
@@ -36,6 +37,7 @@ from delegate_agent.git_utils import (
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
 from delegate_agent.sandbox_bwrap import SandboxPlan
+from delegate_agent.worktree_timeout import describe_timeout
 
 
 @dataclass(frozen=True)
@@ -412,6 +414,15 @@ class IsolationExecutionError(Exception):
         self.message = message
 
 
+class WorktreeAddTimeout(IsolationExecutionError):
+    def __init__(self, root: str, path: str, seconds: int, branch: str | None = None):
+        super().__init__("git_timeout", f"git worktree add timed out after {seconds}s")
+        self.root, self.path, self.seconds, self.branch = root, path, seconds, branch
+
+    def inspect(self) -> tuple[str, JsonObject]:
+        return describe_timeout(self.root, self.path, seconds=self.seconds, branch=self.branch)
+
+
 def target_contains_source_root(target: str | Path, source_root: str | Path) -> bool:
     """Return whether deleting target could delete the source workspace root."""
     try:
@@ -456,6 +467,8 @@ def create_persistent_worktree(
     branch: str,
     worktree_path: str,
     base_oid: str,
+    *,
+    timeout_seconds: int = DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS,
 ) -> None:
     """Create a persistent Git worktree on a new branch from base_oid."""
     branch_probe = _run_git(
@@ -478,8 +491,10 @@ def create_persistent_worktree(
     result = _run_git(
         source_git_root,
         ["worktree", "add", "-b", branch, worktree_path, base_oid],
+        timeout_seconds=timeout_seconds,
     )
-    _raise_if_git_timed_out(result, "git worktree add")
+    if result.returncode == GIT_TIMEOUT_RETURN_CODE:
+        raise WorktreeAddTimeout(source_git_root, worktree_path, timeout_seconds, branch)
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise IsolationExecutionError(

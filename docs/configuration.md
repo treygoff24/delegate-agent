@@ -902,12 +902,13 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 {
   "isolation": {
     "safe": "auto",
-    "work": "none"
+    "work": "none",
+    "worktreeCreateTimeoutSeconds": 30
   }
 }
 ```
 
-Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
+Allowed values for `safe` and `work` are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
 OpenCode, Pi, Oh My Pi, Droid, Kimi, and Muse safe mode, an effective value of `none` is normalized to `auto`
 because those safe contracts depend on Delegate's temporary workspace/config
 boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
@@ -918,6 +919,19 @@ Embedded defaults:
 
 - `safe`: `auto`. Cursor, Claude, OpenCode, Pi, Oh My Pi, Droid, Codex, Kimi, and Muse safe use temporary workspace isolation by default. Devin safe is unsupported.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
+- `worktreeCreateTimeoutSeconds`: positive integer, default 30. This is the budget
+  for `git worktree add` (persistent worktrees and detached safe copies), not the
+  run deadline or the timeout for other Git commands. Increase it for large or
+  slow checkouts.
+
+If creation times out, Delegate does not remove the destination, branch, or
+lock. The error reports what remains; a persistent run also keeps those
+observations under `worktreeCreation` in its failed snapshot. A directory with
+files does not prove the checkout finished. A lock does not prove its owner
+is dead. Inspect the reported path and `git worktree list --porcelain` in the
+source repository, confirm no checkout is still running, and preserve any work
+before retrying. Do not delete a lock or force-remove a worktree based on the
+timeout alone.
 
 #### `isolation.safeBackend` and `isolation.bwrapBinds` (Linux)
 

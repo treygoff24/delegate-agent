@@ -31,16 +31,25 @@ from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
 from delegate_agent.argv_utils import replace_workspace_arg_in_argv as _replace_ws_by_engine
-from delegate_agent.config import SAFE_BACKEND_BWRAP
+from delegate_agent.config import (
+    DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS,
+    SAFE_BACKEND_BWRAP,
+    worktree_create_timeout_seconds,
+)
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
+    GIT_TIMEOUT_RETURN_CODE,
 )
 from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.git_utils import run_git_bytes as _run_git_bytes
-from delegate_agent.isolation import IsolationContext, target_contains_source_root
+from delegate_agent.isolation import (
+    IsolationContext,
+    WorktreeAddTimeout,
+    target_contains_source_root,
+)
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.request_models import Request
@@ -933,6 +942,7 @@ def create_git_safe_workspace(
     git_root: str,
     *,
     include_warnings: bool = False,
+    timeout_seconds: int = DEFAULT_WORKTREE_CREATE_TIMEOUT_SECONDS,
 ) -> tuple[str, str] | tuple[str, str, tuple[str, ...]]:
     temp_base = safe_workspace_temp_base(git_root)
     worktree_path = str(Path(temp_base) / "wt")
@@ -942,8 +952,10 @@ def create_git_safe_workspace(
         added = _run_git(
             git_root,
             ["worktree", "add", "--detach", worktree_path, "HEAD"],
-            timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
         )
+        if added.returncode == GIT_TIMEOUT_RETURN_CODE:
+            raise WorktreeAddTimeout(git_root, worktree_path, timeout_seconds)
         if added.returncode != 0:
             raise DelegateError(
                 "safe_workspace_create_failed",
@@ -951,6 +963,11 @@ def create_git_safe_workspace(
             )
         worktree_added = True
         warnings = sync_git_workspace_snapshot(git_root, worktree_path)
+    except WorktreeAddTimeout as exc:
+        message, diagnostics = exc.inspect()
+        raise DelegateError(
+            "safe_workspace_create_failed", message, diagnostics=diagnostics
+        ) from exc
     except Exception:
         discard_git_safe_workspace(
             git_root, worktree_path, temp_base, worktree_added=worktree_added
@@ -1251,6 +1268,7 @@ def safe_isolated_request(
         isolated_workspace, temp_base, safe_workspace_warnings = create_git_safe_workspace(
             source_git_root,
             include_warnings=True,
+            timeout_seconds=worktree_create_timeout_seconds(config),
         )
         cleanup_git_root = source_git_root
         safe_workspace_method = "git-worktree"

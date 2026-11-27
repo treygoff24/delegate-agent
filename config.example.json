@@ -130,7 +130,8 @@
   },
   "isolation": {
     "safe": "auto",
-    "work": "none"
+    "work": "none",
+    "worktreeCreateTimeoutSeconds": 30
   },
   "worktrees": {
     "dataHome": null,

@@ -8,6 +8,7 @@ from unittest import mock
 
 from delegate_agent import config as config_api
 from delegate_agent import errors as errors_api
+from delegate_agent import git_utils, isolation
 from delegate_agent import request_build as request_api
 from delegate_agent import request_models as request_types
 from delegate_agent import run_registry as registry_api
@@ -111,6 +112,69 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 self.assertNotIn("branch", snapshot_payload)
             finally:
                 worktree_execution_api.create_persistent_worktree = original_create
+
+    def test_timeout_preserves_partial_checkout_locks_and_reports_them_in_snapshot(self):
+        repo, _ = self._make_git_repo_with_commit()
+        config = config_api.embedded_default_config()
+        config["worktrees"]["dataHome"] = str(Path(self._test_home) / "pool with spaces")
+        config["isolation"]["worktreeCreateTimeoutSeconds"] = 91
+        request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
+
+        budgets = []
+
+        def partial_checkout(cwd, args, **kwargs):
+            if args[:2] != ["worktree", "add"]:
+                return git_utils.run_git(cwd, args, **kwargs)
+            budgets.append(kwargs.get("timeout_seconds"))
+            wt = Path(args[-2])
+            git_utils.run_git(cwd, [*args[:2], "--no-checkout", *args[2:]]).check_returncode()
+            git_utils.run_git(cwd, ["worktree", "lock", str(wt)]).check_returncode()
+            git_dir = Path(
+                git_utils.run_git(str(wt), ["rev-parse", "--absolute-git-dir"]).stdout.strip()
+            )
+            (git_dir / "index.lock").touch()
+            (wt / "partially written").touch()
+            return subprocess.CompletedProcess(args, 124, "", "timed out")
+
+        with (
+            mock.patch.object(isolation, "_run_git", side_effect=partial_checkout),
+            mock.patch.object(worktree_execution_api, "_cleanup_partial_worktree") as cleanup,
+            self.assertRaises(errors_api.DelegateError) as caught,
+        ):
+            self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=request_api.resolve_workspace(repo.name),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        cleanup.assert_not_called()
+        self.assertEqual(budgets, [91])
+        self.assertEqual(caught.exception.error, "git_timeout")
+        detail = caught.exception.diagnostics["worktreeCreation"]
+        self.assertEqual(detail["timeoutSeconds"], 91)
+        self.assertTrue(detail["registered"])
+        self.assertTrue(detail["worktreeLocked"])
+        self.assertTrue(detail["indexLocked"])
+        self.assertTrue(Path(detail["indexLockPath"]).is_file())
+        self.assertIn(caught.exception.diagnostics["snapshotCommand"], caught.exception.message)
+        self.assertTrue(detail["branchExists"])
+        self.assertTrue(detail["hasCheckoutEntries"])
+        self.assertTrue(Path(detail["path"], "partially written").exists())
+        self.assertIn("worktree list", caught.exception.message)
+        self.assertNotIn("--force", caught.exception.message)
+        [run] = (Path(repo.name) / ".delegate/runs").glob("del_*")
+        out = io.StringIO()
+        self.assertEqual(
+            self.delegate.main(["--cwd", repo.name, "--json", "snapshot", run.name], stdout=out), 0
+        )
+        snapshot = json.loads(out.getvalue())
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["worktreeCreation"], detail)
+        self.assertNotIn("worktreeCleanupCommands", snapshot)
 
     def test_partial_worktree_cleanup_uses_git_timeouts(self):
         """Failure-path cleanup must not run unbounded git subprocesses."""
