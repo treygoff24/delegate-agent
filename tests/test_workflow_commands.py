@@ -2114,6 +2114,9 @@ class WorkflowCommandTests(unittest.TestCase):
 
         approved = self.run_delegate(["--json", "workflow", "approve", wf_id])
         self.assertEqual(approved.returncode, 0, approved.stderr)
+        # Approval starts a supervisor; the approval response is not completion.
+        resumed = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
         final = self.run_delegate(["--json", "workflow", "status", wf_id])
         self.assertEqual(json.loads(final.stdout).get("status"), "succeeded")
         approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}

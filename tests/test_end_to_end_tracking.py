@@ -510,10 +510,23 @@ class EndToEndTrackingTests(unittest.TestCase):
         )
         try:
             self.assertEqual(read_fifo_line(started_fifo, timeout=5), "started")
-            time.sleep(0.2)
+            # Release the fake harness only after the behavior under test, not
+            # after a sleep that can expire before the runner is scheduled.
+            assert process.stderr is not None
+            prefix = bytearray()
+            deadline = time.monotonic() + 5
+            while b"delegate: still running" not in prefix:
+                ready, _, _ = select.select(
+                    [process.stderr], [], [], max(0, deadline - time.monotonic())
+                )
+                self.assertTrue(ready, "timed out waiting for a progress heartbeat")
+                chunk = os.read(process.stderr.fileno(), 4096)
+                self.assertTrue(chunk, "stderr closed before a progress heartbeat")
+                prefix.extend(chunk)
             with release_fifo.open("w", encoding="utf-8") as release:
                 release.write("go\n")
             stdout, stderr = process.communicate(timeout=10)
+            stderr = prefix.decode() + stderr
             self.assertEqual(process.returncode, 0, stderr)
             payload = json.loads(stdout)
             self.assertTrue(payload["ok"])
