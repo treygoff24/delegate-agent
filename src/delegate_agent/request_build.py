@@ -3063,6 +3063,16 @@ def build_request(
             or _discovery_has_engine_record(contextual, engine)
         ):
             discovery = contextual
+    # Confined runs must never execute the harness outside the mount boundary,
+    # including version and capability checks during request construction.
+    verify_native_persona = (
+        not confined_work
+        and engine == "claude"
+        and mode == MODE_WORK
+        and not dry_run
+        and persona is not None
+        and _cached_native_persona_transport(discovery)
+    )
     discovery, drift_warnings = _runtime_discovery_for_engine(
         config,
         engine,
@@ -3071,20 +3081,8 @@ def build_request(
         # Native persona transport is an argv-compatibility safety decision, so
         # spend the existing lazy identity probe only when this request would
         # otherwise trust its positive cached capability.
-        probe_version=(
-            engine == "claude"
-            and mode == MODE_WORK
-            and not dry_run
-            and persona is not None
-            and _cached_native_persona_transport(discovery)
-        ),
-        require_current_version=(
-            engine == "claude"
-            and mode == MODE_WORK
-            and not dry_run
-            and persona is not None
-            and _cached_native_persona_transport(discovery)
-        ),
+        probe_version=verify_native_persona,
+        require_current_version=verify_native_persona,
     )
     warnings = (
         *warnings,
@@ -3184,6 +3182,8 @@ def build_request(
         version matched, or because it failed open on an error, a timeout, or an
         unrecognized banner.
         """
+        if confined_work:
+            return None
         probed, probe_warnings = _runtime_discovery_for_engine(
             config,
             engine,
@@ -4329,7 +4329,9 @@ def _build_request_for_workspace(
         mode=mode,
         config=config,
         profile_resolution=profile_resolution,
-        discovery=discovery,
+        # Native transport needs a fresh capability check; use prompt framing
+        # instead of starting an unconfined probe.
+        discovery=None if confined_work else discovery,
         agent=agent,
         persona=persona_resolution,
     )
@@ -4572,7 +4574,9 @@ def _build_request_for_workspace(
             allow_repo_persona=allow_repo_persona,
             persona_env_overrides=parts.persona_env_overrides or persona_env,
             completion_report_mode=completion_report_mode,
-            account_binding_command=account_binding.cursor_status_command(engine, config),
+            account_binding_command=(
+                None if confined_work else account_binding.cursor_status_command(engine, config)
+            ),
             persistent_worktree_notes_framed=framed_worktree_note is not None,
             mail_push=mail_push,
             resumable=resumable,

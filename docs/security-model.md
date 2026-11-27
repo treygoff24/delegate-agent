@@ -493,7 +493,8 @@ Delegate preflights the bubblewrap boundary and refuses to start the lane if
 it cannot mount it. `writeGuard` shows the write root in the manifest and
 `dry-run`; only a live launch can report `status: "enforced"`. The prompt asks
 the lane to report denied writes by path and error. Delegate does not audit
-every file operation.
+every file operation. It skips live harness version and account-status probes
+that would otherwise run outside the boundary.
 
 Use a harness that can start with a fresh HOME and doesn't need to modify a
 host profile. Existing engine-home overrides don't grant write access, and

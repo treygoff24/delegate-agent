@@ -29,6 +29,8 @@ class ConfinedWorkTests(GuardE2ETestCase):
             self.write_engine(
                 "agent",
                 "#!/bin/sh\n"
+                f'if [ "$1" = status ]; then printf escaped > "{self.home}/status-probe"; exit; fi\n'
+                "cat >/dev/null\n"
                 "/bin/sh -c '\n"
                 '  printf kept > "$PWD/in-root"\n'
                 '  printf escaped > "$PWD/../outside-packet"\n'
@@ -41,7 +43,9 @@ class ConfinedWorkTests(GuardE2ETestCase):
                 'printf yes > "$PWD/private-dirs-work"\n'
                 "'\n" + EVENTS,
             )
-            completed = self.cli("cursor", "work", "--confined-work", "tidy up", cwd=packet)
+            completed = self.cli(
+                "--json", "cursor", "work", "--confined-work", "tidy up", cwd=packet
+            )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
             self.assertEqual((packet / "in-root").read_text(), "kept")
             outside = [
@@ -49,6 +53,7 @@ class ConfinedWorkTests(GuardE2ETestCase):
                 self.sibling / "canary",
                 self.sibling / "via-link",
                 self.home / "real-home-canary",
+                self.home / "status-probe",
                 real_tmp,
             ]
             self.assertEqual([p.name for p in outside if p.exists()], [])
@@ -81,12 +86,14 @@ class ConfinedWorkTests(GuardE2ETestCase):
 
     def test_dry_run_shows_the_planned_root_without_running_bwrap(self):
         self.write_config()
+        self.write_engine("agent", '#!/bin/sh\nprintf escaped > "$HOME/dry-run-probe"\n')
         result = self.cli("--json", "dry-run", "cursor", "work", "--confined-work", "implement")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         plan = json.loads(result.stdout)
         self.assertTrue(plan["confinedWork"])
         self.assertEqual(plan["writeGuard"]["status"], "planned")
         self.assertEqual(plan["writeGuard"]["writeRoot"], str(self.workspace))
+        self.assertFalse((self.home / "dry-run-probe").exists())
 
     @unittest.skipUnless(_USABLE, _WHY_NOT)
     def test_input_json_and_persistent_worktree_keep_shared_git_metadata_read_only(self):
