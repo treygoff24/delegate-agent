@@ -6306,13 +6306,17 @@ def _execute_call_once(
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
-    if pure and harness == "claude" and Path(argv[0]).name == "estate-claude":
-        if auth_profile not in {"work", "personal"}:
-            raise RunnerLaunchError(
-                "broker_rejected",
-                "Pure estate-claude calls need a resolved work or personal auth profile; "
-                "refusing the broker's implicit work account.",
-            )
+    if (
+        pure
+        and harness == "claude"
+        and Path(argv[0]).name == "estate-claude"
+        and auth_profile not in {"work", "personal"}
+    ):
+        raise RunnerLaunchError(
+            "broker_rejected",
+            "Pure estate-claude calls need a resolved work or personal auth profile; "
+            "refusing the broker's implicit work account.",
+        )
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         argv,
         prompt_file_text=prompt_file_text,
