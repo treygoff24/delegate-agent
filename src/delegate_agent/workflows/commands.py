@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -652,6 +653,7 @@ def emit_run(
             recorded_script_hash = status.get("scriptSha256")
             script_hash = recorded_script_hash if isinstance(recorded_script_hash, str) else None
             warnings.extend(_resume_source_warnings(status))
+            warnings.extend(_resume_environment_warning(status))
             warnings.extend(_resume_frozen_script_warnings(status, script_path))
             args_value = status.get("args")
             budget_total = command.budget
@@ -718,6 +720,7 @@ def emit_run(
                 "workspace": str(workspace),
                 "scriptPath": str(script_path),
                 "sourceScript": str(source),
+                "launchEnvironmentFingerprint": _launch_environment_fingerprint(),
                 "journalPath": str(root / registry.JOURNAL_FILE),
                 "resultPath": str(root / registry.RESULT_FILE),
                 "scriptSha256": script_hash,
@@ -1786,6 +1789,36 @@ def emit_save(command: WorkflowCommand, *, stdout: TextIO) -> int:
     else:
         print(f"saved: {target}", file=stdout)
     return EXIT_OK
+
+
+def _launch_environment_fingerprint() -> dict[str, str | None]:
+    # Fixed allowlist of toolchain/config paths. Never inspect credential variables,
+    # enumerate the caller's environment, or copy raw path values to the journal.
+    names = ("PATH", "VIRTUAL_ENV", "PYTHONPATH", "CODEX_HOME", "CLAUDE_CONFIG_DIR")
+    return {
+        name: hashlib.sha256(os.fsencode(os.environ[name])).hexdigest()
+        if name in os.environ
+        else None
+        for name in names
+    }
+
+
+def _resume_environment_warning(status: JsonObject) -> list[str]:
+    launch = status.get("launchEnvironmentFingerprint")
+    if not isinstance(launch, dict):
+        return []
+    changed = [
+        name
+        for name, digest in _launch_environment_fingerprint().items()
+        if name in launch and launch[name] != digest
+    ]
+    if not changed:
+        return []
+    return [
+        "Environment differs from the original launch: "
+        + ", ".join(changed)
+        + ". This attempt inherits the resuming environment; verify dependent checks."
+    ]
 
 
 def _resume_source_warnings(status: JsonObject) -> list[str]:

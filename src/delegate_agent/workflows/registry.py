@@ -210,6 +210,7 @@ def write_status(root: Path, payload: JsonObject) -> None:
         for key in (
             "scriptSha256",
             "sourceScript",
+            "launchEnvironmentFingerprint",
             "args",
             "watchdogFiredAt",
             "watchdogReason",

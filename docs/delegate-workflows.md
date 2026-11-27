@@ -721,6 +721,11 @@ several workspaces is listed rather than guessed. Child runs are ordinary runs
 of the workflow's workspace, so the run-level lookup rules in the CLI reference
 apply to them.
 
+Resume warns when PATH, VIRTUAL_ENV, PYTHONPATH, CODEX_HOME or CLAUDE_CONFIG_DIR
+differs from launch. Only fingerprints of those paths are recorded; other
+ambient variables are not compared. For reproducible project-specific data
+paths, supply them explicitly to worktree children as described below.
+
 `workflow run --env NAME=VALUE` and `--env-file PATH` (both repeatable, launch
 only) record a workflow-level env in the workflow directory's private
 `workspace-env.json`. Every `agent()` child of every attempt receives it

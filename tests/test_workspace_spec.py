@@ -1260,6 +1260,28 @@ class WorkflowWorkspaceSpecTests(WorktreeMgmtTestBase):
                 base=None, env={"TMPDIR": "/x"}, setup=None, mode="work", isolation="worktree"
             )
 
+    def test_resume_warns_on_changed_toolchain_without_recording_environment(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as home:
+            script = Path(home) / "wf.py"
+            script.write_text('meta = {"name": "noop"}\nreturn True\n')
+            cmd = ["--cwd", path, "--json", "workflow"]
+            with mock.patch.dict(
+                os.environ, {"VIRTUAL_ENV": "/first/venv", "SECRET_TOKEN": "fixture-secret"}
+            ):
+                code, out, err = self._run_cli([*cmd, "run", str(script), "--dry-run"], home=home)
+            self.assertEqual(code, 0, err)
+            wf_id = json.loads(out)["wfId"]
+            status = (Path(path) / ".delegate" / "workflows" / wf_id / "status.json").read_text()
+            self.assertNotIn("/first/venv", status)
+            self.assertNotIn("SECRET_TOKEN", status)
+            self.assertNotIn("fixture-secret", status)
+            with mock.patch.dict(os.environ, {"VIRTUAL_ENV": "/next/venv"}):
+                code, out, err = self._run_cli([*cmd, "resume", wf_id, "--dry-run"], home=home)
+            self.assertEqual(code, 0, err)
+            self.assertIn("Environment differs from the original launch: VIRTUAL_ENV", out + err)
+            self.assertNotIn("/next/venv", out + err)
+
     def test_workflow_launch_env_is_recorded_and_resume_refuses_new_env(self):
         _repo, repo_path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
