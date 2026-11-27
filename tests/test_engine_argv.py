@@ -3063,7 +3063,9 @@ class EngineArgvTests(CommandTestBase):
                 self.assertNotIn("private/default", request.argv)
                 self.assertNotIn("private/smol", request.argv)
                 self.assertNotIn("private/plan", request.argv)
-        self.assertNotIn("private/", json.dumps(describe_api.describe_payload(config, "test")))
+        discovery = json.dumps(describe_api.describe_payload(config, "test"))
+        for role in config["omp"]["modelRoles"].values():
+            self.assertNotIn(role, discovery)
 
     def test_omp_work_resolves_structured_alias_and_cli_thinking(self):
         config = json.loads(json.dumps(delegate_config.embedded_default_config()))

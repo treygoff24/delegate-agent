@@ -867,6 +867,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "with Muse's sandbox on and the workspace untrusted, so repo-local Muse skills "
             "do not load. Safe mode has no shell: reviewers use Muse's native read/search "
             "tools and cannot run git or tests.",
+            "If an untrusted Muse review returns no assistant text, use another safe engine, "
+            "or (only if edits in a separate worktree are acceptable) run delegate muse work "
+            "--isolation worktree --forbid-commit with a read-only brief. --forbid-commit "
+            "does not prevent file edits.",
             "Safe mode is not hermetic against user-level Muse configuration: a user-configured "
             "MCP server's behavior under the safe flags is not yet probed.",
             "Work mode trusts the workspace and keeps Muse's sandbox on unless Delegate policy "
@@ -1420,7 +1424,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--group", "NAME", "Expand a registered launch group into concrete recipients."
             ),
-            OptionSpec("--reply-to", "ID", "Reply within an existing exchange."),
+            OptionSpec(
+                "--reply-to",
+                "ID",
+                "Reply to a message delivered to you. To follow up on your own message, send a new message without --reply-to.",
+            ),
             OptionSpec("--subject", "TEXT", "Optional subject, capped at 200 characters."),
             OptionSpec("--file", "FILE", "Read the UTF-8 body from a file."),
         ),
@@ -2964,6 +2972,8 @@ def render_overview_text() -> str:
         "Usage: delegate [GLOBAL OPTIONS] COMMAND [COMMAND OPTIONS] [ARGS...]",
         "Launch: delegate ENGINE MODE [--model ALIAS_OR_MODEL] PROMPT",
         "Modes: safe (review), work (edit), call (one hop). See engine help for support.",
+        "Network and socket binds depend on the harness and host. Codex safe tool commands run offline;",
+        "work does not guarantee network or bind access. Run blocked checks on a permitted coordinator host.",
         "",
         "Commands:",
     ]

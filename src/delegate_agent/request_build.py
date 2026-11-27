@@ -4048,23 +4048,9 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         capability_warnings.extend(warnings)
         return capability
 
-    if thinking is not None and thinking_source == "alias":
-        capability = reasoning.ReasoningCapability(
-            harness="omp",
-            model=capability_model or "",
-            effort=thinking,
-            default_effort=None,
-            transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
-            source="alias",
-            evidence="exact",
-        )
-        fallback_warnings: tuple[str, ...] = ()
-    else:
-        capability, fallback_warnings = _capability_with_config_fallback(
-            resolve_capability,
-            engine="omp",
-            effort_source=thinking_source,
-        )
+    capability, fallback_warnings = _capability_with_config_fallback(
+        resolve_capability, engine="omp", effort_source=thinking_source
+    )
     resolved_thinking = capability.effort if capability is not None else None
     argv = build_omp_argv(
         omp,

@@ -81,6 +81,18 @@ class OmpProviderPinRequestTests(CommandTestBase):
 
     # -- the default: an explicit provider id is pinned -----------------------
 
+    def test_alias_thinking_cannot_override_exact_route_capability(self):
+        model = "example/reviewer"
+        catalog = _catalog(model)
+        catalog["harnesses"]["omp"]["models"][model]["reasoning"] = {
+            "supported": ["low"],
+            "evidence": "exact",
+        }
+        config = _config_with_aliases(review={"model": model, "thinking": "high"})
+        with self.assertRaises(DelegateError) as caught:
+            self._request("review", config=config, discovery=catalog)
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+
     def test_explicit_provider_id_is_pinned_and_launched_without_failover(self):
         request = self._request("opencode-go/glm-5.3")
 

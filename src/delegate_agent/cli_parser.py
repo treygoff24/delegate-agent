@@ -176,6 +176,9 @@ def canonical_help_topic(path: str | None) -> str | None:
 
     if not path:
         return path
+    # Modes follow the engine on launch; show a real engine's syntax and examples.
+    if path in ("safe", "work", "call"):
+        return "codex" if path != "call" else "codex call"
     if path in command_help.COMMAND_SPECS:
         return path
     parts = path.split()
@@ -929,6 +932,11 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             i += 1
             continue
         if token in value_options:
+            if token == "--file" and args[i + 1 : i + 2] == ["-"]:
+                raise DelegateError(
+                    "missing_option_value",
+                    "Use a positional '-' to read stdin: delegate mail send --to ALIAS -",
+                )
             value = _require_option_value(args, i, token)
             if token in values:
                 raise DelegateError("invalid_option_combination", f"Only one {token} is allowed.")
@@ -1144,6 +1152,11 @@ def corrected_command_suffix(argv: list[str]) -> str:
 
 
 def unknown_option_message(command: str, option: str) -> str:
+    if command.startswith("droid ") and option.split("=")[0] in {"--image", "--video", "--attach"}:
+        return (
+            "Droid does not accept media attachments here. Put image files in the workspace "
+            "and request one Read per image. For video, extract frames or use a video upload route."
+        )
     spec = command_help.COMMAND_SPECS.get(command)
     candidates = [opt.flag for opt in spec.options] if spec is not None else []
     matches = command_suggestions(option, candidates)

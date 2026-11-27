@@ -18,3 +18,15 @@
 | `help` and `--help` | `src/delegate_agent/command_help.py` | Text and JSON help specs. |
 
 See [data models](data-models.md) for registry and schema details.
+
+## Reviewing images and video with Droid
+
+Give Droid paths to image files visible in the review workspace. For a Gemini
+lane, ask for one image Read per message: batching several frame reads into
+one model request has returned HTTP 400 with no body. Retry one frame at a
+time rather than repeating the batch.
+
+Delegate's Droid prompt file is text, not a media attachment. A video path in
+the prompt does not upload the video. Extract still frames for an image-only
+review (label that limitation), or use a video-capable Gemini upload route for
+questions that require motion or sound.

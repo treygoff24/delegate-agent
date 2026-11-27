@@ -764,7 +764,7 @@ def _validate_reply(registry_root: Path, reply_to: str, identity: MailIdentity) 
     if not _reply_sender_allowed(registry_root, ledger, identity):
         raise _error(
             "reply_not_participant",
-            "The sender did not participate in the original exchange; reply-to cannot be routed around that boundary.",
+            "Only a delivered recipient may use --reply-to; this boundary cannot be routed around. To follow up on your own message, send a new message to the same recipient without --reply-to.",
         )
     return ledger
 

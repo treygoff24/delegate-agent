@@ -346,6 +346,13 @@ newest codex run and `delegate run-output codex:glm` the newest matching
 model. Envelopes echo `requestedHandle`/`resolvedHandle`/`resolutionKind` so you
 can confirm which run you addressed.
 
+The original launch process supervises a tracked Run: it drains the child's output
+and writes the completion record. Keep it alive. You can stop a separate
+`delegate wait` observer without stopping the Run. For a job that must survive
+the invoking terminal, use a detached `delegate workflow run`. If a launcher
+was killed and its Run is now stale, `resume` launches a new Run from the
+available history; it does not restart the old supervisor.
+
 `resume` creates a new Run from a terminal source Run. It carries forward the
 source mode and compatible launch settings, places the prior prompt and bounded
 result before your new instructions, and attaches to an existing persistent
@@ -365,6 +372,17 @@ file changes or commits; the child exit code remains available as `childExitCode
 A run whose child ended its turn mid-job ("Waiting on the full gate" while a
 background test run was still going) stays `succeeded` but carries `degraded: true`
 and a `degradedReason`; see [Troubleshooting](docs/troubleshooting.md#a-succeeded-runs-report-says-it-is-still-waiting-degraded).
+For a review that determines whether work can land, a successful Run is not an
+approval. On OMP, use a provider/model selector or explicit pinned continuity,
+then compare `modelProvenance.servedProvider` and `servedModel` to the requested
+route. Missing provider evidence is unverified.
+In particular, OMP's requested/resolved reasoning effort describes the launch,
+not the provider: `modelProvenance.providerReportedReasoningEffort` is null
+when the harness supplies no such evidence. For safe/work runs, declare each required output with
+`--expect-file PATH`: a missing path fails the Run. Before accepting it,
+read each required artifact from the execution workspace, check it was produced
+by this attempt, and validate its contents (or require a structured result
+with those fields). Do not accept a missing, stale, or truncated artifact.
 Tracked raw streams have no byte cap by default, so a verbose run is never
 killed or truncated for its size and `stdout.log` keeps the whole stream. Set
 `<engine>.trackedStreamMaxBytes` to a positive integer to opt an engine into a

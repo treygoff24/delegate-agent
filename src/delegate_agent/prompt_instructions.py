@@ -39,7 +39,7 @@ Ending your turn ends this Run, and nothing will wake you afterward: any backgro
 # the rule is carried here rather than read from a local policy file at runtime.
 LANE_TESTS_INSTRUCTION = """## Delegate lane test rule
 
-Lanes run targeted tests only: the test files for what you changed and their immediate neighbours, through `testrun <repo> <kind> -- <cmd>` with explicit worker caps (vitest --maxWorkers=8, cargo -j 8 / --test-threads=8, pytest -n 8). The full suite and the project gate are the coordinator's, run once on the integrated candidate; a lane never runs them, whatever a repository or skill file says. (Trey, 2026-09-30.)"""
+Lanes run targeted tests only: the test files for what you changed and their immediate neighbours, through `testrun <repo> <kind> -- <cmd>` with explicit worker caps (vitest --maxWorkers=8, cargo -j 8 / --test-threads=8, pytest -n 8). If sandboxed tools cannot resolve DNS or bind a local socket, report the unrun check for the coordinator to run on a permitted host; do not treat it as a failing test. The full suite and the project gate are the coordinator's, run once on the integrated candidate; a lane never runs them, whatever a repository or skill file says. (Trey, 2026-09-30.)"""
 
 # Work mode only: a Run has no human on the other end, so a skill that gates
 # implementation behind approval (brainstorming, design review) would park it.

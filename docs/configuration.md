@@ -445,7 +445,11 @@ archival keeps its once-a-minute cadence).
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `resumable`: defaults to `true`. A Codex **work** Run saves its native session, so `delegate followup <handle>` works without remembering `--resumable` at launch. `false` restores the old opt-in default: a work Run then saves its session only when launched with `--resumable` (or JSON `resumable: true`). A launch can always decide for itself: `--resumable` or `--no-resumable` (JSON `resumable: true` or `false`) beats this key. Safe and call Runs, `--pass-through` Runs, and other engines never default to resumable. See [Native session files](#native-session-files-and-the-resumable-default) for the storage consequence.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs that are **not** resumable, so it now applies to safe and call Runs, `--no-resumable` Runs, and every Run while `resumable` is `false`. It does not switch resumability off: a work Run stays resumable under `ephemeral: true` unless it opts out with `--no-resumable` or `resumable: false`.
-- `ignoreUserConfig`: include Codex `--ignore-user-config`.
+- `ignoreUserConfig`: include Codex `--ignore-user-config`. For a reviewer
+  that must not inherit optional user MCP servers, use a dedicated Delegate
+  config with this enabled, and explicitly configure the intended model and
+  policies. This skips the whole Codex user config, not just its MCP entries;
+  check the route with `delegate --json dry-run codex safe PROMPT` first.
 
 Temporary usage-limit blocks live in per-user runtime state and key on a hash
 of `CODEX_HOME/auth.json` plus `codex.profile`. Default work/personal homes also

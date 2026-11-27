@@ -43,6 +43,13 @@ git diff --check
 share bounded workers, low priority, and a lock across worktrees. `ruff` ships
 in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
 
+For a version check, `python3 bin/delegate.py --version` prints the bare
+version, not a string prefixed by the program name. Wrappers can instead
+compare the `version` field from `--json describe`. To verify an installation,
+compare the package's shipped source files (use the wheel member list), not
+a recursive diff of the installed directory: Python generates `__pycache__`
+and bytecode when the CLI runs.
+
 ## Reporting issues
 
 When filing an issue, include:
