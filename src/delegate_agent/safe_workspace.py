@@ -10,7 +10,8 @@ isolated workspace for the duration of a run and tears it down afterwards.
 This is the temporary-isolation twin of ``isolation.py`` (which owns
 persistent-worktree planning/creation); both are deliberately kept distinct.
 The security constraints here — symlink containment, ``.git``/``.delegate``
-exclusion, atomic writes — are load-bearing; preserve them exactly.
+exclusion, atomic writes — are load-bearing; preserve them exactly. Copies also
+skip ``.delegate-workflow-pins``, whose sealed trees a copy could not remove.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from delegate_agent.sandbox_bwrap import (
     parity_masks,
     requested_safe_backend,
 )
+from delegate_agent.workflow_pinning import PIN_ROOT_DIRNAME
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -663,7 +665,9 @@ def mirror_path_preserving_symlinks(
 def _copytree_ignore_safe_workspace(
     directory: str, names: list[str], *, unreadable: list[str] | None = None
 ) -> set[str]:
-    ignored = {".git", ".delegate"} & set(names)
+    # Workflow pins are sealed read-only (0500/0400): a copy of them cannot be
+    # removed without unsealing it, and nothing in a throwaway copy uses them.
+    ignored = {".git", ".delegate", PIN_ROOT_DIRNAME} & set(names)
     for name in names:
         path = Path(directory) / name
         try:

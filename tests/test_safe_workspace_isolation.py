@@ -360,6 +360,29 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             finally:
                 shutil.rmtree(temp_base, ignore_errors=True)
 
+    def test_create_directory_safe_workspace_omits_nested_sealed_workflow_pins(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            # A workspace that holds a HOME (a scratch home in a test tree, say)
+            # holds sealed workflow pins below the top level.
+            pins = Path(workspace) / "home" / ".delegate-workflow-pins"
+            (pins / "wf_0123456789ab").mkdir(parents=True)
+            (pins / "wf_0123456789ab" / "pin.json").write_text("{}\n", encoding="utf-8")
+            sealed = (pins / "wf_0123456789ab" / "pin.json", pins / "wf_0123456789ab", pins)
+            for path in sealed:
+                path.chmod(0o400 if path.is_file() else 0o500)
+            try:
+                copy_path, temp_base = safe_api.create_directory_safe_workspace(workspace)
+                try:
+                    self.assertTrue((Path(copy_path) / "home").is_dir())
+                    self.assertFalse(
+                        (Path(copy_path) / "home" / ".delegate-workflow-pins").exists()
+                    )
+                finally:
+                    shutil.rmtree(temp_base, ignore_errors=True)
+            finally:
+                for path in reversed(sealed):
+                    path.chmod(0o700)
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "mkfifo unavailable")
     def test_create_directory_safe_workspace_skips_fifo_files(self):
         with tempfile.TemporaryDirectory() as workspace:
