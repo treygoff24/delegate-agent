@@ -562,6 +562,7 @@ def register_run(
     metadata: JsonObject | None = None,
     timeout_seconds: float | None = None,
 ) -> tuple[str, str]:
+    """Allocate the harness alias, create the run directory, and index the run."""
     run_id = run_id or generate_run_id()
     if not RUN_ID_RE.match(run_id):
         raise ValueError(f"run id does not match expected format: {run_id}")
@@ -735,7 +736,9 @@ class RunTargetLookupError:
     next_actions: tuple[str, ...] = ()
 
 
-def _newer_sibling_count(index: JsonObject, run_id: str) -> tuple[str | None, int]:
+def _newer_sibling_count(
+    index: JsonObject, run_id: str, group: str | None
+) -> tuple[str | None, int]:
     entries = list(index_run_entries(index))
     target = next(
         (
@@ -762,7 +765,9 @@ def _newer_sibling_count(index: JsonObject, run_id: str) -> tuple[str | None, in
     newer = sum(
         1
         for position, (_candidate, entry) in enumerate(entries)
-        if entry.get("harness") == harness and registration_key(position, entry) > target_key
+        if entry.get("harness") == harness
+        and (group is None or entry.get("group") == group)
+        and registration_key(position, entry) > target_key
     )
     return harness, newer
 
@@ -815,7 +820,7 @@ def _run_target_resolution_details(
         ),
         None,
     )
-    harness, newer_count = _newer_sibling_count(index, run_id)
+    harness, newer_count = _newer_sibling_count(index, run_id, group)
     timestamp = activity_timestamp(state, manifest, run_id)
     parsed = parse_utc_timestamp(timestamp)
     age_seconds = (

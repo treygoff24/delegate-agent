@@ -326,6 +326,19 @@ delegate worktree remove --group wave4
 
 Default removal refuses if the worktree has uncommitted changes or the branch is not merged into current source `HEAD`.
 
+A dirty-worktree refusal keeps the run record, alias, and group. If you only
+have the worktree path, use the workspace that launched the run:
+
+```bash
+delegate --cwd "$source_workspace" worktree show "$absolute_worktree_path"
+```
+
+This looks up the exact path in that workspace's registry. A miss from some
+other directory is not evidence of an orphan. If the owning record really is
+gone and the path is in the configured pool, preview what cleanup would do
+with `delegate worktree reap --path "$absolute_worktree_path" --older-than 30 --dry-run`.
+Inspect or save the changes before authorizing removal; see [Reap old pooled paths](#reap-old-pooled-paths).
+
 "Uncommitted changes" has one definition across `remove`, `prune`, `reap`, and
 completion retirement: what a lane actually changed. Files the launch seeded
 from a dirty source do not count while they still match the launch digest, and

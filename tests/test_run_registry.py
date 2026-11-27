@@ -246,6 +246,9 @@ class RunRegistryTests(unittest.TestCase):
                 )
                 runs.append((run_id, alias))
 
+            self.registry.register_run(root, harness="codex", metadata={"group": "other-wave"})
+            self.registry.register_run(root, harness="codex")
+            self.registry.register_run(root, harness="cursor", metadata={"group": "wave4"})
             target = self.registry.resolve_run_target(
                 root,
                 handle=runs[0][1],

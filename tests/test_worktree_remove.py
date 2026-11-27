@@ -150,6 +150,7 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
                 branch=branch,
                 execution_cwd=wt_path,
             )
+            self._tag_run_group(path, run_id, "cleanup")
             self._create_worktree_at(path, branch, wt_path, dirty_file="scratch.txt")
             code, out, _err = self._run_cli(
                 ["--cwd", path, "--json", "worktree", "remove", "cursor-4"],
@@ -173,6 +174,31 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(state["worktreeStatus"], "present")
             self.assertNotIn("worktreeRemovedAt", state)
             self.assertNotIn("discardedDirtyPaths", state)
+
+            for handle in ("cursor-4", wt_path):
+                code, out, err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "show", handle], home=fake_home
+                )
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads(out)["runId"], run_id)
+            code, out, err = self._run_cli(
+                [
+                    "--cwd",
+                    path,
+                    "--json",
+                    "worktree",
+                    "list",
+                    "--group",
+                    "cleanup",
+                    "--no-auto-prune",
+                ],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0, err)
+            self.assertEqual(
+                [(row["alias"], row["runId"]) for row in json.loads(out)["entries"]],
+                [("cursor-4", run_id)],
+            )
 
     def test_worktree_remove_discard_records_dirty_paths(self):
         _repo, path = self._make_repo()
