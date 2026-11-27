@@ -6294,6 +6294,13 @@ def _execute_call_once(
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
+    if pure and harness == "claude" and Path(argv[0]).name == "estate-claude":
+        if auth_profile not in {"work", "personal"}:
+            raise RunnerLaunchError(
+                "broker_rejected",
+                "Pure estate-claude calls need a resolved work or personal auth profile; "
+                "refusing the broker's implicit work account.",
+            )
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         argv,
         prompt_file_text=prompt_file_text,
@@ -6307,6 +6314,10 @@ def _execute_call_once(
         output_schema_path=output_schema_path,
     )
     env = profiles.child_environment(overrides=env_overrides, pure=pure)
+    if pure and auth_profile is not None:
+        # The broker routes on this name. Do not copy ambient account selectors,
+        # credentials or sockets into the pure environment.
+        env["DELEGATE_PROFILE"] = auth_profile
     env.update(NON_INTERACTIVE_ENV)
     started = time.monotonic()
     seatbelt_profile_path: str | None = None
@@ -6402,6 +6413,31 @@ def _execute_call_once(
     stdout_text = (stdout_data or b"").decode("utf-8", errors="replace")
     stderr_tail = _call_stderr_tail(stderr_data or b"", sensitive_texts)
     if harness == "claude" and (pure or structured_output):
+        if process.returncode and not stdout_text.strip():
+            # A broker can refuse before the vendor emits a result. Only trust
+            # process diagnostics here, never strings in assistant output.
+            record = provider_errors.provider_error_record(
+                engine=harness, raw=None, fallback_text=stderr_tail, profile=auth_profile
+            )
+            if provider_errors.reason_for_record(record) in {
+                "broker_rejected",
+                "binding_not_active",
+            }:
+                failure = child_failures.failure_from_provider_error(record)
+                assert failure is not None
+                return CallResult(
+                    text="",
+                    exit_code=process.returncode,
+                    duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
+                    stdout_bytes=stdout_bytes,
+                    stderr_bytes=stderr_bytes,
+                    text_chars=0,
+                    text_truncated=False,
+                    stderr_tail=stderr_tail,
+                    error=failure.code,
+                    message=failure.message,
+                    provider_error=record,
+                )
         raw_text, parsed_exit, warnings, model_resolved, usage, error, message, served = (
             _parse_claude_call_json(stdout_text, pure=pure)
         )

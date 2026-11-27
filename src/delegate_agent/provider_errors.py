@@ -225,6 +225,18 @@ SIGNATURES: tuple[Signature, ...] = (
         patterns=(_BINDING_NOT_ACTIVE_PATTERN,),
     ),
     Signature(
+        id="broker_realm_unavailable",
+        klass=CLASS_PERSISTENT,
+        scope=SCOPE_LANE,
+        reason="broker_rejected",
+        summary="The broker could not launch the selected realm.",
+        hint="Check that realm's broker status before retrying; do not switch accounts implicitly.",
+        patterns=_rx(
+            r"\b(?:ineligible_pointer|current_pointer_missing|no_current_generation|missing_realm_header|broker_unavailable):",
+            r"estate-harness: every account in this pool is unavailable",
+        ),
+    ),
+    Signature(
         id="broker_uid_unmapped",
         klass=CLASS_PERSISTENT,
         scope=SCOPE_LANE,

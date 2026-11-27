@@ -411,6 +411,42 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(payload["modelResolved"], "resolved-model")
         self.assertEqual(payload["usage"]["basis"], "exact")
 
+    def test_pure_broker_receives_resolved_identity_not_ambient_selectors(self):
+        script = (
+            "import json,os; print(json.dumps(dict(type='result',permission_denials=[],"
+            "result=json.dumps([os.getenv(k) for k in "
+            "('DELEGATE_PROFILE','AI_PROFILE','DELEGATE_TEST_SECRET')]))))"
+        )
+        with mock.patch.dict(os.environ, {"AI_PROFILE": "work", "DELEGATE_TEST_SECRET": "canary"}):
+            result = runner_api.execute_call(
+                [sys.executable, "-c", script],
+                ".",
+                harness="claude",
+                pure=True,
+                auth_profile="personal",
+            )
+        self.assertEqual(json.loads(result.text), ["personal", None, None])
+
+    def test_pure_broker_without_resolved_realm_refuses_before_launch(self):
+        with self.assertRaises(runner_api.RunnerLaunchError) as caught:
+            runner_api.execute_call(
+                ["/nonexistent/estate-claude"], ".", harness="claude", pure=True
+            )
+        self.assertEqual(caught.exception.error, "broker_rejected")
+
+    def test_pure_broker_refusal_is_not_invalid_model_output(self):
+        script = "import sys; sys.stderr.write('ineligible_pointer: Current account is cooldown'); sys.exit(2)"
+        result = runner_api.execute_call(
+            [sys.executable, "-c", script],
+            ".",
+            harness="claude",
+            pure=True,
+            auth_profile="personal",
+        )
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.error, "broker_rejected")
+        self.assertEqual(result.text, "")
+
     def test_malformed_claude_json_is_call_output_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "bad_claude.py"
