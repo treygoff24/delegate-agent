@@ -1639,18 +1639,18 @@ def execute_request(
             raise DelegateError(
                 exc.error, exc.message, exc.exit_code, diagnostics=exc.diagnostics
             ) from exc
+    ensure_binary(
+        request.argv,
+        engine=request.engine,
+        config_source=config_source,
+        env_overrides=request.env_overrides,
+    )
     with _safe_workspace.safe_isolated_request(request, config=config) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
         if isolated_request.resumed_from is not None and isolated_request.argv:
             _resume_command.enforce_resume_prompt_size(
                 isolated_request.engine, isolated_request.argv[-1]
             )
-        ensure_binary(
-            isolated_request.argv,
-            engine=isolated_request.engine,
-            config_source=config_source,
-            env_overrides=isolated_request.env_overrides,
-        )
         if pass_through:
             if json_mode:
                 raise DelegateError(

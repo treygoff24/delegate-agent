@@ -1280,8 +1280,11 @@ or `ANTHROPIC_BASE_URL` is set in the launching environment or passed with
 warning.
 
 `--summary` takes no `<engine>` argument: it emits the compact alias-centered
-inventory across engines. Use `delegate models <engine>` for a per-engine
-catalog, optionally with `--live`.
+inventory across engines, omitting aliases whose configured executable cannot
+be found in the selected profile. The JSON summary keeps a harness row with
+`binaryMissing` and any cached catalog scope and probe status. A listed alias
+does not guarantee provider access or remaining quota. Use `delegate models
+<engine>` for a per-engine catalog, optionally with `--live`.
 
 Automatic setup and refresh use these evidence sources:
 

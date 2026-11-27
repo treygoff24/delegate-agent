@@ -203,6 +203,8 @@ class CapabilityCommandTests(unittest.TestCase):
             config = embedded_default_config()
             config["droid"]["models"] = {"glm": "glm-5.1"}
             config["cursor"]["reasoningEffortModels"] = {"high": "cursor-thinking"}
+            config["cursor"]["argvPrefix"] = [sys.executable]
+            config["opencode"]["binary"] = config["droid"]["binary"] = sys.executable
             payload = models_payload(config, "test-config", Path(workspace))
             self.assertIn("reasoningAliases", payload)
             self.assertEqual(payload["reasoningAliases"]["droid"]["glm"]["source"], "bundled")
@@ -310,6 +312,7 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertFalse(capabilities["opencode"]["nativeSessionResume"])
         self.assertTrue(capabilities["opencode"]["promptStdin"])
 
+        config["opencode"]["binary"] = sys.executable
         summary = models_summary_payload(config, "test-config")
         by_provider_alias = {(item["provider"], item["alias"]): item for item in summary["aliases"]}
         deep = by_provider_alias[("opencode", "deep")]
