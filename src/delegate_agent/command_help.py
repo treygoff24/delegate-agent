@@ -476,6 +476,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Kimi rejects combining --yolo with --prompt.",
             "Model selection uses --model (alias from kimi.models or a raw model ID), "
             "the run-input JSON model, or kimi.defaultModel in config.",
+            "Remaining Kimi quota is unknown before launch. A listed model is not a credit check. "
+            "After a tracked run reports insufficient funds, see `delegate doctor` for the "
+            "known-bad lane; avoid other models on the same account until credit is restored.",
             "The Kimi CLI exposes no effort flag; k3 supports effort internally "
             "via ~/.kimi-code/config.toml, so Delegate rejects --reasoning-effort for Kimi.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
