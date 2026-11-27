@@ -35,6 +35,7 @@ from delegate_agent import (
     structured_output,
     wait_cancel_commands,
     workspace_spec,
+    worktree_summary,
 )
 from delegate_agent import outcome as run_outcome
 from delegate_agent.constants import (
@@ -4943,6 +4944,39 @@ class WorkflowDsl:
             stderrTail=stderr_tail,
         )
 
+    def _last_registered_child(self, key: str) -> JsonObject:
+        # A previous retry may be the latest registration. Preserve the observed
+        # receipt without treating it as proof that this attempt succeeded.
+        try:
+            run_id = _find_workflow_agent_run(self.state.workspace, self.state.wf_id, key)
+            if run_id is None:
+                return {}
+            snapshot = (
+                run_registry.load_run_state_or_none(
+                    _run_registry_root(self.state.workspace), run_id
+                )
+                or {}
+            )
+        except (DelegateError, OSError, ValueError):
+            return {}  # Diagnostics must not prevent cancellation.
+        return {
+            "runId": run_id,
+            **{
+                k: snapshot[k]
+                for k in ("status", "finishedAt", "executionCwd", "workSummary")
+                if k in snapshot
+            },
+        }
+
+    def _interruption_fields(self, receipt: JsonObject, *, mode: str) -> JsonObject:
+        if not receipt:
+            return {}
+        if mode == MODE_WORK:
+            receipt.update(
+                worktree_summary.interrupted_checkout_fields(self.state.workspace, receipt)
+            )
+        return {"lastRegisteredChild": receipt}
+
     def _run_delegate(
         self,
         engine: str,
@@ -5040,23 +5074,38 @@ class WorkflowDsl:
                 input_path,
             ]
             completed = _run_child_command_for_state(argv, state=self.state, timeout=timeout)
+        except SupervisorWatchdogExit:
+            with contextlib.suppress(OSError, DelegateError):
+                self.state.append_journal_only(
+                    "agent_interrupted",
+                    key=workflow_agent_key,
+                    label=label,
+                    engine=engine,
+                    **self._interruption_fields(
+                        self._last_registered_child(workflow_agent_key), mode=mode
+                    ),
+                )
+            raise
         except subprocess.TimeoutExpired as exc:
-            cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
-            # key and label were both in scope here and neither was recorded, so
-            # a timeout row said which engine died and not which task, and the
-            # only way to find out was cross-referencing agent_started by time.
-            # Two sites reporting a timeout differently is how that survived, so
-            # both now carry every identifier each can honestly produce.
-            self.state.append_event(
-                "agent_timeout",
-                engine=engine,
-                timeout=timeout,
-                key=workflow_agent_key,
-                label=label,
-                model=model,
-                scope=self.state.current_scope(),
-                nextEngine=getattr(self.state.thread_local, "next_engine", None),
-            )
+            receipt = self._last_registered_child(workflow_agent_key)
+            try:
+                cancel_workflow_agent_child(
+                    self.state.workspace, self.state.wf_id, workflow_agent_key
+                )
+            finally:
+                # The pre-cancel receipt survives even a cancellation failure.
+                # Inspect checkout dirt only after attempting to stop the writer.
+                self.state.append_event(
+                    "agent_timeout",
+                    engine=engine,
+                    timeout=timeout,
+                    key=workflow_agent_key,
+                    label=label,
+                    model=model,
+                    scope=self.state.current_scope(),
+                    nextEngine=getattr(self.state.thread_local, "next_engine", None),
+                    **self._interruption_fields(receipt, mode=mode),
+                )
             self.state.notify_event(
                 "agent_timeout",
                 detail=f"{label or workflow_agent_key} ({engine}) after {timeout}s",
@@ -5118,6 +5167,10 @@ class WorkflowDsl:
                 if resumable:
                     event["resumable"] = True
                 event.update(_child_outcome_fields(result))
+                if completed.returncode and mode == MODE_WORK:
+                    event.update(
+                        worktree_summary.interrupted_checkout_fields(self.state.workspace, result)
+                    )
                 self.state.append_event("agent_child", **event)
         if (
             expected_persona_digest is not None

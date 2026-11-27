@@ -160,6 +160,65 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         )
         self.assertEqual(event["scope"], "root")
 
+    def test_interruption_keeps_pre_cancel_receipt_and_observed_checkout(self) -> None:
+        dsl = self._dsl()
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "partial.txt").write_text("unreviewed", encoding="utf-8")
+        root = run_registry.registry_root(self.workspace)
+        run_id, alias = run_registry.register_run(
+            root, harness="codex", metadata={"group": dsl.state.wf_id, "workflowAgentKey": "edit"}
+        )
+        run_path = run_registry.run_directory(root, run_id)
+        run_state = {"runId": run_id, "alias": alias, "executionCwd": str(self.workspace)}
+        for exc, event_type in (
+            (runtime.SupervisorWatchdogExit("interrupted"), "agent_interrupted"),
+            (subprocess.TimeoutExpired(["delegate"], 1), "agent_timeout"),
+        ):
+            with self.subTest(event_type=event_type):
+                run_registry.write_run_state(run_path, {**run_state, "status": "succeeded"})
+                with (
+                    mock.patch.object(runtime, "_run_child_command_for_state", side_effect=exc),
+                    mock.patch.object(
+                        runtime,
+                        "cancel_workflow_agent_child",
+                        side_effect=lambda *args: run_registry.write_run_state(
+                            run_path, {**run_state, "status": "cancelled"}
+                        ),
+                    ),
+                ):
+
+                    def launch():
+                        return dsl._run_delegate(
+                            "codex",
+                            "edit",
+                            mode="work",
+                            model=None,
+                            effort=None,
+                            fast=None,
+                            isolation="none",
+                            passthrough=False,
+                            timeout=1,
+                            output_schema=None,
+                            prefer_assistant=False,
+                            workflow_agent_key="edit",
+                        )
+
+                    if isinstance(exc, runtime.SupervisorWatchdogExit):
+                        with self.assertRaises(runtime.SupervisorWatchdogExit):
+                            launch()
+                    else:
+                        self.assertIsNone(launch())
+                (event,) = (
+                    e
+                    for e in registry.iter_journal(dsl.state.journal_path)
+                    if e["type"] == event_type
+                )
+                receipt = event["lastRegisteredChild"]
+                self.assertEqual((receipt["runId"], receipt["status"]), (run_id, "succeeded"))
+                observed = receipt["unreviewedCheckoutStatus"]
+                self.assertEqual(observed["inspectionStatus"], "observed")
+                self.assertEqual(observed["entries"], [{"path": "partial.txt", "status": "??"}])
+
     def test_followup_timeout_event_names_the_step(self) -> None:
         """A follow-up that times out is attributed to its step, like an agent timeout.
 

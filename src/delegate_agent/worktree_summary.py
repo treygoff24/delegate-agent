@@ -71,6 +71,38 @@ def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonOb
     return all_changed_files_from_porcelain_lines(lines)
 
 
+def interrupted_checkout_fields(workspace: Path, child: JsonObject) -> JsonObject:
+    # Only inspect the known source checkout, never an arbitrary receipt path.
+    # Its current dirt can include unrelated edits: it is NOT a child delta.
+    if child.get("executionCwd") != str(workspace):
+        return {}
+    summary: JsonObject = {"inspectionStatus": "unavailable"}
+    try:
+        status = run_git(
+            str(workspace),
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=normal",
+                "--",
+                ".",
+                ":(exclude).delegate",
+            ],
+            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        )
+        if status.returncode == 0:
+            entries, count = changed_files_from_porcelain_lines(status.stdout.splitlines())
+            summary = {
+                "inspectionStatus": "observed",
+                "entries": entries,
+                "totalEntries": count,
+            }
+    except (OSError, UnicodeError):
+        pass
+    return {"unreviewedCheckoutStatus": summary}
+
+
 def changed_files_from_porcelain_lines(
     lines: list[str],
     total: int | None = None,

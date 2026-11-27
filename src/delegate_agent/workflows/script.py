@@ -11,6 +11,7 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
     MODE_SAFE,
+    MODE_WORK,
     PROMPT_ENFORCED_SAFE_ENGINES,
     VALID_MODES,
 )
@@ -110,7 +111,7 @@ def check_source(source: str, *, filename: str = "<workflow>") -> CheckResult:
         *_unkeyed_step_warnings(tree),
     ]
     _validate_literal_schemas(tree)
-    _validate_literal_agent_modes(tree, meta)
+    warnings.extend(_check_literal_agent_modes(tree, meta))
     _validate_literal_judge_efforts(tree)
     return CheckResult(meta=meta, warnings=tuple(warnings))
 
@@ -188,7 +189,7 @@ def _unkeyed_step_warnings(tree: ast.AST) -> list[str]:
         warnings.append(
             f"keying warning: {len(lines)} {step}() call(s) without key= (line {where}) in a "
             "script that keys other steps; unkeyed steps replay by position and prompt, so "
-            "skipping or adding a sibling shifts them and settled work can run again on resume"
+            "skipping or adding a sibling can make replay ambiguous"
         )
     return warnings
 
@@ -227,7 +228,8 @@ def _validate_literal_schemas(tree: ast.AST) -> None:
                 raise WorkflowScriptError(f"invalid schema literal: {exc}") from exc
 
 
-def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
+def _check_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> list[str]:
+    warnings: list[str] = []
     defaults = meta.get("defaults") if isinstance(meta.get("defaults"), dict) else {}
     default_engine = defaults.get("engine") if isinstance(defaults, dict) else None
     default_mode = defaults.get("mode") if isinstance(defaults, dict) else None
@@ -238,6 +240,19 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
         if not isinstance(node, ast.Call) or _name_of(node.func) != "agent":
             continue
         mode = _literal_keyword(node, "mode") or default_mode
+        if (
+            not warnings
+            and mode == MODE_WORK
+            and (not _has_keyword(node, "mode") or _literal_keyword(node, "mode") == MODE_WORK)
+            and len(node.args) < 3
+            and not any(kw.arg in ("isolation", None) for kw in node.keywords)
+            and not defaults.get("isolation")
+        ):
+            warnings.append(
+                f"edit isolation (line {node.lineno}): this work agent inherits the configured "
+                "workspace. Set isolation='worktree' for edits pending review, or isolation='none' "
+                "to explicitly edit the source checkout."
+            )
         engine = _literal_keyword(node, "engine") or default_engine
         engines = engine if isinstance(engine, list) else [engine]
         if mode is not None and mode not in VALID_MODES:
@@ -277,6 +292,8 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
                     "resumable=True is only supported by codex, claude, and muse; other engines do "
                     "not support native session resumption"
                 )
+
+    return warnings
 
 
 def _validate_literal_judge_efforts(tree: ast.AST) -> None:

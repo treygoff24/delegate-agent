@@ -13,6 +13,24 @@ def warnings_for(source: str) -> list[str]:
     return [w for w in result.warnings if w.startswith("keying warning")]
 
 
+class EditIsolationWarningTests(unittest.TestCase):
+    def test_work_stages_should_choose_their_edit_workspace(self) -> None:
+        for source, warns in (
+            ('agent("edit", mode="work")', True),
+            ('meta = {"defaults": {"mode": "work"}}\nagent("edit")', True),
+            ('agent("edit", mode="work", isolation="none")', False),
+            (
+                'meta = {"defaults": {"mode": "work", "isolation": "worktree"}}\nagent("edit")',
+                False,
+            ),
+            ('agent("review", mode="safe")', False),
+            ('agent("maybe edit", **options)', False),
+        ):
+            with self.subTest(source=source):
+                warnings = workflow_script.check_source(source).warnings
+                self.assertEqual(any("isolation='worktree'" in w for w in warnings), warns)
+
+
 class UnkeyedStepWarningTests(unittest.TestCase):
     def test_unkeyed_agent_beside_a_keyed_one_is_flagged_with_its_line(self) -> None:
         (warning,) = warnings_for(

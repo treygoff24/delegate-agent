@@ -626,7 +626,18 @@ intentionally deferred.
 
 ## Patterns
 
-- Use `safe` or `work` lanes for agents that inspect or modify the tree.
+- Use `safe` for inspection. For edits pending review, choose
+  `agent("Implement the approved change", mode="work", isolation="worktree", key="edit")`.
+  Inspect the child's worktree before merging; a child finishing is not review.
+  Specify `isolation="none"` only when the stage should edit the source checkout
+  directly. Interrupting or retrying that stage does **not** roll its edits back.
+- On an interruption or timeout, inspect `workflow events <wfId>` before cleanup.
+  An `agent_timeout` reports a supervisor deadline, not proof the child failed.
+  When available, `lastRegisteredChild` gives the last run receipt observed for
+  this step (which may be an earlier retry). Compare its run ID and terminal
+  status with the workflow journal. For an interrupted in-place work child,
+  `unreviewedCheckoutStatus` shows the observed dirty entries, not who edited
+  them. Missing or unavailable evidence does not mean the checkout is clean.
 - Use `call --read-only` lanes for judge/verify steps that should not touch files.
 - `call` is the default mode for `judges()`, and workflow call-mode children are read-only by default.
 - `agent(model=...)` selects the child model per-run; every engine now supports it via `--model`.
