@@ -42,6 +42,7 @@ from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
 from tests import assert_compact_temps_contained, proc_harness  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
+TEST_PROCESS_TIMEOUT = 40
 
 
 def _argv_pairs(argv: list[str]) -> list[list[str]]:
@@ -295,8 +296,40 @@ class WorkflowCommandTests(unittest.TestCase):
             capture_output=True,
             check=False,
             env=env,
-            timeout=40,
+            timeout=TEST_PROCESS_TIMEOUT,
         )
+
+    def assert_workflow_succeeded(self, wf_id: str) -> None:
+        # Terminal status may be published before the detached producer has
+        # stopped touching its files. Join its inherited lock before reading or
+        # tampering with receipts. The fixture timeout is only a hang backstop.
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        exited = workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=TEST_PROCESS_TIMEOUT)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertTrue(exited, f"workflow supervisor did not exit: {status}")
+        self.assertEqual(status.get("status"), "succeeded", status)
+
+    @contextlib.contextmanager
+    def held_workflow(self, *launch_options: str):
+        # Keep the real supervisor live until the test has exercised the losing
+        # command. No fake child or guessed sleep window is needed to own a lock.
+        barrier = self.workspace / "workflow-release"
+        script = self.write_workflow(
+            f"import fcntl\nwith open({str(barrier)!r}) as barrier:\n"
+            "    fcntl.flock(barrier, fcntl.LOCK_SH)\nreturn True"
+        )
+        with barrier.open("w") as release:
+            fcntl.flock(release, fcntl.LOCK_EX)
+            launched = self.run_delegate(
+                ["--json", "workflow", "run", str(script), *launch_options]
+            )
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            wf_id = json.loads(launched.stdout)["wfId"]
+            try:
+                yield wf_id
+            finally:
+                fcntl.flock(release, fcntl.LOCK_UN)
+                self.assert_workflow_succeeded(wf_id)
 
     def write_workflow(self, body: str) -> Path:
         path = self.workspace / f"wf_{time.time_ns()}.py"
@@ -1390,12 +1423,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(
-                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-            ).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
         events = [
             json.loads(line)
@@ -1412,12 +1440,7 @@ class WorkflowCommandTests(unittest.TestCase):
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertEqual(
-            self.run_delegate(
-                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-            ).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         events_after = [
             json.loads(line)
             for line in (root / workflow_registry.JOURNAL_FILE).read_text().splitlines()
@@ -1779,8 +1802,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(parent)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], [["fake completion"]])
 
@@ -1918,8 +1940,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         events = json.loads(
             self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
         )["events"]
@@ -2530,27 +2551,14 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(status.get("replayAttempt"), 2)
 
     def test_cli_reject_refuses_live_running_workflow(self) -> None:
-        script = self.write_workflow(
-            """
-            meta = {"name": "reject-live"}
-            return agent("slow", label="draft")
-            """
-        )
-        launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script)],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "2"},
-        )
-        self.assertEqual(launch.returncode, 0, launch.stderr)
-        wf_id = json.loads(launch.stdout)["wfId"]
-        rejected = self.run_delegate(
-            ["--json", "workflow", "reject", wf_id, "draft", "--reason", "race"]
-        )
-        self.assertNotEqual(rejected.returncode, 0)
-        payload = json.loads(rejected.stdout)
-        self.assertEqual(payload["error"], "workflow_running")
-        self.assertIn("reject() from the workflow script", payload["message"])
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        with self.held_workflow() as wf_id:
+            rejected = self.run_delegate(
+                ["--json", "workflow", "reject", wf_id, "draft", "--reason", "race"]
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            payload = json.loads(rejected.stdout)
+            self.assertEqual(payload["error"], "workflow_running")
+            self.assertIn("reject() from the workflow script", payload["message"])
 
     def test_current_agent_key_includes_timeout(self) -> None:
         opts = {
@@ -2747,7 +2755,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         launch = self.run_delegate(["--json", "workflow", "run", str(script), "--budget", "1"])
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         values = json.loads(result.stdout)["result"]
         self.assertEqual(values.count("fake completion"), 1)
@@ -2897,8 +2905,7 @@ class WorkflowCommandTests(unittest.TestCase):
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], "fake completion")
         events = json.loads(
@@ -4448,7 +4455,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
@@ -4462,7 +4469,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assert_workflow_succeeded(wf_id)
 
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         runs = self.run_delegate(["--json", "runs", "--group", wf_id])
@@ -4571,12 +4578,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(
-                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-            ).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         root = self.workspace / ".delegate" / "workflows" / wf_id
         journal = root / "journal.jsonl"
         events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
@@ -4592,10 +4594,7 @@ class WorkflowCommandTests(unittest.TestCase):
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "final"})
 
@@ -4616,12 +4615,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(
-                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-            ).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         root = self.workspace / ".delegate" / "workflows" / wf_id
         journal = root / "journal.jsonl"
         events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
@@ -4650,12 +4644,7 @@ class WorkflowCommandTests(unittest.TestCase):
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id], env_extra=env)
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertEqual(
-            self.run_delegate(
-                ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-            ).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "final"})
         runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
@@ -4796,10 +4785,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(launch.returncode, 0, launch.stderr)
         launched = json.loads(launch.stdout)
         wf_id = launched["wfId"]
-        waited = self.run_delegate(
-            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-        )
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
@@ -5010,10 +4996,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(launch.returncode, 0, launch.stderr)
         launched = json.loads(launch.stdout)
         wf_id = launched["wfId"]
-        waited = self.run_delegate(
-            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-        )
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
@@ -5067,10 +5050,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        waited = self.run_delegate(
-            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
-        )
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
@@ -5433,10 +5413,7 @@ class WorkflowCommandTests(unittest.TestCase):
         launch = self.run_delegate(["--json", "workflow", "run", str(script)])
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         root = self.workspace / ".delegate" / "workflows" / wf_id
         journal = root / "journal.jsonl"
         events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
@@ -5461,10 +5438,7 @@ class WorkflowCommandTests(unittest.TestCase):
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
         runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
@@ -6018,26 +5992,14 @@ class WorkflowCommandTests(unittest.TestCase):
 
     def test_resume_budget_override_does_not_mutate_while_locked(self) -> None:
         # R5: lock before budget mutation on resume.
-        script = self.write_workflow(
-            """
-            meta = {"name": "lock-budget", "defaults": {"engine": "codex", "mode": "safe"}}
-            return agent("very slow")
-            """
-        )
-        launch = self.run_delegate(["--json", "workflow", "run", str(script), "--budget", "3"])
-        self.assertEqual(launch.returncode, 0, launch.stderr)
-        wf_id = json.loads(launch.stdout)["wfId"]
-        self.wait_for_group_runs(wf_id)
-        before = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
-        resumed = self.run_delegate(
-            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "99"]
-        )
-        self.assertNotEqual(resumed.returncode, 0)
-        self.assertEqual(json.loads(resumed.stdout)["error"], "workflow_locked")
-        after = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
-        self.assertEqual(after["budget"]["total"], before["budget"]["total"])
-        self.assertEqual(after["budget"]["total"], 3)
-        self.run_delegate(["--json", "workflow", "kill", wf_id])
+        with self.held_workflow("--budget", "3") as wf_id:
+            resumed = self.run_delegate(
+                ["--json", "workflow", "run", "--resume", wf_id, "--budget", "99"]
+            )
+            self.assertNotEqual(resumed.returncode, 0)
+            self.assertEqual(json.loads(resumed.stdout)["error"], "workflow_locked")
+            after = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+            self.assertEqual(after["budget"]["total"], 3)
 
     def test_workflow_kill_waits_for_held_lock_before_merging_status(self) -> None:
         # R6 / F3: kill must wait on the workflow flock (or escalate) before
