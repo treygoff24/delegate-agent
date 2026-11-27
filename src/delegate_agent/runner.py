@@ -606,6 +606,16 @@ def _model_provenance(
         "servedModel": served_model,
         "servedModelSource": "harness_event" if served_model is not None else "unavailable",
         "servedProvider": (accumulator.served_model_provider if accumulator is not None else None),
+        # OMP reports model identity but not an authoritative effort in its
+        # assistant-message receipt. Never copy the requested --thinking value.
+        **(
+            {
+                "requestedReasoningEffort": ctx.requested_reasoning_effort or ctx.reasoning_effort,
+                "providerReportedReasoningEffort": None,
+            }
+            if ctx.harness == "omp"
+            else {}
+        ),
         "modelObservations": model_observations,
         "modelObservationsTotal": model_observations_total,
         "fallbackHops": fallback_hops,
@@ -965,6 +975,8 @@ def build_run_record(
         and (accumulator is None or accumulator.served_model is None)
     ):
         warnings.append(pinned_continuity_unverified_warning(ctx))
+    if accumulator is not None and accumulator.tool_cycle_warning:
+        warnings.append(accumulator.tool_cycle_warning)
     substitution_warning = model_substitution_warning(ctx, accumulator)
     if substitution_warning is not None:
         warnings.append(substitution_warning)
@@ -2051,6 +2063,7 @@ class TrackedCaptureResult:
     pid: int
     pgid: int | None
     mail_push_failure_reason: str | None = None
+    sibling_write_examples: tuple[str, ...] = ()
     error: str | None = None
     message: str | None = None
     output_limit_stream: str | None = None
@@ -2585,13 +2598,22 @@ def _emit_progress_heartbeat(
     accumulator: harness_events.StreamAccumulator,
     *,
     started: float,
+    pid: int,
+    event_age: float | None,
     stderr: TextIO,
 ) -> None:
     elapsed_ms = int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)
+    age = (
+        "none_yet"
+        if event_age is None
+        else format_duration(int(event_age * MILLISECONDS_PER_SECOND))
+    )
+    provider_state = accumulator.provider_terminal_state or "unknown"
     print(
         "delegate: still running "
-        f"alias={ctx.alias} elapsed={format_duration(elapsed_ms)} "
-        f"last_event={_progress_current_label(accumulator)!r}",
+        f"alias={ctx.alias} pid={pid} child_state=alive elapsed={format_duration(elapsed_ms)} "
+        f"last_event={_progress_current_label(accumulator)!r} last_event_age={age} "
+        f"provider_state={provider_state}",
         file=stderr,
         flush=True,
     )
@@ -3036,6 +3058,11 @@ def _capture_tracked_process(
 
     line_buffer = ""
     stdout_bytes_counter = ByteCounter()
+    write_audit = (
+        outside_cwd_changes.SiblingWriteAudit(ctx.execution_cwd)
+        if ctx.mode == "work" and ctx.harness in {"omp", "pi"}
+        else None
+    )
     stdout_capture: JsonObject | None = {} if ctx.harness == "omp" else None
     stderr_bytes_counter = ByteCounter()
     lines_since_persist = 0
@@ -3123,13 +3150,20 @@ def _capture_tracked_process(
                 prior_session_id = accumulator.session_id
                 events_before = accumulator.events.total
                 accumulator.ingest_line(line)
-                watchdog.observe_line(
-                    line,
-                    now=time.monotonic(),
-                    tool_events=stall_watchdog.tool_events_from(
-                        accumulator.events.last(accumulator.events.total - events_before)
-                    ),
+                tool_events = stall_watchdog.tool_events_from(
+                    accumulator.events.last(accumulator.events.total - events_before)
                 )
+                if write_audit is not None:
+                    for event in tool_events:
+                        if (
+                            event.completed
+                            and event.status == "success"
+                            and event.tool.lower() in {"write", "edit"}
+                            and event.target
+                        ):
+                            write_audit.observe(event.target)
+                watchdog.observe_line(line, now=time.monotonic(), tool_events=tool_events)
+                accumulator.tool_cycle_warning = watchdog.cycle_warning
                 accumulator.pending_tool = watchdog.oldest_pending_tool(time.monotonic())
                 if accumulator.terminal_status is not None and accumulator.terminal_exit_armed:
                     terminal_signal.set()
@@ -3367,6 +3401,8 @@ def _capture_tracked_process(
                         ctx,
                         accumulator,
                         started=started,
+                        pid=process.pid,
+                        event_age=watchdog.last_event_age(now),
                         stderr=progress_stderr,
                     )
                 except OSError:
@@ -3494,6 +3530,7 @@ def _capture_tracked_process(
         stdin_failures=tuple(stdin_failures),
         pid=process.pid,
         pgid=pgid,
+        sibling_write_examples=tuple(write_audit.examples) if write_audit else (),
         mail_push_failure_reason=mail_push_failure_reason,
         error=error,
         message=message,
@@ -4804,6 +4841,10 @@ def _merge_tracked_attempt_captures(
     # attempt's terminal state. The event stays in ``events`` for diagnosis.
     accumulator.provider_terminal_state = current_capture.accumulator.provider_terminal_state
     accumulator.provider_terminal_reason = current_capture.accumulator.provider_terminal_reason
+    accumulator.tool_cycle_warning = (
+        current_capture.accumulator.tool_cycle_warning
+        or prior_capture.accumulator.tool_cycle_warning
+    )
     accumulator.served_model = (
         current_capture.accumulator.served_model or prior_capture.accumulator.served_model
     )
@@ -4890,6 +4931,11 @@ def _merge_tracked_attempt_captures(
     return replace(
         current_capture,
         accumulator=accumulator,
+        sibling_write_examples=tuple(
+            dict.fromkeys(
+                (*prior_capture.sibling_write_examples, *current_capture.sibling_write_examples)
+            )
+        )[: outside_cwd_changes.EXAMPLE_LIMIT],
         final_attempt_accumulator=(
             current_capture.final_attempt_accumulator or current_capture.accumulator
         ),
@@ -5592,6 +5638,15 @@ def _execute_tracked(
         _append_unique(
             final_warnings,
             f"{failure} (the pipe kept draining; progress records may lag the stream)",
+        )
+    if capture.accumulator.tool_cycle_warning:
+        _append_unique(final_warnings, capture.accumulator.tool_cycle_warning)
+    if capture.sibling_write_examples:
+        final_extra["reportedSiblingWorktreeWrites"] = list(capture.sibling_write_examples)
+        _append_unique(
+            final_warnings,
+            "The harness reported successful file writes in a sibling checkout. "
+            "Inspect reportedSiblingWorktreeWrites. Shell writes are not audited.",
         )
     if outside_snapshot is not None:
         escaped = outside_cwd_changes.changed_outside(outside_snapshot)

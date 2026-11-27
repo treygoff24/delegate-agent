@@ -562,28 +562,9 @@ def _check_linked_orphan(
             if not discard_uncommitted:
                 return LinkedOrphanCheck("dirty", source, True, fields)
     if not kill_live:
-        scan = worktree_procs.processes_with_cwd_inside(path)
-        if scan.holders:
-            fields["processes"] = [
-                {"pid": holder.pid, "command": holder.command}
-                for holder in scan.holders[: worktree_procs.MAX_HOLDERS_REPORTED]
-            ]
-            fields["hint"] = (
-                "A process has its cwd inside this worktree. End it, or pass --kill-live "
-                "to remove the path anyway."
-            )
-            return LinkedOrphanCheck("process_cwd_inside", source, raw_dirty, fields)
-        if not scan.checked:
-            # Nothing was found, but nothing could be ruled out either.
-            fields["processScan"] = scan.note or "the scan could not run"
-            fields["hint"] = (
-                "Delegate could not confirm that no process is working inside this path "
-                f"({fields['processScan']}). Check by hand, then pass --kill-live to "
-                "remove it anyway."
-            )
-            return LinkedOrphanCheck("process_scan_unavailable", source, raw_dirty, fields)
-        if scan.note:
-            fields.setdefault("warnings", []).append(scan.note)
+        block = worktree_procs.removal_block(path, fields)
+        if block is not None:
+            return LinkedOrphanCheck(block, source, raw_dirty, fields)
     return LinkedOrphanCheck(None, source, raw_dirty, fields)
 
 

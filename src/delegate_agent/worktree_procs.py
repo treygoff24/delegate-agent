@@ -43,6 +43,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from delegate_agent.json_types import JsonObject
+
 LSOF_TIMEOUT_SECONDS = 20
 MAX_HOLDERS_REPORTED = 5
 PROC_ROOT = Path("/proc")
@@ -232,3 +234,28 @@ def processes_with_cwd_inside(path: str | Path) -> ProcessCwdScan:
     except (OSError, ValueError) as exc:
         return ProcessCwdScan(checked=False, note=f"could not resolve {path}: {exc}")
     return _scan_proc(target) or _scan_lsof(target)
+
+
+def removal_block(path: str | Path, fields: JsonObject) -> str | None:
+    """Check cwd holders before removing a present worktree; retain bounded diagnostics."""
+    scan = processes_with_cwd_inside(path)
+    if scan.holders:
+        fields["processes"] = [
+            {"pid": holder.pid, "command": holder.command}
+            for holder in scan.holders[:MAX_HOLDERS_REPORTED]
+        ]
+        fields["hint"] = (
+            "A process has its cwd inside this worktree. End it, or pass --kill-live "
+            "to remove the path anyway."
+        )
+        return "process_cwd_inside"
+    if not scan.checked:
+        fields["processScan"] = scan.note or "the scan could not run"
+        fields["hint"] = (
+            "Delegate could not confirm that no process is working inside this path "
+            f"({fields['processScan']}). Check by hand, then pass --kill-live to remove it anyway."
+        )
+        return "process_scan_unavailable"
+    if scan.note:
+        fields.setdefault("warnings", []).append(scan.note)
+    return None

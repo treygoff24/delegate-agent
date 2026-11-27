@@ -205,6 +205,26 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(state["worktreeStatus"], "removed")
             self.assertIn("discardedDirtyPaths", state)
 
+    def test_remove_refuses_live_cwd_even_with_force(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as home:
+            wt = str(Path(home) / "wt")
+            branch = "delegate/held"
+            self._seed_persistent_run(path, alias="cursor-4", branch=branch, execution_cwd=wt)
+            self._create_worktree_at(path, branch, wt)
+            with subprocess.Popen(["sleep", "120"], cwd=wt) as holder:
+                try:
+                    args = ["--cwd", path, "--json", "worktree", "remove", "cursor-4", "--force"]
+                    code, out, _ = self._run_cli(args, home=home)
+                    self.assertNotEqual(code, 0)
+                    result = json.loads(out)
+                    self.assertEqual(result["error"], "process_cwd_inside")
+                    self.assertIn(holder.pid, [p["pid"] for p in result["processes"]])
+                    self.assertTrue(Path(wt).exists())
+                    self.assertEqual(self._run_cli([*args, "--kill-live"], home=home)[0], 0)
+                finally:
+                    holder.terminate()
+
     def test_worktree_remove_clean_removes_path_and_branch(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

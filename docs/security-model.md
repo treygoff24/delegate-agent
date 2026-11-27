@@ -451,15 +451,14 @@ Work mode defaults to `--isolation none` (`isolation.work` in config): the child
 runs directly in the resolved workspace with **no workspace write boundary**
 (the [work write guard](#work-write-guard) still protects a named list of
 irreplaceable paths, but everything else stays writable). Delegate
-records no launch-versus-exit drift for these runs — `worktreeStatus`, the dirty
-work summary, and the worktree cleanup commands exist only for
-persistent-worktree runs — and it neither refuses nor reports a write the child
-makes to an absolute path outside that workspace, including the source checkout
-when the lane was launched with `--cwd` pointing at another directory. The
-harness is not confined by Delegate here; only each engine's own sandbox flags
-(such as Codex `--sandbox`) apply. After a non-isolated lane whose task was
-supposed to be confined elsewhere, `git status` the checkout yourself: nothing
-in the Delegate envelope flags that drift.
+does not compute a complete write audit. A before/after Git status can show
+changes outside a subdirectory cwd **in the same checkout**; concurrent writers
+prevent attributing those changes to one process. OMP and Pi work runs also
+report up to five paths from successful native write/edit tool receipts naming
+sibling Git checkouts (`reportedSiblingWorktreeWrites`). This is evidence from
+the harness, not an OS audit. Shell commands, missing receipts, writes through
+symlinks and other checkouts not reported by Git can escape detection. Inspect
+the source checkout yourself before accepting a lane's work.
 
 `delegate resume` reads the initial manifest and `prompt.txt` outside the Registry
 lock with bounded, no-follow, single-link readers. It re-checks status and reads

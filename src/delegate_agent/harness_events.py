@@ -817,6 +817,7 @@ class StreamAccumulator:
     # The oldest in-flight tool call (name, target, seconds), set by the runner
     # from the stall watchdog while the run is live. Observation only.
     pending_tool: JsonObject | None = None
+    tool_cycle_warning: str | None = None
     # The provider's own last unrecovered error as data: status, provider code, and a
     # redacted, bounded message (provider_errors.raw_error). Cleared by a successful
     # terminal, like `_last_error_message`; the runner classifies it at finalization.

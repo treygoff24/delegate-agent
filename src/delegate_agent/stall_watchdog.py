@@ -52,6 +52,7 @@ or no-op command must not keep resetting the idle clock. And an external probe
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -106,6 +107,8 @@ RUNAWAY_OUTPUT_CHARS_DEFAULT = 400_000
 REPEATED_TOOL_FAILURE_LIMIT = 5
 # In-flight tool calls tracked at once; a stream that never closes its calls is capped.
 PENDING_TOOL_LIMIT = 256
+MAX_TOOL_CYCLE = 4
+TOOL_CYCLE_REPEATS = 10
 # Sampling is diagnostic, not a time limit. Commands (including builds/test
 # suites) and unknown calls get a longer grace period than a named MCP call.
 MCP_PROBE_AFTER_SECONDS = 10 * 60
@@ -805,6 +808,11 @@ class StallWatchdog:
     _output_chars_since_tool: int = field(default=0, repr=False)
     _last_completion: tuple[str, str, str] | None = field(default=None, repr=False)
     _failure_signature: tuple[str, str] | None = field(default=None, repr=False)
+    _tool_window: deque[tuple[str, str, str]] = field(
+        default_factory=lambda: deque(maxlen=MAX_TOOL_CYCLE * TOOL_CYCLE_REPEATS), repr=False
+    )
+    cycle_warning: str | None = None
+    _last_line_at: float | None = field(default=None, repr=False)
     _failure_count: int = field(default=0, repr=False)
     # The same streak for failed finishes that carry no ToolEvent (see
     # LineSignals.failed_finish). Kept apart so the two kinds interleaving
@@ -825,6 +833,11 @@ class StallWatchdog:
     @property
     def enabled(self) -> bool:
         return self.stall_seconds > 0
+
+    def last_event_age(self, now: float) -> float | None:
+        """Seconds since any nonblank child event, including a repeated event."""
+        with self._lock:
+            return None if self._last_line_at is None else max(0.0, now - self._last_line_at)
 
     @property
     def last_progress_label(self) -> str | None:
@@ -934,6 +947,7 @@ class StallWatchdog:
             return
         signals = classify_line(line, harness=self.harness)
         with self._lock:
+            self._last_line_at = now
             self._lines_seen += 1
             if not self._armed:
                 self._armed = True
@@ -973,6 +987,7 @@ class StallWatchdog:
             else:
                 self._last_completion = None
             failed = (event.status or "").lower() in _TOOL_FAILURE_STATUSES
+            self._observe_cycle(event.tool, event.target, event.status)
             if not failed:
                 self._unmatched_failure_signature = None
                 self._unmatched_failure_count = 0
@@ -988,6 +1003,34 @@ class StallWatchdog:
                 self._failure_count = 1
             self._maybe_trip_repeated_failure_locked(signature, self._failure_count)
 
+    def _observe_cycle(self, tool: str, target: str | None, status: str | None) -> None:
+        # Advisory only: a successful formatter or ten distinct jq checks may be
+        # legitimate. Normalization must never turn that ambiguity into a kill.
+        if self.cycle_warning is not None:
+            return
+        name = tool.lower()
+        target = (target or "").strip()
+        if name in {"command_execution", "bash", "shell"}:
+            if status in {"success", "completed"} and target in {":", "true", "pwd"}:
+                return
+            # Compare the executable, not the changing selectors or quoting.
+            target = target.split(maxsplit=1)[0] if target else ""
+        elif name == "eval":
+            target = ""
+        # Keep a bounded identity regardless of the size of a tool argument.
+        identity = hashlib.sha256(target.encode("utf-8", "backslashreplace")).hexdigest()
+        self._tool_window.append((name[:128], identity, (status or "")[:32]))
+        if len(self._tool_window) < TOOL_CYCLE_REPEATS:
+            return
+        window = list(self._tool_window)
+        for period in range(1, min(MAX_TOOL_CYCLE, len(window) // TOOL_CYCLE_REPEATS) + 1):
+            if window[-period * TOOL_CYCLE_REPEATS :] == window[-period:] * TOOL_CYCLE_REPEATS:
+                self.cycle_warning = (
+                    f"possible_tool_loop: a sequence of {period} normalized tool outcome(s) "
+                    f"repeated {TOOL_CYCLE_REPEATS} times. Inspect recent output before waiting longer."
+                )
+                return
+
     def _record_unmatched_failure_locked(self, signature: tuple[str, str]) -> None:
         if signature == self._unmatched_failure_signature:
             self._unmatched_failure_count += 1
@@ -995,6 +1038,7 @@ class StallWatchdog:
             self._unmatched_failure_signature = signature
             self._unmatched_failure_count = 1
         self._maybe_trip_repeated_failure_locked(signature, self._unmatched_failure_count)
+        self._observe_cycle(*signature, "failed")
 
     def _maybe_trip_repeated_failure_locked(self, signature: tuple[str, str], count: int) -> None:
         if self._trip is None and count >= max(self.repeated_failure_limit, 1):
@@ -1025,6 +1069,7 @@ class StallWatchdog:
                 # a reset nor the fix loop working: it counts in its own streak.
                 self._record_unmatched_failure_locked(signals.failed_finish)
         elif unmatched_finish:
+            self._tool_window.clear()
             # A tool finished that the stream accumulator does not normalize
             # into a ToolEvent (codex `file_change` from apply_patch, and its
             # mcp/web-search items). It cannot be the failing call, so it

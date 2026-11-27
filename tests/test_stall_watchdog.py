@@ -1321,6 +1321,20 @@ class FailureIdentityTests(unittest.TestCase):
             fed.feed(line, float(now))
         return fed.watchdog
 
+    def test_repeating_mixed_calls_are_flagged_not_killed(self):
+        lines = []
+        for index in range(stall_watchdog.TOOL_CYCLE_REPEATS):
+            for suffix, command, status in (
+                ("a", f"jq .rows[{index}] data", "failed"),
+                ("p", "true", "completed"),
+                ("b", "formatter file", "completed"),
+            ):
+                lines.extend(_codex_real_command(f"{index}{suffix}", command, status))
+        watchdog = self.feed_all(lines)
+        self.assertIn("sequence of 2", watchdog.cycle_warning)
+        self.assertNotEqual(watchdog.stall_detail(0.0)["stallReason"], "repeated_tool_failure")
+        self.assertEqual(watchdog.last_event_age(len(lines) + 7.0), 7.0)
+
     def test_distinct_long_failing_commands_do_not_trip(self):
         lines = [
             line

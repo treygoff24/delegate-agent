@@ -297,6 +297,21 @@ def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
 
 
 def dirty_sync_snapshot(git_root: str) -> DirtySyncSnapshot:
+    merge = _run_git_bytes(
+        git_root,
+        ["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if merge.returncode not in (0, 1):
+        raise DelegateError("safe_workspace_sync_failed", "Could not check the source merge state.")
+    if merge.returncode == 0 or _git_paths(
+        git_root, ["diff", "--name-only", "--diff-filter=U"], error="Failed to check unmerged paths"
+    ):
+        raise DelegateError(
+            "source_merge_in_progress",
+            "Cannot mirror a source checkout with a merge in progress or unmerged paths. "
+            "Finish or abort the operation, or launch from a clean checkout.",
+        )
     return DirtySyncSnapshot(
         diff_names=tuple(
             _git_paths(

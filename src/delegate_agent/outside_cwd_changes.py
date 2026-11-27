@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess  # nosec B404 - git with shell=False via git_utils.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS
@@ -141,3 +141,55 @@ def warning(paths: tuple[str, ...], toplevel: str) -> str:
         f"directory in {toplevel}: {preview}. Review them; only changes inside this git "
         "repository are detectable."
     )
+
+
+@dataclass
+class SiblingWriteAudit:
+    """Sample explicit write receipts, not other actors' simultaneous filesystem changes."""
+
+    cwd: str
+    examples: list[str] = field(default_factory=list)
+    _roots: list[Path] | None = field(default=None, init=False)
+
+    def observe(self, target: str) -> None:
+        if (
+            len(self.examples) >= EXAMPLE_LIMIT
+            or not target
+            or len(target) > 4096
+            or "\0" in target
+        ):
+            return
+        # Compare the target the harness named. Do not follow its symlinks or
+        # open it: a receipt is not independent proof of a filesystem change.
+        path = Path(os.path.normpath(os.path.join(self.cwd, target)))
+        if self._roots is None:
+            self._roots = []
+            try:
+                listing = _run_git_bytes(
+                    self.cwd,
+                    ["worktree", "list", "--porcelain", "-z"],
+                    timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return
+            if listing.returncode == 0:
+                self._roots = sorted(
+                    (
+                        Path(os.fsdecode(entry.removeprefix(b"worktree ")))
+                        for entry in listing.stdout.split(b"\0")
+                        if entry.startswith(b"worktree ")
+                    ),
+                    key=lambda root: len(root.parts),
+                    reverse=True,
+                )
+        # Linked checkouts can live inside one another. Match the deepest
+        # registered root for both paths, not an enclosing checkout.
+        owner = next((root for root in self._roots if path.is_relative_to(root)), None)
+        here = next((root for root in self._roots if Path(self.cwd).is_relative_to(root)), None)
+        if (
+            owner is not None
+            and here is not None
+            and owner != here
+            and str(path) not in self.examples
+        ):
+            self.examples.append(str(path))

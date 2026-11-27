@@ -1,6 +1,7 @@
 """--isolation none: files a child changed outside its cwd are recorded and warned."""
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -42,15 +43,22 @@ class OutsideCwdChangesTests(unittest.TestCase):
         (repo / "already-dirty.txt").write_text("dirty before launch", encoding="utf-8")
         return repo
 
-    def run_child(self, cwd: Path, *, registry_at: Path | None = None) -> dict:
+    def run_child(
+        self,
+        cwd: Path,
+        *,
+        registry_at: Path | None = None,
+        engine: str = "codex",
+        child: str = CHILD,
+    ) -> dict:
         registry_root = run_registry.ensure_registry(registry_at or cwd, workspace_kind="directory")
-        run_id, alias = run_registry.register_run(registry_root, harness="codex")
+        run_id, alias = run_registry.register_run(registry_root, harness=engine)
         context = runner.RunContext(
             registry_root=registry_root,
             run_id=run_id,
             alias=alias,
-            harness="codex",
-            engine="codex",
+            harness=engine,
+            engine=engine,
             mode="work",
             model=None,
             source_cwd=str(cwd),
@@ -60,7 +68,7 @@ class OutsideCwdChangesTests(unittest.TestCase):
             started_at=run_registry.utc_now_iso(),
         )
         runner.execute_tracked(
-            [sys.executable, "-c", CHILD],
+            [sys.executable, "-c", child],
             str(cwd),
             context,
             json_mode=True,
@@ -90,6 +98,45 @@ class OutsideCwdChangesTests(unittest.TestCase):
         self.assertEqual(
             state["outsideCwdChanges"]["examples"], ["already-dirty.txt", "escaped.txt"]
         )
+
+    def test_omp_write_receipt_in_sibling_checkout_not_other_activity(self):
+        repo = self.repo()
+        lane = repo.parent / "lane"
+        git(repo, "worktree", "add", "-b", "lane", str(lane))
+        reported = repo / "reported.txt"
+        other = repo / "unrelated.txt"
+        other.write_text("not from this lane")
+        start = {
+            "type": "tool_execution_start",
+            "toolCallId": "write1",
+            "toolName": "write",
+            "args": {"path": str(reported)},
+        }
+        finish = {
+            "type": "tool_execution_end",
+            "toolCallId": "write1",
+            "toolName": "write",
+            "isError": False,
+        }
+        child = (
+            f"print({json.dumps(start)!r}, flush=True)\n"
+            f"from pathlib import Path; Path({str(reported)!r}).write_text('changed')\n"
+            f"print({json.dumps(finish)!r}, flush=True)\n"
+        )
+        state = self.run_child(lane, engine="omp", child=child)
+        self.assertEqual(reported.read_text(), "changed")
+        self.assertEqual(state["reportedSiblingWorktreeWrites"], [str(reported)])
+        self.assertNotIn("outsideCwdChanges", state)
+
+    def test_nested_worktree_receipts_belong_to_the_deepest_checkout(self):
+        repo = self.repo()
+        nested = repo / "lane"
+        git(repo, "worktree", "add", "-b", "lane", str(nested))
+        for cwd, other in ((repo, nested), (nested / "sub", repo)):
+            audit = outside_cwd_changes.SiblingWriteAudit(str(cwd))
+            audit.observe(str(cwd.parent / "keep.txt") if cwd != repo else "keep.txt")
+            audit.observe(str(other / "reported.txt"))
+            self.assertEqual(audit.examples, [str(other / "reported.txt")])
 
     def test_a_repo_root_cwd_is_not_snapshotted(self):
         repo = self.repo()

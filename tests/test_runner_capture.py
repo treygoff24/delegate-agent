@@ -2516,6 +2516,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self._pinned_context("omp"),
             model="opencode-go/glm-5.3",
             model_resolved="opencode-go/glm-5.3",
+            requested_reasoning_effort="high",
             continuity_mode="fungible",
         )
         accumulator = self.runner.harness_events.StreamAccumulator(harness="omp")
@@ -2527,6 +2528,8 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(record["servedModel"], "glm-5.3")
         self.assertEqual(record["servedProvider"], "opencode-go")
         self.assertEqual(record["modelProvenance"]["servedModel"], "glm-5.3")
+        self.assertEqual(record["modelProvenance"]["requestedReasoningEffort"], "high")
+        self.assertIsNone(record["modelProvenance"]["providerReportedReasoningEffort"])
 
     def test_the_envelope_omits_served_fields_nobody_observed(self):
         # A field the harness never reported must be absent, not a null or a

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from delegate_agent import isolation, run_registry
+from delegate_agent import isolation, run_registry, worktree_procs
 from delegate_agent import worktree_mgmt as wm
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
@@ -883,6 +883,13 @@ def _remove_locked(
 
     if plan.status == STATUS_MISSING:
         return _remove_missing_worktree_path(registry_root, plan, options=options)
+
+    if not kill_live:
+        fields: JsonObject = {"warnings": plan.warnings}
+        block = worktree_procs.removal_block(plan.execution_cwd, fields)
+        if block is not None:
+            payload = wm._error_payload(block, str(fields["hint"]), record=record, retry_safe=True)
+            raise wm.WorktreeManagementError({**payload, **fields})
 
     with contextlib.ExitStack() as stack:
         nested_removed: list[JsonObject] = []

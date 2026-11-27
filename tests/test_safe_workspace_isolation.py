@@ -66,6 +66,27 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         (root / "ignored.txt").write_text("secret\n", encoding="utf-8")
         return repo
 
+    def test_dirty_sync_refuses_pending_merge_and_unmerged_index(self):
+        repo = self.make_dirty_repo()
+        # A resolved but uncommitted merge still has MERGE_HEAD.
+        head = subprocess.check_output(["git", "-C", repo.name, "rev-parse", "HEAD"])
+        marker = Path(repo.name) / ".git/MERGE_HEAD"
+        marker.write_bytes(head)
+        with self.assertRaisesRegex(errors_api.DelegateError, "merge in progress"):
+            safe_workspace.dirty_sync_snapshot(repo.name)
+        marker.unlink()
+        # An unmerged index can also exist without MERGE_HEAD (e.g. stash apply).
+        blob = subprocess.check_output(
+            ["git", "-C", repo.name, "rev-parse", "HEAD:tracked.txt"]
+        ).strip()
+        subprocess.run(
+            ["git", "-C", repo.name, "update-index", "--index-info"],
+            check=True,
+            input=b"100644 " + blob + b" 2\tconflict.txt\n",
+        )
+        with self.assertRaisesRegex(errors_api.DelegateError, "unmerged paths"):
+            safe_workspace.dirty_sync_snapshot(repo.name)
+
     def test_cursor_safe_dry_run_reports_isolation(self):
         request = self.build_git_request(
             "cursor",
