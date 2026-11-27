@@ -239,16 +239,27 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.assertFalse((root / registry.STATUS_FILE).exists())
 
     def test_registry_entry_deletion_cancels_real_supervisor(self) -> None:
-        wf_id, root = self._launch(10)
-        self._wait_for_running_child(wf_id)
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        pid = int(status["supervisorPid"])
-        # Remove the registry entry atomically: recursive deletion races with
-        # the live supervisor's status writes and can fail with ENOTEMPTY.
-        # Keep the detached files for cleanup after the producer is reaped.
-        root.rename(self.workspace / "removed-workflow")
-        self._wait_process_gone(pid)
-        self.assertFalse((root / registry.STATUS_FILE).exists())
+        release = self.workspace / "held-for-deletion"
+        with release.open("w") as barrier:
+            fcntl.flock(barrier, fcntl.LOCK_EX)
+            wf_id, root = self._launch(0, env_updates={"FAKE_CODEX_RELEASE": str(release)})
+            proc_harness.wait_until_ready(
+                release.with_suffix(".ready").exists, "child did not start"
+            )
+            self._wait_for_running_child(wf_id)
+            status = registry.read_json(root / registry.STATUS_FILE) or {}
+            pid = int(status["supervisorPid"])
+            # Move the live registry out of view atomically; its open lock
+            # still belongs to the supervisor until cancellation finishes.
+            removed = self.workspace / "removed-workflow"
+            root.rename(removed)
+            self.assertTrue(
+                runtime.wait_for_workflow_lock(
+                    removed, timeout_seconds=proc_harness.TEST_PROCESS_TIMEOUT
+                )
+            )
+            self._wait_process_gone(pid)
+            self.assertFalse((root / registry.STATUS_FILE).exists())
 
     def test_state_deletion_reaps_only_owned_parallel_children(self) -> None:
         wf_id, root = self._launch(

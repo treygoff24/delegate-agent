@@ -184,21 +184,15 @@ class WorkflowCommandTests(unittest.TestCase):
             "if session_id and os.environ.get('FAKE_CODEX_SESSION_BEFORE_SLEEP'):\n"
             "    print(json.dumps({'type': 'thread.started', 'thread_id': session_id}), flush=True)\n"
             "ready = os.environ.get('FAKE_CODEX_HOLD_READY')\n"
+            "retry_ready = os.environ.get('FAKE_CODEX_HOLD_RETRY_READY')\n"
+            "if retry_ready and os.path.exists(os.environ['FAKE_CODEX_ATTEMPT_FILE']):\n"
+            "    ready = retry_ready\n"
             "if ready and 'exec' in sys.argv[1:]:\n"
             "    import signal\n"
             "    with open(ready, 'a', encoding='utf-8') as f: f.write(str(os.getpgrp()) + '\\n')\n"
             "    signal.pause()\n"
             "sleep = os.environ.get('FAKE_CODEX_SLEEP_SECONDS')\n"
-            "retry_sleep = os.environ.get('FAKE_CODEX_SLEEP_RETRY_SECONDS')\n"
-            "retry_attempt_file = os.environ.get('FAKE_CODEX_ATTEMPT_FILE')\n"
-            "if retry_sleep and retry_attempt_file:\n"
-            "    try:\n"
-            "        retry_attempt = int(open(retry_attempt_file, encoding='utf-8').read() or '0')\n"
-            "    except FileNotFoundError:\n"
-            "        retry_attempt = 0\n"
-            "    if retry_attempt >= 1:\n"
-            "        time.sleep(float(retry_sleep))\n"
-            "elif sleep:\n"
+            "if sleep:\n"
             "    time.sleep(float(sleep))\n"
             "elif 'very slow' in prompt:\n"
             "    time.sleep(10)\n"
@@ -5325,17 +5319,23 @@ class WorkflowCommandTests(unittest.TestCase):
             return agent("hold for workflow kill", schema=SCHEMA, retries=1, timeout=30, isolation="worktree")
             """
         )
+        ready = self.home / "retry-started"
         launch = self.run_delegate(
             ["--json", "workflow", "run", str(script)],
             env_extra={
                 "FAKE_CODEX_ATTEMPT_FILE": str(self.workspace / "kill-attempts.txt"),
-                "FAKE_CODEX_SLEEP_RETRY_SECONDS": "30",
+                "FAKE_CODEX_HOLD_RETRY_READY": str(ready),
             },
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        proc_harness.wait_until_ready(
+            lambda: ready.exists() and ready.stat().st_size, "retry did not start"
+        )
         runs = self.wait_for_group_runs(wf_id, count=2, with_execution_cwd=True)
         self.assertEqual(len(runs), 2)
+        self.assertIn(int(ready.read_text()), [run.get("pgid") for run in runs])
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
         self.assertTrue(json.loads(killed.stdout)["cancelled"])
@@ -7239,10 +7239,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.assertEqual(
-            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"]).returncode,
-            0,
-        )
+        self.assert_workflow_succeeded(wf_id)
         result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)[
             "result"
         ]
