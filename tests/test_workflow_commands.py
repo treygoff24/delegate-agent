@@ -42,7 +42,6 @@ from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
 from tests import assert_compact_temps_contained, proc_harness  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
-TEST_PROCESS_TIMEOUT = 40
 
 
 def _argv_pairs(argv: list[str]) -> list[list[str]]:
@@ -184,6 +183,11 @@ class WorkflowCommandTests(unittest.TestCase):
             "session_id = os.environ.get('FAKE_CODEX_SESSION_ID')\n"
             "if session_id and os.environ.get('FAKE_CODEX_SESSION_BEFORE_SLEEP'):\n"
             "    print(json.dumps({'type': 'thread.started', 'thread_id': session_id}), flush=True)\n"
+            "ready = os.environ.get('FAKE_CODEX_HOLD_READY')\n"
+            "if ready and 'exec' in sys.argv[1:]:\n"
+            "    import signal\n"
+            "    with open(ready, 'a', encoding='utf-8') as f: f.write(str(os.getpgrp()) + '\\n')\n"
+            "    signal.pause()\n"
             "sleep = os.environ.get('FAKE_CODEX_SLEEP_SECONDS')\n"
             "retry_sleep = os.environ.get('FAKE_CODEX_SLEEP_RETRY_SECONDS')\n"
             "retry_attempt_file = os.environ.get('FAKE_CODEX_ATTEMPT_FILE')\n"
@@ -296,7 +300,7 @@ class WorkflowCommandTests(unittest.TestCase):
             capture_output=True,
             check=False,
             env=env,
-            timeout=TEST_PROCESS_TIMEOUT,
+            timeout=proc_harness.TEST_PROCESS_TIMEOUT,
         )
 
     def assert_workflow_succeeded(self, wf_id: str) -> None:
@@ -304,7 +308,9 @@ class WorkflowCommandTests(unittest.TestCase):
         # stopped touching its files. Join its inherited lock before reading or
         # tampering with receipts. The fixture timeout is only a hang backstop.
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
-        exited = workflow_runtime.wait_for_workflow_lock(root, timeout_seconds=TEST_PROCESS_TIMEOUT)
+        exited = workflow_runtime.wait_for_workflow_lock(
+            root, timeout_seconds=proc_harness.TEST_PROCESS_TIMEOUT
+        )
         status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
         self.assertTrue(exited, f"workflow supervisor did not exit: {status}")
         self.assertEqual(status.get("status"), "succeeded", status)
@@ -3163,6 +3169,22 @@ class WorkflowCommandTests(unittest.TestCase):
         events = [json.loads(line) for line in lines if line.strip()]
         return [event for event in events if event.get("type") == event_type]
 
+    def launch_held_child(self, script: Path) -> tuple[str, dict[str, object]]:
+        ready = self.home / "held-codex-started"
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_HOLD_READY": str(ready)},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
+        proc_harness.wait_until_ready(
+            lambda: ready.exists() and ready.stat().st_size, "fake Codex never started"
+        )
+        (child,) = self._wait_for_live_child(wf_id)
+        self.assertEqual(int(ready.read_text()), child["pgid"])
+        return wf_id, child
+
     def _orphan_a_workflow(self) -> tuple[str, Path, dict[str, object], int]:
         """Launch a slow child, then SIGKILL the whole tree so nothing finalizes.
 
@@ -3175,14 +3197,7 @@ class WorkflowCommandTests(unittest.TestCase):
             return agent("hold")
             """
         )
-        launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script)],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
-        )
-        self.assertEqual(launch.returncode, 0, launch.stderr)
-        wf_id = json.loads(launch.stdout)["wfId"]
-        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
-        (child,) = self._wait_for_live_child(wf_id)
+        wf_id, child = self.launch_held_child(script)
         root = workflow_registry.workflow_dir(self.workspace, wf_id)
         status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
         supervisor_pid = status["supervisorPid"]
@@ -3812,14 +3827,7 @@ class WorkflowCommandTests(unittest.TestCase):
             return agent("hold")
             """
         )
-        launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script)],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "60"},
-        )
-        self.assertEqual(launch.returncode, 0, launch.stderr)
-        wf_id = json.loads(launch.stdout)["wfId"]
-        self.addCleanup(proc_harness.reap_workflow_now, self.workspace, wf_id)
-        (child,) = self._wait_for_live_child(wf_id)
+        wf_id, child = self.launch_held_child(script)
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
         payload = json.loads(killed.stdout)
@@ -5196,38 +5204,85 @@ class WorkflowCommandTests(unittest.TestCase):
             return agent("timeout structured", schema=SCHEMA, retries=1, timeout=1.5, isolation="worktree")
             """
         )
-        # The resume-vs-relaunch assertion needs the fake child's thread.started
-        # line captured BEFORE the timeout kill; interpreter startup on a loaded
-        # macOS box blows through a 0.2s window, so give it real margin.
-        launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script)],
-            env_extra={
-                "FAKE_CODEX_SLEEP_SECONDS": "5",
-                "FAKE_CODEX_SESSION_ID": "timeout-thread",
-                "FAKE_CODEX_SESSION_BEFORE_SLEEP": "1",
-            },
-        )
+        # Create the normal pin (including its discovery context), then drive
+        # its supervisor in this process so we can synchronize the spawn seam.
+        # Each real child has to own its workspace and publish its session
+        # before the 1.5 s deadline starts. Both timers and kills are real.
+        launch = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        waited = self.run_delegate(
-            ["--json", "workflow", "wait", wf_id, "--timeout", "15"],
-            env_extra={
-                "FAKE_CODEX_SLEEP_SECONDS": "5",
-                "FAKE_CODEX_SESSION_ID": "timeout-thread",
-                "FAKE_CODEX_SESSION_BEFORE_SLEEP": "1",
-            },
-        )
-        self.assertEqual(waited.returncode, 0, waited.stderr)
+        pin = workflow_pinning.load_pin(wf_id, home=self.home)
+        self.assertIsNotNone(pin)
+        root = run_registry.registry_root(self.workspace)
+        ready = self.home / "timeout-attempts-started"
+        started_runs: list[str] = []
+        real_popen = subprocess.Popen
+
+        def start_ready_child(argv, *args, **kwargs):
+            child = real_popen(argv, *args, **kwargs)
+            if not isinstance(argv, list) or argv[:2] != pin.cli_argv or "--input-json" not in argv:
+                return child
+
+            def session_persisted():
+                if not ready.exists():
+                    return False
+                pgids = ready.read_text().splitlines()
+                if len(pgids) != len(started_runs) + 1:
+                    return False
+                for run_id, entry in run_registry.index_run_entries(run_registry.load_index(root)):
+                    if entry.get("group") != wf_id or run_id in started_runs:
+                        continue
+                    record = run_registry.load_run_state_or_none(root, run_id) or {}
+                    if (
+                        str(record.get("pgid")) == pgids[-1]
+                        and record.get("sessionId") == "timeout-thread"
+                    ):
+                        started_runs.append(run_id)
+                        return True
+                return False
+
+            try:
+                proc_harness.wait_until_ready(
+                    session_persisted, "fake child did not publish a session"
+                )
+            except BaseException:
+                workflow_runtime._terminate_and_reap_child(child)
+                raise
+            return child
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": str(self.home),
+                    **pin.environment,
+                    "FAKE_CODEX_HOLD_READY": str(ready),
+                    "FAKE_CODEX_SESSION_ID": "timeout-thread",
+                    "FAKE_CODEX_SESSION_BEFORE_SLEEP": "1",
+                },
+            ),
+            mock.patch.object(subprocess, "Popen", start_ready_child),
+        ):
+            code = workflow_runtime.run_supervisor(
+                workspace=self.workspace,
+                wf_id=wf_id,
+                cli_argv=pin.cli_argv,
+                config=pin.config,
+            )
+        self.assertEqual(code, 0)
         result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
         self.assertIsNone(result["result"])
         events = json.loads(
             self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
         )["events"]
+        self.assertEqual(sum(e["type"] == "agent_timeout" for e in events), 2)
         retry_events = [event for event in events if event["type"] == "agent_structured_retry"]
         self.assertTrue(retry_events)
         self.assertEqual(retry_events[0]["strategy"], "resume")
         self.assertEqual(retry_events[0]["sessionId"], "timeout-thread")
         runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual({r["runId"] for r in runs}, set(started_runs))
+        self.assertTrue(all(isinstance(run.get("executionCwd"), str) for run in runs))
         self.assertEqual(len(runs), 2)
         worktree_list = subprocess.run(
             ["git", "-C", str(self.workspace), "worktree", "list", "--porcelain"],

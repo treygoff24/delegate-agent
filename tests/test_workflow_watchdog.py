@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import subprocess
@@ -49,6 +50,11 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.codex.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, sys, time\n"
+            "if release := os.environ.get('FAKE_CODEX_RELEASE'):\n"
+            "    import fcntl\n"
+            "    with open(release) as gate:\n"
+            "        open(release + '.ready', 'w').close()\n"
+            "        fcntl.flock(gate, fcntl.LOCK_SH)\n"
             "time.sleep(float(os.environ.get('FAKE_CODEX_SLEEP', '0')))\n"
             "print(json.dumps({'type':'message','role':'assistant','content':[{'type':'output_text','text':'done'}]}))\n"
             "print(json.dumps({'type':'completion','finalText':'done'}))\n",
@@ -392,41 +398,49 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             self.assertEqual(run_status.raw_status(canary_state), run_status.STATUS_RUNNING)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
-    def test_healthy_long_child_is_not_killed(self) -> None:
-        _, root = self._launch(2)
-        # The supervisor publishes success before releasing its workflow lock.
-        self._wait_for(
-            lambda: (
-                (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
-                and not registry.supervisor_alive(root)
-            ),
-            timeout=8,
+    def assert_supervisor_succeeded(self, root: Path) -> None:
+        self.assertTrue(
+            runtime.wait_for_workflow_lock(root, timeout_seconds=proc_harness.TEST_PROCESS_TIMEOUT),
+            "supervisor still owns its workflow",
         )
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "succeeded", status)
+
+    def test_healthy_long_child_is_not_killed(self) -> None:
+        release = self.workspace / "long-child"
+        with release.open("w") as barrier:
+            fcntl.flock(barrier, fcntl.LOCK_EX)
+            _, root = self._launch(0, env_updates={"FAKE_CODEX_RELEASE": str(release)})
+            proc_harness.wait_until_ready(
+                release.with_suffix(".ready").exists, "healthy child did not start"
+            )
+            time.sleep(2)  # A real quiet child, independent of supervisor startup.
+            self.assertTrue(registry.supervisor_alive(root))
+        self.assert_supervisor_succeeded(root)
         events = registry.iter_journal(root / registry.JOURNAL_FILE)
         self.assertNotIn("workflow_watchdog", {event.get("type") for event in events})
 
     def test_journal_silent_stretch_is_not_killed(self) -> None:
-        _, root = self._launch(
-            0,
-            "import time\n"
-            "meta = {'name': 'parked stretch'}\n"
-            "time.sleep(3.5)\n"
-            "return agent('after parked stretch')\n",
-        )
-        initial_journal = registry.iter_journal(root / registry.JOURNAL_FILE)
-        self.assertEqual([event.get("type") for event in initial_journal], ["attempt_config"])
-        time.sleep(2.2)
-
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        self.assertEqual(status.get("status"), "running")
-        self.assertTrue(registry.supervisor_alive(root))
-        self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), initial_journal)
-        self._wait_for(
-            lambda: (
-                (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
-            ),
-            timeout=8,
-        )
+        ready = self.workspace / "quiet-started"
+        release = self.workspace / "quiet-release"
+        with release.open("w") as barrier:
+            fcntl.flock(barrier, fcntl.LOCK_EX)
+            _, root = self._launch(
+                0,
+                "import fcntl\nfrom pathlib import Path\n"
+                "meta = {'name': 'parked stretch'}\n"
+                f"Path({str(ready)!r}).touch()\nwith open({str(release)!r}) as barrier:\n"
+                "    fcntl.flock(barrier, fcntl.LOCK_SH)\nreturn agent('after parked stretch')\n",
+            )
+            proc_harness.wait_until_ready(ready.exists, "workflow never entered its quiet stretch")
+            initial_journal = registry.iter_journal(root / registry.JOURNAL_FILE)
+            self.assertEqual([event.get("type") for event in initial_journal], ["attempt_config"])
+            time.sleep(2.2)  # Exercise a real quiet stretch, not interpreter startup.
+            status = registry.read_json(root / registry.STATUS_FILE) or {}
+            self.assertEqual(status.get("status"), "running")
+            self.assertTrue(registry.supervisor_alive(root))
+            self.assertEqual(registry.iter_journal(root / registry.JOURNAL_FILE), initial_journal)
+        self.assert_supervisor_succeeded(root)
 
     def test_slow_gate_and_soft_park_notifications_do_not_break_pause(self) -> None:
         post = self.bin_dir / "post"

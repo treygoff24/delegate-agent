@@ -18,6 +18,19 @@ _PROCESS_GROUP_GRACE_SECONDS = 1.0
 _PROCESS_GROUP_POLL_SECONDS = 0.05
 
 
+# Safety backstop for test-owned CLI processes and readiness barriers, not a
+# deadline that the behavior under test is expected to meet.
+TEST_PROCESS_TIMEOUT = 40
+
+
+def wait_until_ready(predicate: Callable[[], object], message: str) -> None:
+    deadline = time.monotonic() + TEST_PROCESS_TIMEOUT
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(message)
+        time.sleep(_PROCESS_GROUP_POLL_SECONDS)
+
+
 def _record_pgid(pgid: int) -> None:
     if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 1:
         _RECORDED_PGIDS.add(pgid)
@@ -470,6 +483,7 @@ atexit.register(_assert_at_suite_end)
 
 
 __all__ = [
+    "TEST_PROCESS_TIMEOUT",
     "ProducerExitProof",
     "assert_no_live_process_groups",
     "await_process_group",
@@ -483,6 +497,7 @@ __all__ = [
     "reaped_owned_producers",
     "register_process_tree",
     "spawn_process",
+    "wait_until_ready",
     "workflow_producer_proofs",
     "workflow_reap",
 ]
