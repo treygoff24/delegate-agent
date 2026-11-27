@@ -355,7 +355,7 @@ class WorkflowAttemptTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.error, "invalid_workflow_attempt")
 
-    def test_delegate_child_uses_state_snapshot_not_mutated_ambient_environment(self):
+    def test_siblings_use_attempt_config_across_live_config_replacement(self):
         attempt = self.attempt()
         state = runtime.WorkflowState(
             wf_id=self.pin.workflow_id,
@@ -368,16 +368,21 @@ class WorkflowAttemptTests(unittest.TestCase):
             budget=runtime.Budget(None),
             attempt_environment={**self.pin.environment, **attempt.environment},
         )
+        live = self.home / "config.work.json"
         with mock.patch.dict(
-            os.environ, {"DELEGATE_CONFIG": "missing.json", "DELEGATE_STALL_MINUTES": "999"}
+            os.environ, {"DELEGATE_CONFIG": str(live), "DELEGATE_STALL_MINUTES": "999"}
         ):
-            child = runtime._run_child_command_for_state(
-                [*self.pin.cli_argv, "--json", "models"],
-                state=state,
-                timeout=10,
-            )
-        self.assertEqual(child.returncode, 0, child.stderr)
-        self.assertEqual(json.loads(child.stdout)["configSource"], str(attempt.config_path))
+            for model in ("pinned-model", "changed-by-sync"):
+                live.write_text(json.dumps({"cursor": {"defaultModel": model}}))
+                child = runtime._run_child_command_for_state(
+                    [*self.pin.cli_argv, "--json", "models"],
+                    state=state,
+                    timeout=10,
+                )
+                self.assertEqual(child.returncode, 0, child.stderr)
+                payload = json.loads(child.stdout)
+                self.assertEqual(payload["configSource"], str(attempt.config_path))
+                self.assertEqual(payload["cursor"]["defaultModel"], "pinned-model")
 
     def test_missing_explicit_config_fails_before_workflow_creation(self):
         stdout, stderr = io.StringIO(), io.StringIO()
