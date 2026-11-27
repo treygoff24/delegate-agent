@@ -3227,6 +3227,9 @@ def _capture_tracked_process(
             },
             daemon=True,
         )
+        # The empty pending state was published before starting the readers.
+        # A reader can record the first tool before the polling loop begins.
+        pending_published_generation = watchdog.pending_generation
         stdout_thread.start()
         stderr_thread.start()
         stdin_thread: threading.Thread | None = None
@@ -3261,7 +3264,6 @@ def _capture_tracked_process(
         terminal_seen_at: float | None = None
         stall_detail: JsonObject | None = None
         pending_refreshed_at = time.monotonic()
-        pending_published_generation = watchdog.pending_generation
         while True:
             now = time.monotonic()
             if (

@@ -165,7 +165,7 @@ class PendingToolTests(unittest.TestCase):
         from pathlib import Path
         from unittest import mock
 
-        from delegate_agent import pending_tool, run_registry, runner
+        from delegate_agent import pending_tool, run_registry, runner, stall_watchdog
 
         script = (
             "import json\n"
@@ -184,9 +184,21 @@ class PendingToolTests(unittest.TestCase):
             seen = {"pending": False, "cleared": False}
             stop = threading.Event()
 
+            # Exercise the interleaving where the reader sees the first event
+            # before the supervisor starts polling. Incidental timed flushes
+            # must not be needed to publish a change in pending state.
+            first_line = threading.Event()
+            observe = stall_watchdog.StallWatchdog.observe_line
+
+            def read_line(watch, *args, **kwargs):
+                observe(watch, *args, **kwargs)
+                first_line.set()
+
+            def started(*args):
+                self.assertTrue(first_line.wait(10), "child did not report its first event")
+
             def poll():
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and not stop.is_set() and not seen["cleared"]:
+                while not stop.is_set() and not seen["cleared"]:
                     state = run_registry.load_run_state(root, run_id) or {}
                     if state.get("status") == "running":
                         if state.get("pendingTool"):
@@ -201,6 +213,9 @@ class PendingToolTests(unittest.TestCase):
             thread.start()
             try:
                 with (
+                    mock.patch.object(stall_watchdog.StallWatchdog, "observe_line", read_line),
+                    mock.patch.object(runner, "_emit_progress_started", started),
+                    mock.patch.object(runner, "PROGRESS_PERSIST_TIME_INTERVAL_SEC", float("inf")),
                     mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
                     mock.patch.object(pending_tool, "REFRESH_SECONDS", 1000),
                 ):
@@ -209,6 +224,7 @@ class PendingToolTests(unittest.TestCase):
                         workspace,
                         ctx,
                         json_mode=True,
+                        progress=True,
                         stdout=io.StringIO(),
                         stderr=io.StringIO(),
                     )
