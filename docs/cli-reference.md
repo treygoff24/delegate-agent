@@ -359,6 +359,13 @@ recorded in the run manifest and in `--dry-run` under `writeGuard`. The guard's
 protected list and backend choice are configured under
 [`isolation.writeGuard`](configuration.md#isolationwriteguard).
 
+`--confined-work` (Linux, tracked `work` mode only) replaces the normal work
+write guard for one run. The execution directory is the only writable host
+directory; `$HOME` and `/tmp` are private and temporary. Put the flag before
+the prompt. If bubblewrap cannot set up the boundary, Delegate refuses to
+start instead of running without it. See [confined work](security-model.md#confined-work-on-linux)
+for compatible launch options and harness requirements.
+
 Work-mode persistent worktrees automatically copy uncommitted tracked changes
 and untracked non-ignored files from a dirty source checkout before the child
 starts. Gitignored files remain excluded, and external symlinks are blocked with
@@ -1212,6 +1219,7 @@ Supported input keys:
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"`, makes commits fail inside the child through run-owned git hooks, and fails the run if the child creates commits (any isolation, including `none`; with isolation omitted it implies `worktree`). `mode: "call"` rejects commit policy.
+- `confinedWork`: optional boolean. `true` is equivalent to `--confined-work`; it requires a tracked Linux work run and never falls back to an unconfined launch.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
 - `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex, Claude, and Muse in every mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.

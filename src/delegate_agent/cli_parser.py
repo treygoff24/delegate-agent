@@ -1342,6 +1342,7 @@ def parse_modeless_engine(
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             expect_files=expect_files,
             writable=tail.writable,
+            confined_work=tail.confined_work,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -1486,6 +1487,7 @@ def parse_droid(
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             expect_files=expect_files,
             writable=tail_result.writable,
+            confined_work=tail_result.confined_work,
             include_dirty=include_dirty,
             mail_push=mail_push,
             read_only=read_only,
@@ -2052,6 +2054,7 @@ def parse_prompt_tail(
     forbid_commit = False
     expect_files: list[str] = []
     writable: list[str] = []
+    confined_work = False
     include_dirty = False
     mail_push = False
     read_only = False
@@ -2324,6 +2327,10 @@ def parse_prompt_tail(
             expect_files.append(rest[i + 1])
             i += 2
             continue
+        if token == "--confined-work":
+            confined_work = True
+            i += 1
+            continue
         if token == "--writable":
             if i + 1 >= len(rest) or not rest[i + 1].strip():
                 raise DelegateError("missing_writable_path", "--writable requires a path.")
@@ -2462,6 +2469,10 @@ def parse_prompt_tail(
     # flag and its value become prompt text and the run proceeds with the default.
     # Match whole tokens only, so prose that mentions a flag stays quiet, and skip
     # everything after a literal `--`, which is an explicit "this is prompt text".
+    if "--confined-work" in checked_prompt_parts:
+        raise DelegateError(
+            "invalid_option_combination", "--confined-work must appear before the prompt."
+        )
     absorbed_options = [token for token in checked_prompt_parts if token in known_options]
     tail_warnings = tuple(
         _absorbed_option_warning(option) for option in dict.fromkeys(absorbed_options)
@@ -2496,6 +2507,7 @@ def parse_prompt_tail(
         workspace_setup,
         stall_minutes,
         tuple(writable),
+        confined_work,
     )
 
 

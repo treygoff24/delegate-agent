@@ -1013,6 +1013,11 @@ there on every launch. Every key is optional; an
 unknown key or a wrong type fails config validation (`invalid_isolation_config`).
 See the [security model](security-model.md#work-write-guard) for the default
 protected list, the writable re-opens every run gets, and the backends.
+These settings do not alter a run started with
+[`--confined-work`](security-model.md#confined-work-on-linux). That flag always
+requires bubblewrap and refuses an unconfined launch, even when the regular
+guard is disabled or configured to warn. Guard and safe-mode bind exceptions
+do not open paths for confined work.
 
 - `enabled` (default `true`): `false` means Delegate adds nothing to work lanes:
   no wrap, no Codex `--add-dir` roots, no prompt note. The environment variable

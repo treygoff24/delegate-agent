@@ -224,7 +224,7 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Cursor work runs with edit-enabling Cursor flags.
 - Droid work adds Droid's unsafe skip flag for non-interactive edits.
 - Codex work uses the configured Codex policy and sandbox settings. When the policy keeps Codex's own `workspace-write` sandbox on, Delegate adds the writable roots the run needs (see [Work write guard](#work-write-guard)).
-- Every work lane also runs under the [work write guard](#work-write-guard), which makes a named list of irreplaceable paths read-only where the platform offers a backend.
+- Tracked work lanes normally use the [work write guard](#work-write-guard), which makes a named list of irreplaceable paths read-only where the platform offers a backend. On Linux, opt into [confined work](#confined-work-on-linux) to prevent writes outside the execution directory.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Grok work uses `grok.workPermissionMode` and `grok.workSandbox`; Delegate policy can explicitly map `policy.harness.grok.work.bypassApprovalsAndSandbox` to Grok `--permission-mode bypassPermissions`.
 - Devin work uses `--permission-mode dangerous` because non-interactive edit and exec tools otherwise require approval.
@@ -447,8 +447,9 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 
 ### Non-isolated work mode (`--isolation none`)
 
-Work mode defaults to `--isolation none` (`isolation.work` in config): the child
-runs directly in the resolved workspace with **no workspace write boundary**
+Work mode defaults to `--isolation none` (`isolation.work` in config). Without
+`--confined-work`, the child runs directly in the resolved workspace with
+**no workspace write boundary**
 (the [work write guard](#work-write-guard) still protects a named list of
 irreplaceable paths, but everything else stays writable). Delegate
 does not compute a complete write audit. A before/after Git status can show
@@ -472,6 +473,41 @@ different provider. A persistent-worktree resume attaches to the existing path
 by deriving and validating its Registry record; it does not weaken
 safe/worktree path checks or create a replacement worktree when the original
 has moved.
+
+### Confined work on Linux
+
+```bash
+delegate --cwd ./packet --isolation none pi work --confined-work "Edit this packet and run its checks."
+```
+
+The lane and its local subprocesses can write inside the resolved execution
+directory and to a private `$HOME` and `/tmp`. An in-place run can declare a
+subdirectory with `--cwd`; a worktree run can write to the new worktree. The
+host `/tmp` is hidden, and `$TMPDIR`, `$TMP`, and `$TEMP` all point at the private
+`/tmp`. Writes there and to the private HOME disappear when the lane exits. Use
+the execution directory for results that should survive. The rest of the host
+filesystem, including Git metadata outside the worktree, is read-only where
+visible. Review and stage linked worktree edits from outside the lane.
+
+Delegate preflights the bubblewrap boundary and refuses to start the lane if
+it cannot mount it. `writeGuard` shows the write root in the manifest and
+`dry-run`; only a live launch can report `status: "enforced"`. The prompt asks
+the lane to report denied writes by path and error. Delegate does not audit
+every file operation.
+
+Use a harness that can start with a fresh HOME and doesn't need to modify a
+host profile. Existing engine-home overrides don't grant write access, and
+Delegate doesn't copy credentials or persistent sessions into the private HOME.
+Codex needs a dedicated launch config that does not enable a second sandbox
+(`codex.workSandbox: "danger-full-access"`); Delegate does not switch Codex's
+policy automatically. `--pass-through`, `--writable`, `--setup`, `--mail-push`,
+native session persistence, `resume`, and `followup` are not supported.
+
+This is a filesystem write boundary for trusted workspaces, not a sandbox for
+hostile code. It does not protect readable host data or credentials, disable
+network access, or stop requests to external services. Use a write root that
+doesn't contain pre-existing hard links to outside files or host mount points
+you don't want the lane to write through.
 
 ### Work write guard
 

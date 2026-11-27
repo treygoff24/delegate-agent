@@ -110,6 +110,11 @@ NOTE_CODEX_NATIVE = (
     "directory, scratch and temp directories; a write anywhere else fails with a permission "
     "error. Report a blocked write instead of working around it."
 )
+NOTE_CONFINED_WORK = (
+    "Delegate confined work: write only in your execution directory, private $HOME, or "
+    "private /tmp. Do not try to work around a blocked write; report the path and the "
+    "error. The private directories are discarded when the lane exits."
+)
 
 NOTE_FORBID_COMMIT_IN_PLACE = (
     "Delegate commit policy: --forbid-commit is active for this run. Commits are refused "
@@ -152,6 +157,8 @@ class WriteGuardSettings:
     home_caches: tuple[str, ...] = DEFAULT_HOME_CACHES
     # Absolute paths from ``--writable`` (resolved against the caller's cwd).
     run_writable: tuple[str, ...] = ()
+    # Explicit per-launch write boundary, independent of the protect-list settings.
+    confined: bool = False
 
 
 @dataclass(frozen=True)

@@ -632,6 +632,12 @@ def build_resume_plan(
     manifest = _read_record_json(run_path / run_registry.MANIFEST_FILE)
     if manifest is None:
         raise _record_invalid("The source run has no manifest.json record.")
+    if manifest.get("confinedWork") is True:
+        raise DelegateError(
+            "confined_work_replay_unsupported",
+            "A confined run cannot be resumed. Start a new work run with --confined-work "
+            "and the intended --cwd.",
+        )
     manifest_cwd = _manifest_str(manifest, "cwd")
     if manifest_cwd is not None and worktree_records._canonical_path(
         manifest_cwd

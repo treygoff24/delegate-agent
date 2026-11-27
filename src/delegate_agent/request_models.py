@@ -59,6 +59,7 @@ class LaunchOptions:
     expect_files: tuple[str, ...] = ()
     # Extra paths the work write guard leaves writable for this run (--writable).
     writable: tuple[str, ...] = ()
+    confined_work: bool = False
     include_dirty: bool = False
     read_only: bool = False
     pure: bool = False
@@ -245,6 +246,7 @@ class PromptTail(NamedTuple):
     workspace_setup: str | None = None
     stall_minutes: float | None = None
     writable: tuple[str, ...] = ()
+    confined_work: bool = False
 
 
 @dataclass

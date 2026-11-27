@@ -154,6 +154,7 @@ def _launch_options() -> list[str]:
                 "--mail-push",
                 "--expect-file",
                 "--writable",
+                "--confined-work",
                 "--stall-minutes",
                 *command_help.WORKSPACE_SPEC_FLAGS,
             }:

@@ -19,3 +19,9 @@ The agent-facing summary of the experimental `isolation.safeBackend` / `DELEGATE
   files when they live outside the core roots; a linked worktree's common git dir is ro-bound; and
   `--pass-through` is refused because it execs outside the tracked launcher.
   Site launch surfaces are declared via `isolation.bwrapBinds`.
+
+`--confined-work` shares the bubblewrap launcher and preflight, but not the
+safe-mode bind exceptions. It starts with a read-only host filesystem, private
+process and device mounts, and a private HOME and `/tmp`. It reopens only the
+execution directory and refuses on preflight failure. Engine homes and Git
+metadata outside the execution directory are never reopened for writes.

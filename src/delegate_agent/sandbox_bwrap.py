@@ -1,4 +1,4 @@
-"""Linux bubblewrap boundary for zero-copy safe-mode isolation.
+"""Linux bubblewrap boundaries for safe and work mode.
 
 The Linux analogue of ``seatbelt.py``: instead of materialising a temporary
 copy of the workspace, the engine argv is prefixed with a bubblewrap (bwrap)
@@ -41,6 +41,7 @@ SAFE_BACKEND_ENV = "DELEGATE_SAFE_BACKEND"
 SAFE_BACKEND_COPY = "copy"
 BWRAP_BINARY = "bwrap"
 BWRAP_METHOD = "bwrap-ro-bind"
+CONFINED_HOME = "/tmp/.delegate-home"
 
 MASK_OVERFLOW_LIMIT = 2000
 MASK_KIND_TMPFS = "tmpfs"
@@ -453,6 +454,18 @@ _SYMLINK_PAIRS = (
 )
 
 
+def _namespace_prefix(bwrap_path: str) -> list[str]:
+    return [
+        bwrap_path,
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--die-with-parent",
+        "--new-session",
+    ]
+
+
 def build_bwrap_argv(
     *,
     workspace: str,
@@ -479,15 +492,7 @@ def build_bwrap_argv(
     stacked last.
     """
     mounted: set[str] = set()
-    argv: list[str] = [
-        bwrap_path,
-        "--unshare-user",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-cgroup-try",
-        "--die-with-parent",
-        "--new-session",
-    ]
+    argv = _namespace_prefix(bwrap_path)
 
     def bind(flag: str, *pair: str) -> None:
         target = pair[-1]
@@ -549,14 +554,8 @@ def build_work_guard_argv(
     copy-then-delete: a file-by-file delete inside a writable root is allowed,
     and the mount point itself survives, empty.)
     """
-    argv: list[str] = [
-        bwrap_path,
-        "--unshare-user",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-cgroup-try",
-        "--die-with-parent",
-        "--new-session",
+    argv = [
+        *_namespace_prefix(bwrap_path),
         "--dev-bind",
         "/",
         "/",
@@ -568,6 +567,82 @@ def build_work_guard_argv(
             )
         argv.extend(("--ro-bind" if mode == "ro" else "--bind", path, path))
     argv.extend(("--chdir", cwd, "--", *engine_argv))
+    return argv
+
+
+def confined_work_argv(
+    *,
+    bwrap_path: str,
+    engine_argv: list[str],
+    cwd: str,
+    env: Mapping[str, str],
+    git_common_dir: str | None,
+    run_path: str,
+) -> list[str]:
+    """Start from read-only host mounts. Only re-open cwd, never an engine home."""
+    root = Path(cwd).resolve(strict=True)
+    home = Path.home().resolve()
+    child_home = Path(env.get("HOME") or home).resolve()
+    reserved = tuple(Path(path) for path in ("/dev", "/proc", "/sys", CONFINED_HOME))
+    if (
+        root in (Path("/tmp"), Path("/var/tmp"))
+        or any(p.is_relative_to(root) for p in (home, child_home, *reserved))
+        or any(root.is_relative_to(p) for p in reserved)
+    ):
+        raise DelegateError(
+            "invalid_confined_write_root",
+            "--confined-work requires a dedicated execution directory, not a system, HOME, "
+            "or shared temp root. Set --cwd to the directory the lane may edit.",
+        )
+
+    argv = [
+        *_namespace_prefix(bwrap_path),
+        "--unshare-pid",
+        "--disable-userns",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--remount-ro",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--remount-ro",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--perms",
+        "0700",
+        "--dir",
+        CONFINED_HOME,
+        "--setenv",
+        "HOME",
+        CONFINED_HOME,
+    ]
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        argv.extend(("--setenv", key, "/tmp"))
+    for key in (
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+    ):
+        argv.extend(("--unsetenv", key))
+
+    # Under /tmp, the only host inputs to restore are the engine executable
+    # and external Git metadata (e.g. a linked worktree). Leave both read-only.
+    restored = [*_engine_binary_files(engine_argv, env)]
+    if git_common_dir:
+        restored.append(git_common_dir)
+    for path in dict.fromkeys(restored):
+        if Path(path).is_relative_to("/tmp") and not Path(path).is_relative_to(root):
+            argv.extend(("--ro-bind", path, path))
+    argv.extend(("--bind", str(root), str(root)))
+    # Prompt/schema artifacts must be visible even if the registry lives under
+    # the shadowed host /tmp, and writable receipts would undermine tracking.
+    argv.extend(("--ro-bind", run_path, run_path, "--chdir", str(root), "--", *engine_argv))
     return argv
 
 

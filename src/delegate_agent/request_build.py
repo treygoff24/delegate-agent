@@ -132,6 +132,7 @@ RUN_INPUT_KEYS = {
     "outputSchema",
     "progress",
     "forbidCommit",
+    "confinedWork",
     "readOnly",
     "includeDirty",
     "agent",
@@ -854,7 +855,9 @@ def _work_policy_note(
     if forbid_commit and not worktree_note_present:
         # The persistent-worktree note block carries its own commit note.
         notes.append(write_guard.NOTE_FORBID_COMMIT_IN_PLACE)
-    if guard_settings is not None:
+    if guard_settings is not None and guard_settings.confined:
+        notes.append(write_guard.NOTE_CONFINED_WORK)
+    elif guard_settings is not None:
         backend = write_guard.predicted_backend(
             guard_settings,
             engine=engine,
@@ -1745,6 +1748,8 @@ def _build_normalized_launch(
     launch, global_options = spec.options, spec.global_options
     engine, mode = launch.engine, launch.mode
     assert isinstance(engine, str) and isinstance(mode, str)
+    if launch.confined_work:
+        _validate_confined_work(spec, config, engine, mode)
     call = mode == MODE_CALL
     run_writable = _resolve_run_writable(launch, global_options, mode)
     cleanup_workspace = False
@@ -1846,6 +1851,7 @@ def _build_normalized_launch(
             progress_initial_delay_sec=initial,
             progress_interval_sec=interval,
             forbid_commit=launch.forbid_commit,
+            confined_work=launch.confined_work,
             include_dirty=launch.include_dirty and launch.mode != MODE_SAFE,
             auth_profile_override=global_options.auth_profile,
             auth_profile_inherited=global_options.auth_profile_inherited,
@@ -1901,6 +1907,37 @@ def _build_normalized_launch(
     if stderr is not None and not launch.dry_run:
         _print_launch_notices(request, spec.forbid_commit_note, stderr)
     return request
+
+
+def _validate_confined_work(spec: _LaunchInput, config: JsonObject, engine: str, mode: str) -> None:
+    launch = spec.options
+    if mode != MODE_WORK or spec.global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination", "--confined-work requires tracked work mode."
+        )
+    for conflict, present in (
+        ("--writable", launch.writable),
+        ("--setup", launch.workspace_setup),
+        ("--mail-push", launch.mail_push),
+        ("--resumable or session replay", launch.resumable or launch.resume_session_id),
+        ("structured session retry", spec.structured_session or spec.structured_retry_workspace),
+    ):
+        if present:
+            raise DelegateError(
+                "invalid_option_combination", f"--confined-work cannot be combined with {conflict}."
+            )
+    if engine == "codex":
+        policy = delegate_config.effective_policy(config, engine=engine, mode=mode)
+        codex = config.get("codex")
+        if policy.get("bypassApprovalsAndSandbox") is not True and (
+            not isinstance(codex, dict) or codex.get("workSandbox") != "danger-full-access"
+        ):
+            raise DelegateError(
+                "invalid_option_combination",
+                "--confined-work is the sandbox; it cannot nest Codex's native sandbox. "
+                "Choose another engine or use a dedicated config with "
+                'codex.workSandbox="danger-full-access" only for the confined invocation.',
+            )
 
 
 def _print_launch_notices(request: Request, forbid_commit_note: str | None, stderr: TextIO) -> None:
@@ -2315,6 +2352,9 @@ def request_from_input_json(
     raw_forbid_commit = raw.get("forbidCommit", False)
     if not isinstance(raw_forbid_commit, bool):
         raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
+    raw_confined_work = raw.get("confinedWork", False)
+    if not isinstance(raw_confined_work, bool):
+        raise DelegateError("invalid_confined_work", "confinedWork must be true or false.")
     raw_read_only = raw.get("readOnly", False)
     if not isinstance(raw_read_only, bool):
         raise DelegateError("invalid_read_only", "readOnly must be true or false.")
@@ -2516,6 +2556,7 @@ def request_from_input_json(
         fast=fast,
         progress_intent=raw_progress_intent,
         forbid_commit=raw_forbid_commit,
+        confined_work=raw_confined_work,
         include_dirty=raw_include_dirty,
         read_only=raw_read_only,
         pure=raw_pure,
@@ -2853,6 +2894,7 @@ def build_request(
     progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
+    confined_work: bool = False,
     include_dirty: bool = False,
     auth_profile_override: str | None = None,
     auth_profile_inherited: bool = False,
@@ -2908,6 +2950,8 @@ def build_request(
     )
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "fast is only supported by codex.")
+    if confined_work:
+        resumable = False
     if resumable is None:
         resumable = default_resumable(engine, mode, config, pass_through=pass_through)
     elif not isinstance(resumable, bool):
@@ -3096,6 +3140,7 @@ def build_request(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
             forbid_commit=forbid_commit,
+            confined_work=confined_work,
             include_dirty=include_dirty,
             profile_resolution=profile_resolution,
             discovery=snapshot,
@@ -4216,6 +4261,7 @@ def _build_request_for_workspace(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     forbid_commit: bool,
+    confined_work: bool,
     include_dirty: bool,
     profile_resolution: profiles.ProfileResolution,
     discovery: JsonObject | None,
@@ -4306,6 +4352,8 @@ def _build_request_for_workspace(
     guard_settings = (
         write_guard.settings_from_config(config) if mode == MODE_WORK and stream_capture else None
     )
+    if confined_work and guard_settings is not None:
+        guard_settings = replace(guard_settings, confined=True)
     policy_note = _work_policy_note(
         engine,
         mode,

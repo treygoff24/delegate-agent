@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Opt-in confined work on Linux.** `delegate … work --confined-work` uses
+  bubblewrap to let a lane and its subprocesses write only in the execution
+  directory and private HOME and `/tmp`. If confinement cannot start, the
+  lane does not start either. Default work mode is unchanged.
+
 ### Changed
 - **Terminal states say what they mean.** The run's closing `terminal state:` line
   now carries a plain explanation, and run receipts, `status` and `wait` output

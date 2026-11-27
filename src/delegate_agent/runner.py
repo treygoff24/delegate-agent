@@ -903,6 +903,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["worktreeAttachment"] = ctx.worktree_attachment
     if ctx.workspace_spec is not None:
         payload["workspaceSpec"] = ctx.workspace_spec
+    if ctx.write_guard is not None and ctx.write_guard.confined:
+        payload["confinedWork"] = True
     if ctx.write_guard_record is not None:
         payload["writeGuard"] = ctx.write_guard_record
     return payload
@@ -2835,7 +2837,13 @@ def _launch_tracked_process(
             hooks_root / write_guard.FORBID_COMMIT_HOOKS_DIRNAME
         )
         env.update(write_guard.forbid_commit_env(str(hooks_dir), env))
-    if sandbox is not None:
+    guarded: write_guard_launch.GuardLaunch | None = None
+    if guard_settings is not None and guard_settings.confined:
+        assert run_path is not None, "confined work requires tracked run artifacts"
+        guarded = write_guard_launch.apply_confined_work(
+            argv=argv, cwd=cwd, env=env, run_path=str(run_path)
+        )
+    elif sandbox is not None:
         if not isinstance(sandbox, sandbox_bwrap.SandboxPlan):
             raise DelegateError(
                 "invalid_bwrap_plan", "Tracked sandbox requires a validated SandboxPlan."
@@ -2890,6 +2898,7 @@ def _launch_tracked_process(
             registry_root=str(guard_registry_root) if guard_registry_root is not None else None,
             run_roots=guard_run_roots,
         )
+    if guarded is not None:
         argv = guarded.argv
         if guard_record is not None:
             guard_record.clear()
@@ -5192,7 +5201,10 @@ def _execute_tracked(
             run_roots=guard_run_roots,
             home=(ctx.env_overrides or {}).get("HOME"),
         )
-        if ctx.write_guard is not None and ctx.write_guard.enabled and ctx.engine == "codex"
+        if ctx.write_guard is not None
+        and ctx.write_guard.enabled
+        and not ctx.write_guard.confined
+        and ctx.engine == "codex"
         else None
     )
     if native_guard is not None and native_guard.roots:
@@ -5213,6 +5225,8 @@ def _execute_tracked(
             manifest["tempPath"] = str(files.temp_dir)
         write_manifest(files.run_path, manifest)
     sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
+    if ctx.write_guard is not None and ctx.write_guard.confined:
+        sandbox_temp_base = files.run_path
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         run_argv,
         prompt_file_text=prompt_file_text,

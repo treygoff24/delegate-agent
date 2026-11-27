@@ -249,6 +249,52 @@ def _apply_bwrap(
     return GuardLaunch(argv=wrapped, record=record, warning=" ".join(warnings) or None)
 
 
+def _confined_record(root: str, status: str) -> JsonObject:
+    return {
+        "mode": "confined",
+        "backend": "bwrap",
+        "status": status,
+        "onUnavailable": "refuse",
+        "writeRoot": root,
+        "privateHome": sandbox_bwrap.CONFINED_HOME,
+        "privateTemp": "/tmp",
+    }
+
+
+def apply_confined_work(
+    *, argv: list[str], cwd: str, env: Mapping[str, str], run_path: str
+) -> GuardLaunch:
+    """No partial mount plans, native-sandbox substitution, or warning fallback."""
+    bwrap_path = (
+        shutil.which(sandbox_bwrap.BWRAP_BINARY) if sys.platform.startswith("linux") else None
+    )
+    error = "confined_work_unavailable"
+    if bwrap_path is None:
+        raise DelegateError(
+            error,
+            "--confined-work requires Linux and bubblewrap (bwrap) on PATH; the lane did not start.",
+        )
+    try:
+        wrapped = sandbox_bwrap.confined_work_argv(
+            bwrap_path=bwrap_path,
+            engine_argv=argv,
+            cwd=cwd,
+            env=env,
+            git_common_dir=git_common_dir(cwd),
+            run_path=run_path,
+        )
+        sandbox_bwrap.preflight_plan(wrapped)
+    except DelegateError as exc:
+        if exc.error != "bwrap_launch_failed":
+            raise
+        raise DelegateError(
+            error, f"--confined-work: {exc.message}; the lane did not start."
+        ) from exc
+    except OSError as exc:
+        raise DelegateError(error, f"--confined-work: {exc}; the lane did not start.") from exc
+    return GuardLaunch(wrapped, _confined_record(os.path.realpath(cwd), STATUS_ENFORCED))
+
+
 def _apply_seatbelt(
     settings: WriteGuardSettings, argv: list[str], cwd: str, facts: GuardFacts
 ) -> GuardLaunch:
@@ -354,6 +400,8 @@ def preview_payload(
     Uses only facts known before launch; run scratch, the child's TMPDIR and the
     engine home are added when the child launches.
     """
+    if settings.confined:
+        return _confined_record(exec_root, STATUS_PLANNED)
     backend = write_guard.predicted_backend(settings, engine=engine, argv=argv)
     if backend is None:
         status, reason = write_guard.unguarded(settings)

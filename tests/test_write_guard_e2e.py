@@ -68,7 +68,7 @@ def run_git(repo: Path, *args: str) -> str:
 
 class GuardE2ETestCase(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(dir=getattr(self, "temp_root", None))
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.home = self.root / "home"
@@ -132,9 +132,11 @@ class GuardE2ETestCase(unittest.TestCase):
             env.pop(name, None)
         return env
 
-    def cli(self, *args: str, guard: str = "on") -> subprocess.CompletedProcess[str]:
+    def cli(
+        self, *args: str, guard: str = "on", cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(CLI_PATH), "--cwd", str(self.workspace), *args],
+            [sys.executable, str(CLI_PATH), "--cwd", str(cwd or self.workspace), *args],
             text=True,
             capture_output=True,
             env=self.env(guard),

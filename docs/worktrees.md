@@ -592,3 +592,14 @@ Use `--pool PATH` to scan a pool root that is no longer the configured `dataHome
 ## Security boundary
 
 Worktree isolation is source-checkout isolation, not a full sandbox. The child process may still use credentials, network access, external tools, and absolute paths according to its runtime and host permissions. See [Security model](security-model.md).
+
+On Linux, add `--confined-work` before the prompt to prevent the lane from
+writing outside the worktree (apart from private HOME and temp scratch):
+
+```bash
+delegate --isolation worktree pi work --confined-work "Edit the files and report the checks."
+```
+
+The Git index and objects live in the source repo for a linked worktree and
+are read-only to the lane. Stage or commit the retained edits from outside the
+lane. See [confined work](security-model.md#confined-work-on-linux).

@@ -316,6 +316,14 @@ _WRITABLE_OPTION = OptionSpec(
     "PATH must exist; relative paths resolve against the caller's directory. The re-open "
     "is recorded in the manifest and dry-run writeGuard.",
 )
+_CONFINED_WORK_OPTION = OptionSpec(
+    "--confined-work",
+    None,
+    "Linux tracked work only: allow writes only in the execution directory and private "
+    "HOME and /tmp. Requires working bubblewrap; no unconfined fallback. Put this flag "
+    "before the prompt. Incompatible with --writable, --pass-through, --setup, "
+    "--mail-push and --resumable.",
+)
 _MAIL_PUSH_OPTION = OptionSpec(
     "--mail-push",
     None,
@@ -1031,7 +1039,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate run --input-json task.json",),
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
-            "reasoningEffort, fast, outputSchema, progress, forbidCommit, persona, allowRepoPersona, "
+            "reasoningEffort, fast, outputSchema, progress, forbidCommit, confinedWork, persona, allowRepoPersona, "
             "resumable, base, env (object of NAME to string), setup.",
             "Use this for long prompts or programmatic invocation.",
         ),
@@ -2771,6 +2779,7 @@ for _engine in (*KNOWN_ENGINES, "dry-run"):
             _MAIL_PUSH_OPTION,
             _EXPECT_FILE_OPTION,
             _WRITABLE_OPTION,
+            _CONFINED_WORK_OPTION,
             _CONTINUITY_MODE_OPTION,
             *_WORKSPACE_SPEC_OPTIONS,
             *PERSONA_OPTIONS,
@@ -2786,6 +2795,7 @@ _CALL_HIDDEN_OPTION_FLAGS = frozenset(
         "--include-dirty",
         "--expect-file",
         "--writable",
+        "--confined-work",
         "--mail-push",
         "--resumable",
         "--no-resumable",

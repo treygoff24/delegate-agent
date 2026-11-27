@@ -312,6 +312,8 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if request.write_guard is not None:
+        if request.write_guard.confined:
+            payload["confinedWork"] = True
         planned_root = (
             request.isolation_context.planned_execution_cwd
             if request.isolation_context is not None
@@ -543,6 +545,8 @@ def _maybe_auto_resume(
     """
     from delegate_agent import request_build
 
+    if request.write_guard is not None and request.write_guard.confined:
+        return first
     enabled = request.provider_policy.auto_resume
     already_automatic = request.auto_resume is not None
     if auto_resume.skip_reason(note, enabled=enabled, already_automatic=already_automatic):
