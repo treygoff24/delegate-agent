@@ -34,21 +34,28 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
   ```
 
 - [ ] Run Gitleaks and TruffleHog against both Git history and the exact source
-      tree that will be packaged:
+      tree that will be packaged. From the intended release checkout, pin its
+      commit once; other branches, linked worktrees and fetch refs are not
+      release history:
 
   ```bash
-  gitleaks detect --source . --redact --no-banner
-  trufflehog git file://. --only-verified --fail --fail-on-scan-errors \
-    --exclude-detectors Lob --no-update
-  LOB_SCAN_RC=0
-  git grep -nIE '(^|[^[:alnum:]_])(live|test)_[a-f0-9]{35}([^[:alnum:]_]|$)' \
-    $(git rev-list HEAD) || LOB_SCAN_RC=$?
-  test "$LOB_SCAN_RC" -eq 1
-  SCAN_ROOT="$(mktemp -d)"
-  mkdir "$SCAN_ROOT/source"
-  git archive HEAD | tar -x -C "$SCAN_ROOT/source"
-  trufflehog filesystem "$SCAN_ROOT/source" --only-verified --fail \
-    --fail-on-scan-errors --exclude-detectors Lob --no-update
+  (
+    set -eo pipefail
+    cd -- "$(git rev-parse --show-toplevel)"
+    RELEASE_COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
+    gitleaks git --log-opts="$RELEASE_COMMIT" --redact --no-banner .
+    trufflehog git "file://$PWD" --branch "$RELEASE_COMMIT" --only-verified --fail \
+      --fail-on-scan-errors --exclude-detectors Lob --no-update
+    LOB_SCAN_RC=0
+    git grep -lIE '(^|[^[:alnum:]_])(live|test)_[a-f0-9]{35}([^[:alnum:]_]|$)' \
+      $(git rev-list "$RELEASE_COMMIT") || LOB_SCAN_RC=$?
+    test "$LOB_SCAN_RC" -eq 1
+    SCAN_ROOT=$(mktemp -d)
+    trap 'rm -rf -- "$SCAN_ROOT"' EXIT
+    git archive "$RELEASE_COMMIT" | tar -x -C "$SCAN_ROOT"
+    trufflehog filesystem "$SCAN_ROOT" --only-verified --fail \
+      --fail-on-scan-errors --exclude-detectors Lob --no-update
+  )
   ```
 
   TruffleHog 3.96.0's Lob detector accepts ordinary 35-character Python
