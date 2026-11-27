@@ -216,7 +216,18 @@ def emit_estate_selection(argv: list[str]) -> int:
     from delegate_agent import cli_parser
 
     try:
-        realm, path = _estate_selection(cli_parser.parse_cli(argv))
+        parsed = cli_parser.parse_cli(argv, estate_selection=True)
+    except DelegateError as exc:
+        if exc.error == "realm_conflict":
+            print(f"delegate: {exc.message}", file=sys.stderr)
+            return 2
+        # Keep the runtime's native usage errors, including JSON. This repeats
+        # the failing parse without the estate-only check; it cannot dispatch.
+        from delegate_agent import cli
+
+        return cli.main(argv)
+    try:
+        realm, path = _estate_selection(parsed)
         if path is not None and any(char in str(path) for char in ("\n", "\r")):
             raise DelegateError("invalid_realm_config", "config path must not contain a newline")
     except DelegateError as exc:

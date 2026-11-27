@@ -54,3 +54,16 @@ def test_conflicting_inherited_realms_refuse_without_explicit_choice(tmp_path):
     assert result.returncode != 0
     assert result.stdout == ""
     assert "contradictory realm" in result.stderr
+
+
+def test_conflicting_repeated_flags_do_not_use_last_one(tmp_path):
+    result = resolve(tmp_path, "--auth-profile", "work", "profiles", "--auth-profile", "personal")
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "contradictory realm" in result.stderr
+
+
+def test_estate_preflight_preserves_json_usage_errors(tmp_path):
+    result = resolve(tmp_path, "--json", "--bad-flag", "profiles")
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error"] == "unknown_option"

@@ -513,8 +513,8 @@ def parse_runtime_subcommand(
     )
 
 
-def parse_cli(argv: list[str]) -> ParsedCommand:
-    parsed = _parse_cli_command(argv)
+def parse_cli(argv: list[str], *, estate_selection: bool = False) -> ParsedCommand:
+    parsed = _parse_cli_command(argv, estate_selection=estate_selection)
     # --force-launch is a launch-time global; the per-command builders below never
     # see it, so it is stamped on the finished command in one place.
     if "--force-launch" in _normalize_global_options(argv)[0]:
@@ -522,7 +522,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     return parsed
 
 
-def _parse_cli_command(argv: list[str]) -> ParsedCommand:
+def _parse_cli_command(argv: list[str], *, estate_selection: bool = False) -> ParsedCommand:
     if not argv or argv[0] in ("--help", "-h"):
         return ParsedCommand("help")
     if argv[0] == "--version":
@@ -602,11 +602,18 @@ def _parse_cli_command(argv: list[str]) -> ParsedCommand:
                 raise DelegateError(
                     "missing_auth_profile", "--auth-profile requires a profile name."
                 )
-            auth_profile = global_argv[i + 1]
-            if not auth_profile or auth_profile.startswith("-"):
+            selected = global_argv[i + 1]
+            if not selected or selected.startswith("-"):
                 raise DelegateError(
                     "missing_auth_profile", "--auth-profile requires a profile name."
                 )
+            if (
+                estate_selection
+                and auth_profile is not None
+                and auth_profile.strip() != selected.strip()
+            ):
+                raise DelegateError("realm_conflict", "contradictory realm in --auth-profile flags")
+            auth_profile = selected
             i += 2
             continue
         if token == "--notify":
