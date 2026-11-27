@@ -1451,7 +1451,7 @@ class WorkflowState:
     call_labels: dict[str, str | None] = field(default_factory=dict)
     started_scopes: dict[str, str] = field(default_factory=dict)
     # Only settlements loaded from the prior journal, consumed on exact replay.
-    pending_positional: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    pending_positional: dict[str, tuple[str, str | None, str | None]] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
     exhausted_keys: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
@@ -1581,9 +1581,11 @@ class WorkflowState:
                 self.started_scopes[key] = scope
                 if "callerKey" not in event and "priorLabel" not in event:
                     digest = event.get("positionalDigest")
+                    persona = event.get("personaDigest")
                     self.pending_positional[key] = (
                         scope,
                         digest if isinstance(digest, str) else None,
+                        persona if isinstance(persona, str) else None,
                     )
             if event.get("type") == "agent_started":
                 digests = _event_digests(event)
@@ -2054,13 +2056,27 @@ class WorkflowState:
         self.append_event("agent_rejected", **event)
         return key
 
-    def check_positional_replay(self, key: str, scope: str, digest: str, *, retry: bool) -> None:
+    def check_positional_replay(
+        self, key: str, scope: str, digest: str, *, retry: bool, prompt: str, opts: JsonObject
+    ) -> None:
         """Never use a shifted position as permission to repeat settled work."""
         with self.journal_lock:
             self.pending_positional.pop(key, None)
+            if opts.get("personaDigest") is not None:
+                # A persona file edit intentionally invalidates the old result.
+                # Prove that it was this slot's call with ONLY the content
+                # digest replaced. This proof also works on pre-guard journals.
+                for prior, (old_scope, _, old_persona) in list(self.pending_positional.items()):
+                    if (
+                        old_scope == scope
+                        and old_persona
+                        and prior
+                        == _agent_key(scope, prompt, {**opts, "personaDigest": old_persona})
+                    ):
+                        del self.pending_positional[prior]
             if retry or key in self.replay_keys or key in self.started_without_result:
                 return
-            for prior, (old_scope, old_digest) in self.pending_positional.items():
+            for prior, (old_scope, old_digest, _) in self.pending_positional.items():
                 if prior in self.replay_keys and (old_scope == scope or old_digest == digest):
                     raise WorkflowKeyConflict(
                         f"ambiguous positional replay at {scope!r}: a completed agent() at "
@@ -3948,8 +3964,15 @@ class WorkflowDsl:
                 retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
                 key = _agent_key(path, prompt, retry_opts)
             # Same inputs in an independent named scope are a different step.
-            digest = _agent_key(self.state.current_named_scope(), prompt, key_opts)
-            self.state.check_positional_replay(key, path, digest, retry=retry)
+            # The result key tracks the persona's bytes. The move detector
+            # tracks the script's selected persona even when those bytes change.
+            move_opts = (
+                {**key_opts, "personaDigest": None, "persona": persona} if persona else key_opts
+            )
+            digest = _agent_key(self.state.current_named_scope(), prompt, move_opts)
+            self.state.check_positional_replay(
+                key, path, digest, retry=retry, prompt=prompt, opts=key_opts
+            )
             key_digests = {"positionalDigest": digest}
         persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
         prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes

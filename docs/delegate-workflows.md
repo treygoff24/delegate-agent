@@ -142,7 +142,9 @@ lifetime and replays the same way on resume.
 
 Unkeyed calls keep their positional keys. An exact match still replays. Before
 launching an unmatched call, resume refuses an occupied position whose prior
-settlement has not replayed. New journals also record a digest of the inputs
+settlement has not replayed. Editing a persona file intentionally invalidates
+the result of the same call in the same position; it does not authorize a
+moved call. New journals also record a digest of the inputs
 within the named scope: if that call moves to an empty position, resume stops
 rather than repeating it. Older journals without that digest support the
 occupied-position check only. The refusal cannot reconstruct skipped script

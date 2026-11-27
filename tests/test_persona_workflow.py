@@ -329,6 +329,21 @@ class PersonaWorkflowTests(unittest.TestCase):
         self.assertEqual(second_calls[0]["persona"], "editor")
         self.assertEqual(second_calls[0]["allowRepoPersona"], True)
 
+    def test_persona_edit_does_not_authorize_a_different_or_moved_call(self) -> None:
+        opts = {"persona": "editor", "allow_repo_persona": True}
+        calls = []
+        with mock.patch.object(
+            workflow_runtime, "_run_child_command", side_effect=self._child_result(calls)
+        ):
+            self._dsl(self._state()).agent("original", **opts)
+            (self.workspace / ".delegate" / "personas" / "editor.md").write_text(self.new_text)
+            with self.assertRaises(workflow_runtime.WorkflowKeyConflict):
+                self._dsl(self._state()).agent("different prompt", **opts)
+            dsl = self._dsl(self._state())
+            with self.assertRaises(workflow_runtime.WorkflowKeyConflict):
+                dsl.parallel([lambda: dsl.agent("original", **opts)])
+        self.assertEqual(len(calls), 1)
+
     def test_child_digest_mismatch_after_persona_mutation_fails_without_cache_entry(self) -> None:
         state = self._state()
         calls: list[dict[str, object]] = []
