@@ -28,6 +28,7 @@ from delegate_agent import (
     auto_resume,
     child_failures,
     degraded,
+    estate_codex_health,
     failover_state,
     git_utils,
     harness_events,
@@ -2801,6 +2802,8 @@ def _launch_tracked_process(
     # A Run's stdin is closed: an editor, pager or credential prompt would hang
     # it. Forced for every engine, over profile and ambient values.
     env.update(NON_INTERACTIVE_ENV)
+    if engine == "codex":
+        env["DELEGATE_REPORT_CODEX_CREDENTIAL"] = "1"
     _install_no_page_ask(env, temp_dir or scratch_dir or run_path)
     hooks_root = run_path or temp_dir or scratch_dir
     if forbid_commit and hooks_root is not None:
@@ -3887,10 +3890,11 @@ def _finalize_tracked_run(
     # segment, error events, and last error message. Earlier attempts stay in the
     # record for diagnosis but never decide the failure kind.
     final_accumulator = capture.final_attempt_accumulator or capture.accumulator
+    final_stderr = _final_attempt_segment(stderr_tail)
     signal_text = "\n".join(
         part
         for part in (
-            _final_attempt_segment(stderr_tail),
+            final_stderr,
             _accumulator_failure_signal_text(final_accumulator),
         )
         if part
@@ -4037,6 +4041,13 @@ def _finalize_tracked_run(
         and accumulator.completion_text is None
         and not outcome.work_summary_shows_changes(merged_extra.get("workSummary"))
     )
+    if (
+        ctx.engine == "codex"
+        and status == run_registry.STATUS_FAILED
+        and not cancel_requested
+        and established_reason is None
+    ):
+        estate_codex_health.observe_rejection(final_stderr, signal_text, provider_error)
     if not cancel_requested and merged_extra.get("codexAuthFallback") is None:
         _observe_lane_health(
             ctx,

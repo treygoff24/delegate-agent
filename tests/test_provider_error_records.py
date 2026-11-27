@@ -184,6 +184,64 @@ class TrackedRunProviderErrorTests(unittest.TestCase):
         )
         return code, payload, run_registry.load_run_state(root, run_id), root, run_id
 
+    def test_codex_refresh_rejection_records_only_its_launch_generation(self):
+        rejection = (
+            "Your access token could not be refreshed because your refresh token was revoked"
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            profiles = Path(workspace) / "profiles"
+            account = profiles / "accounts/codex/work/work-a"
+            account.mkdir(parents=True)
+            auth = account / "auth.json"
+            auth.write_text('{"tokens":{"refresh_token":"fixture-refresh"}}')
+            info = auth.stat()
+            generation = [
+                info.st_dev,
+                info.st_ino,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                info.st_size,
+            ]
+            stamp = ":".join(map(str, generation))
+            marker = f"estate-harness: codex-credential-generation work work-a {stamp}\n"
+            receipt = account / ".estate-refresh-rejected.json"
+            with mock.patch.dict(os.environ, {"ESTATE_AI_PROFILES_ROOT": str(profiles)}):
+                for stderr, message in (
+                    (marker, "401 Unauthorized: token_expired"),
+                    ("", rejection),
+                    (marker + marker, rejection),
+                ):
+                    self._run(
+                        "codex",
+                        [{"type": "error", "message": message}],
+                        workspace,
+                        exit_code=1,
+                        stderr=stderr,
+                    )
+                    self.assertFalse(receipt.exists())
+                code, _payload, _state, _root, _run_id = self._run(
+                    "codex",
+                    [{"type": "turn.failed", "error": {"message": rejection}}],
+                    workspace,
+                    exit_code=1,
+                    stderr=marker,
+                )
+                self.assertNotEqual(code, 0)
+                data = json.loads(receipt.read_text())
+                self.assertEqual(set(data), {"generation", "observed_at"})
+                self.assertEqual(data["generation"], generation)
+                self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+                receipt.unlink()
+                auth.write_text("{}\n")
+                self._run(
+                    "codex",
+                    [{"type": "error", "message": rejection}],
+                    workspace,
+                    exit_code=1,
+                    stderr=marker,
+                )
+                self.assertFalse(receipt.exists())
+
     def test_omp_400_that_says_invalid_token_is_a_request_error_not_auth(self):
         # The audit's live misread: the message wording beat the 400.
         with tempfile.TemporaryDirectory() as workspace:
