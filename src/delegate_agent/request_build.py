@@ -4437,6 +4437,13 @@ def _build_request_for_workspace(
         )
         if unknown_claude_model is not None:
             raise unknown_claude_model
+    if mail_push and engine == "codex" and os.path.basename(parts.argv[0]) == "estate-codex":
+        # The account broker replaces the private CODEX_HOME containing the hook.
+        mail_push = False
+        warnings = (
+            *warnings,
+            "The estate Codex launcher replaces CODEX_HOME; using pull mail instead of an unloaded stop hook.",
+        )
     catalog_warnings = _launch_model_catalog_warnings(engine, parts.model, discovery)
     process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     request_env_overrides = dict(parts.env_overrides or {})

@@ -96,6 +96,15 @@ class MailPushGatingTests(CommandTestBase):
             )
         self.assertEqual(caught.exception.error, "mail_push_disabled")
 
+    def test_estate_codex_warns_instead_of_promising_an_unloaded_stop_hook(self):
+        config = self._config(True)
+        config["codex"]["binary"] = "estate-codex"
+        request = self.build_git_request(
+            "codex", "work", None, "/repo", "hi", config, True, mail_push=True
+        )
+        self.assertFalse(request.mail_push)
+        self.assertTrue(any("pull mail" in warning for warning in request.warnings))
+
     def test_mail_enabled_does_not_auto_enable_push_without_the_flag(self):
         request = self.build_git_request(
             "cursor",

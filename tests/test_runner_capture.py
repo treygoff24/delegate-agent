@@ -29,7 +29,7 @@ RUN_OUTPUT_PATH = ROOT / "src" / "delegate_agent" / "run_output_commands.py"
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from delegate_agent import mail  # noqa: E402
+from delegate_agent import mail, terminal_states  # noqa: E402
 from tests import assert_compact_temps_contained  # noqa: E402
 
 
@@ -5120,6 +5120,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             assert payload is not None
             self.assertEqual(payload["terminalState"], "completed_unverified")
+            self.assertEqual(
+                payload["terminalStateMeaning"],
+                terminal_states.TERMINAL_STATE_MEANINGS["completed_unverified"],
+            )
             self.assertNotIn("failureReason", payload)
 
     def test_forced_auth_fallback_records_provenance_hop_and_sticky_turn(self):
