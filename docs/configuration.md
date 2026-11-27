@@ -503,6 +503,18 @@ fallback.
 
 #### Profile and config precedence
 
+The estate-managed `delegate` launcher resolves work/personal before loading
+keys. `--auth-profile` and a realm-bound `DELEGATE_CONFIG` take precedence over
+inherited markers; the launcher refuses if they name different realms. A config
+binds a realm through its `config.work.json`/`config.personal.json` filename or
+its own `profiles.default`. Without an explicit realm, inherited `DELEGATE_PROFILE`,
+`AI_PROFILE`, and `ESTATE_AGENT_REALM` must agree. The launcher reports the chosen
+realm and config path on stderr, and Delegate uses that same realm even if the
+config's `profiles.detectFrom` would have picked differently. Unset a stale
+`DELEGATE_CONFIG` before switching to the other realm with `--auth-profile`.
+
+For the generic profile shim outside that estate wrapper:
+
 One order applies to every choice: an explicit flag beats the environment, and
 the environment beats a config default.
 

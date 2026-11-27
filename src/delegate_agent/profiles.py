@@ -249,7 +249,17 @@ def resolve_active_profile(
     selected: str | None = None
     source: str | None = None
 
-    if cli_override is not None:
+    estate_realm = env.get("DELEGATE_ESTATE_REALM")
+    if estate_realm in ("work", "personal") and (definitions or cli_override is not None):
+        if cli_override is not None and cli_override.strip() != estate_realm:
+            raise DelegateError(
+                "realm_conflict",
+                "requested auth profile contradicts the selected estate realm; relaunch in that realm",
+            )
+        if estate_realm not in definitions:
+            raise _unknown_profile_error(estate_realm, definitions)
+        selected, source = estate_realm, "estate"
+    elif cli_override is not None:
         selected = cli_override.strip()
         if not selected or selected not in definitions:
             raise _unknown_profile_error(cli_override, definitions)
@@ -288,6 +298,12 @@ def resolve_active_profile(
     active_env = (
         profile_env(config, selected, expand_env=expand_env) if selected is not None else {}
     )
+    if source == "estate":
+        for marker in ("AI_PROFILE", "DELEGATE_PROFILE", "ESTATE_AGENT_REALM", "CODEX_PROFILE"):
+            if marker in active_env and active_env[marker] != selected:
+                raise DelegateError(
+                    "realm_conflict", f"configured {marker} contradicts the selected estate realm"
+                )
     codex = codex_section(config)
     fallback_profile = codex_fallback_profile(config)
     fallback_home = None

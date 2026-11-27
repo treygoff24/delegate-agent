@@ -28,4 +28,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from delegate_agent.cli import main  # noqa: E402
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--_estate-selection"]:
+        from delegate_agent.profile_guard import emit_estate_selection
+
+        raise SystemExit(emit_estate_selection(sys.argv[2:]))
     raise SystemExit(main())
