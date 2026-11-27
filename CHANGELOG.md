@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-11-27
+
+This release adds opt-in filesystem write confinement for Linux work lanes.
+
 ### Added
 - **Opt-in confined work on Linux.** `delegate … work --confined-work` uses
   bubblewrap to let a lane and its subprocesses write only in the execution
@@ -2629,7 +2633,8 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/treygoff24/delegate-agent/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/treygoff24/delegate-agent/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/treygoff24/delegate-agent/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.31.0
