@@ -3372,6 +3372,14 @@ def _capture_tracked_process(
                     next_progress_at = time.monotonic() + interval
             # A pending tool that emits nothing leaves no line to trigger a
             # persist; refresh the record so `current` shows the growing wait.
+            if not terminal_signal.is_set():
+                watchdog.probe_pending(
+                    now,
+                    lambda: stall_watchdog.process_group_activity(pgid),
+                    # A final unterminated line is parsed after draining; it
+                    # could itself be the missing result.
+                    result_stream_ended=not stdout_thread.is_alive() and not line_buffer.strip(),
+                )
             pending_generation = watchdog.pending_generation
             pending = watchdog.oldest_pending_tool(now)
             accumulator.pending_tool = pending

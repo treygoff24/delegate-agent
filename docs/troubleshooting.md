@@ -581,9 +581,15 @@ suites and builds legitimately run long. A tool that hangs (for example an MCP
 call that never returns) therefore does not end the Run by itself. `delegate
 runs` and `delegate snapshot` show `pendingTool` for a live Run: the oldest
 pending call's `name`, optional `target`, `startedAt`, and `seconds`. After a
-minute `current` reads `waiting on tool <name> for 13m`. Delegate only surfaces
-this; deciding that the call is hung, and running `delegate cancel <handle>`,
-is the coordinator's call.
+minute `current` shows the wait. With the watchdog enabled, Delegate samples
+the local process group after 10 minutes for named MCP calls and 30 minutes
+for other tools, then at most once a minute. `pendingTool.probe` reports the
+group's activity and how old the call was at the sample. If the child's
+result stream has ended with the tool still pending, `current` says so: no
+more results can arrive on that stream. An open stream and sleeping processes
+can mean healthy I/O or a dead remote tool. Delegate cannot distinguish them,
+and never cancels a call based on these observations. Use `delegate cancel
+<handle>` if inspection warrants it, or set a run deadline with `--timeout`.
 
 ## A run went stale after its launch command was killed
 

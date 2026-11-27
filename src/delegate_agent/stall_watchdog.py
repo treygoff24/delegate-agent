@@ -106,6 +106,11 @@ RUNAWAY_OUTPUT_CHARS_DEFAULT = 400_000
 REPEATED_TOOL_FAILURE_LIMIT = 5
 # In-flight tool calls tracked at once; a stream that never closes its calls is capped.
 PENDING_TOOL_LIMIT = 256
+# Sampling is diagnostic, not a time limit. Commands (including builds/test
+# suites) and unknown calls get a longer grace period than a named MCP call.
+MCP_PROBE_AFTER_SECONDS = 10 * 60
+OTHER_PROBE_AFTER_SECONDS = 30 * 60
+PENDING_PROBE_INTERVAL_SECONDS = 60
 
 STALL_REASON_IDLE = "idle"
 STALL_REASON_RUNAWAY_OUTPUT = "runaway_output"
@@ -763,6 +768,16 @@ def _classify_payload(
 
 
 @dataclass
+class _PendingCall:
+    key: str
+    name: str
+    target: str | None
+    started: float
+    probed_at: float | None = None
+    probe: JsonObject | None = None
+
+
+@dataclass
 class StallWatchdog:
     """Tracks time since the last real progress on one child's stdout stream.
 
@@ -782,12 +797,8 @@ class StallWatchdog:
     _armed: bool = field(default=False, repr=False)
     _last_progress_at: float | None = field(default=None, repr=False)
     _recent_deltas: deque[str] = field(default_factory=deque, repr=False)
-    _pending_tools: list[str] = field(default_factory=list, repr=False)
-    # Parallel to `_pending_tools`: (tool name, target, monotonic start) of each
-    # in-flight call, for `oldest_pending_tool`. Never consulted for stall logic.
-    _pending_meta: list[tuple[str, str | None, float]] = field(default_factory=list, repr=False)
-    # Bumped whenever the set of pending tools changes, so a poller can tell that
-    # the oldest pending call changed or cleared without diffing its details.
+    _pending_tools: list[_PendingCall] = field(default_factory=list, repr=False)
+    # A poller publishes a changed pending call, including its first probe.
     _pending_generation: int = field(default=0, repr=False)
     _last_progress_label: str | None = field(default=None, repr=False)
     _lines_seen: int = field(default=0, repr=False)
@@ -827,7 +838,7 @@ class StallWatchdog:
 
     @property
     def pending_generation(self) -> int:
-        """Changes whenever a tool call starts or finishes."""
+        """Changes whenever a tool starts, finishes, or gets a fresh probe."""
         with self._lock:
             return self._pending_generation
 
@@ -838,13 +849,53 @@ class StallWatchdog:
         hung call is otherwise invisible. `seconds` is how long it has run.
         """
         with self._lock:
-            if not self._pending_meta:
+            if not self._pending_tools:
                 return None
-            name, target, started = self._pending_meta[0]
-        detail: JsonObject = {"name": name, "seconds": max(int(now - started), 0)}
-        if target:
-            detail["target"] = target
-        return detail
+            call = self._pending_tools[0]
+            detail: JsonObject = {"name": call.name, "seconds": max(int(now - call.started), 0)}
+            if call.target:
+                detail["target"] = call.target
+            if call.probe is not None:
+                detail["probe"] = dict(call.probe)
+            return detail
+
+    def probe_pending(
+        self, now: float, sample: Callable[[], JsonObject], *, result_stream_ended: bool
+    ) -> None:
+        """Observe an old pending call without treating sleep or silence as a stall."""
+        with self._lock:
+            if not self.enabled or not self._pending_tools:
+                return
+            call = self._pending_tools[0]
+            name = call.name.lower()
+            budget = (
+                MCP_PROBE_AFTER_SECONDS
+                if name.startswith(("mcp_", "mcp."))
+                else OTHER_PROBE_AFTER_SECONDS
+            )
+            if now - call.started < budget:
+                return
+            if call.probed_at is not None and now - call.probed_at < PENDING_PROBE_INTERVAL_SECONDS:
+                # No need for another process sample to observe an ended pipe.
+                if result_stream_ended and call.probe and not call.probe["resultStreamEnded"]:
+                    call.probe["resultStreamEnded"] = True
+                    self._pending_generation += 1
+                return
+            call.probed_at = now
+        try:
+            activity = sample()["childActivity"]
+        except Exception:  # An unavailable diagnostic cannot change the run outcome.
+            activity = "unknown"
+        with self._lock:
+            # The stdout thread may have finished or replaced the call during ps.
+            if not self._pending_tools or self._pending_tools[0] is not call:
+                return
+            call.probe = {
+                "childActivity": activity,
+                "sampledAtSeconds": int(now - call.started),
+                "resultStreamEnded": result_stream_ended,
+            }
+            self._pending_generation += 1
 
     def prime_probe(self) -> None:
         """Record the external progress baseline before the child can act."""
@@ -992,31 +1043,26 @@ class StallWatchdog:
             self._pending_generation += 1
         started_events = [event for event in tool_events if not event.completed]
         for index, key in enumerate(signals.tools_started):
-            self._pending_tools.append(key)
             event = started_events[index] if index < len(started_events) else None
-            if len(self._pending_tools) > PENDING_TOOL_LIMIT:
-                # A stream that never finishes its calls must not grow this
-                # without bound; the oldest is the one already least trusted.
-                del self._pending_tools[0]
-                del self._pending_meta[0]
-            self._pending_meta.append(
-                (
+            self._pending_tools.append(
+                _PendingCall(
+                    key,
                     event.tool if event else signals.label or "tool",
                     event.target if event else None,
                     now,
                 )
             )
+            if len(self._pending_tools) > PENDING_TOOL_LIMIT:
+                del self._pending_tools[0]
             progressed = True
         for key in signals.tools_finished:
-            if key in self._pending_tools:
-                del self._pending_meta[self._pending_tools.index(key)]
-                self._pending_tools.remove(key)
-            elif self._pending_tools:
-                self._pending_meta.pop(0)
-                # A stream that does not correlate starts with finishes (or whose
-                # start we missed) must not leak an in-flight tool forever, which
-                # would disable the watchdog for the rest of the run.
-                self._pending_tools.pop(0)
+            if self._pending_tools:
+                # Some streams don't correlate IDs. As before, a finish missing
+                # its matching start retires the oldest pending call.
+                index = next(
+                    (i for i, call in enumerate(self._pending_tools) if call.key == key), 0
+                )
+                self._pending_tools.pop(index)
             # A finish that reported failure is activity, not progress.
             progressed = progressed or signals.failed_finish is None
         if not had_pending and self._pending_tools:
@@ -1201,7 +1247,7 @@ def reports_completion_by_text(harness: str | None) -> bool:
     return harness in _TEXT_STREAM_HARNESSES
 
 
-def _ps_group_rows(pgid: int) -> list[tuple[int, str, float, str]]:
+def _ps_group_rows(pgid: int) -> list[tuple[int, str, float, str]] | None:
     try:
         completed = subprocess.run(  # nosec B603 B607 - fixed argv, no shell.
             ["ps", "-A", "-o", "pid=,pgid=,stat=,time=,comm="],
@@ -1211,9 +1257,9 @@ def _ps_group_rows(pgid: int) -> list[tuple[int, str, float, str]]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if completed.returncode != 0:
-        return []
+        return None
     rows: list[tuple[int, str, float, str]] = []
     for raw in completed.stdout.splitlines():
         parts = raw.split(None, 4)
@@ -1251,7 +1297,7 @@ def process_group_activity(
     pgid: int | None,
     *,
     sample_interval: float | None = None,
-    rows: Callable[[int], list[tuple[int, str, float, str]]] = _ps_group_rows,
+    rows: Callable[[int], list[tuple[int, str, float, str]] | None] = _ps_group_rows,
     sleep: Callable[[float], None] = time.sleep,
 ) -> JsonObject:
     """What the stalled child's process group was doing when the stall fired.
@@ -1269,10 +1315,14 @@ def process_group_activity(
     if pgid is None or pgid <= 1:
         return {"childActivity": "unknown"}
     first = rows(pgid)
+    if first is None:
+        return {"childActivity": "unknown"}
     if not first:
         return {"childActivity": "no_processes"}
     sleep(PROCESS_SAMPLE_INTERVAL_SEC if sample_interval is None else sample_interval)
     second = rows(pgid)
+    if second is None:
+        return {"childActivity": "unknown"}
     if not second:
         return {"childActivity": "no_processes"}
     before = {pid: cpu for pid, _stat, cpu, _cmd in first}

@@ -49,6 +49,9 @@ def record_value(detail: JsonObject) -> JsonObject | None:
     target = detail.get("target")
     if isinstance(target, str) and target:
         value["target"] = redaction.redact_string(target)
+    probe = detail.get("probe")
+    if isinstance(probe, dict):
+        value["probe"] = dict(probe)
     return value
 
 
@@ -57,7 +60,13 @@ def current_for(value: JsonObject) -> str | None:
     name = value.get("name")
     seconds = value.get("seconds")
     if isinstance(name, str) and isinstance(seconds, int) and seconds >= NOTICE_SECONDS:
-        return waiting_text(name, seconds)
+        text = waiting_text(name, seconds)
+        probe = value.get("probe")
+        if isinstance(probe, dict):
+            if probe.get("resultStreamEnded"):
+                return f"{text}; result stream ended without a tool result"
+            return f"{text}; process group: {probe['childActivity']}"
+        return text
     return None
 
 

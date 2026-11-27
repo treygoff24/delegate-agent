@@ -913,6 +913,10 @@ class ProcessGroupActivityTests(unittest.TestCase):
     def test_an_empty_group_reads_as_gone(self):
         self.assertEqual(self.activity([], [])["childActivity"], "no_processes")
 
+    def test_unavailable_sample_does_not_claim_an_empty_group(self):
+        for first, second in ((None, None), ([(10, "S", 0.0, "harness")], None)):
+            self.assertEqual(self.activity(first, second)["childActivity"], "unknown")
+
     def test_ps_time_parsing(self):
         self.assertEqual(stall_watchdog._cpu_seconds("01:02.50"), 62.5)
         self.assertEqual(stall_watchdog._cpu_seconds("1-00:00:01"), 86401.0)

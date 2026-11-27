@@ -224,6 +224,34 @@ class PendingToolTests(unittest.TestCase):
         self._observe(watchdog, sw, _pi_tool_start(), 0.0)
         self.assertIsNone(watchdog.stalled_for(100000.0))
 
+    def test_pending_probe_has_separate_tool_budgets_and_throttles_samples(self):
+        from unittest import mock
+
+        for name, threshold in (("mcp__x", 600), ("bash", 1800), ("other", 1800)):
+            watchdog, sw = self._watch()
+            self._observe(watchdog, sw, _pi_tool_start(name=name), 0.0)
+            sample = mock.Mock(return_value={"childActivity": "waiting"})
+            for now in (threshold - 1, threshold, threshold + 1):
+                watchdog.probe_pending(now, sample, result_stream_ended=False)
+            sample.assert_called_once_with()
+            detail = watchdog.oldest_pending_tool(threshold + 1)
+            self.assertEqual(detail["probe"]["childActivity"], "waiting")
+            self.assertEqual(detail["seconds"], threshold + 1)
+            self.assertIsNone(watchdog.stalled_for(threshold + 1))
+
+    def test_tool_that_finishes_during_probe_cannot_label_its_successor(self):
+        watchdog, sw = self._watch()
+        self._observe(watchdog, sw, _pi_tool_start(), 0.0)
+
+        def sample():
+            self._observe(watchdog, sw, _pi_tool_end(), 700.0)
+            self._observe(watchdog, sw, _pi_tool_start(), 700.0)
+            return {"childActivity": "no_processes"}
+
+        watchdog.probe_pending(700.0, sample, result_stream_ended=True)
+        self.assertNotIn("probe", watchdog.oldest_pending_tool(701.0))
+        self.assertIsNone(watchdog.stalled_for(701.0))
+
     def test_record_carries_pending_tool_and_waiting_current(self):
         from delegate_agent import pending_tool, runner
 
@@ -259,13 +287,14 @@ class PendingToolTests(unittest.TestCase):
         from pathlib import Path
         from unittest import mock
 
-        from delegate_agent import pending_tool, run_registry, runner, snapshot_view
+        from delegate_agent import pending_tool, run_registry, runner, snapshot_view, stall_watchdog
 
         script = (
             "import json\n"
             + _WAIT_FOR_ACK
             + "print(json.dumps({'type':'tool_execution_start','toolCallId':'c1',"
             "'toolName':'mcp__hung','args':{}}),flush=True)\n"
+            "import os\nos.close(1)\n"
             "wait_for_ack('pending-observed')\n"
         )
         with tempfile.TemporaryDirectory() as workspace:
@@ -282,7 +311,7 @@ class PendingToolTests(unittest.TestCase):
                     if (
                         state.get("status") == "running"
                         and state.get("pendingTool")
-                        and "waiting on tool" in state.get("current", "")
+                        and "result stream ended" in state.get("current", "")
                     ):
                         seen["state"] = state
                         seen["view"] = snapshot_view.merge_snapshot_view(
@@ -297,6 +326,7 @@ class PendingToolTests(unittest.TestCase):
                 with (
                     mock.patch.object(pending_tool, "NOTICE_SECONDS", 0),
                     mock.patch.object(pending_tool, "REFRESH_SECONDS", 0),
+                    mock.patch.object(stall_watchdog, "MCP_PROBE_AFTER_SECONDS", 0),
                 ):
                     runner.execute_tracked(
                         [sys.executable, "-c", script, workspace],
@@ -313,6 +343,7 @@ class PendingToolTests(unittest.TestCase):
         self.assertEqual(seen["state"]["pendingTool"]["name"], "mcp__hung")
         self.assertEqual(seen["view"]["pendingTool"]["name"], "mcp__hung")
         self.assertIn("mcp__hung", seen["view"]["current"])
+        self.assertTrue(seen["view"]["pendingTool"]["probe"]["resultStreamEnded"])
 
 
 def _ctx(root=None, run_id="run-1", alias="a1", workspace="/tmp"):
