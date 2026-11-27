@@ -100,14 +100,33 @@ class KeyedReplayTests(_WorkflowFixture):
             second_calls.append(prompt)
             return f"run2:{prompt}"
 
-        second_result = self.run_script(self.SCRIPT, {"skip": True, "head": "abc"}, second)
-        # The keyed step hits the cache although its parallel moved from
-        # position 1 to position 0.
-        self.assertEqual(second_result["keyed"], "run1:keyed step head=abc")
-        # Control: the unkeyed step's positional key shifted, so it misses and
-        # relaunches, which is today's behavior for unkeyed calls.
-        self.assertEqual(second_result["unkeyed"], "run2:unkeyed step")
-        self.assertEqual(second_calls, ["unkeyed step"])
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "ambiguous.*key="):
+            self.run_script(self.SCRIPT, {"skip": True, "head": "abc"}, second)
+        self.assertEqual(second_calls, [])
+        self.assertEqual(self.events("agent_cache_hit")[0]["result"], "run1:keyed step head=abc")
+
+    def test_resume_replays_completed_steps_and_only_launches_the_later_call(self) -> None:
+        script = """
+meta = {"name": "sequence"}
+first = agent("repeat")
+second = agent("repeat")
+return [first, second, agent("repeat") if args else None]
+"""
+        self.run_script(script, False, lambda *_a, **_k: "settled")
+        calls = []
+
+        def launch(_dsl, _engine, prompt, **kw):
+            calls.append(prompt)
+            return "new"
+
+        self.assertEqual(self.run_script(script, True, launch), ["settled", "settled", "new"])
+        self.assertEqual(calls, ["repeat"])
+
+    def test_occupied_positional_slot_does_not_launch_a_changed_prompt(self) -> None:
+        script = 'meta = {"name": "changed"}\nreturn agent(args)\n'
+        self.run_script(script, "first", lambda *_a, **_k: "settled")
+        with self.assertRaisesRegex(runtime.WorkflowKeyConflict, "ambiguous.*root/seq#0"):
+            self.run_script(script, "second", lambda *_a, **_k: self.fail("launched"))
 
     def test_prompt_change_under_the_same_key_adopts_and_warns(self) -> None:
         self.run_script(

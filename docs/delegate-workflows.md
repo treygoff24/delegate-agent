@@ -109,8 +109,7 @@ By default a call's replay identity is positional: its scope path
 replays correctly only when it makes the same calls in the same order with the
 same prompts. A script that reads mutable state (plan files, git heads) and
 skips settled work breaks that: skipping one `parallel()` shifts every later
-position, and a new head in a prompt changes the key, so settled steps run
-again.
+position, and a new head in a prompt changes the key.
 
 `agent(..., key="impl-task-7")` replaces that identity with the caller's key,
 namespaced by the enclosing named scope. Position and prompt text no longer
@@ -141,8 +140,14 @@ script-authoring mistake is never silent. An unusable key or
 step moves it to the next retry identity, so reject-and-rerun works in one
 lifetime and replays the same way on resume.
 
-Unkeyed calls keep their positional keys exactly, so existing journals replay
-unchanged.
+Unkeyed calls keep their positional keys. An exact match still replays. Before
+launching an unmatched call, resume refuses an occupied position whose prior
+settlement has not replayed. New journals also record a digest of the inputs
+within the named scope: if that call moves to an empty position, resume stops
+rather than repeating it. Older journals without that digest support the
+occupied-position check only. The refusal cannot reconstruct skipped script
+branches: use stable keys for steps that may move. To resume an existing run,
+restore its original inputs/order; adding keys retroactively creates new steps.
 
 `workflow check` warns about the mixed case: a script that gives some `agent()`,
 `parallel()`, `pipeline()`, or `workflow()` calls a `key=` and leaves others

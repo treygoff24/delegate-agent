@@ -1449,6 +1449,8 @@ class WorkflowState:
     # older label for the same key must not leak onto an unlabelled call.
     call_labels: dict[str, str | None] = field(default_factory=dict)
     started_scopes: dict[str, str] = field(default_factory=dict)
+    # Only settlements loaded from the prior journal, consumed on exact replay.
+    pending_positional: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
     exhausted_keys: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
@@ -1576,6 +1578,12 @@ class WorkflowState:
             scope = event.get("scope")
             if event.get("type") == "agent_started" and isinstance(scope, str):
                 self.started_scopes[key] = scope
+                if "callerKey" not in event and "priorLabel" not in event:
+                    digest = event.get("positionalDigest")
+                    self.pending_positional[key] = (
+                        scope,
+                        digest if isinstance(digest, str) else None,
+                    )
             if event.get("type") == "agent_started":
                 digests = _event_digests(event)
                 if digests:
@@ -1635,6 +1643,9 @@ class WorkflowState:
                     crun_id, cengine, cresumable, clabel = child_info[key]
                     if clabel is not None:
                         self.record_completed_child(clabel, crun_id, cengine, cresumable)
+        self.pending_positional = {
+            key: slot for key, slot in self.pending_positional.items() if key in self.replay_keys
+        }
         # Budget events are fsynced but status.json is not, so after a hard
         # crash the seeded spent can lag the durable claim set. One claim per
         # key, so spent is at least len(claimed_keys); status can only lag
@@ -2041,6 +2052,21 @@ class WorkflowState:
         # the same lock used by lifecycle cache decisions.
         self.append_event("agent_rejected", **event)
         return key
+
+    def check_positional_replay(self, key: str, scope: str, digest: str, *, retry: bool) -> None:
+        """Never use a shifted position as permission to repeat settled work."""
+        with self.journal_lock:
+            self.pending_positional.pop(key, None)
+            if retry or key in self.replay_keys or key in self.started_without_result:
+                return
+            for prior, (old_scope, old_digest) in self.pending_positional.items():
+                if prior in self.replay_keys and (old_scope == scope or old_digest == digest):
+                    raise WorkflowKeyConflict(
+                        f"ambiguous positional replay at {scope!r}: a completed agent() at "
+                        f"{old_scope!r} has not replayed. Restore the original call order and "
+                        "inputs to resume, or reconcile completed work and start a workflow "
+                        "with stable agent(key=...) steps."
+                    )
 
     def cancel_stale_scope_children(self, scope: str, current_key: str) -> None:
         """Cancel a prior lifetime's unfinished child that this position replaced.
@@ -3915,10 +3941,15 @@ class WorkflowDsl:
             key_opts = dict(opts)
             base_key = _agent_key(path, prompt, key_opts)
             key = base_key
-            if base_key in self.state.tombstoned_keys:
+            retry = base_key in self.state.tombstoned_keys
+            if retry:
                 retry_opts = dict(key_opts)
                 retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
                 key = _agent_key(path, prompt, retry_opts)
+            # Same inputs in an independent named scope are a different step.
+            digest = _agent_key(self.state.current_named_scope(), prompt, key_opts)
+            self.state.check_positional_replay(key, path, digest, retry=retry)
+            key_digests = {"positionalDigest": digest}
         persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
         prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes
         dry_run_entry: JsonObject = {
@@ -4036,8 +4067,8 @@ class WorkflowDsl:
             start_event["deadlineAt"] = (datetime.now(UTC) + timedelta(seconds=timeout)).isoformat()
         if caller_key is not None:
             start_event["callerKey"] = caller_key
-            start_event.update(key_digests)
             self.state.claim_caller_key(key, caller_key)
+        start_event.update(key_digests)
         try:
             if caller_key is not None:
                 self._warn_key_prompt_mismatch(
