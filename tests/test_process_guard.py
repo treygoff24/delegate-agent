@@ -21,6 +21,59 @@ def _failed_ps(*, returncode: int = 1, stdout: str = "") -> mock._patch:
 
 
 class ProcessGuardTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux /proc process metadata")
+    def test_suite_closeout_reports_adopted_test_process(self):
+        # Hold the child on stdin until we've inspected closeout. Closing the pipe
+        # lets it exit without signalling any process, including its new parent.
+        launcher_code = """
+import os, subprocess, sys
+def launch(env):
+    return subprocess.Popen(
+        [sys.executable, "-c", "import select; select.select([0], [], [], 30)"],
+        cwd="/", env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+owned = launch(None)
+foreign = launch(dict(
+    os.environ, DELEGATE_TEST_PROCESS_ROOT=os.environ["DELEGATE_TEST_PROCESS_ROOT"] + "-foreign",
+))
+print(os.getpid(), owned.pid, foreign.pid)
+"""
+        suite_code = """
+import subprocess, sys, tempfile
+from unittest.mock import patch
+
+# The suite retains its root on failure. Keep it in the outer test's temp dir.
+mkdtemp = tempfile.mkdtemp
+with patch.object(tempfile, "mkdtemp", lambda **kw: mkdtemp(dir=sys.argv[2], **kw)):
+    import tests
+print(subprocess.check_output([sys.executable, "-c", sys.argv[1]], text=True).strip(), flush=True)
+"""
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            subprocess.Popen(
+                [sys.executable, "-c", suite_code, launcher_code, tmp],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as suite,
+        ):
+            assert suite.stdout is not None and suite.stderr is not None
+            try:
+                status = suite.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                suite.kill()
+                raise
+            launcher_pid, child_pid, foreign_pid = map(int, suite.stdout.read().split())
+            for pid in (child_pid, foreign_pid):
+                stat = Path(f"/proc/{pid}/stat").read_text()
+                state, parent_pid, *_ = stat.rpartition(")")[2].split()
+                self.assertNotEqual(state, "Z")
+                self.assertNotIn(int(parent_pid), {launcher_pid, suite.pid})
+            self.assertEqual(status, 1, "suite closeout accepted a live adopted child")
+            self.assertIn(f"test processes still live: [{child_pid}]", suite.stderr.read())
+
     def test_reaps_only_delegate_processes_owned_by_temp_root(self):
         with (
             tempfile.TemporaryDirectory() as owned,

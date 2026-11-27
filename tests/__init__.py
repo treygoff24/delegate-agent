@@ -38,6 +38,8 @@ import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from tests.process_guard import TEST_PROCESS_ROOT_ENV
+
 # Make the src layout importable for focused invocations
 # (`python3 -m unittest tests.test_x`), which otherwise fail before per-module
 # sys.path shims run because `tests.delegate_fixtures` imports delegate_agent
@@ -130,6 +132,9 @@ if ORIGINAL_HOME:
     os.environ["DELEGATE_TESTS_ORIGINAL_HOME"] = ORIGINAL_HOME
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="dt-"))
+# Child commands inherit this marker even when they leave our process tree.
+if sys.platform == "linux":
+    os.environ[TEST_PROCESS_ROOT_ENV] = str(_TEST_ROOT)
 _TEST_HOME = str(_TEST_ROOT / "home")
 _TEST_TEMP = str(_TEST_ROOT / "tmp")
 Path(_TEST_HOME).mkdir()
@@ -610,10 +615,15 @@ def _finish_test_environment() -> None:
     # Both runners use the same ownership guard. Pytest also invokes it for
     # each test; unittest gets this suite-level backstop before temp cleanup.
     from tests import proc_harness
-    from tests.process_guard import reap_delegate_processes
+    from tests.process_guard import live_test_processes, reap_delegate_processes
 
     try:
         reap_delegate_processes(_TEST_ROOT)
+        # A surviving tagged child may now share a parent or a process group
+        # with other sessions. Fail closeout, but do not signal it or its group.
+        live = live_test_processes(_TEST_ROOT)
+        if live:
+            raise RuntimeError(f"test processes still live: {sorted(live)}")
     except Exception as exc:
         os.write(2, f"test process cleanup failed; retaining {_TEST_ROOT}: {exc}\n".encode())
         # atexit exceptions otherwise do not make the authoritative gate fail.

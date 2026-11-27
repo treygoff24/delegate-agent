@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +14,38 @@ from pathlib import Path
 _PS_TIMEOUT_SECONDS = 20.0
 
 _PS_ARGV = ["ps", "-ww", "-axo", "pid=,pgid=,command="]
+
+TEST_PROCESS_ROOT_ENV = "DELEGATE_TEST_PROCESS_ROOT"
+
+
+def live_test_processes(root: Path) -> set[int]:
+    """Find processes launched with this Linux suite's private root marker.
+
+    The exec environment preserves ownership through reparenting and changes
+    of cwd or process group. Do not infer ownership from the current parent,
+    and never signal a process or group from this diagnostic scan.
+    """
+    if sys.platform != "linux":
+        return set()
+    marker = os.fsencode(f"{TEST_PROCESS_ROOT_ENV}={root}")
+    own_pid = os.getpid()
+    own_uid = os.geteuid()
+    live: set[int] = set()
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        pid = int(process.name)
+        if pid <= 1 or pid == own_pid:
+            continue
+        try:
+            if process.stat().st_uid != own_uid:
+                continue
+            if marker in (process / "environ").read_bytes().split(b"\0"):
+                live.add(pid)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            # Exited, or not readable by this user.
+            continue
+    return live
 
 
 class OwnedProcessScanError(RuntimeError):
