@@ -90,12 +90,15 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
   "$DELEGATE" --json describe
   "$DELEGATE" --json dry-run codex safe "Review only."
   "$DELEGATE" --json dry-run claude safe "Review only."
-  "$DELEGATE" --json dry-run grok safe "Review only."
+  "$DELEGATE" --json dry-run --isolation worktree grok work --forbid-commit \
+    --model grok-4.7 --reasoning-effort xhigh "Review only."
   "$DELEGATE" --json dry-run opencode safe "Review only."
   "$DELEGATE" --json dry-run pi safe "Review only."
   "$DELEGATE" --json dry-run omp safe "Review only."
   "$DELEGATE" --json dry-run kimi safe "Review only."
   ```
+
+  Grok uses a work-mode dry run because Delegate rejects Grok safe mode.
 
 ## GitHub surface
 
