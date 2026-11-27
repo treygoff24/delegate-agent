@@ -765,7 +765,7 @@ delegate [--json] workflow save <script.py> --name NAME
   its final workflow status to distinguish successful work from failed work.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
   without launching child agents or consuming real budget. Because the supervisor
-  is detached, the invoking process exits immediately: under a systemd unit the
+  is detached, the invoking process exits immediately. If it is a systemd service’s main process, the
   unit's `KillMode` must be `process` (`systemd-run -p KillMode=process ...`).
   The default `control-group` reaps the supervisor with the rest of the cgroup
   about half a second after that exit while the unit still reports

@@ -134,11 +134,10 @@ def _systemd_detach_warning() -> str | None:
         else "its KillMode could not be read, and the default is control-group"
     )
     return (
-        f"this launch runs inside systemd unit {unit.name}, and {detail}: the unit's main "
-        "process is this command, which exits as soon as the supervisor is detached. "
-        "systemd will then stop the supervisor with the rest of the cgroup while the "
-        "unit reports success -- re-run under `-p KillMode=process` (or set it in the "
-        "unit) so the workflow outlives the launcher."
+        f"this launch runs inside systemd unit {unit.name}, and {detail}. "
+        "The detached supervisor is stopped with the unit. If this command is the "
+        "unit's main process, that can happen as soon as the launcher returns. "
+        "Use a dedicated unit with `-p KillMode=process` if the supervisor must outlive it."
     )
 
 

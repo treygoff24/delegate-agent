@@ -738,7 +738,7 @@ own `env=` did not override.
 process does not see these variables.
 
 `workflow run` detaches its supervisor and returns, so the invoking process ends
-immediately. Run it under a systemd unit only with `KillMode=process`
+immediately. If this command is the main process of a systemd service, run it with `KillMode=process`
 (`systemd-run -p KillMode=process ...`): the default `control-group` reaps the
 detached supervisor with the rest of the cgroup about half a second after that
 exit, while the unit still reports `Result=success` and `ExecMainStatus=0`, so
