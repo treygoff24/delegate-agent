@@ -30,6 +30,13 @@ warns once and leaves the work launch running without mail setup. Stop-hook
 push (`--mail-push`) stays opt-in, and completion notifications (`--notify`)
 still require an explicit target. See [workspace mail](docs/cli-reference.md#workspace-mail).
 
+**To hold a running worker:** mail delivery means the message reached the inbox,
+not that the worker read it or stopped. Push presents mail at a stop hook; it
+cannot interrupt a running turn. Ask the worker to stop editing and reply to
+the message once stopped. If edits must stop now, use `delegate cancel <run-id>`
+and confirm the terminal state with `delegate wait <run-id>` before reassigning
+the files. Cancellation does not undo edits already made.
+
 ## Install
 
 Delegate requires Python 3.11 or newer. The PyPI package is named `delegate-agent-cli` (PyPI's name-similarity rule blocked the shorter `delegate-agent`), but it installs the same `delegate` command either way.

@@ -393,6 +393,14 @@ _DEVIN_MODE_ARG = ArgSpec(
 
 # Command registry.
 
+URGENT_HOLD_NOTE = (
+    "Urgent hold: delivered means published to the inbox, not read or stopped. "
+    "--mail-push delivers at stop hooks, not mid-turn. Ask the worker to stop editing "
+    "and reply with --reply-to only once stopped. If edits must stop now, use "
+    "delegate cancel <run-id> and confirm the terminal state with delegate wait <run-id>."
+)
+
+
 COMMAND_SPECS: dict[str, CommandSpec] = {
     "cursor": CommandSpec(
         name="cursor",
@@ -1371,6 +1379,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate mail watch --once --timeout 10",
         ),
         notes=(
+            URGENT_HOLD_NOTE,
             "Mail is a pull mailbox under .delegate/mail; commands work even when mail.enabled is false.",
             "The command-local mail send --group selector is distinct from launch --group.",
             "Mail identity is workspace trust, not authentication; framing is cooperative-agent UX, not a privilege boundary.",
@@ -1414,6 +1423,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=("delegate mail send --to coordinator --subject status 'The review is ready.'",),
         notes=(
+            URGENT_HOLD_NOTE,
             "Only effectively running work-mode recipients receive a publication; other registered recipients are ledgered as skipped_ineligible.",
             "A send succeeds only when at least one recipient received it; a send that reaches nobody fails with mail_not_delivered (exit 1), names each recipient's outcome and reason, and stays on the sent ledger for mail status.",
             "Rules are evaluated after group expansion and cannot be bypassed by group addressing.",
@@ -1472,7 +1482,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=("delegate mail status MESSAGE_ID",),
         arguments=(ArgSpec("MESSAGE_ID", True, "Message id or unique prefix."),),
         examples=("delegate --json mail status 20260801-120000-a1b2c3",),
-        notes=("Outcomes include delivered, failed, skipped_ineligible, blocked, and pruned.",),
+        notes=(
+            "Outcomes include delivered, failed, skipped_ineligible, blocked, and pruned.",
+            URGENT_HOLD_NOTE,
+        ),
         see_also=("mail send", "mail prune"),
         unsupported_global_options=(
             "--isolation",
