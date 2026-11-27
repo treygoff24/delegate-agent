@@ -394,15 +394,16 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
 
     def test_healthy_long_child_is_not_killed(self) -> None:
         _, root = self._launch(2)
+        # The supervisor publishes success before releasing its workflow lock.
         self._wait_for(
             lambda: (
                 (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
+                and not registry.supervisor_alive(root)
             ),
             timeout=8,
         )
         events = registry.iter_journal(root / registry.JOURNAL_FILE)
         self.assertNotIn("workflow_watchdog", {event.get("type") for event in events})
-        self.assertFalse(registry.supervisor_alive(root))
 
     def test_journal_silent_stretch_is_not_killed(self) -> None:
         _, root = self._launch(
