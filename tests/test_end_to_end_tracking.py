@@ -531,7 +531,8 @@ class EndToEndTrackingTests(unittest.TestCase):
             payload = json.loads(stdout)
             self.assertTrue(payload["ok"])
             self.assertIn("delegate: run started", stderr)
-            self.assertIn("delegate: still running", stderr)
+            self.assertRegex(stderr, r"delegate: still running [^\n]*pid=\d+ child_state=alive")
+            self.assertRegex(stderr, r"last_event_age=(?:none_yet|\d+s) provider_state=unknown")
             self.assertNotIn(ASSISTANT_MARKER, stderr)
         finally:
             if process.poll() is None:
