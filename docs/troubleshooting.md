@@ -417,6 +417,7 @@ images; the lane is healthy). Only lane-scoped persistent errors mark a lane.
 | `model_unavailable` | persistent | HTTP 404: the account cannot use the requested model. Pick another alias (`delegate models`). |
 | `age_confirmation_required` | persistent | The provider wants an age confirmation on this account. Complete it, then relaunch. |
 | `harness_config_rejected` | persistent | The harness rejected its own configuration (an unsupported `-c` override or config key) before running. Fix the config or upgrade the harness. |
+| `broker_realm_unavailable` | persistent | The broker could not launch the selected realm. Check that realm’s broker status before retrying; do not switch accounts implicitly. |
 | `broker_binding_inactive`, `broker_uid_unmapped`, `broker_principal_not_cell` | persistent | The estate broker refused the launch (HTTP 403); no vendor process ran. Launch from a bound, mapped cell. A single `broker_binding_inactive` is often launch-slot contention: a `safe` run retries it once (see "Fresh rerun" below) and only marks the lane known-bad if the retry is refused too; a `work` run is not retried, marks the lane, and its hint says to relaunch once with `--force-launch`. |
 | `request_image_limit` | persistent, this request only | HTTP 400, 413, or 422 naming an image count or size limit. This is not an auth failure. Attach fewer or smaller images. |
 | `request_too_large` | persistent, this request only | HTTP 413: the request exceeds the size or context limit. Shorten the prompt or attachments. |
