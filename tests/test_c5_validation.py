@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -479,10 +480,11 @@ class HarnessEnabledTests(CommandTestBase):
         self.assertEqual(payload["omp"]["models"]["droid"], "provider/model")
 
     def test_summary_counts_are_recomputed_after_filtering(self):
-        self._use_config({"droid": {"models": {"glm": "glm-5.1"}}})
+        block = {"binary": sys.executable, "models": {"glm": "glm-5.1"}}
+        self._use_config({"droid": block})
         baseline = self._json(["--json", "models", "--summary"])
         self.assertIn("droid", {row["provider"] for row in baseline["aliases"]})
-        self._use_config({"droid": {"enabled": False, "models": {"glm": "glm-5.1"}}})
+        self._use_config({"droid": {**block, "enabled": False}})
         summary = self._json(["--json", "models", "--summary"])
         self.assertEqual(summary["counts"]["aliases"], len(summary["aliases"]))
         self.assertEqual(

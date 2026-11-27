@@ -689,6 +689,9 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertIn("safe (read-only review)", out)
 
     def test_models_summary_derives_devin_modes_from_registry(self):
+        Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+            json.dumps({"devin": {"binary": sys.executable}})
+        )
         code, out, _err = self.run_main(["--json", "models", "--summary"])
         self.assertEqual(code, error_types.EXIT_OK)
         devin = next(item for item in json.loads(out)["aliases"] if item["provider"] == "devin")

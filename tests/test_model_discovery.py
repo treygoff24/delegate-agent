@@ -6,6 +6,7 @@ import io
 import json
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -151,6 +152,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
         config = self.embedded_default_config()
         config["codex"]["models"] = {"fast model": "gpt-5.5"}
+        config["codex"]["binary"] = config["droid"]["binary"] = sys.executable
         config["droid"]["models"] = {"deepseek v4 pro": "custom:dsv4"}
         payload = models_summary_payload(config, "embedded-default")
         commands = {e["alias"]: e["command"] for e in payload["aliases"]}
@@ -158,6 +160,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         self.assertIn("'deepseek v4 pro'", commands["deepseek v4 pro"])
         # Simple aliases stay unquoted.
         config2 = self.embedded_default_config()
+        config2["codex"]["binary"] = sys.executable
         config2["codex"]["models"] = {"fast": "gpt-5.5"}
         payload2 = models_summary_payload(config2, "embedded-default")
         commands2 = {e["alias"]: e["command"] for e in payload2["aliases"]}
@@ -522,6 +525,8 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
         from delegate_agent.describe_payload import models_summary_payload
 
         config = embedded_default_config()
+        for engine in ("droid", "codex", "claude", "kimi", "devin", "opencode"):
+            config[engine]["binary"] = sys.executable
         config["droid"]["models"] = {"glm": "glm-5.1"}
         config["codex"]["models"] = {"fast": "gpt-5.5"}
         config["claude"]["models"] = {"opus": "claude-opus-4-8"}
@@ -757,12 +762,13 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
         from delegate_agent.describe_payload import models_summary_payload
 
         self.config["droid"]["models"] = {"known": "provider/model"}
-        before = models_summary_payload(self.config, "fixture")
         with tempfile.TemporaryDirectory() as tmp:
             binary = _write_executable(Path(tmp) / "codex", "#!/bin/sh\nexit 0\n")
             droid_binary = _write_executable(Path(tmp) / "droid", "#!/bin/sh\nexit 0\n")
             self.config["codex"]["binary"] = str(binary)
             self.config["droid"]["binary"] = str(droid_binary)
+            self.config["claude"]["binary"] = str(Path(tmp) / "not-installed")
+            before = models_summary_payload(self.config, "fixture")
             discovery = {
                 "harnesses": {
                     "codex": {
@@ -798,6 +804,7 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
         self.assertEqual(
             missing,
             {
+                "binaryMissing": True,
                 "installed": False,
                 "probeStatus": "missing",
                 "catalogScope": "unknown",

@@ -272,18 +272,18 @@ def _droid_row_has_content(section: JsonObject, discovery: JsonObject | None) ->
     return bool(model_discovery.discovered_model_ids(discovery, "droid"))
 
 
-def binary_missing(binary: object) -> bool:
-    """True when a configured harness binary does not resolve from this process.
+def binary_missing(binary: object, *, path: str | None = None) -> bool:
+    """True when a configured harness binary does not resolve on the selected PATH.
 
     This is the launch check (``cli.ensure_binary``): ``shutil.which`` on the
-    configured value, PATH of the Delegate process, no ``~`` expansion. A path
+    configured value, PATH of the child, no ``~`` expansion. A path
     that only resolves after expansion reads as missing here because launch
     would refuse it too; ``models`` used to print such a path as if it were
     installed until a launch failed with missing_binary.
     """
     if not isinstance(binary, str) or not binary.strip():
         return False
-    return shutil.which(binary) is None
+    return shutil.which(binary, path=path) is None
 
 
 def _binary_label(section: JsonObject) -> str:
@@ -297,7 +297,9 @@ def models_payload(
     workspace: Path | None = None,
     *,
     discovery: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> JsonObject:
+    path = profile.env.get("PATH") if profile else None
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     cursor: JsonObject = {
         "defaultModel": config["cursor"]["defaultModel"],
@@ -378,7 +380,7 @@ def models_payload(
         if models is not None:
             section["models"] = models
         if "binary" in section:
-            section["binaryMissing"] = binary_missing(section["binary"])
+            section["binaryMissing"] = binary_missing(section["binary"], path=path)
     return {
         "ok": True,
         "configSource": config_source,
@@ -393,7 +395,7 @@ def models_payload(
             "models": config["droid"]["models"],
             "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
-            "binaryMissing": binary_missing(config["droid"]["binary"]),
+            "binaryMissing": binary_missing(config["droid"]["binary"], path=path),
         },
         "codex": codex,
         "claude": claude,
@@ -639,6 +641,8 @@ def models_summary_payload(
             )
             aliases.append(entry)
 
+    harnesses = _harness_summary_metadata(config, discovery, profile)
+    aliases = [row for row in aliases if not harnesses[row["provider"]]["binaryMissing"]]
     return {
         "ok": True,
         "summary": True,
@@ -649,7 +653,7 @@ def models_summary_payload(
             "aliases": len(aliases),
             "providers": len({str(item.get("provider")) for item in aliases}),
         },
-        "harnesses": _harness_summary_metadata(config, discovery, profile),
+        "harnesses": harnesses,
         "discovery": {
             "fullModels": "delegate --json models",
             "safeSummary": "delegate --json models --summary",
@@ -683,12 +687,19 @@ def _harness_summary_metadata(
                 profile=active_profile,
             )
         )
+        binary = (
+            config["cursor"]["argvPrefix"][0] if engine == "cursor" else config[engine]["binary"]
+        )
+        missing = binary_missing(binary, path=active_profile.env.get("PATH"))
         output[engine] = {
+            "binaryMissing": missing,
             "installed": installed,
             "probeStatus": probe_status if isinstance(probe_status, str) else "missing",
             "catalogScope": model_scope if isinstance(model_scope, str) else "unknown",
             "stale": stale,
-            "launchable": _cached_harness_launchable(config, engine, installed and not stale),
+            "launchable": _cached_harness_launchable(
+                config, engine, installed and not stale and not missing
+            ),
         }
     return output
 
@@ -1771,7 +1782,7 @@ def emit_models(
         return EXIT_OK
     payload = redaction.scrub_public_projection(
         harness_enabled.strip_disabled(
-            models_payload(config, config_source, workspace, discovery=discovery),
+            models_payload(config, config_source, workspace, discovery=discovery, profile=profile),
             harness_enabled.disabled_harnesses(config),
         )
     )

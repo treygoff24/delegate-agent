@@ -2591,7 +2591,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
         ),
         options=(
-            OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),
+            OptionSpec(
+                "--summary",
+                None,
+                "List aliases whose harness executable resolves on this profile's PATH.",
+            ),
             OptionSpec(
                 "--live",
                 None,

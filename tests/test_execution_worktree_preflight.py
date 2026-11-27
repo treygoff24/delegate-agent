@@ -90,6 +90,25 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             self.assertEqual(branches.stdout.strip(), "")
             self.assertFalse((Path(repo.name) / ".delegate" / "runs").exists())
 
+    def test_missing_binary_refuses_safe_run_before_creating_snapshot(self):
+        with tempfile.TemporaryDirectory() as home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            config = self._write_missing_cursor_worktree_config(home)
+            out = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"HOME": home, "DELEGATE_CONFIG": str(config)}),
+                mock.patch.object(
+                    safe_api,
+                    "create_git_safe_workspace",
+                    side_effect=AssertionError("snapshot before preflight"),
+                ),
+            ):
+                code = self.delegate.main(
+                    ["--cwd", repo.name, "--json", "cursor", "safe", "review"], stdout=out
+                )
+            self.assertEqual(code, errors_api.EXIT_MISSING_BINARY)
+            self.assertEqual(json.loads(out.getvalue())["error"], "missing_binary")
+
     def test_persistent_worktree_dirty_source_auto_include_still_checks_binary(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

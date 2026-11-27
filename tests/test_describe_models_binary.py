@@ -7,14 +7,52 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from delegate_agent import describe_payload
 from delegate_agent.config import embedded_default_config
+from delegate_agent.profiles import empty_profile_resolution
 
 
 class ModelsBinaryMissingTests(unittest.TestCase):
+    def test_route_roster_uses_profile_path_and_keeps_missing_harness_diagnostics(self):
+        config = embedded_default_config()
+        config["opencode"]["binary"] = "fixture-opencode"
+        config["opencode"]["models"] = {"review": "fixture/model"}
+        config["cursor"]["argvPrefix"] = ["missing-cursor-wrapper", "--agent"]
+        with tempfile.TemporaryDirectory() as profile_bin:
+            profile = replace(empty_profile_resolution(), env={"PATH": profile_bin})
+            catalog = {"harnesses": {"opencode": {"modelScope": "catalog"}}}
+            with mock.patch.dict(os.environ, {"PATH": ""}):
+
+                def roster():
+                    return describe_payload.models_summary_payload(
+                        config, "test", discovery=catalog, profile=profile
+                    )
+
+                missing = roster()
+                self.assertFalse(
+                    {"opencode", "cursor"} & {r["provider"] for r in missing["aliases"]}
+                )
+                self.assertTrue(missing["harnesses"]["opencode"]["binaryMissing"])
+                self.assertEqual(missing["harnesses"]["opencode"]["catalogScope"], "catalog")
+                exe = Path(profile_bin) / "fixture-opencode"
+                exe.write_text("#!/bin/sh\nexit 1\n")
+                exe.chmod(0o755)
+                found = roster()
+                self.assertFalse(
+                    describe_payload.models_payload(config, "test", profile=profile)["opencode"][
+                        "binaryMissing"
+                    ]
+                )
+                self.assertFalse(found["harnesses"]["opencode"]["binaryMissing"])
+                self.assertEqual(
+                    {r["alias"] for r in found["aliases"] if r["provider"] == "opencode"},
+                    {"opencode", "review"},
+                )
+
     def test_payload_marks_unresolvable_binaries(self):
         config = embedded_default_config()
         config["opencode"]["binary"] = "~/definitely/not/here/opencode"
